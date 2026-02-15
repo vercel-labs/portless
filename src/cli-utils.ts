@@ -1,9 +1,11 @@
 import * as fs from "node:fs";
+import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
+import { PORTLESS_HEADER } from "./proxy.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -174,25 +176,31 @@ export async function findFreePort(
 }
 
 /**
- * Check if something is listening on the given port at 127.0.0.1.
+ * Check if a portless proxy is listening on the given port at 127.0.0.1.
+ * Makes an HTTP request and verifies the X-Portless response header to
+ * distinguish the portless proxy from unrelated services.
  */
 export function isProxyRunning(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = new net.Socket();
-    socket.setTimeout(SOCKET_TIMEOUT_MS);
-
-    socket.on("connect", () => {
-      socket.destroy();
-      resolve(true);
-    });
-
-    socket.on("error", () => resolve(false));
-    socket.on("timeout", () => {
-      socket.destroy();
+    const req = http.request(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/",
+        method: "HEAD",
+        timeout: SOCKET_TIMEOUT_MS,
+      },
+      (res) => {
+        res.resume();
+        resolve(res.headers[PORTLESS_HEADER.toLowerCase()] === "1");
+      }
+    );
+    req.on("error", () => resolve(false));
+    req.on("timeout", () => {
+      req.destroy();
       resolve(false);
     });
-
-    socket.connect(port, "127.0.0.1");
+    req.end();
   });
 }
 
@@ -255,16 +263,25 @@ export function spawnCommand(
 
   let exiting = false;
 
+  const cleanup = () => {
+    process.removeListener("SIGINT", onSigInt);
+    process.removeListener("SIGTERM", onSigTerm);
+    options?.onCleanup?.();
+  };
+
   const handleSignal = (signal: NodeJS.Signals) => {
     if (exiting) return;
     exiting = true;
     child.kill(signal);
-    options?.onCleanup?.();
+    cleanup();
     process.exit(128 + (SIGNAL_CODES[signal] || 15));
   };
 
-  process.on("SIGINT", () => handleSignal("SIGINT"));
-  process.on("SIGTERM", () => handleSignal("SIGTERM"));
+  const onSigInt = () => handleSignal("SIGINT");
+  const onSigTerm = () => handleSignal("SIGTERM");
+
+  process.on("SIGINT", onSigInt);
+  process.on("SIGTERM", onSigTerm);
 
   child.on("error", (err) => {
     if (exiting) return;
@@ -273,14 +290,14 @@ export function spawnCommand(
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       console.error(`Is "${commandArgs[0]}" installed and in your PATH?`);
     }
-    options?.onCleanup?.();
+    cleanup();
     process.exit(1);
   });
 
   child.on("exit", (code, signal) => {
     if (exiting) return;
     exiting = true;
-    options?.onCleanup?.();
+    cleanup();
     if (signal) {
       process.exit(128 + (SIGNAL_CODES[signal] || 15));
     }

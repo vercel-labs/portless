@@ -64,13 +64,13 @@ describe("isProxyRunning", () => {
   });
 
   it("returns false when nothing is listening", async () => {
-    // Use an unlikely port so nothing is listening
     const result = await isProxyRunning(19876);
     expect(result).toBe(false);
   });
 
-  it("returns true when a server is listening", async () => {
+  it("returns true when a portless proxy is listening", async () => {
     const server = http.createServer((_req, res) => {
+      res.setHeader("X-Portless", "1");
       res.end("ok");
     });
     servers.push(server);
@@ -86,6 +86,25 @@ describe("isProxyRunning", () => {
 
     const result = await isProxyRunning(port);
     expect(result).toBe(true);
+  });
+
+  it("returns false when a non-portless server is listening", async () => {
+    const server = http.createServer((_req, res) => {
+      res.end("not portless");
+    });
+    servers.push(server);
+
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          resolve(addr.port);
+        }
+      });
+    });
+
+    const result = await isProxyRunning(port);
+    expect(result).toBe(false);
   });
 });
 

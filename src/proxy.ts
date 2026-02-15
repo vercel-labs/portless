@@ -1,36 +1,51 @@
 import * as http from "node:http";
-import httpProxy from "http-proxy";
+import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
 import { escapeHtml } from "./utils.js";
+
+/** Response header used to identify a portless proxy (for health checks). */
+export const PORTLESS_HEADER = "X-Portless";
+
+/**
+ * Build X-Forwarded-* headers for a proxied request.
+ */
+function buildForwardedHeaders(req: http.IncomingMessage): Record<string, string> {
+  const headers: Record<string, string> = {};
+  const remoteAddress = req.socket.remoteAddress || "127.0.0.1";
+  const proto = "http";
+  const hostHeader = req.headers.host || "";
+
+  headers["x-forwarded-for"] = req.headers["x-forwarded-for"]
+    ? `${req.headers["x-forwarded-for"]}, ${remoteAddress}`
+    : remoteAddress;
+  headers["x-forwarded-proto"] = (req.headers["x-forwarded-proto"] as string) || proto;
+  headers["x-forwarded-host"] = (req.headers["x-forwarded-host"] as string) || hostHeader;
+  headers["x-forwarded-port"] =
+    (req.headers["x-forwarded-port"] as string) || hostHeader.split(":")[1] || "80";
+
+  return headers;
+}
+
+/**
+ * Format the proxy URL for a hostname, omitting port 80.
+ */
+function formatProxyUrl(hostname: string, proxyPort: number): string {
+  return proxyPort === 80 ? `http://${hostname}` : `http://${hostname}:${proxyPort}`;
+}
 
 /**
  * Create an HTTP proxy server that routes requests based on the Host header.
  *
+ * Uses Node's built-in http module for proxying (no external dependencies).
  * The `getRoutes` callback is invoked on every request so callers can provide
  * either a static list or a live-updating one.
  */
 export function createProxyServer(options: ProxyServerOptions): http.Server {
-  const { getRoutes, onError = (msg: string) => console.error(msg) } = options;
-
-  const proxy = httpProxy.createProxyServer({});
-
-  proxy.on("error", (err, req, res) => {
-    onError(`Proxy error for ${req.headers.host}: ${err.message}`);
-    if (res && "writeHead" in res) {
-      const serverRes = res as http.ServerResponse;
-      if (!serverRes.headersSent) {
-        const errWithCode = err as NodeJS.ErrnoException;
-        const message =
-          errWithCode.code === "ECONNREFUSED"
-            ? "Bad Gateway: the target app is not responding. It may have crashed."
-            : "Bad Gateway: the target app may not be running.";
-        serverRes.writeHead(502, { "Content-Type": "text/plain" });
-        serverRes.end(message);
-      }
-    }
-  });
+  const { getRoutes, proxyPort, onError = (msg: string) => console.error(msg) } = options;
 
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    res.setHeader(PORTLESS_HEADER, "1");
+
     const routes = getRoutes();
     const host = (req.headers.host || "").split(":")[0];
 
@@ -56,7 +71,7 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
                 ? `
               <h2>Active apps:</h2>
               <ul>
-                ${routes.map((r) => `<li><a href="http://${escapeHtml(r.hostname)}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
+                ${routes.map((r) => `<li><a href="${escapeHtml(formatProxyUrl(r.hostname, proxyPort))}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
               </ul>
             `
                 : "<p><em>No apps running.</em></p>"
@@ -68,17 +83,43 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
       return;
     }
 
-    proxy.web(req, res, {
-      target: `http://127.0.0.1:${route.port}`,
-      xfwd: true,
+    const forwardedHeaders = buildForwardedHeaders(req);
+    const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
+    for (const [key, value] of Object.entries(forwardedHeaders)) {
+      proxyReqHeaders[key] = value;
+    }
+
+    const proxyReq = http.request(
+      {
+        hostname: "127.0.0.1",
+        port: route.port,
+        path: req.url,
+        method: req.method,
+        headers: proxyReqHeaders,
+      },
+      (proxyRes) => {
+        res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+        proxyRes.pipe(res);
+      }
+    );
+
+    proxyReq.on("error", (err) => {
+      onError(`Proxy error for ${req.headers.host}: ${err.message}`);
+      if (!res.headersSent) {
+        const errWithCode = err as NodeJS.ErrnoException;
+        const message =
+          errWithCode.code === "ECONNREFUSED"
+            ? "Bad Gateway: the target app is not responding. It may have crashed."
+            : "Bad Gateway: the target app may not be running.";
+        res.writeHead(502, { "Content-Type": "text/plain" });
+        res.end(message);
+      }
     });
+
+    req.pipe(proxyReq);
   };
 
-  const handleUpgrade = (
-    req: http.IncomingMessage,
-    socket: import("node:net").Socket,
-    head: Buffer
-  ) => {
+  const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
     const routes = getRoutes();
     const host = (req.headers.host || "").split(":")[0];
     const route = routes.find((r) => r.hostname === host);
@@ -88,10 +129,60 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
       return;
     }
 
-    proxy.ws(req, socket, head, {
-      target: `http://127.0.0.1:${route.port}`,
-      xfwd: true,
+    const forwardedHeaders = buildForwardedHeaders(req);
+    const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
+    for (const [key, value] of Object.entries(forwardedHeaders)) {
+      proxyReqHeaders[key] = value;
+    }
+
+    const proxyReq = http.request({
+      hostname: "127.0.0.1",
+      port: route.port,
+      path: req.url,
+      method: req.method,
+      headers: proxyReqHeaders,
     });
+
+    proxyReq.on("upgrade", (_proxyRes, proxySocket, proxyHead) => {
+      socket.write(
+        `HTTP/1.1 101 Switching Protocols\r\n` +
+          `Upgrade: websocket\r\n` +
+          `Connection: Upgrade\r\n` +
+          `\r\n`
+      );
+      if (proxyHead.length > 0) {
+        socket.write(proxyHead);
+      }
+      proxySocket.pipe(socket);
+      socket.pipe(proxySocket);
+
+      proxySocket.on("error", () => socket.destroy());
+      socket.on("error", () => proxySocket.destroy());
+    });
+
+    proxyReq.on("error", (err) => {
+      onError(`WebSocket proxy error for ${req.headers.host}: ${err.message}`);
+      socket.destroy();
+    });
+
+    proxyReq.on("response", (res) => {
+      // The backend responded with a normal HTTP response instead of upgrading.
+      // Forward the rejection to the client.
+      if (!socket.destroyed) {
+        let response = `HTTP/1.1 ${res.statusCode} ${res.statusMessage}\r\n`;
+        for (let i = 0; i < res.rawHeaders.length; i += 2) {
+          response += `${res.rawHeaders[i]}: ${res.rawHeaders[i + 1]}\r\n`;
+        }
+        response += "\r\n";
+        socket.write(response);
+        res.pipe(socket);
+      }
+    });
+
+    if (head.length > 0) {
+      proxyReq.write(head);
+    }
+    proxyReq.end();
   };
 
   const httpServer = http.createServer(handleRequest);

@@ -13,10 +13,10 @@ const LOCK_MAX_RETRIES = 20;
 const LOCK_RETRY_DELAY_MS = 50;
 
 /** File permission mode for route and state files. */
-const FILE_MODE = 0o644;
+export const FILE_MODE = 0o644;
 
 /** Directory permission mode for the state directory. */
-const DIR_MODE = 0o755;
+export const DIR_MODE = 0o755;
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
@@ -42,6 +42,7 @@ export class RouteStore {
   private readonly routesPath: string;
   private readonly lockPath: string;
   readonly pidPath: string;
+  readonly portFilePath: string;
   private readonly onWarning: ((message: string) => void) | undefined;
 
   constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
@@ -49,6 +50,7 @@ export class RouteStore {
     this.routesPath = path.join(dir, "routes.json");
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
+    this.portFilePath = path.join(dir, "proxy.port");
     this.onWarning = options?.onWarning;
   }
 

@@ -57,12 +57,10 @@
     "url": "https://github.com/vercel-labs/portless/issues"
   },
   "dependencies": {
-    "chalk": "^5.3.0",
-    "http-proxy": "^1.18.1"
+    "chalk": "^5.3.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.2",
-    "@types/http-proxy": "^1.17.14",
     "@types/node": "^20.11.0",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.39.2",

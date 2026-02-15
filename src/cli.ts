@@ -8,7 +8,7 @@ import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createProxyServer } from "./proxy.js";
 import { isErrnoException, parseHostname } from "./utils.js";
-import { RouteStore } from "./routes.js";
+import { FILE_MODE, RouteStore } from "./routes.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
@@ -39,16 +39,12 @@ const EXIT_TIMEOUT_MS = 2000;
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 
-/** File permission mode for state files. */
-const FILE_MODE = 0o644;
-
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
 
 function startProxyServer(store: RouteStore, proxyPort: number): void {
   store.ensureDir();
-  const portFilePath = path.join(path.dirname(store.pidPath), "proxy.port");
 
   // Create empty routes file if it doesn't exist
   const routesPath = store.getRoutesPath();
@@ -88,6 +84,7 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
 
   const server = createProxyServer({
     getRoutes: () => cachedRoutes,
+    proxyPort,
     onError: (msg) => console.error(chalk.red(msg)),
   });
 
@@ -113,7 +110,7 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
   server.listen(proxyPort, () => {
     // Save PID and port once the server is actually listening
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
-    fs.writeFileSync(portFilePath, proxyPort.toString(), { mode: FILE_MODE });
+    fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     console.log(chalk.green(`HTTP proxy listening on port ${proxyPort}`));
   });
 
@@ -133,7 +130,7 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
       // PID file may already be removed; non-fatal
     }
     try {
-      fs.unlinkSync(portFilePath);
+      fs.unlinkSync(store.portFilePath);
     } catch {
       // Port file may already be removed; non-fatal
     }
@@ -155,7 +152,6 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
 
 async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
   const pidPath = store.pidPath;
-  const portFilePath = path.join(path.dirname(store.pidPath), "proxy.port");
   const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
   const sudoHint = needsSudo ? "sudo " : "";
 
@@ -168,7 +164,7 @@ async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
         try {
           process.kill(pid, "SIGTERM");
           try {
-            fs.unlinkSync(portFilePath);
+            fs.unlinkSync(store.portFilePath);
           } catch {
             // Port file may already be absent; non-fatal
           }
@@ -216,7 +212,7 @@ async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
       console.log(chalk.yellow("Proxy process is no longer running. Cleaning up stale files."));
       fs.unlinkSync(pidPath);
       try {
-        fs.unlinkSync(portFilePath);
+        fs.unlinkSync(store.portFilePath);
       } catch {
         // Port file may already be absent; non-fatal
       }
@@ -239,7 +235,7 @@ async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
     process.kill(pid, "SIGTERM");
     fs.unlinkSync(pidPath);
     try {
-      fs.unlinkSync(portFilePath);
+      fs.unlinkSync(store.portFilePath);
     } catch {
       // Port file may already be removed; non-fatal
     }
@@ -457,6 +453,7 @@ ${chalk.bold("Options:")}
 
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
+  PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
 
 ${chalk.bold("Skip portless:")}

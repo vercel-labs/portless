@@ -1,8 +1,10 @@
 import { describe, it, expect, afterEach } from "vitest";
 import * as http from "node:http";
 import * as net from "node:net";
-import { createProxyServer } from "./proxy.js";
+import { createProxyServer, PORTLESS_HEADER } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
+
+const TEST_PROXY_PORT = 1355;
 
 function request(
   server: http.Server,
@@ -56,10 +58,11 @@ describe("createProxyServer", () => {
   describe("request routing", () => {
     it("returns 404 when Host header has no matching route", async () => {
       const routes: RouteInfo[] = [];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
-      // With no routes, any host should get a 404
       const res = await request(server, { host: "nonexistent.localhost" });
       expect(res.status).toBe(404);
       expect(res.body).toContain("Not Found");
@@ -67,7 +70,9 @@ describe("createProxyServer", () => {
 
     it("returns 404 with HTML page for unknown host", async () => {
       const routes: RouteInfo[] = [];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const res = await request(server, { host: "unknown.localhost" });
@@ -83,7 +88,9 @@ describe("createProxyServer", () => {
         { hostname: "myapp.localhost", port: 4001 },
         { hostname: "api.localhost", port: 4002 },
       ];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const res = await request(server, { host: "other.localhost" });
@@ -93,8 +100,28 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("api.localhost");
     });
 
+    it("includes correct port in 404 page links", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain('href="http://myapp.localhost:8080"');
+    });
+
+    it("omits port 80 in 404 page links", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 80 }));
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain('href="http://myapp.localhost"');
+      expect(res.body).not.toContain(":80");
+    });
+
     it("proxies request to matching route", async () => {
-      // Create a simple backend server
       const backend = trackServer(
         http.createServer((_req, res) => {
           res.writeHead(200, { "Content-Type": "text/plain" });
@@ -106,7 +133,9 @@ describe("createProxyServer", () => {
       if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
 
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const res = await request(server, { host: "myapp.localhost" });
@@ -126,7 +155,9 @@ describe("createProxyServer", () => {
       if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
 
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const res = await request(server, { host: "myapp.localhost:80" });
@@ -138,7 +169,9 @@ describe("createProxyServer", () => {
   describe("missing Host header", () => {
     it("returns 400 when Host header is missing", async () => {
       const routes: RouteInfo[] = [];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const addr = server.address();
@@ -167,6 +200,7 @@ describe("createProxyServer", () => {
       const server = trackServer(
         createProxyServer({
           getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
           onError: (msg) => errors.push(msg),
         })
       );
@@ -180,10 +214,36 @@ describe("createProxyServer", () => {
     });
   });
 
+  describe("X-Portless header", () => {
+    it("includes X-Portless header on 404 responses", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "unknown.localhost" });
+      expect(res.headers[PORTLESS_HEADER.toLowerCase()]).toBe("1");
+    });
+
+    it("includes X-Portless header on 400 responses", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "" });
+      expect(res.headers[PORTLESS_HEADER.toLowerCase()]).toBe("1");
+    });
+  });
+
   describe("XSS safety", () => {
     it("escapes hostname in 404 page", async () => {
       const routes: RouteInfo[] = [];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       // The proxy extracts hostname from the Host header before the colon
@@ -196,7 +256,9 @@ describe("createProxyServer", () => {
     it("escapes route hostnames in active apps list", async () => {
       // Route hostnames come from the route store, but defense-in-depth matters
       const routes: RouteInfo[] = [{ hostname: '<img src=x onerror="alert(1)">', port: 4001 }];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const res = await request(server, { host: "other.localhost" });
@@ -224,7 +286,9 @@ describe("createProxyServer", () => {
       if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
 
       const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const addr = server.address();
@@ -255,7 +319,9 @@ describe("createProxyServer", () => {
 
     it("destroys socket for unknown host on upgrade", async () => {
       const routes: RouteInfo[] = [];
-      const server = trackServer(createProxyServer({ getRoutes: () => routes }));
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
       await listen(server);
 
       const addr = server.address();
