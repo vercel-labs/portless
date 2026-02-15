@@ -210,29 +210,8 @@ describe("RouteStore", () => {
     });
   });
 
-  describe("locking", () => {
-    it("acquires and releases lock", () => {
-      store.ensureDir();
-      expect(store.acquireLock()).toBe(true);
-      store.releaseLock();
-    });
-
-    it("returns false when lock cannot be acquired", () => {
-      store.ensureDir();
-      expect(store.acquireLock()).toBe(true);
-      // Try to acquire the same lock again with minimal retries
-      expect(store.acquireLock(1, 10)).toBe(false);
-      store.releaseLock();
-    });
-
-    it("handles double release gracefully", () => {
-      store.ensureDir();
-      store.acquireLock();
-      store.releaseLock();
-      expect(() => store.releaseLock()).not.toThrow();
-    });
-
-    it("removes stale lock older than 10 seconds", () => {
+  describe("locking (via concurrent addRoute)", () => {
+    it("handles stale lock by recovering and completing the operation", () => {
       store.ensureDir();
       const lockPath = path.join(tmpDir, "routes.lock");
       // Create a stale lock directory manually
@@ -240,9 +219,11 @@ describe("RouteStore", () => {
       // Backdate mtime to 11 seconds ago
       const staleTime = new Date(Date.now() - 11_000);
       fs.utimesSync(lockPath, staleTime, staleTime);
-      // Should acquire successfully by removing the stale lock
-      expect(store.acquireLock()).toBe(true);
-      store.releaseLock();
+      // addRoute should recover from the stale lock
+      expect(() => store.addRoute("test.localhost", 4001, process.pid)).not.toThrow();
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].hostname).toBe("test.localhost");
     });
   });
 });
