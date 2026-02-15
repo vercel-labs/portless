@@ -421,6 +421,17 @@ async function runApp(name: string, commandArgs: string[]) {
 async function main() {
   const args = process.argv.slice(2);
 
+  // Block npx / pnpm dlx -- portless should be installed globally, not run
+  // via npx. Running "sudo npx" is unsafe because it performs package
+  // resolution and downloads as root.
+  const isNpx = process.env.npm_command === "exec" && !process.env.npm_lifecycle_event;
+  const isPnpmDlx = !!process.env.PNPM_SCRIPT_SRC_DIR && !process.env.npm_lifecycle_event;
+  if (isNpx || isPnpmDlx) {
+    console.error(chalk.red("Error: portless should not be run via npx or pnpm dlx."));
+    console.log(chalk.blue("Install globally: npm install -g portless"));
+    process.exit(1);
+  }
+
   // Skip portless if PORTLESS=0 or PORTLESS=skip
   const skipPortless = process.env.PORTLESS === "0" || process.env.PORTLESS === "skip";
   if (skipPortless && args.length >= 2 && args[0] !== "proxy") {
@@ -437,6 +448,10 @@ ${chalk.bold("portless")} - Replace port numbers with stable, named .localhost U
 Eliminates port conflicts, memorizing port numbers, and cookie/storage
 clashes by giving each dev server a stable .localhost URL.
 
+${chalk.bold("Install:")}
+  ${chalk.cyan("npm install -g portless")}
+  Do NOT add portless as a project dependency.
+
 ${chalk.bold("Usage:")}
   ${chalk.cyan("sudo portless proxy")}              Start the proxy (run once, keep open)
   ${chalk.cyan("sudo portless proxy --port 8080")}  Start the proxy on a custom port
@@ -445,9 +460,9 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless list")}                    Show active routes
 
 ${chalk.bold("Examples:")}
-  sudo portless proxy              # Start proxy in terminal 1
-  portless myapp next dev          # Terminal 2 -> http://myapp.localhost
-  portless api.myapp pnpm start    # Terminal 3 -> http://api.myapp.localhost
+  sudo portless proxy               # Start proxy in terminal 1
+  portless myapp next dev           # Terminal 2 -> http://myapp.localhost
+  portless api.myapp pnpm start     # Terminal 3 -> http://api.myapp.localhost
 
 ${chalk.bold("In package.json:")}
   {

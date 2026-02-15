@@ -19,6 +19,16 @@ Replace port numbers with stable, named .localhost URLs. For humans and agents.
 - **Sharing URLs with teammates** — "what port is that on?" becomes a Slack question
 - **Browser history is useless** — `localhost:3000` history is a mix of unrelated projects
 
+## Installation
+
+portless is a global CLI tool. Do NOT add it as a project dependency (no `npm install portless` or `pnpm add portless` in a project). Do NOT use `npx`.
+
+Install globally:
+
+```bash
+npm install -g portless
+```
+
 ## Quick Start
 
 ```bash
