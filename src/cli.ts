@@ -101,9 +101,9 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
     } else if (err.code === "EACCES") {
       console.error(chalk.red(`Permission denied for port ${proxyPort}.`));
       console.error(chalk.blue("Either run with sudo:"));
-      console.error(chalk.cyan("  sudo portless proxy"));
+      console.error(chalk.cyan("  sudo portless proxy start -p 80"));
       console.error(chalk.blue("Or use a non-privileged port (no sudo needed):"));
-      console.error(chalk.cyan("  portless proxy -p 8080"));
+      console.error(chalk.cyan("  portless proxy start"));
     } else {
       console.error(chalk.red(`Proxy error: ${err.message}`));
     }
@@ -292,8 +292,20 @@ async function runApp(
 
   // Check if proxy is running, auto-start if possible
   if (!(await isProxyRunning(proxyPort))) {
-    if (process.stdin.isTTY) {
-      // Ask user if they want to start the proxy
+    const defaultPort = getDefaultPort();
+    const needsSudo = defaultPort < PRIVILEGED_PORT_THRESHOLD;
+
+    if (needsSudo) {
+      // Privileged port requires sudo -- must prompt interactively
+      if (!process.stdin.isTTY) {
+        console.error(chalk.red("Proxy is not running."));
+        console.error(chalk.blue("Start the proxy first (requires sudo for this port):"));
+        console.error(chalk.cyan("  sudo portless proxy start -p 80"));
+        console.error(chalk.blue("Or use the default port (no sudo needed):"));
+        console.error(chalk.cyan("  portless proxy start"));
+        process.exit(1);
+      }
+
       const answer = await prompt(chalk.yellow("Proxy not running. Start it? [Y/n/skip] "));
 
       if (answer === "n" || answer === "no") {
@@ -302,64 +314,50 @@ async function runApp(
       }
 
       if (answer === "s" || answer === "skip") {
-        // Run command directly without proxy
         console.log(chalk.gray("Skipping proxy, running command directly...\n"));
         spawnCommand(commandArgs);
         return;
       }
 
-      // Start the proxy
-      const defaultPort = getDefaultPort();
-      const needsSudo = defaultPort < PRIVILEGED_PORT_THRESHOLD;
-
-      if (needsSudo) {
-        console.log(chalk.yellow("Starting proxy (requires sudo)..."));
-        const result = spawnSync("sudo", [process.execPath, process.argv[1], "proxy", "--daemon"], {
-          stdio: "inherit",
-          timeout: SUDO_SPAWN_TIMEOUT_MS,
-        });
-        if (result.status !== 0) {
-          console.error(chalk.red("Failed to start proxy."));
-          console.error(chalk.blue("Try starting it manually:"));
-          console.error(chalk.cyan("  sudo portless proxy"));
-          process.exit(1);
-        }
-      } else {
-        console.log(chalk.yellow("Starting proxy..."));
-        const result = spawnSync(process.execPath, [process.argv[1], "proxy", "--daemon"], {
-          stdio: "inherit",
-          timeout: SUDO_SPAWN_TIMEOUT_MS,
-        });
-        if (result.status !== 0) {
-          console.error(chalk.red("Failed to start proxy."));
-          console.error(chalk.blue("Try starting it manually:"));
-          console.error(chalk.cyan("  portless proxy"));
-          process.exit(1);
-        }
-      }
-
-      // Wait for proxy to be ready
-      if (!(await waitForProxy(defaultPort))) {
-        console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
-        const logPath = path.join(stateDir, "proxy.log");
-        console.error(chalk.blue("Try starting the proxy manually to see the error:"));
-        console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy`));
-        if (fs.existsSync(logPath)) {
-          console.error(chalk.gray(`Logs: ${logPath}`));
-        }
+      console.log(chalk.yellow("Starting proxy (requires sudo)..."));
+      const result = spawnSync("sudo", [process.execPath, process.argv[1], "proxy", "start"], {
+        stdio: "inherit",
+        timeout: SUDO_SPAWN_TIMEOUT_MS,
+      });
+      if (result.status !== 0) {
+        console.error(chalk.red("Failed to start proxy."));
+        console.error(chalk.blue("Try starting it manually:"));
+        console.error(chalk.cyan("  sudo portless proxy start"));
         process.exit(1);
       }
-
-      console.log(chalk.green("Proxy started in background"));
     } else {
-      // No terminal, can't prompt
-      console.error(chalk.red("Proxy is not running."));
-      console.error(chalk.blue("Start the proxy first (one time):"));
-      console.error(chalk.cyan("  portless proxy"));
-      console.error(chalk.blue("For port 80 (requires sudo):"));
-      console.error(chalk.cyan("  sudo portless proxy -p 80"));
+      // Non-privileged port -- auto-start silently, no prompt needed
+      console.log(chalk.yellow("Starting proxy..."));
+      const result = spawnSync(process.execPath, [process.argv[1], "proxy", "start"], {
+        stdio: "inherit",
+        timeout: SUDO_SPAWN_TIMEOUT_MS,
+      });
+      if (result.status !== 0) {
+        console.error(chalk.red("Failed to start proxy."));
+        console.error(chalk.blue("Try starting it manually:"));
+        console.error(chalk.cyan("  portless proxy start"));
+        process.exit(1);
+      }
+    }
+
+    // Wait for proxy to be ready
+    if (!(await waitForProxy(defaultPort))) {
+      console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
+      const logPath = path.join(stateDir, "proxy.log");
+      console.error(chalk.blue("Try starting the proxy manually to see the error:"));
+      console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
+      if (fs.existsSync(logPath)) {
+        console.error(chalk.gray(`Logs: ${logPath}`));
+      }
       process.exit(1);
     }
+
+    console.log(chalk.green("Proxy started in background"));
   } else {
     console.log(chalk.gray("-- Proxy is running"));
   }
@@ -428,16 +426,16 @@ ${chalk.bold("Install:")}
   Do NOT add portless as a project dependency.
 
 ${chalk.bold("Usage:")}
-  ${chalk.cyan("portless proxy")}                   Start the proxy (run once, keep open)
-  ${chalk.cyan("portless proxy -p 80")}             Start on port 80 (requires sudo)
+  ${chalk.cyan("portless proxy start")}             Start the proxy (background daemon)
+  ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
   ${chalk.cyan("portless list")}                    Show active routes
 
 ${chalk.bold("Examples:")}
-  portless proxy                    # Start proxy on port 1355
-  portless myapp next dev           # -> http://myapp.localhost:1355
-  portless api.myapp pnpm start     # -> http://api.myapp.localhost:1355
+  portless proxy start                # Start proxy on port 1355
+  portless myapp next dev             # -> http://myapp.localhost:1355
+  portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
 
 ${chalk.bold("In package.json:")}
   {
@@ -448,13 +446,14 @@ ${chalk.bold("In package.json:")}
 
 ${chalk.bold("How it works:")}
   1. Start the proxy once (listens on port 1355 by default, no sudo needed)
-  2. Run your apps - they register automatically
+  2. Run your apps - they auto-start the proxy and register automatically
   3. Access via http://<name>.localhost:1355
   4. .localhost domains auto-resolve to 127.0.0.1
 
 ${chalk.bold("Options:")}
   -p, --port <number>           Port for the proxy to listen on (default: 1355)
                                 Ports < 1024 require sudo
+  --foreground                  Run proxy in foreground (for debugging)
 
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
@@ -493,7 +492,20 @@ ${chalk.bold("Skip portless:")}
       return;
     }
 
-    const isDaemon = args.includes("--daemon");
+    if (args[1] !== "start") {
+      // Bare "portless proxy" or unknown subcommand -- show usage hint
+      console.log(`
+${chalk.bold("Usage: portless proxy <command>")}
+
+  ${chalk.cyan("portless proxy start")}                Start the proxy (daemon)
+  ${chalk.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
+  ${chalk.cyan("portless proxy start -p 80")}          Start on port 80 (requires sudo)
+  ${chalk.cyan("portless proxy stop")}                 Stop the proxy
+`);
+      process.exit(args[1] ? 1 : 0);
+    }
+
+    const isForeground = args.includes("--foreground");
 
     // Parse --port / -p flag
     let proxyPort = getDefaultPort();
@@ -504,7 +516,7 @@ ${chalk.bold("Skip portless:")}
       if (!portValue || portValue.startsWith("-")) {
         console.error(chalk.red("Error: --port / -p requires a port number."));
         console.error(chalk.blue("Usage:"));
-        console.error(chalk.cyan("  portless proxy -p 8080"));
+        console.error(chalk.cyan("  portless proxy start -p 8080"));
         process.exit(1);
       }
       proxyPort = parseInt(portValue, 10);
@@ -523,12 +535,16 @@ ${chalk.bold("Skip portless:")}
 
     // Check if already running
     if (await isProxyRunning(proxyPort)) {
-      if (!isDaemon) {
-        const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
-        const sudoPrefix = needsSudo ? "sudo " : "";
-        console.log(chalk.yellow(`Proxy is already running on port ${proxyPort}.`));
-        console.log(chalk.blue(`To restart: portless proxy stop && ${sudoPrefix}portless proxy`));
+      if (isForeground) {
+        // Foreground mode is used internally by the daemon fork; exit silently
+        return;
       }
+      const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
+      const sudoPrefix = needsSudo ? "sudo " : "";
+      console.log(chalk.yellow(`Proxy is already running on port ${proxyPort}.`));
+      console.log(
+        chalk.blue(`To restart: portless proxy stop && ${sudoPrefix}portless proxy start`)
+      );
       return;
     }
 
@@ -536,52 +552,55 @@ ${chalk.bold("Skip portless:")}
     if (proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
       console.error(chalk.red(`Error: Port ${proxyPort} requires sudo.`));
       console.error(chalk.blue("Either run with sudo:"));
-      console.error(chalk.cyan("  sudo portless proxy"));
-      console.error(chalk.blue("Or use a non-privileged port (no sudo needed):"));
-      console.error(chalk.cyan("  portless proxy -p 8080"));
+      console.error(chalk.cyan("  sudo portless proxy start -p 80"));
+      console.error(chalk.blue("Or use the default port (no sudo needed):"));
+      console.error(chalk.cyan("  portless proxy start"));
       process.exit(1);
     }
 
-    // Daemon mode: fork and detach, logging to file
-    if (isDaemon) {
-      store.ensureDir();
-      const logPath = path.join(stateDir, "proxy.log");
-      const logFd = fs.openSync(logPath, "a");
-      try {
-        fs.chmodSync(logPath, FILE_MODE);
-      } catch {
-        // May fail if file is owned by another user; non-fatal
-      }
-
-      const daemonArgs = [process.argv[1], "proxy"];
-      if (portFlagIndex !== -1) {
-        daemonArgs.push("--port", proxyPort.toString());
-      }
-
-      const child = spawn(process.execPath, daemonArgs, {
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-        env: process.env,
-      });
-      child.unref();
-      fs.closeSync(logFd);
-
-      // Wait for proxy to be ready
-      if (!(await waitForProxy(proxyPort))) {
-        console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
-        console.error(chalk.blue("Try starting the proxy manually to see the error:"));
-        const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
-        console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy`));
-        if (fs.existsSync(logPath)) {
-          console.error(chalk.gray(`Logs: ${logPath}`));
-        }
-        process.exit(1);
-      }
+    // Foreground mode: run the proxy directly in this process
+    if (isForeground) {
+      console.log(chalk.blue.bold("\nportless proxy\n"));
+      startProxyServer(store, proxyPort);
       return;
     }
 
-    console.log(chalk.blue.bold("\nportless proxy\n"));
-    startProxyServer(store, proxyPort);
+    // Daemon mode (default): fork and detach, logging to file
+    store.ensureDir();
+    const logPath = path.join(stateDir, "proxy.log");
+    const logFd = fs.openSync(logPath, "a");
+    try {
+      fs.chmodSync(logPath, FILE_MODE);
+    } catch {
+      // May fail if file is owned by another user; non-fatal
+    }
+
+    const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
+    if (portFlagIndex !== -1) {
+      daemonArgs.push("--port", proxyPort.toString());
+    }
+
+    const child = spawn(process.execPath, daemonArgs, {
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+      env: process.env,
+    });
+    child.unref();
+    fs.closeSync(logFd);
+
+    // Wait for proxy to be ready
+    if (!(await waitForProxy(proxyPort))) {
+      console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
+      console.error(chalk.blue("Try starting the proxy in the foreground to see the error:"));
+      const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
+      console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start --foreground`));
+      if (fs.existsSync(logPath)) {
+        console.error(chalk.gray(`Logs: ${logPath}`));
+      }
+      process.exit(1);
+    }
+
+    console.log(chalk.green(`Proxy started on port ${proxyPort}`));
     return;
   }
 

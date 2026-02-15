@@ -35,8 +35,10 @@ describe("CLI", () => {
       expect(stdout).toContain("portless");
       expect(stdout).toContain("Usage:");
       expect(stdout).toContain("Examples:");
+      expect(stdout).toContain("proxy start");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
+      expect(stdout).toContain("--foreground");
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -73,6 +75,22 @@ describe("CLI", () => {
       // it doesn't crash and returns 0.
       const { status } = run(["list"]);
       expect(status).toBe(0);
+    });
+  });
+
+  describe("proxy", () => {
+    it("shows proxy usage hint for bare 'proxy' command", () => {
+      const { status, stdout } = run(["proxy"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("proxy start");
+      expect(stdout).toContain("proxy stop");
+      expect(stdout).toContain("--foreground");
+    });
+
+    it("exits 1 for unknown proxy subcommand", () => {
+      const { status, stdout } = run(["proxy", "unknown"]);
+      expect(status).toBe(1);
+      expect(stdout).toContain("proxy start");
     });
   });
 

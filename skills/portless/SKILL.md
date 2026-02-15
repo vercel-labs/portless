@@ -36,14 +36,14 @@ npm install -g portless
 npm install -g portless
 
 # Start the proxy (once, no sudo needed)
-portless proxy
+portless proxy start
 
-# Run your app
+# Run your app (auto-starts the proxy if needed)
 portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
 
-When run directly in a terminal (TTY), portless can auto-start the proxy. Via package scripts, start the proxy manually first.
+The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`.
 
 ## Integration Patterns
 
@@ -57,7 +57,7 @@ When run directly in a terminal (TTY), portless can auto-start the proxy. Via pa
 }
 ```
 
-Start the proxy once (`portless proxy`), then run `pnpm dev` / `npm run dev` as usual.
+The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
 
 ### Multi-app setups with subdomains
 
@@ -77,7 +77,7 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 
 ## How It Works
 
-1. `portless proxy` starts an HTTP reverse proxy on port 1355 (configurable with `-p` / `--port` or the `PORTLESS_PORT` env var)
+1. `portless proxy start` starts an HTTP reverse proxy on port 1355 as a background daemon (configurable with `-p` / `--port` or the `PORTLESS_PORT` env var). The proxy also auto-starts when you run an app.
 2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `http://<name>.localhost:1355` on the proxy port; the proxy forwards to the app's assigned port
 
@@ -104,34 +104,33 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 
 ## CLI Reference
 
-| Command                           | Description                                   |
-| --------------------------------- | --------------------------------------------- |
-| `portless <name> <cmd> [args...]` | Run app at `http://<name>.localhost:1355`     |
-| `portless list`                   | Show active routes                            |
-| `portless proxy`                  | Start the proxy on port 1355 (no sudo needed) |
-| `portless proxy -p <number>`      | Start the proxy on a custom port              |
-| `portless proxy stop`             | Stop the proxy                                |
-| `portless --help` / `-h`          | Show help                                     |
-| `portless --version` / `-v`       | Show version                                  |
+| Command                             | Description                                                   |
+| ----------------------------------- | ------------------------------------------------------------- |
+| `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
+| `portless list`                     | Show active routes                                            |
+| `portless proxy start`              | Start the proxy as a daemon (port 1355, no sudo)              |
+| `portless proxy start -p <number>`  | Start the proxy on a custom port                              |
+| `portless proxy start --foreground` | Start the proxy in foreground (for debugging)                 |
+| `portless proxy stop`               | Stop the proxy                                                |
+| `portless --help` / `-h`            | Show help                                                     |
+| `portless --version` / `-v`         | Show version                                                  |
 
 ## Troubleshooting
 
 ### Proxy not running
 
-If `portless <name> <cmd>` reports the proxy is not running:
+The proxy auto-starts when you run an app with `portless <name> <cmd>`. If it doesn't start (e.g. port conflict), start it manually:
 
 ```bash
-portless proxy
+portless proxy start
 ```
-
-In a TTY, portless offers to start it automatically. In non-interactive contexts (CI, package scripts), start it manually first.
 
 ### Port already in use
 
 Another process is bound to the proxy port. Either stop it first, or use a different port:
 
 ```bash
-portless proxy -p 8080
+portless proxy start -p 8080
 ```
 
 ### Framework not respecting PORT
@@ -146,9 +145,9 @@ Some frameworks need explicit configuration to use the `PORT` env var. Examples:
 Ports below 1024 require `sudo`. The default port (1355) does not need sudo. If you want to use port 80:
 
 ```bash
-sudo portless proxy -p 80       # Port 80, requires sudo
-portless proxy                   # Port 1355, no sudo needed
-portless proxy stop              # Stop (use sudo if started with sudo)
+sudo portless proxy start -p 80       # Port 80, requires sudo
+portless proxy start                   # Port 1355, no sudo needed
+portless proxy stop                    # Stop (use sudo if started with sudo)
 ```
 
 ### Requirements

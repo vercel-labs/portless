@@ -14,14 +14,14 @@ Replace port numbers with stable, named .localhost URLs. For humans and agents.
 npm install -g portless
 
 # Start the proxy (once, no sudo needed)
-portless proxy
+portless proxy start
 
-# Run your app
+# Run your app (auto-starts the proxy if needed)
 portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
 
-> When run directly in your terminal, portless can auto-start the proxy for you. Via package scripts, start the proxy manually first.
+> The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`.
 
 ## Why
 
@@ -64,7 +64,7 @@ portless docs.myapp next dev
 }
 ```
 
-Start the proxy once (`portless proxy`), then just `pnpm dev`.
+The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
 
 ## How It Works
 
@@ -80,7 +80,7 @@ flowchart TD
     Proxy --> App2
 ```
 
-1. **Start the proxy** -- runs on port 1355 by default (no sudo needed)
+1. **Start the proxy** -- auto-starts when you run an app, or start explicitly with `portless proxy start`
 2. **Run apps** -- `portless <name> <command>` assigns a free port and registers with the proxy
 3. **Access via URL** -- `http://<name>.localhost:1355` routes through the proxy to your app
 
@@ -97,13 +97,15 @@ PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 # Also accepts PORTLESS=skip
 
 # Proxy control
-portless proxy                   # Start the proxy (port 1355, no sudo needed)
-portless proxy -p 80             # Start on port 80 (requires sudo)
+portless proxy start             # Start the proxy (port 1355, daemon)
+portless proxy start -p 80       # Start on port 80 (requires sudo)
+portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy stop              # Stop the proxy
 
 # Options
 -p, --port <number>              # Port for the proxy (default: 1355)
                                  # Ports < 1024 require sudo
+--foreground                     # Run proxy in foreground instead of daemon
 
 # Environment variables
 PORTLESS_PORT=<number>           # Override the default proxy port
