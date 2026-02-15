@@ -137,13 +137,14 @@ function spawnCommand(
 function startProxyServer(proxyPort: number): void {
   store.ensureDir();
 
-  // Create empty routes file if it doesn't exist
+  // Create empty routes file if it doesn't exist.
+  // Use 0o666 so non-root app processes can also write routes.
   const routesPath = store.getRoutesPath();
   if (!fs.existsSync(routesPath)) {
-    fs.writeFileSync(routesPath, "[]", { mode: 0o644 });
+    fs.writeFileSync(routesPath, "[]", { mode: 0o666 });
   }
   try {
-    fs.chmodSync(routesPath, 0o644);
+    fs.chmodSync(routesPath, 0o666);
   } catch {
     // May fail if file is owned by another user; non-fatal
   }

@@ -217,12 +217,18 @@ describe("RouteStore", () => {
       store.releaseLock();
     });
 
-    it("returns false when lock cannot be acquired", () => {
-      store.ensureDir();
-      expect(store.acquireLock()).toBe(true);
-      // Try to acquire the same lock again with minimal retries
-      expect(store.acquireLock(1, 10)).toBe(false);
-      store.releaseLock();
+    it("force-breaks lock as last resort with warning", () => {
+      const warnings: string[] = [];
+      const warnStore = new RouteStore(tmpDir, {
+        onWarning: (msg) => warnings.push(msg),
+      });
+      warnStore.ensureDir();
+      expect(warnStore.acquireLock()).toBe(true);
+      // Retries exhausted, but force-break succeeds as last resort
+      expect(warnStore.acquireLock(1, 10)).toBe(true);
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]).toContain("Force-breaking");
+      warnStore.releaseLock();
     });
 
     it("handles double release gracefully", () => {
@@ -242,6 +248,27 @@ describe("RouteStore", () => {
       fs.utimesSync(lockPath, staleTime, staleTime);
       // Should acquire successfully by removing the stale lock
       expect(store.acquireLock()).toBe(true);
+      store.releaseLock();
+    });
+
+    it("breaks lock held by a dead process immediately", () => {
+      store.ensureDir();
+      const lockPath = path.join(tmpDir, "routes.lock");
+      // Simulate a lock left by a crashed process (dead PID)
+      fs.mkdirSync(lockPath);
+      fs.writeFileSync(path.join(lockPath, "pid"), "999999");
+      // Should acquire successfully by detecting the dead holder
+      // Needs 2 retries: first breaks the stale lock, second acquires it
+      expect(store.acquireLock(2, 10)).toBe(true);
+      store.releaseLock();
+    });
+
+    it("writes PID file inside lock directory on acquire", () => {
+      store.ensureDir();
+      expect(store.acquireLock()).toBe(true);
+      const lockPath = path.join(tmpDir, "routes.lock");
+      const pidStr = fs.readFileSync(path.join(lockPath, "pid"), "utf-8");
+      expect(parseInt(pidStr, 10)).toBe(process.pid);
       store.releaseLock();
     });
   });

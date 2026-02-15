@@ -39,10 +39,12 @@ export class RouteStore {
 
   ensureDir(): void {
     if (!fs.existsSync(this.dir)) {
-      fs.mkdirSync(this.dir, { recursive: true, mode: 0o755 });
+      // Use 0o1777 (sticky + world-writable) so both root (proxy) and
+      // non-root (app) processes can create files here, like /tmp itself.
+      fs.mkdirSync(this.dir, { recursive: true, mode: 0o1777 });
     }
     try {
-      fs.chmodSync(this.dir, 0o755);
+      fs.chmodSync(this.dir, 0o1777);
     } catch {
       // May fail if directory is owned by another user (e.g. root); non-fatal
     }
@@ -64,10 +66,38 @@ export class RouteStore {
     for (let i = 0; i < maxRetries; i++) {
       try {
         fs.mkdirSync(this.lockPath);
+        // Write our PID so other processes can detect a crashed holder
+        try {
+          fs.writeFileSync(path.join(this.lockPath, "pid"), String(process.pid));
+        } catch {
+          // Non-fatal; lock is still held by directory existence
+        }
         return true;
       } catch (err: unknown) {
         if (isErrnoException(err) && err.code === "EEXIST") {
-          // Check for stale lock (older than 10 seconds)
+          // Check if the lock holder process is still alive
+          let holderAlive = true;
+          try {
+            const pidStr = fs.readFileSync(path.join(this.lockPath, "pid"), "utf-8");
+            const holderPid = parseInt(pidStr, 10);
+            if (!isNaN(holderPid)) {
+              holderAlive = this.isProcessAlive(holderPid);
+            }
+          } catch {
+            // Cannot read PID file; fall through to time-based check
+          }
+
+          if (!holderAlive) {
+            // Lock holder crashed; break the lock immediately
+            try {
+              fs.rmSync(this.lockPath, { recursive: true });
+            } catch {
+              // Already removed by another process
+            }
+            continue;
+          }
+
+          // Fallback: check for stale lock (older than 10 seconds)
           try {
             const stat = fs.statSync(this.lockPath);
             if (Date.now() - stat.mtimeMs > 10000) {
@@ -86,8 +116,27 @@ export class RouteStore {
         }
       }
     }
-    // Timed out waiting for lock
-    return false;
+    // Last resort: force-break the lock with a warning.
+    // The lock protects a tiny JSON write that takes milliseconds; if we've
+    // exhausted retries the lock is almost certainly orphaned.
+    this.onWarning?.(`Force-breaking stale route lock: ${this.lockPath}`);
+    try {
+      fs.rmSync(this.lockPath, { recursive: true });
+    } catch {
+      // Cannot remove; give up
+      return false;
+    }
+    try {
+      fs.mkdirSync(this.lockPath);
+      try {
+        fs.writeFileSync(path.join(this.lockPath, "pid"), String(process.pid));
+      } catch {
+        // Non-fatal
+      }
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   releaseLock(): void {
@@ -139,7 +188,7 @@ export class RouteStore {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.
         try {
-          fs.writeFileSync(this.routesPath, JSON.stringify(alive, null, 2), { mode: 0o644 });
+          fs.writeFileSync(this.routesPath, JSON.stringify(alive, null, 2), { mode: 0o666 });
         } catch {
           // Write may fail (permissions); non-fatal
         }
@@ -152,13 +201,15 @@ export class RouteStore {
 
   private saveRoutes(routes: RouteMapping[]): void {
     this.ensureDir();
-    fs.writeFileSync(this.routesPath, JSON.stringify(routes, null, 2), { mode: 0o644 });
+    fs.writeFileSync(this.routesPath, JSON.stringify(routes, null, 2), { mode: 0o666 });
   }
 
   addRoute(hostname: string, port: number, pid: number): void {
     this.ensureDir();
     if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
+      throw new Error(
+        `Failed to acquire route lock. Remove it manually and retry:\n  rm -rf ${this.lockPath}`
+      );
     }
     try {
       const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
@@ -172,7 +223,9 @@ export class RouteStore {
   removeRoute(hostname: string): void {
     this.ensureDir();
     if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
+      throw new Error(
+        `Failed to acquire route lock. Remove it manually and retry:\n  rm -rf ${this.lockPath}`
+      );
     }
     try {
       const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
