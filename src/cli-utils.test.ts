@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
+import * as path from "node:path";
 import {
   DEFAULT_PROXY_PORT,
   PRIVILEGED_PORT_THRESHOLD,
@@ -10,6 +11,7 @@ import {
   findFreePort,
   getDefaultPort,
   isProxyRunning,
+  parsePidFromNetstat,
   resolveStateDir,
 } from "./cli-utils.js";
 
@@ -130,12 +132,72 @@ describe("constants", () => {
     expect(PRIVILEGED_PORT_THRESHOLD).toBe(1024);
   });
 
-  it("SYSTEM_STATE_DIR is /tmp/portless", () => {
-    expect(SYSTEM_STATE_DIR).toBe("/tmp/portless");
+  it("SYSTEM_STATE_DIR is in tmpdir", () => {
+    expect(SYSTEM_STATE_DIR).toBe(path.join(os.tmpdir(), "portless"));
   });
 
   it("USER_STATE_DIR is in home directory", () => {
-    expect(USER_STATE_DIR).toBe(`${os.homedir()}/.portless`);
+    expect(USER_STATE_DIR).toBe(path.join(os.homedir(), ".portless"));
+  });
+});
+
+describe("parsePidFromNetstat", () => {
+  const SAMPLE_OUTPUT = [
+    "Active Connections",
+    "",
+    "  Proto  Local Address          Foreign Address        State           PID",
+    "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1104",
+    "  TCP    0.0.0.0:1355           0.0.0.0:0              LISTENING       9876",
+    "  TCP    0.0.0.0:5432           0.0.0.0:0              LISTENING       3200",
+    "  TCP    [::]:1355              [::]:0                  LISTENING       9876",
+    "  TCP    127.0.0.1:1355         127.0.0.1:52000        ESTABLISHED     9876",
+    "  TCP    192.168.1.10:13550     10.0.0.1:443           ESTABLISHED     5500",
+  ].join("\r\n");
+
+  it("finds PID for a matching LISTENING port", () => {
+    expect(parsePidFromNetstat(SAMPLE_OUTPUT, 1355)).toBe(9876);
+  });
+
+  it("returns null when port is not listening", () => {
+    expect(parsePidFromNetstat(SAMPLE_OUTPUT, 9999)).toBeNull();
+  });
+
+  it("does not match ESTABLISHED connections", () => {
+    // Port 1355 has an ESTABLISHED line at 127.0.0.1 -- should not match
+    // because we only look at LISTENING lines. The first LISTENING match wins.
+    expect(parsePidFromNetstat(SAMPLE_OUTPUT, 1355)).toBe(9876);
+  });
+
+  it("does not false-match on port prefix (13550 vs 1355)", () => {
+    expect(parsePidFromNetstat(SAMPLE_OUTPUT, 13550)).toBeNull();
+  });
+
+  it("matches IPv6 addresses ([::]:port)", () => {
+    // Remove the IPv4 line so only IPv6 remains for port 1355
+    const ipv6Only = [
+      "  Proto  Local Address          Foreign Address        State           PID",
+      "  TCP    [::]:1355              [::]:0                  LISTENING       4444",
+    ].join("\r\n");
+    expect(parsePidFromNetstat(ipv6Only, 1355)).toBe(4444);
+  });
+
+  it("matches 127.0.0.1 bound addresses", () => {
+    const loopback = [
+      "  Proto  Local Address          Foreign Address        State           PID",
+      "  TCP    127.0.0.1:8080         0.0.0.0:0              LISTENING       7777",
+    ].join("\r\n");
+    expect(parsePidFromNetstat(loopback, 8080)).toBe(7777);
+  });
+
+  it("returns null for empty output", () => {
+    expect(parsePidFromNetstat("", 1355)).toBeNull();
+  });
+
+  it("handles Unix-style line endings", () => {
+    const unixOutput = [
+      "  TCP    0.0.0.0:3000           0.0.0.0:0              LISTENING       1234",
+    ].join("\n");
+    expect(parsePidFromNetstat(unixOutput, 3000)).toBe(1234);
   });
 });
 

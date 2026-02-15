@@ -11,14 +11,17 @@ import { PORTLESS_HEADER } from "./proxy.js";
 // Constants
 // ---------------------------------------------------------------------------
 
+/** True when running on Windows. */
+export const isWindows = process.platform === "win32";
+
 /** Default proxy port. Uses an unprivileged port so sudo is not required. */
 export const DEFAULT_PROXY_PORT = 1355;
 
-/** Ports below this threshold require root/sudo to bind. */
+/** Ports below this threshold require root/sudo to bind (Unix only). */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
 
-/** System-wide state directory (used when proxy needs sudo). */
-export const SYSTEM_STATE_DIR = "/tmp/portless";
+/** System-wide state directory (used when proxy needs sudo on Unix). */
+export const SYSTEM_STATE_DIR = path.join(os.tmpdir(), "portless");
 
 /** Per-user state directory (used when proxy runs without sudo). */
 export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
@@ -35,8 +38,8 @@ const RANDOM_PORT_ATTEMPTS = 50;
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
 
-/** Timeout (ms) for lsof when finding a PID on a port. */
-const LSOF_TIMEOUT_MS = 5000;
+/** Timeout (ms) for PID lookup when finding a process on a port. */
+const PID_LOOKUP_TIMEOUT_MS = 5000;
 
 /** Maximum poll attempts when waiting for the proxy to become ready. */
 export const WAIT_FOR_PROXY_MAX_ATTEMPTS = 20;
@@ -209,15 +212,45 @@ export function isProxyRunning(port: number): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Parse the PID of a process listening on a given port from netstat output.
+ * Exported for testing.
+ */
+export function parsePidFromNetstat(output: string, port: number): number | null {
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.includes("LISTENING")) continue;
+    const parts = line.trim().split(/\s+/);
+    // Format: TCP  0.0.0.0:PORT  0.0.0.0:0  LISTENING  PID
+    if (parts.length < 5) continue;
+    const localAddr = parts[1];
+    const lastColon = localAddr.lastIndexOf(":");
+    if (lastColon === -1) continue;
+    const addrPort = parseInt(localAddr.substring(lastColon + 1), 10);
+    if (addrPort === port) {
+      const pid = parseInt(parts[parts.length - 1], 10);
+      if (!isNaN(pid) && pid > 0) return pid;
+    }
+  }
+  return null;
+}
+
+/**
  * Try to find the PID of a process listening on the given TCP port.
- * Uses lsof, which is available on macOS and most Linux distributions.
+ * Uses lsof on macOS/Linux and netstat on Windows.
  * Returns null if the PID cannot be determined.
  */
 export function findPidOnPort(port: number): number | null {
   try {
+    if (isWindows) {
+      const output = execSync("netstat -ano -p tcp", {
+        encoding: "utf-8",
+        timeout: PID_LOOKUP_TIMEOUT_MS,
+      });
+      return parsePidFromNetstat(output, port);
+    }
+
     const output = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, {
       encoding: "utf-8",
-      timeout: LSOF_TIMEOUT_MS,
+      timeout: PID_LOOKUP_TIMEOUT_MS,
     });
     // lsof may return multiple PIDs (one per line); take the first
     const pid = parseInt(output.trim().split("\n")[0], 10);
@@ -259,6 +292,9 @@ export function spawnCommand(
   const child = spawn(commandArgs[0], commandArgs.slice(1), {
     stdio: "inherit",
     env: options?.env,
+    // On Windows, commands like "next", "npm" etc. are .cmd scripts that
+    // require a shell to resolve. This is a no-op on Unix.
+    shell: isWindows,
   });
 
   let exiting = false;
