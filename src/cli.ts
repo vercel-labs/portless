@@ -619,7 +619,7 @@ ${chalk.bold("Usage: portless proxy <command>")}
     if (!(await waitForProxy(proxyPort))) {
       console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
       console.error(chalk.blue("Try starting the proxy in the foreground to see the error:"));
-      const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
+      const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
       console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start --foreground`));
       if (fs.existsSync(logPath)) {
         console.error(chalk.gray(`Logs: ${logPath}`));

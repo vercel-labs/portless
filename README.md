@@ -98,13 +98,13 @@ PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 
 # Proxy control
 portless proxy start             # Start the proxy (port 1355, daemon)
-portless proxy start -p 80       # Start on port 80 (requires sudo)
+portless proxy start -p 80       # Start on port 80 (requires sudo on macOS/Linux)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy stop              # Stop the proxy
 
 # Options
 -p, --port <number>              # Port for the proxy (default: 1355)
-                                 # Ports < 1024 require sudo
+                                 # Ports < 1024 require sudo on macOS/Linux
 --foreground                     # Run proxy in foreground instead of daemon
 
 # Environment variables
@@ -120,12 +120,13 @@ portless --version               # Show version
 
 Portless stores its state (routes, PID file, port file) in a directory that depends on the proxy port:
 
-- **Port < 1024** (sudo required): `/tmp/portless` -- shared between root and user processes
+- **Port < 1024** (sudo required, macOS/Linux only): `/tmp/portless` -- shared between root and user processes
 - **Port >= 1024** (no sudo): `~/.portless` -- user-scoped, no root involvement
+- **Windows**: always uses `~/.portless` (no sudo concept)
 
 Override with the `PORTLESS_STATE_DIR` environment variable if needed.
 
 ## Requirements
 
 - Node.js 20+
-- macOS or Linux
+- macOS, Linux, or Windows
