@@ -1,6 +1,10 @@
 /** Type guard for Node.js system errors with an error code. */
 export function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
-  return err instanceof Error && "code" in err;
+  return (
+    err instanceof Error &&
+    "code" in err &&
+    typeof (err as Record<string, unknown>).code === "string"
+  );
 }
 
 /**
@@ -13,6 +17,13 @@ export function escapeHtml(str: string): string {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+/**
+ * Format a .localhost URL, including the port only when it is not 80 (standard HTTP).
+ */
+export function formatUrl(hostname: string, proxyPort: number): string {
+  return proxyPort === 80 ? `http://${hostname}` : `http://${hostname}:${proxyPort}`;
 }
 
 /**

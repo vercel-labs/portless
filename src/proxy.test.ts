@@ -317,6 +317,70 @@ describe("createProxyServer", () => {
       expect(upgraded).toBe(true);
     });
 
+    it("forwards backend Sec-WebSocket-Accept and custom headers", async () => {
+      const testAcceptValue = "dGhlIHNhbXBsZSBub25jZQ==";
+      const testProtocol = "graphql-ws";
+
+      const backend = trackServer(http.createServer());
+      backend.on("upgrade", (_req, socket) => {
+        socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            `Sec-WebSocket-Accept: ${testAcceptValue}\r\n` +
+            `Sec-WebSocket-Protocol: ${testProtocol}\r\n` +
+            "\r\n"
+        );
+        socket.end();
+      });
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const result = await new Promise<{
+        upgraded: boolean;
+        accept?: string;
+        protocol?: string;
+      }>((resolve) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/",
+          headers: {
+            host: "ws.localhost",
+            connection: "Upgrade",
+            upgrade: "websocket",
+          },
+        });
+        req.on("error", () => resolve({ upgraded: false }));
+        req.on("upgrade", (res) => {
+          resolve({
+            upgraded: true,
+            accept: res.headers["sec-websocket-accept"],
+            protocol: res.headers["sec-websocket-protocol"],
+          });
+        });
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve({ upgraded: false });
+        });
+        req.end();
+      });
+
+      expect(result.upgraded).toBe(true);
+      expect(result.accept).toBe(testAcceptValue);
+      expect(result.protocol).toBe(testProtocol);
+    });
+
     it("destroys socket for unknown host on upgrade", async () => {
       const routes: RouteInfo[] = [];
       const server = trackServer(

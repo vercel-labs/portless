@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
-import { escapeHtml } from "./utils.js";
+import { escapeHtml, formatUrl } from "./utils.js";
 
 /** Response header used to identify a portless proxy (for health checks). */
 export const PORTLESS_HEADER = "X-Portless";
@@ -24,13 +24,6 @@ function buildForwardedHeaders(req: http.IncomingMessage): Record<string, string
     (req.headers["x-forwarded-port"] as string) || hostHeader.split(":")[1] || "80";
 
   return headers;
-}
-
-/**
- * Format the proxy URL for a hostname, omitting port 80.
- */
-function formatProxyUrl(hostname: string, proxyPort: number): string {
-  return proxyPort === 80 ? `http://${hostname}` : `http://${hostname}:${proxyPort}`;
 }
 
 /**
@@ -71,7 +64,7 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
                 ? `
               <h2>Active apps:</h2>
               <ul>
-                ${routes.map((r) => `<li><a href="${escapeHtml(formatProxyUrl(r.hostname, proxyPort))}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
+                ${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort))}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
               </ul>
             `
                 : "<p><em>No apps running.</em></p>"
@@ -116,6 +109,19 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
       }
     });
 
+    // Abort the outgoing request if the client disconnects
+    res.on("close", () => {
+      if (!proxyReq.destroyed) {
+        proxyReq.destroy();
+      }
+    });
+
+    req.on("error", () => {
+      if (!proxyReq.destroyed) {
+        proxyReq.destroy();
+      }
+    });
+
     req.pipe(proxyReq);
   };
 
@@ -143,13 +149,16 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
       headers: proxyReqHeaders,
     });
 
-    proxyReq.on("upgrade", (_proxyRes, proxySocket, proxyHead) => {
-      socket.write(
-        `HTTP/1.1 101 Switching Protocols\r\n` +
-          `Upgrade: websocket\r\n` +
-          `Connection: Upgrade\r\n` +
-          `\r\n`
-      );
+    proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+      // Forward the backend's actual 101 response including Sec-WebSocket-Accept,
+      // subprotocol negotiation, and extension headers.
+      let response = `HTTP/1.1 101 Switching Protocols\r\n`;
+      for (let i = 0; i < proxyRes.rawHeaders.length; i += 2) {
+        response += `${proxyRes.rawHeaders[i]}: ${proxyRes.rawHeaders[i + 1]}\r\n`;
+      }
+      response += "\r\n";
+      socket.write(response);
+
       if (proxyHead.length > 0) {
         socket.write(proxyHead);
       }

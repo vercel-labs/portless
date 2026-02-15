@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { escapeHtml, isErrnoException, parseHostname } from "./utils.js";
+import { escapeHtml, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 
 describe("escapeHtml", () => {
   it("escapes angle brackets", () => {
@@ -48,6 +48,24 @@ describe("isErrnoException", () => {
 
   it("returns false for a plain object with code", () => {
     expect(isErrnoException({ code: "ENOENT", message: "fail" })).toBe(false);
+  });
+
+  it("returns false for an Error with a non-string code", () => {
+    const err = new Error("fail");
+    (err as unknown as Record<string, unknown>).code = 42;
+    expect(isErrnoException(err)).toBe(false);
+  });
+});
+
+describe("formatUrl", () => {
+  it("omits port for standard HTTP port (80)", () => {
+    expect(formatUrl("myapp.localhost", 80)).toBe("http://myapp.localhost");
+  });
+
+  it("includes port for non-standard ports", () => {
+    expect(formatUrl("myapp.localhost", 1355)).toBe("http://myapp.localhost:1355");
+    expect(formatUrl("myapp.localhost", 8080)).toBe("http://myapp.localhost:8080");
+    expect(formatUrl("myapp.localhost", 3000)).toBe("http://myapp.localhost:3000");
   });
 });
 

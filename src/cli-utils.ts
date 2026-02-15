@@ -321,10 +321,3 @@ export function prompt(question: string): Promise<string> {
     });
   });
 }
-
-/**
- * Format a .localhost URL, including the port only when it is not 80 (standard HTTP).
- */
-export function formatUrl(hostname: string, proxyPort: number): string {
-  return proxyPort === 80 ? `http://${hostname}` : `http://${hostname}:${proxyPort}`;
-}

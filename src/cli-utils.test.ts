@@ -8,7 +8,6 @@ import {
   SYSTEM_STATE_DIR,
   USER_STATE_DIR,
   findFreePort,
-  formatUrl,
   getDefaultPort,
   isProxyRunning,
   resolveStateDir,
@@ -119,18 +118,6 @@ describe("resolveStateDir", () => {
     expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
     expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
     expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
-  });
-});
-
-describe("formatUrl", () => {
-  it("omits port for standard HTTP port (80)", () => {
-    expect(formatUrl("myapp.localhost", 80)).toBe("http://myapp.localhost");
-  });
-
-  it("includes port for non-standard ports", () => {
-    expect(formatUrl("myapp.localhost", 1355)).toBe("http://myapp.localhost:1355");
-    expect(formatUrl("myapp.localhost", 8080)).toBe("http://myapp.localhost:8080");
-    expect(formatUrl("myapp.localhost", 3000)).toBe("http://myapp.localhost:3000");
   });
 });
 

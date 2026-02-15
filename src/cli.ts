@@ -7,14 +7,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createProxyServer } from "./proxy.js";
-import { isErrnoException, parseHostname } from "./utils.js";
+import { formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { FILE_MODE, RouteStore } from "./routes.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
   findFreePort,
   findPidOnPort,
-  formatUrl,
   getDefaultPort,
   isProxyRunning,
   prompt,
@@ -567,23 +566,26 @@ ${chalk.bold("Usage: portless proxy <command>")}
     const logPath = path.join(stateDir, "proxy.log");
     const logFd = fs.openSync(logPath, "a");
     try {
-      fs.chmodSync(logPath, FILE_MODE);
-    } catch {
-      // May fail if file is owned by another user; non-fatal
-    }
+      try {
+        fs.chmodSync(logPath, FILE_MODE);
+      } catch {
+        // May fail if file is owned by another user; non-fatal
+      }
 
-    const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
-    if (portFlagIndex !== -1) {
-      daemonArgs.push("--port", proxyPort.toString());
-    }
+      const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
+      if (portFlagIndex !== -1) {
+        daemonArgs.push("--port", proxyPort.toString());
+      }
 
-    const child = spawn(process.execPath, daemonArgs, {
-      detached: true,
-      stdio: ["ignore", logFd, logFd],
-      env: process.env,
-    });
-    child.unref();
-    fs.closeSync(logFd);
+      const child = spawn(process.execPath, daemonArgs, {
+        detached: true,
+        stdio: ["ignore", logFd, logFd],
+        env: process.env,
+      });
+      child.unref();
+    } finally {
+      fs.closeSync(logFd);
+    }
 
     // Wait for proxy to be ready
     if (!(await waitForProxy(proxyPort))) {
