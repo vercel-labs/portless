@@ -100,12 +100,11 @@ const execFileAsync = promisify(execFileCb);
  * Used for on-demand cert generation in the SNI callback to avoid blocking
  * the event loop.
  */
-async function opensslAsync(args: string[], options?: { input?: string }): Promise<string> {
+async function opensslAsync(args: string[]): Promise<string> {
   try {
     const { stdout } = await execFileAsync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
-      input: options?.input,
     });
     return stdout;
   } catch (err: unknown) {
