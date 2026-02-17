@@ -86,11 +86,34 @@ flowchart TD
 
 Apps are assigned a random port (4000-4999) via the `PORT` environment variable. Most frameworks (Next.js, Vite, etc.) respect this automatically.
 
+## HTTP/2 + HTTPS
+
+Enable HTTP/2 for faster dev server page loads. Browsers limit HTTP/1.1 to 6 connections per host, which bottlenecks dev servers that serve many unbundled files (Vite, Nuxt, etc.). HTTP/2 multiplexes all requests over a single connection.
+
+```bash
+# Start with HTTPS/2 -- generates certs and trusts them automatically
+portless proxy start --https
+
+# First run prompts for sudo once to add the CA to your system trust store.
+# After that, no prompts. No browser warnings.
+
+# Make it permanent (add to .bashrc / .zshrc)
+export PORTLESS_HTTPS=1
+portless proxy start    # HTTPS by default now
+
+# Use your own certs (e.g., from mkcert)
+portless proxy start --cert ./cert.pem --key ./key.pem
+
+# If you skipped sudo on first run, trust the CA later
+sudo portless trust
+```
+
 ## Commands
 
 ```bash
 portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
 portless list                    # Show active routes
+portless trust                   # Add local CA to system trust store
 
 # Disable portless (run command directly)
 PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
@@ -98,6 +121,7 @@ PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 
 # Proxy control
 portless proxy start             # Start the proxy (port 1355, daemon)
+portless proxy start --https     # Start with HTTP/2 + TLS
 portless proxy start -p 80       # Start on port 80 (requires sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy stop              # Stop the proxy
@@ -105,10 +129,15 @@ portless proxy stop              # Stop the proxy
 # Options
 -p, --port <number>              # Port for the proxy (default: 1355)
                                  # Ports < 1024 require sudo
+--https                          # Enable HTTP/2 + TLS with auto-generated certs
+--cert <path>                    # Use a custom TLS certificate (implies --https)
+--key <path>                     # Use a custom TLS private key (implies --https)
+--no-tls                         # Disable HTTPS (overrides PORTLESS_HTTPS)
 --foreground                     # Run proxy in foreground instead of daemon
 
 # Environment variables
 PORTLESS_PORT=<number>           # Override the default proxy port
+PORTLESS_HTTPS=1                 # Always enable HTTPS
 PORTLESS_STATE_DIR=<path>        # Override the state directory
 
 # Info

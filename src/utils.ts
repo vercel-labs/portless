@@ -20,10 +20,15 @@ export function escapeHtml(str: string): string {
 }
 
 /**
- * Format a .localhost URL, including the port only when it is not 80 (standard HTTP).
+ * Format a .localhost URL. Omits the port when it matches the protocol default
+ * (80 for HTTP, 443 for HTTPS).
  */
-export function formatUrl(hostname: string, proxyPort: number): string {
-  return proxyPort === 80 ? `http://${hostname}` : `http://${hostname}:${proxyPort}`;
+export function formatUrl(hostname: string, proxyPort: number, tls = false): string {
+  const proto = tls ? "https" : "http";
+  const defaultPort = tls ? 443 : 80;
+  return proxyPort === defaultPort
+    ? `${proto}://${hostname}`
+    : `${proto}://${hostname}:${proxyPort}`;
 }
 
 /**

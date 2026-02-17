@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -97,34 +98,75 @@ export function readPortFromDir(dir: string): number | null {
   }
 }
 
+/** Name of the marker file that indicates the proxy is running with TLS. */
+const TLS_MARKER_FILE = "proxy.tls";
+
+/** Read the TLS marker from a state directory. */
+export function readTlsMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, TLS_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+/** Write or remove the TLS marker in the state directory. */
+export function writeTlsMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, TLS_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
 /**
- * Discover the active proxy's state directory and port.
+ * Return whether HTTPS mode is requested via the PORTLESS_HTTPS env var.
+ */
+export function isHttpsEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_HTTPS;
+  return val === "1" || val === "true";
+}
+
+/**
+ * Discover the active proxy's state directory, port, and TLS mode.
  * Checks the user-level dir first, then the system-level dir.
  * Falls back to the system dir with the default port if nothing is running.
  */
-export async function discoverState(): Promise<{ dir: string; port: number }> {
+export async function discoverState(): Promise<{ dir: string; port: number; tls: boolean }> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
     const port = readPortFromDir(dir) ?? getDefaultPort();
-    return { dir, port };
+    const tls = readTlsMarker(dir);
+    return { dir, port, tls };
   }
 
   // Check user-level state first (~/.portless)
   const userPort = readPortFromDir(USER_STATE_DIR);
-  if (userPort !== null && (await isProxyRunning(userPort))) {
-    return { dir: USER_STATE_DIR, port: userPort };
+  if (userPort !== null) {
+    const tls = readTlsMarker(USER_STATE_DIR);
+    if (await isProxyRunning(userPort, tls)) {
+      return { dir: USER_STATE_DIR, port: userPort, tls };
+    }
   }
 
   // Check system-level state (/tmp/portless)
   const systemPort = readPortFromDir(SYSTEM_STATE_DIR);
-  if (systemPort !== null && (await isProxyRunning(systemPort))) {
-    return { dir: SYSTEM_STATE_DIR, port: systemPort };
+  if (systemPort !== null) {
+    const tls = readTlsMarker(SYSTEM_STATE_DIR);
+    if (await isProxyRunning(systemPort, tls)) {
+      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls };
+    }
   }
 
   // Nothing running; fall back based on default port
   const defaultPort = getDefaultPort();
-  return { dir: resolveStateDir(defaultPort), port: defaultPort };
+  return { dir: resolveStateDir(defaultPort), port: defaultPort, tls: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -177,18 +219,23 @@ export async function findFreePort(
 
 /**
  * Check if a portless proxy is listening on the given port at 127.0.0.1.
- * Makes an HTTP request and verifies the X-Portless response header to
+ * Makes an HTTP(S) request and verifies the X-Portless response header to
  * distinguish the portless proxy from unrelated services.
+ *
+ * When `tls` is true, uses HTTPS with certificate verification disabled
+ * (the proxy may use a self-signed or locally-trusted CA cert).
  */
-export function isProxyRunning(port: number): Promise<boolean> {
+export function isProxyRunning(port: number, tls = false): Promise<boolean> {
   return new Promise((resolve) => {
-    const req = http.request(
+    const requestFn = tls ? https.request : http.request;
+    const req = requestFn(
       {
         hostname: "127.0.0.1",
         port,
         path: "/",
         method: "HEAD",
         timeout: SOCKET_TIMEOUT_MS,
+        ...(tls ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
         res.resume();
@@ -234,11 +281,12 @@ export function findPidOnPort(port: number): number | null {
 export async function waitForProxy(
   port: number,
   maxAttempts = WAIT_FOR_PROXY_MAX_ATTEMPTS,
-  intervalMs = WAIT_FOR_PROXY_INTERVAL_MS
+  intervalMs = WAIT_FOR_PROXY_INTERVAL_MS,
+  tls = false
 ): Promise<boolean> {
   for (let i = 0; i < maxAttempts; i++) {
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
-    if (await isProxyRunning(port)) {
+    if (await isProxyRunning(port, tls)) {
       return true;
     }
   }

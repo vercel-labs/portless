@@ -38,7 +38,8 @@ function isValidRoute(value: unknown): value is RouteMapping {
  * Supports file locking and stale-route cleanup.
  */
 export class RouteStore {
-  private readonly dir: string;
+  /** The state directory path. */
+  readonly dir: string;
   private readonly routesPath: string;
   private readonly lockPath: string;
   readonly pidPath: string;

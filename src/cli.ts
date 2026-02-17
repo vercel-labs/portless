@@ -6,6 +6,7 @@ import chalk from "chalk";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import { createProxyServer } from "./proxy.js";
 import { formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { FILE_MODE, RouteStore } from "./routes.js";
@@ -15,11 +16,14 @@ import {
   findFreePort,
   findPidOnPort,
   getDefaultPort,
+  isHttpsEnvEnabled,
   isProxyRunning,
   prompt,
+  readTlsMarker,
   resolveStateDir,
   spawnCommand,
   waitForProxy,
+  writeTlsMarker,
 } from "./cli-utils.js";
 
 // ---------------------------------------------------------------------------
@@ -42,8 +46,14 @@ const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
 
-function startProxyServer(store: RouteStore, proxyPort: number): void {
+function startProxyServer(
+  store: RouteStore,
+  proxyPort: number,
+  tlsOptions?: { cert: Buffer; key: Buffer }
+): void {
   store.ensureDir();
+
+  const isTls = !!tlsOptions;
 
   // Create empty routes file if it doesn't exist
   const routesPath = store.getRoutesPath();
@@ -85,6 +95,7 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
     getRoutes: () => cachedRoutes,
     proxyPort,
     onError: (msg) => console.error(chalk.red(msg)),
+    tls: tlsOptions,
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
@@ -110,7 +121,9 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
     // Save PID and port once the server is actually listening
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
-    console.log(chalk.green(`HTTP proxy listening on port ${proxyPort}`));
+    writeTlsMarker(store.dir, isTls);
+    const proto = isTls ? "HTTPS/2" : "HTTP";
+    console.log(chalk.green(`${proto} proxy listening on port ${proxyPort}`));
   });
 
   // Cleanup on exit
@@ -133,6 +146,7 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
     } catch {
       // Port file may already be removed; non-fatal
     }
+    writeTlsMarker(store.dir, false);
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
     setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
@@ -149,14 +163,14 @@ function startProxyServer(store: RouteStore, proxyPort: number): void {
 // Commands
 // ---------------------------------------------------------------------------
 
-async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
+async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
   const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
   const sudoHint = needsSudo ? "sudo " : "";
 
   if (!fs.existsSync(pidPath)) {
     // PID file is missing -- check whether something is still listening
-    if (await isProxyRunning(proxyPort)) {
+    if (await isProxyRunning(proxyPort, tls)) {
       console.log(chalk.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
       const pid = findPidOnPort(proxyPort);
       if (pid !== null) {
@@ -220,7 +234,7 @@ async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
 
     // Verify the process is actually running a proxy on the expected port.
     // If the PID was recycled by an unrelated process, the port won't be listening.
-    if (!(await isProxyRunning(proxyPort))) {
+    if (!(await isProxyRunning(proxyPort, tls))) {
       console.log(
         chalk.yellow(
           `PID file exists but port ${proxyPort} is not listening. The PID may have been recycled.`
@@ -253,7 +267,7 @@ async function stopProxy(store: RouteStore, proxyPort: number): Promise<void> {
   }
 }
 
-function listRoutes(store: RouteStore, proxyPort: number): void {
+function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   const routes = store.loadRoutes();
 
   if (routes.length === 0) {
@@ -264,7 +278,7 @@ function listRoutes(store: RouteStore, proxyPort: number): void {
 
   console.log(chalk.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
-    const url = formatUrl(route.hostname, proxyPort);
+    const url = formatUrl(route.hostname, proxyPort, tls);
     console.log(
       `  ${chalk.cyan(url)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(`(pid ${route.pid})`)}`
     );
@@ -277,18 +291,19 @@ async function runApp(
   proxyPort: number,
   stateDir: string,
   name: string,
-  commandArgs: string[]
+  commandArgs: string[],
+  tls: boolean
 ) {
   const hostname = parseHostname(name);
-  const appUrl = formatUrl(hostname, proxyPort);
 
   console.log(chalk.blue.bold(`\nportless\n`));
   console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
 
   // Check if proxy is running, auto-start if possible
-  if (!(await isProxyRunning(proxyPort))) {
+  if (!(await isProxyRunning(proxyPort, tls))) {
     const defaultPort = getDefaultPort();
     const needsSudo = defaultPort < PRIVILEGED_PORT_THRESHOLD;
+    const wantHttps = isHttpsEnvEnabled();
 
     if (needsSudo) {
       // Privileged port requires sudo -- must prompt interactively
@@ -315,7 +330,9 @@ async function runApp(
       }
 
       console.log(chalk.yellow("Starting proxy (requires sudo)..."));
-      const result = spawnSync("sudo", [process.execPath, process.argv[1], "proxy", "start"], {
+      const startArgs = [process.execPath, process.argv[1], "proxy", "start"];
+      if (wantHttps) startArgs.push("--https");
+      const result = spawnSync("sudo", startArgs, {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
       });
@@ -328,7 +345,9 @@ async function runApp(
     } else {
       // Non-privileged port -- auto-start silently, no prompt needed
       console.log(chalk.yellow("Starting proxy..."));
-      const result = spawnSync(process.execPath, [process.argv[1], "proxy", "start"], {
+      const startArgs = [process.argv[1], "proxy", "start"];
+      if (wantHttps) startArgs.push("--https");
+      const result = spawnSync(process.execPath, startArgs, {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
       });
@@ -340,8 +359,11 @@ async function runApp(
       }
     }
 
+    // Re-read TLS state after auto-start (proxy may now be running with HTTPS)
+    const autoTls = readTlsMarker(stateDir);
+
     // Wait for proxy to be ready
-    if (!(await waitForProxy(defaultPort))) {
+    if (!(await waitForProxy(defaultPort, undefined, undefined, autoTls))) {
       console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
       const logPath = path.join(stateDir, "proxy.log");
       console.error(chalk.blue("Try starting the proxy manually to see the error:"));
@@ -352,6 +374,8 @@ async function runApp(
       process.exit(1);
     }
 
+    // Update tls/URL for newly started proxy
+    tls = autoTls;
     console.log(chalk.green("Proxy started in background"));
   } else {
     console.log(chalk.gray("-- Proxy is running"));
@@ -364,7 +388,8 @@ async function runApp(
   // Register route
   store.addRoute(hostname, port, process.pid);
 
-  console.log(chalk.cyan.bold(`\n  -> ${appUrl}\n`));
+  const finalUrl = formatUrl(hostname, proxyPort, tls);
+  console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
 
   // Run the command
   console.log(chalk.gray(`Running: PORT=${port} ${commandArgs.join(" ")}\n`));
@@ -422,13 +447,16 @@ ${chalk.bold("Install:")}
 
 ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start")}             Start the proxy (background daemon)
+  ${chalk.cyan("portless proxy start --https")}     Start with HTTP/2 + TLS (auto-generates certs)
   ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
   ${chalk.cyan("portless list")}                    Show active routes
+  ${chalk.cyan("portless trust")}                   Add local CA to system trust store
 
 ${chalk.bold("Examples:")}
   portless proxy start                # Start proxy on port 1355
+  portless proxy start --https        # Start with HTTPS/2 (faster page loads)
   portless myapp next dev             # -> http://myapp.localhost:1355
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
 
@@ -445,13 +473,23 @@ ${chalk.bold("How it works:")}
   3. Access via http://<name>.localhost:1355
   4. .localhost domains auto-resolve to 127.0.0.1
 
+${chalk.bold("HTTP/2 + HTTPS:")}
+  Use --https for HTTP/2 multiplexing (faster dev server page loads).
+  On first use, portless generates a local CA and adds it to your
+  system trust store (requires sudo once). No browser warnings.
+
 ${chalk.bold("Options:")}
   -p, --port <number>           Port for the proxy to listen on (default: 1355)
                                 Ports < 1024 require sudo
+  --https                       Enable HTTP/2 + TLS with auto-generated certs
+  --cert <path>                 Use a custom TLS certificate (implies --https)
+  --key <path>                  Use a custom TLS private key (implies --https)
+  --no-tls                      Disable HTTPS (overrides PORTLESS_HTTPS)
   --foreground                  Run proxy in foreground (for debugging)
 
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
+  PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
 
@@ -467,24 +505,42 @@ ${chalk.bold("Skip portless:")}
     process.exit(0);
   }
 
+  // Trust command
+  if (args[0] === "trust") {
+    const { dir } = await discoverState();
+    const result = trustCA(dir);
+    if (result.trusted) {
+      console.log(chalk.green("Local CA added to system trust store."));
+      console.log(chalk.gray("Browsers will now trust portless HTTPS certificates."));
+    } else {
+      console.error(chalk.red(`Failed to trust CA: ${result.error}`));
+      if (result.error?.includes("sudo")) {
+        console.error(chalk.blue("Run with sudo:"));
+        console.error(chalk.cyan("  sudo portless trust"));
+      }
+      process.exit(1);
+    }
+    return;
+  }
+
   // List routes
   if (args[0] === "list") {
-    const { dir, port } = await discoverState();
+    const { dir, port, tls } = await discoverState();
     const store = new RouteStore(dir, {
       onWarning: (msg) => console.warn(chalk.yellow(msg)),
     });
-    listRoutes(store, port);
+    listRoutes(store, port, tls);
     return;
   }
 
   // Proxy commands
   if (args[0] === "proxy") {
     if (args[1] === "stop") {
-      const { dir, port } = await discoverState();
+      const { dir, port, tls } = await discoverState();
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(chalk.yellow(msg)),
       });
-      await stopProxy(store, port);
+      await stopProxy(store, port, tls);
       return;
     }
 
@@ -494,6 +550,7 @@ ${chalk.bold("Skip portless:")}
 ${chalk.bold("Usage: portless proxy <command>")}
 
   ${chalk.cyan("portless proxy start")}                Start the proxy (daemon)
+  ${chalk.cyan("portless proxy start --https")}        Start with HTTP/2 + TLS
   ${chalk.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${chalk.cyan("portless proxy start -p 80")}          Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}                 Stop the proxy
@@ -523,14 +580,46 @@ ${chalk.bold("Usage: portless proxy <command>")}
       }
     }
 
+    // Parse HTTPS / TLS flags
+    const hasNoTls = args.includes("--no-tls");
+    const hasHttpsFlag = args.includes("--https");
+    const wantHttps = !hasNoTls && (hasHttpsFlag || isHttpsEnvEnabled());
+
+    // Parse optional --cert / --key for custom certificates
+    let customCertPath: string | null = null;
+    let customKeyPath: string | null = null;
+    const certIdx = args.indexOf("--cert");
+    if (certIdx !== -1) {
+      customCertPath = args[certIdx + 1] || null;
+      if (!customCertPath || customCertPath.startsWith("-")) {
+        console.error(chalk.red("Error: --cert requires a file path."));
+        process.exit(1);
+      }
+    }
+    const keyIdx = args.indexOf("--key");
+    if (keyIdx !== -1) {
+      customKeyPath = args[keyIdx + 1] || null;
+      if (!customKeyPath || customKeyPath.startsWith("-")) {
+        console.error(chalk.red("Error: --key requires a file path."));
+        process.exit(1);
+      }
+    }
+    if ((customCertPath && !customKeyPath) || (!customCertPath && customKeyPath)) {
+      console.error(chalk.red("Error: --cert and --key must be used together."));
+      process.exit(1);
+    }
+
+    // Custom cert/key implies HTTPS
+    const useHttps = wantHttps || !!(customCertPath && customKeyPath);
+
     // Resolve state directory based on the port
     const stateDir = resolveStateDir(proxyPort);
     const store = new RouteStore(stateDir, {
       onWarning: (msg) => console.warn(chalk.yellow(msg)),
     });
 
-    // Check if already running
-    if (await isProxyRunning(proxyPort)) {
+    // Check if already running (try both TLS and non-TLS to detect any running proxy)
+    if ((await isProxyRunning(proxyPort, true)) || (await isProxyRunning(proxyPort, false))) {
       if (isForeground) {
         // Foreground mode is used internally by the daemon fork; exit silently
         return;
@@ -554,10 +643,61 @@ ${chalk.bold("Usage: portless proxy <command>")}
       process.exit(1);
     }
 
+    // Prepare TLS options if HTTPS is requested
+    let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+    if (useHttps) {
+      store.ensureDir();
+      if (customCertPath && customKeyPath) {
+        // Use user-provided certificates
+        try {
+          tlsOptions = {
+            cert: fs.readFileSync(customCertPath),
+            key: fs.readFileSync(customKeyPath),
+          };
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(chalk.red(`Error reading certificate files: ${message}`));
+          process.exit(1);
+        }
+      } else {
+        // Auto-generate certificates using built-in CA
+        console.log(chalk.gray("Ensuring TLS certificates..."));
+        const certs = ensureCerts(stateDir);
+        if (certs.caGenerated) {
+          console.log(chalk.green("Generated local CA certificate."));
+        }
+
+        // Trust the CA if not already trusted
+        if (!isCATrusted(stateDir)) {
+          console.log(chalk.yellow("Adding CA to system trust store..."));
+          const trustResult = trustCA(stateDir);
+          if (trustResult.trusted) {
+            console.log(
+              chalk.green("CA added to system trust store. Browsers will trust portless certs.")
+            );
+          } else {
+            console.warn(chalk.yellow("Could not add CA to system trust store."));
+            if (trustResult.error) {
+              console.warn(chalk.gray(trustResult.error));
+            }
+            console.warn(
+              chalk.yellow("Browsers will show certificate warnings. To fix this later, run:")
+            );
+            console.warn(chalk.cyan("  sudo portless trust"));
+          }
+        }
+
+        tlsOptions = {
+          cert: fs.readFileSync(certs.certPath),
+          key: fs.readFileSync(certs.keyPath),
+        };
+      }
+    }
+
     // Foreground mode: run the proxy directly in this process
     if (isForeground) {
       console.log(chalk.blue.bold("\nportless proxy\n"));
-      startProxyServer(store, proxyPort);
+      startProxyServer(store, proxyPort, tlsOptions);
       return;
     }
 
@@ -576,6 +716,13 @@ ${chalk.bold("Usage: portless proxy <command>")}
       if (portFlagIndex !== -1) {
         daemonArgs.push("--port", proxyPort.toString());
       }
+      if (useHttps) {
+        if (customCertPath && customKeyPath) {
+          daemonArgs.push("--cert", customCertPath, "--key", customKeyPath);
+        } else {
+          daemonArgs.push("--https");
+        }
+      }
 
       const child = spawn(process.execPath, daemonArgs, {
         detached: true,
@@ -588,7 +735,7 @@ ${chalk.bold("Usage: portless proxy <command>")}
     }
 
     // Wait for proxy to be ready
-    if (!(await waitForProxy(proxyPort))) {
+    if (!(await waitForProxy(proxyPort, undefined, undefined, useHttps))) {
       console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
       console.error(chalk.blue("Try starting the proxy in the foreground to see the error:"));
       const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
@@ -599,7 +746,8 @@ ${chalk.bold("Usage: portless proxy <command>")}
       process.exit(1);
     }
 
-    console.log(chalk.green(`Proxy started on port ${proxyPort}`));
+    const proto = useHttps ? "HTTPS/2" : "HTTP";
+    console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
     return;
   }
 
@@ -616,11 +764,11 @@ ${chalk.bold("Usage: portless proxy <command>")}
     process.exit(1);
   }
 
-  const { dir, port } = await discoverState();
+  const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
-  await runApp(store, port, dir, name, commandArgs);
+  await runApp(store, port, dir, name, commandArgs, tls);
 }
 
 main().catch((err: unknown) => {

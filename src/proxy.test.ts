@@ -1,13 +1,23 @@
-import { describe, it, expect, afterEach } from "vitest";
+import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import * as fs from "node:fs";
 import * as http from "node:http";
+import * as http2 from "node:http2";
+import * as https from "node:https";
 import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
 import { createProxyServer, PORTLESS_HEADER } from "./proxy.js";
+import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
+import { ensureCerts } from "./certs.js";
 
 const TEST_PROXY_PORT = 1355;
 
+/** Helper type covering both http.Server and http2.Http2SecureServer */
+type AnyServer = http.Server | ProxyServer;
+
 function request(
-  server: http.Server,
+  server: AnyServer,
   options: { host?: string; path?: string; method?: string }
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
@@ -34,16 +44,16 @@ function request(
   });
 }
 
-function listen(server: http.Server): Promise<void> {
+function listen(server: AnyServer): Promise<void> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve());
   });
 }
 
 describe("createProxyServer", () => {
-  const servers: http.Server[] = [];
+  const servers: AnyServer[] = [];
 
-  function trackServer(server: http.Server): http.Server {
+  function trackServer<T extends AnyServer>(server: T): T {
     servers.push(server);
     return server;
   }
@@ -411,5 +421,225 @@ describe("createProxyServer", () => {
 
       expect(destroyed).toBe(true);
     });
+  });
+});
+
+describe("createProxyServer with TLS (HTTP/2)", () => {
+  let tlsCert: Buffer;
+  let tlsKey: Buffer;
+  let certDir: string;
+  const servers: AnyServer[] = [];
+
+  function trackServer<T extends AnyServer>(server: T): T {
+    servers.push(server);
+    return server;
+  }
+
+  beforeAll(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-test-"));
+    const certs = ensureCerts(certDir);
+    tlsCert = fs.readFileSync(certs.certPath);
+    tlsKey = fs.readFileSync(certs.keyPath);
+  });
+
+  afterEach(async () => {
+    // Force-close all servers with a timeout to avoid hanging on open HTTP/2 sessions
+    await Promise.all(
+      servers.map(
+        (s) =>
+          new Promise<void>((resolve) => {
+            s.close(() => resolve());
+            // Force resolve after 1s if connections don't drain
+            setTimeout(resolve, 1000);
+          })
+      )
+    );
+    servers.length = 0;
+  });
+
+  function httpsRequest(
+    server: AnyServer,
+    options: { host?: string; path?: string; method?: string }
+  ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
+    return new Promise((resolve, reject) => {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") {
+        return reject(new Error("Server not listening"));
+      }
+      const req = https.request(
+        {
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: options.path || "/",
+          method: options.method || "GET",
+          headers: { host: options.host || "" },
+          rejectUnauthorized: false,
+        },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk: Buffer) => (body += chunk));
+          res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers, body }));
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("creates an HTTPS server that responds to requests", async () => {
+    const routes: RouteInfo[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "unknown.localhost" });
+    expect(res.status).toBe(404);
+    expect(res.body).toContain("Not Found");
+  });
+
+  it("includes X-Portless header on TLS responses", async () => {
+    const routes: RouteInfo[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "unknown.localhost" });
+    expect(res.headers[PORTLESS_HEADER.toLowerCase()]).toBe("1");
+  });
+
+  it("proxies HTTPS request to matching route", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("hello from backend via h2");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "myapp.localhost" });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe("hello from backend via h2");
+  });
+
+  it("supports HTTP/2 connections", async () => {
+    const routes: RouteInfo[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const result = await new Promise<{ status: number; protocol: string }>((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+
+      const req = client.request({
+        ":method": "GET",
+        ":path": "/",
+        host: "test.localhost",
+      });
+
+      req.on("response", (headers) => {
+        const status = headers[":status"] as number;
+        req.close();
+        client.close();
+        resolve({ status, protocol: "h2" });
+      });
+
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(result.status).toBe(404);
+    expect(result.protocol).toBe("h2");
+  });
+
+  it("still accepts HTTP/1.1 connections over TLS (allowHTTP1)", async () => {
+    const routes: RouteInfo[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "fallback.localhost" });
+    expect(res.status).toBe(404);
+    expect(res.body).toContain("Not Found");
+  });
+
+  it("generates https:// URLs in 404 page", async () => {
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "other.localhost" });
+    expect(res.status).toBe(404);
+    expect(res.body).toContain("https://myapp.localhost:1355");
+  });
+
+  it("sets x-forwarded-proto to https when proxying", async () => {
+    let receivedProto = "";
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        receivedProto = req.headers["x-forwarded-proto"] as string;
+        res.writeHead(200);
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    await httpsRequest(server, { host: "myapp.localhost" });
+    expect(receivedProto).toBe("https");
   });
 });

@@ -11,4 +11,6 @@ export interface ProxyServerOptions {
   proxyPort: number;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
+  /** When provided, enables HTTP/2 over TLS (HTTPS). */
+  tls?: { cert: Buffer; key: Buffer };
 }

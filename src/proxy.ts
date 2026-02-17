@@ -1,4 +1,5 @@
 import * as http from "node:http";
+import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
 import { escapeHtml, formatUrl } from "./utils.js";
@@ -9,10 +10,11 @@ export const PORTLESS_HEADER = "X-Portless";
 /**
  * Build X-Forwarded-* headers for a proxied request.
  */
-function buildForwardedHeaders(req: http.IncomingMessage): Record<string, string> {
+function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<string, string> {
   const headers: Record<string, string> = {};
   const remoteAddress = req.socket.remoteAddress || "127.0.0.1";
-  const proto = "http";
+  const proto = tls ? "https" : "http";
+  const defaultPort = tls ? "443" : "80";
   const hostHeader = req.headers.host || "";
 
   headers["x-forwarded-for"] = req.headers["x-forwarded-for"]
@@ -21,10 +23,13 @@ function buildForwardedHeaders(req: http.IncomingMessage): Record<string, string
   headers["x-forwarded-proto"] = (req.headers["x-forwarded-proto"] as string) || proto;
   headers["x-forwarded-host"] = (req.headers["x-forwarded-host"] as string) || hostHeader;
   headers["x-forwarded-port"] =
-    (req.headers["x-forwarded-port"] as string) || hostHeader.split(":")[1] || "80";
+    (req.headers["x-forwarded-port"] as string) || hostHeader.split(":")[1] || defaultPort;
 
   return headers;
 }
+
+/** Server type returned by createProxyServer (HTTP/1.1 or HTTP/2+TLS). */
+export type ProxyServer = http.Server | http2.Http2SecureServer;
 
 /**
  * Create an HTTP proxy server that routes requests based on the Host header.
@@ -32,9 +37,15 @@ function buildForwardedHeaders(req: http.IncomingMessage): Record<string, string
  * Uses Node's built-in http module for proxying (no external dependencies).
  * The `getRoutes` callback is invoked on every request so callers can provide
  * either a static list or a live-updating one.
+ *
+ * When `tls` is provided, creates an HTTP/2 secure server with HTTP/1.1
+ * fallback (`allowHTTP1: true`). This enables HTTP/2 multiplexing for
+ * browsers while keeping WebSocket upgrades working over HTTP/1.1.
  */
-export function createProxyServer(options: ProxyServerOptions): http.Server {
-  const { getRoutes, proxyPort, onError = (msg: string) => console.error(msg) } = options;
+export function createProxyServer(options: ProxyServerOptions): ProxyServer {
+  const { getRoutes, proxyPort, onError = (msg: string) => console.error(msg), tls } = options;
+
+  const isTls = !!tls;
 
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.setHeader(PORTLESS_HEADER, "1");
@@ -64,7 +75,7 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
                 ? `
               <h2>Active apps:</h2>
               <ul>
-                ${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort))}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
+                ${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, isTls))}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
               </ul>
             `
                 : "<p><em>No apps running.</em></p>"
@@ -76,7 +87,7 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
       return;
     }
 
-    const forwardedHeaders = buildForwardedHeaders(req);
+    const forwardedHeaders = buildForwardedHeaders(req, isTls);
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
@@ -135,7 +146,7 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
       return;
     }
 
-    const forwardedHeaders = buildForwardedHeaders(req);
+    const forwardedHeaders = buildForwardedHeaders(req, isTls);
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
@@ -193,6 +204,20 @@ export function createProxyServer(options: ProxyServerOptions): http.Server {
     }
     proxyReq.end();
   };
+
+  if (tls) {
+    const h2Server = http2.createSecureServer({
+      cert: tls.cert,
+      key: tls.key,
+      allowHTTP1: true,
+    });
+    // With allowHTTP1, the 'request' event receives objects compatible with
+    // http.IncomingMessage / http.ServerResponse. Cast to satisfy TypeScript.
+    h2Server.on("request", handleRequest as (...args: unknown[]) => void);
+    // WebSocket upgrades arrive over HTTP/1.1 connections (allowHTTP1)
+    h2Server.on("upgrade", handleUpgrade as (...args: unknown[]) => void);
+    return h2Server;
+  }
 
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);

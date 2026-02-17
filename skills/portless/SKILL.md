@@ -99,8 +99,21 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 | Variable             | Description                                     |
 | -------------------- | ----------------------------------------------- |
 | `PORTLESS_PORT`      | Override the default proxy port (default: 1355) |
+| `PORTLESS_HTTPS`     | Set to `1` to always enable HTTPS/HTTP/2        |
 | `PORTLESS_STATE_DIR` | Override the state directory                    |
 | `PORTLESS=0\|skip`   | Bypass the proxy, run the command directly      |
+
+### HTTP/2 + HTTPS
+
+Use `--https` for HTTP/2 multiplexing (faster page loads for dev servers with many files):
+
+```bash
+portless proxy start --https                  # Auto-generate certs and trust CA
+portless proxy start --cert ./c.pem --key ./k.pem  # Use custom certs
+sudo portless trust                           # Add CA to trust store later
+```
+
+First run generates a local CA and prompts for sudo to add it to the system trust store. After that, no prompts and no browser warnings. Set `PORTLESS_HTTPS=1` in `.bashrc`/`.zshrc` to make it permanent.
 
 ## CLI Reference
 
@@ -108,7 +121,9 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 | ----------------------------------- | ------------------------------------------------------------- |
 | `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
 | `portless list`                     | Show active routes                                            |
+| `portless trust`                    | Add local CA to system trust store (for HTTPS)                |
 | `portless proxy start`              | Start the proxy as a daemon (port 1355, no sudo)              |
+| `portless proxy start --https`      | Start with HTTP/2 + TLS (auto-generates certs)                |
 | `portless proxy start -p <number>`  | Start the proxy on a custom port                              |
 | `portless proxy start --foreground` | Start the proxy in foreground (for debugging)                 |
 | `portless proxy stop`               | Stop the proxy                                                |
@@ -150,7 +165,18 @@ portless proxy start                   # Port 1355, no sudo needed
 portless proxy stop                    # Stop (use sudo if started with sudo)
 ```
 
+### Browser shows certificate warning with --https
+
+The local CA may not be trusted yet. Run:
+
+```bash
+sudo portless trust
+```
+
+This adds the portless local CA to your system trust store. After that, restart the browser.
+
 ### Requirements
 
 - Node.js 20+
 - macOS or Linux
+- `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions)
