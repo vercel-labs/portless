@@ -3,7 +3,8 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
-import { ensureCerts } from "./certs.js";
+import * as tls from "node:tls";
+import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
 
 describe("ensureCerts", () => {
   let tmpDir: string;
@@ -105,5 +106,138 @@ describe("ensureCerts", () => {
 
     const serverKeyStat = fs.statSync(result.keyPath);
     expect(serverKeyStat.mode & 0o777).toBe(0o600);
+  });
+});
+
+describe("createSNICallback", () => {
+  let tmpDir: string;
+  let defaultCert: Buffer;
+  let defaultKey: Buffer;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-sni-test-"));
+    const certs = ensureCerts(tmpDir);
+    defaultCert = fs.readFileSync(certs.certPath);
+    defaultKey = fs.readFileSync(certs.keyPath);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns default context for localhost", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("localhost", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    expect(ctx).toBeDefined();
+  });
+
+  it("returns default context for simple *.localhost subdomains", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("myapp.localhost", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    expect(ctx).toBeDefined();
+  });
+
+  it("generates per-hostname cert for deep subdomains", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("chat.myapp.localhost", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    expect(ctx).toBeDefined();
+
+    // Verify a cert file was created in the host-certs directory
+    const hostCertPath = path.join(tmpDir, "host-certs", "chat_myapp_localhost.pem");
+    expect(fs.existsSync(hostCertPath)).toBe(true);
+
+    // Verify the generated cert covers the hostname
+    const cert = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
+    expect(cert.subjectAltName).toContain("DNS:chat.myapp.localhost");
+  });
+
+  it("caches generated certs in memory on subsequent calls", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+
+    const ctx1 = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("deep.sub.localhost", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    const ctx2 = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("deep.sub.localhost", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    // Same context object returned from cache
+    expect(ctx1).toBe(ctx2);
+  });
+
+  it("returns error via callback when state dir is invalid", async () => {
+    const badDir = path.join(tmpDir, "nonexistent");
+    const sniCallback = createSNICallback(badDir, defaultCert, defaultKey);
+
+    const error = await new Promise<Error | null>((resolve) => {
+      sniCallback("deep.sub.localhost", (err) => {
+        resolve(err);
+      });
+    });
+
+    expect(error).toBeInstanceOf(Error);
+  });
+});
+
+describe("isCATrusted", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-trust-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns false when CA does not exist", () => {
+    expect(isCATrusted(tmpDir)).toBe(false);
+  });
+
+  it("returns false for an empty directory", () => {
+    expect(isCATrusted(path.join(tmpDir, "nonexistent"))).toBe(false);
+  });
+});
+
+describe("trustCA", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-trust-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns error when CA cert is missing", () => {
+    const result = trustCA(tmpDir);
+    expect(result.trusted).toBe(false);
+    expect(result.error).toContain("CA certificate not found");
   });
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as http2 from "node:http2";
@@ -442,6 +442,10 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     tlsKey = fs.readFileSync(certs.keyPath);
   });
 
+  afterAll(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+  });
+
   afterEach(async () => {
     // Force-close all servers with a timeout to avoid hanging on open HTTP/2 sessions
     await Promise.all(
@@ -641,5 +645,149 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
     await httpsRequest(server, { host: "myapp.localhost" });
     expect(receivedProto).toBe("https");
+  });
+
+  it("proxies WebSocket upgrade over TLS", async () => {
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (_req, socket) => {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "\r\n"
+      );
+      socket.end();
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const upgraded = await new Promise<boolean>((resolve) => {
+      const req = https.request({
+        hostname: "127.0.0.1",
+        port: addr.port,
+        path: "/",
+        headers: {
+          host: "ws.localhost",
+          connection: "Upgrade",
+          upgrade: "websocket",
+        },
+        rejectUnauthorized: false,
+      });
+      req.on("error", () => resolve(false));
+      req.on("upgrade", () => resolve(true));
+      req.setTimeout(2000, () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
+    });
+
+    expect(upgraded).toBe(true);
+  });
+
+  it("accepts plain HTTP on the TLS-enabled port", async () => {
+    const routes: RouteInfo[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    // Plain HTTP request (not TLS) -- exercises the buf[0] !== 0x16 branch
+    const res = await request(server, { host: "test.localhost" });
+    expect(res.status).toBe(404);
+    expect(res.body).toContain("Not Found");
+  });
+
+  it("strips hop-by-hop headers from proxied TLS responses (HTTP/2 client)", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        // Backend sends hop-by-hop headers that are invalid in HTTP/2
+        res.writeHead(200, {
+          "Content-Type": "text/plain",
+          Connection: "keep-alive",
+          "Keep-Alive": "timeout=5",
+          "X-Custom": "preserved",
+        });
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "hop.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    // Use HTTP/2 client -- hop-by-hop headers must be stripped for HTTP/2
+    const result = await new Promise<{
+      status: number;
+      headers: Record<string, string>;
+      body: string;
+    }>((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+
+      const req = client.request({
+        ":method": "GET",
+        ":path": "/",
+        host: "hop.localhost",
+      });
+
+      let status = 0;
+      const responseHeaders: Record<string, string> = {};
+      req.on("response", (headers) => {
+        status = headers[":status"] as number;
+        for (const [key, value] of Object.entries(headers)) {
+          if (key !== ":status" && typeof value === "string") {
+            responseHeaders[key] = value;
+          }
+        }
+      });
+
+      let body = "";
+      req.on("data", (chunk: Buffer) => (body += chunk));
+      req.on("end", () => {
+        client.close();
+        resolve({ status, headers: responseHeaders, body });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.headers["connection"]).toBeUndefined();
+    expect(result.headers["keep-alive"]).toBeUndefined();
+    expect(result.headers["x-custom"]).toBe("preserved");
+    expect(result.body).toBe("ok");
   });
 });

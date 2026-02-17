@@ -186,8 +186,8 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
     extPath,
   ]);
 
-  // Clean up temporary files
-  for (const tmp of [csrPath, extPath, path.join(stateDir, "ca.srl")]) {
+  // Clean up temporary files (keep ca.srl for serial number tracking)
+  for (const tmp of [csrPath, extPath]) {
     try {
       fs.unlinkSync(tmp);
     } catch {
@@ -262,16 +262,18 @@ function isCATrustedMacOS(caCertPath: string): boolean {
     const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
       .trim()
       .replace(/^.*=/, "")
-      .replace(/:/g, "");
+      .replace(/:/g, "")
+      .toLowerCase();
 
     // Check the login keychain first, then the system keychain
     for (const keychain of [loginKeychainPath(), "/Library/Keychains/System.keychain"]) {
       try {
-        const result = execSync(
-          `security find-certificate -a -Z "${keychain}" 2>/dev/null | grep -i "${fingerprint}"`,
-          { encoding: "utf-8", timeout: 5000 }
-        ).trim();
-        if (result.length > 0) return true;
+        const result = execFileSync("security", ["find-certificate", "-a", "-Z", keychain], {
+          encoding: "utf-8",
+          timeout: 5000,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+        if (result.toLowerCase().includes(fingerprint)) return true;
       } catch {
         // Not found in this keychain, try next
       }
@@ -301,6 +303,11 @@ function loginKeychainPath(): string {
   return path.join(home, "Library", "Keychains", "login.keychain-db");
 }
 
+/**
+ * Check if the CA is trusted on Linux.
+ * Uses the Debian/Ubuntu path (/usr/local/share/ca-certificates/).
+ * Fedora/RHEL use /etc/pki/ca-trust/source/anchors/ which is not supported yet.
+ */
 function isCATrustedLinux(stateDir: string): boolean {
   const systemCertPath = `/usr/local/share/ca-certificates/portless-ca.crt`;
   if (!fileExists(systemCertPath)) return false;
@@ -397,8 +404,8 @@ function generateHostCert(
     extPath,
   ]);
 
-  // Clean up temp files
-  for (const tmp of [csrPath, extPath, path.join(stateDir, "ca.srl")]) {
+  // Clean up temporary files (keep ca.srl for serial number tracking)
+  for (const tmp of [csrPath, extPath]) {
     try {
       fs.unlinkSync(tmp);
     } catch {

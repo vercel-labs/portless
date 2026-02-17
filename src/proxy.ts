@@ -52,8 +52,8 @@ function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<
   return headers;
 }
 
-/** Server type returned by createProxyServer (HTTP/1.1, HTTP/2+TLS, or net wrapper). */
-export type ProxyServer = http.Server | http2.Http2SecureServer | net.Server;
+/** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
+export type ProxyServer = http.Server | net.Server;
 
 /**
  * Create an HTTP proxy server that routes requests based on the Host header.
@@ -187,6 +187,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
     }
+    // Remove HTTP/2 pseudo-headers before forwarding to HTTP/1.1 backend
+    for (const key of Object.keys(proxyReqHeaders)) {
+      if (key.startsWith(":")) {
+        delete proxyReqHeaders[key];
+      }
+    }
 
     const proxyReq = http.request({
       hostname: "127.0.0.1",
@@ -249,10 +255,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       ...(tls.SNICallback ? { SNICallback: tls.SNICallback } : {}),
     });
     // With allowHTTP1, the 'request' event receives objects compatible with
-    // http.IncomingMessage / http.ServerResponse. Cast to satisfy TypeScript.
-    h2Server.on("request", handleRequest as (...args: unknown[]) => void);
+    // http.IncomingMessage / http.ServerResponse. Cast explicitly to satisfy TypeScript.
+    h2Server.on("request", (req: http2.Http2ServerRequest, res: http2.Http2ServerResponse) => {
+      handleRequest(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse);
+    });
     // WebSocket upgrades arrive over HTTP/1.1 connections (allowHTTP1)
-    h2Server.on("upgrade", handleUpgrade as (...args: unknown[]) => void);
+    h2Server.on("upgrade", (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
+      handleUpgrade(req, socket, head);
+    });
 
     // Plain HTTP server using the same proxy handlers (no TLS, no redirect)
     const plainServer = http.createServer(handleRequest);

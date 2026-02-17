@@ -650,10 +650,26 @@ ${chalk.bold("Usage: portless proxy <command>")}
       if (customCertPath && customKeyPath) {
         // Use user-provided certificates
         try {
-          tlsOptions = {
-            cert: fs.readFileSync(customCertPath),
-            key: fs.readFileSync(customKeyPath),
-          };
+          const cert = fs.readFileSync(customCertPath);
+          const key = fs.readFileSync(customKeyPath);
+
+          // Validate PEM format
+          const certStr = cert.toString("utf-8");
+          const keyStr = key.toString("utf-8");
+          if (!certStr.includes("-----BEGIN CERTIFICATE-----")) {
+            console.error(chalk.red(`Error: ${customCertPath} is not a valid PEM certificate.`));
+            console.error(chalk.gray("Expected a file starting with -----BEGIN CERTIFICATE-----"));
+            process.exit(1);
+          }
+          if (!keyStr.match(/-----BEGIN [\w\s]*PRIVATE KEY-----/)) {
+            console.error(chalk.red(`Error: ${customKeyPath} is not a valid PEM private key.`));
+            console.error(
+              chalk.gray("Expected a file starting with -----BEGIN ...PRIVATE KEY-----")
+            );
+            process.exit(1);
+          }
+
+          tlsOptions = { cert, key };
         } catch (err: unknown) {
           const message = err instanceof Error ? err.message : String(err);
           console.error(chalk.red(`Error reading certificate files: ${message}`));
