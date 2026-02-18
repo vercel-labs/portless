@@ -59,6 +59,45 @@ The proxy auto-starts when you run an app. You can also start it explicitly with
 
 The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
 
+### Monorepo / Turborepo (auto-name)
+
+Use `portless run` to auto-derive the app name from each package's `package.json` name. Every package can use the same script:
+
+```json
+{
+  "scripts": {
+    "dev": "portless run next dev"
+  }
+}
+```
+
+Run `turbo dev` and each package gets its own stable URL automatically.
+
+Name resolution order:
+
+1. `.portlessrc.json` name override (see below)
+2. `npm_package_name` env var (set by npm/pnpm/yarn/turbo)
+3. Nearest `package.json` name
+4. Directory basename
+
+Scoped packages are sanitized: `@acme/web` becomes `web`.
+
+### .portlessrc.json (name overrides)
+
+Place a `.portlessrc.json` in your repo root to map package names to friendlier route names:
+
+```json
+{
+  "names": {
+    "@acme/web-app": "web",
+    "@acme/backend": "api",
+    "@acme/docs-site": "docs"
+  }
+}
+```
+
+Without this file, `@acme/web-app` would be routed as `web-app.localhost`.
+
 ### Multi-app setups with subdomains
 
 ```bash
@@ -120,6 +159,7 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 | Command                             | Description                                                   |
 | ----------------------------------- | ------------------------------------------------------------- |
 | `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
+| `portless run <cmd> [args...]`      | Auto-name from package.json and run (great for monorepos)     |
 | `portless list`                     | Show active routes                                            |
 | `portless trust`                    | Add local CA to system trust store (for HTTPS)                |
 | `portless proxy start`              | Start the proxy as a daemon (port 1355, no sudo)              |
