@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createProxyServer } from "./proxy.js";
-import { formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import { formatUrl, isErrnoException, parseHostname, resolveAppName } from "./utils.js";
 import { FILE_MODE, RouteStore } from "./routes.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
@@ -403,8 +403,13 @@ async function main() {
   // Skip portless if PORTLESS=0 or PORTLESS=skip
   const skipPortless = process.env.PORTLESS === "0" || process.env.PORTLESS === "skip";
   if (skipPortless && args.length >= 2 && args[0] !== "proxy") {
-    // Just run the command directly, skipping the first arg (the name)
-    spawnCommand(args.slice(1));
+    if (args[0] === "run") {
+      const cmdArgs = args.slice(1);
+      if (cmdArgs[0] === "--") cmdArgs.shift();
+      spawnCommand(cmdArgs);
+    } else {
+      spawnCommand(args.slice(1));
+    }
     return;
   }
 
@@ -425,12 +430,14 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
+  ${chalk.cyan("portless run <cmd>")}              Auto-name from package.json and run
   ${chalk.cyan("portless list")}                    Show active routes
 
 ${chalk.bold("Examples:")}
   portless proxy start                # Start proxy on port 1355
   portless myapp next dev             # -> http://myapp.localhost:1355
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
+  portless run next dev                 # Auto-name from package.json
 
 ${chalk.bold("In package.json:")}
   {
@@ -454,6 +461,15 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
+
+${chalk.bold("Config file (.portlessrc.json):")}
+  Place a .portlessrc.json in your repo root to customize app names:
+  {
+    "names": {
+      "@acme/web": "web",
+      "@acme/api": "api"
+    }
+  }
 
 ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
@@ -600,6 +616,40 @@ ${chalk.bold("Usage: portless proxy <command>")}
     }
 
     console.log(chalk.green(`Proxy started on port ${proxyPort}`));
+    return;
+  }
+
+  // Run with auto-derived name
+  if (args[0] === "run") {
+    const commandArgs = args.slice(1);
+    // Support optional -- separator: `portless run -- next dev`
+    if (commandArgs[0] === "--") {
+      commandArgs.shift();
+    }
+
+    if (commandArgs.length === 0) {
+      console.error(chalk.red("Error: No command provided."));
+      console.error(chalk.blue("Usage:"));
+      console.error(chalk.cyan("  portless run <command...>"));
+      console.error(chalk.blue("Example:"));
+      console.error(chalk.cyan("  portless run next dev"));
+      process.exit(1);
+    }
+
+    let name: string;
+    try {
+      name = resolveAppName(process.cwd());
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(chalk.red(`Error: ${message}`));
+      process.exit(1);
+    }
+
+    const { dir, port } = await discoverState();
+    const store = new RouteStore(dir, {
+      onWarning: (msg) => console.warn(chalk.yellow(msg)),
+    });
+    await runApp(store, port, dir, name, commandArgs);
     return;
   }
 

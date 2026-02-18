@@ -1,5 +1,16 @@
-import { describe, it, expect } from "vitest";
-import { escapeHtml, formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import { describe, it, expect, afterEach } from "vitest";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import * as os from "node:os";
+import {
+  escapeHtml,
+  formatUrl,
+  isErrnoException,
+  loadPortlessConfig,
+  parseHostname,
+  resolveAppName,
+  sanitizePackageName,
+} from "./utils.js";
 
 describe("escapeHtml", () => {
   it("escapes angle brackets", () => {
@@ -140,5 +151,132 @@ describe("parseHostname", () => {
 
   it("handles protocol with .localhost already present", () => {
     expect(parseHostname("https://test.localhost")).toBe("test.localhost");
+  });
+});
+
+describe("sanitizePackageName", () => {
+  it("strips npm scope", () => {
+    expect(sanitizePackageName("@scope/pkg")).toBe("pkg");
+  });
+
+  it("strips scope and preserves hyphens", () => {
+    expect(sanitizePackageName("@my-org/my-app")).toBe("my-app");
+  });
+
+  it("returns simple names unchanged", () => {
+    expect(sanitizePackageName("simple-name")).toBe("simple-name");
+  });
+
+  it("lowercases and replaces underscores", () => {
+    expect(sanitizePackageName("UPPER_Case")).toBe("upper-case");
+  });
+
+  it("replaces multiple invalid chars with hyphens", () => {
+    expect(sanitizePackageName("my@weird!name")).toBe("my-weird-name");
+  });
+
+  it("returns null for all-hyphen input", () => {
+    expect(sanitizePackageName("---")).toBe(null);
+  });
+
+  it("returns null for empty string", () => {
+    expect(sanitizePackageName("")).toBe(null);
+  });
+
+  it("returns null for scope with empty name", () => {
+    expect(sanitizePackageName("@scope/")).toBe(null);
+  });
+});
+
+describe("loadPortlessConfig", () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it("returns null when no config file exists", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    expect(loadPortlessConfig(tmpDir)).toBe(null);
+  });
+
+  it("finds config in the start directory", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    const config = { names: { "my-app": "custom" } };
+    fs.writeFileSync(path.join(tmpDir, ".portlessrc.json"), JSON.stringify(config));
+    expect(loadPortlessConfig(tmpDir)).toEqual(config);
+  });
+
+  it("finds config in a parent directory", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    const nested = path.join(tmpDir, "sub", "dir");
+    fs.mkdirSync(nested, { recursive: true });
+    const config = { names: { "my-app": "custom" } };
+    fs.writeFileSync(path.join(tmpDir, ".portlessrc.json"), JSON.stringify(config));
+    expect(loadPortlessConfig(nested)).toEqual(config);
+  });
+
+  it("returns null for invalid JSON", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    fs.writeFileSync(path.join(tmpDir, ".portlessrc.json"), "not valid json{{{");
+    expect(loadPortlessConfig(tmpDir)).toBe(null);
+  });
+});
+
+describe("resolveAppName", () => {
+  let tmpDir: string;
+  let savedNpmPackageName: string | undefined;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+    if (savedNpmPackageName === undefined) {
+      delete process.env.npm_package_name;
+    } else {
+      process.env.npm_package_name = savedNpmPackageName;
+    }
+  });
+
+  it("uses npm_package_name env var when set", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    savedNpmPackageName = process.env.npm_package_name;
+    process.env.npm_package_name = "my-cool-app";
+    expect(resolveAppName(tmpDir)).toBe("my-cool-app");
+  });
+
+  it("falls back to package.json name when npm_package_name not set", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    savedNpmPackageName = process.env.npm_package_name;
+    delete process.env.npm_package_name;
+    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "from-pkg-json" }));
+    expect(resolveAppName(tmpDir)).toBe("from-pkg-json");
+  });
+
+  it("applies config name override from .portlessrc.json", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    savedNpmPackageName = process.env.npm_package_name;
+    process.env.npm_package_name = "original-name";
+    const config = { names: { "original-name": "overridden" } };
+    fs.writeFileSync(path.join(tmpDir, ".portlessrc.json"), JSON.stringify(config));
+    expect(resolveAppName(tmpDir)).toBe("overridden");
+  });
+
+  it("falls back to directory basename", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    const nested = path.join(tmpDir, "my-project");
+    fs.mkdirSync(nested);
+    savedNpmPackageName = process.env.npm_package_name;
+    delete process.env.npm_package_name;
+    expect(resolveAppName(nested)).toBe("my-project");
+  });
+
+  it("sanitizes scoped package names", () => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    savedNpmPackageName = process.env.npm_package_name;
+    process.env.npm_package_name = "@my-org/my-app";
+    expect(resolveAppName(tmpDir)).toBe("my-app");
   });
 });

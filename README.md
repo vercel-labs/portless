@@ -46,6 +46,10 @@ Portless fixes all of this by giving each dev server a stable, named `.localhost
 portless myapp next dev
 # -> http://myapp.localhost:1355
 
+# Auto-name from package.json (great for monorepos)
+portless run next dev
+# -> http://<package-name>.localhost:1355
+
 # Subdomains
 portless api.myapp pnpm start
 # -> http://api.myapp.localhost:1355
@@ -65,6 +69,47 @@ portless docs.myapp next dev
 ```
 
 The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
+
+### Monorepo / Turborepo
+
+With `portless run`, every package can use the same script -- the name is derived automatically from each package's `package.json` name:
+
+```json
+{
+  "scripts": {
+    "dev": "portless run next dev"
+  }
+}
+```
+
+Run `turbo dev` and each package gets its own stable URL (`http://web.localhost:1355`, `http://api.localhost:1355`, etc.) with zero per-package configuration.
+
+#### Name resolution
+
+`portless run` resolves the app name in this order:
+
+1. **`.portlessrc.json` override** -- if a config file maps the package name to a custom name, use it
+2. **`npm_package_name`** -- the env var set by npm/pnpm/yarn/turbo when running scripts
+3. **Nearest `package.json` name** -- walks up from cwd
+4. **Directory basename** -- last resort fallback
+
+Scoped packages are sanitized automatically: `@acme/web` becomes `web`.
+
+#### `.portlessrc.json`
+
+Place a `.portlessrc.json` in your repo root to customize app names:
+
+```json
+{
+  "names": {
+    "@acme/web-app": "web",
+    "@acme/backend": "api",
+    "@acme/docs-site": "docs"
+  }
+}
+```
+
+This maps package names to friendlier route names. Without this file, `@acme/web-app` would be routed as `web-app.localhost`.
 
 ## How It Works
 
@@ -90,6 +135,7 @@ Apps are assigned a random port (4000-4999) via the `PORT` environment variable.
 
 ```bash
 portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
+portless run <cmd> [args...]     # Auto-name from package.json and run
 portless list                    # Show active routes
 
 # Disable portless (run command directly)
