@@ -84,7 +84,59 @@ flowchart TD
 2. **Run apps** -- `portless <name> <command>` assigns a free port and registers with the proxy
 3. **Access via URL** -- `http://<name>.localhost:1355` routes through the proxy to your app
 
-Apps are assigned a random port (4000-4999) via the `PORT` environment variable. Most frameworks (Next.js, Vite, etc.) respect this automatically.
+Apps are assigned a random port (4000-4999) via the `PORT` environment variable. Most frameworks respect this automatically; some require extra config (see [Framework Configuration](#framework-configuration) below).
+
+## Framework Configuration
+
+Most frameworks pick up the `PORT` env var automatically. A few need explicit config.
+
+### Next.js
+
+Works out of the box -- no configuration needed:
+
+```json
+{
+  "scripts": {
+    "dev": "portless myapp next dev"
+  }
+}
+```
+
+### Vite
+
+Vite does not read `PORT` by default. Configure `vite.config.ts` to pick it up:
+
+```ts
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react-swc";
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    host: "0.0.0.0",
+    port: Number(process.env.PORT) || 5173,
+  },
+});
+```
+
+Then run normally:
+
+```json
+{
+  "scripts": {
+    "dev": "portless myapp vite"
+  }
+}
+```
+
+### Express / custom servers
+
+Read `process.env.PORT` explicitly:
+
+```js
+const port = Number(process.env.PORT) || 3000;
+app.listen(port);
+```
 
 ## HTTP/2 + HTTPS
 
