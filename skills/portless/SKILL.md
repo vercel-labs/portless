@@ -152,6 +152,17 @@ portless proxy start -p 8080
 
 Some frameworks need explicit configuration to use the `PORT` env var. Examples:
 
+- **Vite**:
+
+  ```ts
+  export default defineConfig({
+    server: {
+      host: "0.0.0.0",
+      port: Number(process.env.PORT) || 5173,
+    },
+  });
+  ```
+
 - **Webpack Dev Server**: use `--port $PORT`
 - **Custom servers**: read `process.env.PORT` and listen on it
 
