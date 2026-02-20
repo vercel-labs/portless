@@ -24,10 +24,7 @@ function setCookie(name: string, value: string) {
   document.cookie = `${name}=${encodeURIComponent(value)};path=/;max-age=${60 * 60 * 24 * 365};samesite=lax`;
 }
 
-const TOOL_LABELS: Record<
-  string,
-  { label: string; pastLabel: string; argKey?: string }
-> = {
+const TOOL_LABELS: Record<string, { label: string; pastLabel: string; argKey?: string }> = {
   readFile: { label: "Reading", pastLabel: "Read", argKey: "path" },
   bash: { label: "Running", pastLabel: "Ran", argKey: "command" },
 };
@@ -82,8 +79,7 @@ function ToolCallDisplay({
           .replace(/\/index$/, "") || "/"
       : "";
 
-  const docsLink =
-    toolName === "readFile" && argPreview.startsWith("/") ? argPreview : null;
+  const docsLink = toolName === "readFile" && argPreview.startsWith("/") ? argPreview : null;
 
   const argEl = argPreview ? (
     docsLink ? (
@@ -133,7 +129,7 @@ export function DocsChat({
   const [isDesktop, setIsDesktop] = useState(false);
   const [hasMounted, setHasMounted] = useState(false);
   const [desktopWidth, setDesktopWidth] = useState(
-    Math.min(DESKTOP_MAX_WIDTH, Math.max(DESKTOP_MIN_WIDTH, defaultWidth)),
+    Math.min(DESKTOP_MAX_WIDTH, Math.max(DESKTOP_MIN_WIDTH, defaultWidth))
   );
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -194,7 +190,7 @@ export function DocsChat({
         const delta = startX - ev.clientX;
         const newWidth = Math.min(
           DESKTOP_MAX_WIDTH,
-          Math.max(DESKTOP_MIN_WIDTH, startWidth + delta),
+          Math.max(DESKTOP_MIN_WIDTH, startWidth + delta)
         );
         setDesktopWidth(newWidth);
       };
@@ -209,7 +205,7 @@ export function DocsChat({
       document.addEventListener("pointermove", onPointerMove);
       document.addEventListener("pointerup", onPointerUp);
     },
-    [desktopWidth],
+    [desktopWidth]
   );
 
   useEffect(() => {
@@ -291,7 +287,7 @@ export function DocsChat({
       sendMessage({ text: input });
       setInput("");
     },
-    [input, isLoading, sendMessage],
+    [input, isLoading, sendMessage]
   );
 
   const handleClear = useCallback(() => {
@@ -299,12 +295,8 @@ export function DocsChat({
     sessionStorage.removeItem(STORAGE_KEY);
   }, [setMessages]);
 
-  const hasVisibleContent = (
-    parts: (typeof messages)[number]["parts"],
-  ): boolean => {
-    return parts.some(
-      (p) => (p.type === "text" && p.text.length > 0) || isToolPart(p),
-    );
+  const hasVisibleContent = (parts: (typeof messages)[number]["parts"]): boolean => {
+    return parts.some((p) => (p.type === "text" && p.text.length > 0) || isToolPart(p));
   };
 
   const chatPanel = (
@@ -348,10 +340,7 @@ export function DocsChat({
 
       {/* Content: suggestions or messages */}
       {showMessages ? (
-        <div
-          ref={messagesScrollRef}
-          className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto"
-        >
+        <div ref={messagesScrollRef} className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto">
           {messages.map((message) => {
             if (!hasVisibleContent(message.parts)) return null;
             return (
@@ -359,10 +348,7 @@ export function DocsChat({
                 {message.role === "user" ? (
                   <div className="text-sm text-neutral-500 dark:text-neutral-400 whitespace-pre-wrap leading-relaxed">
                     {message.parts
-                      .filter(
-                        (p): p is Extract<typeof p, { type: "text" }> =>
-                          p.type === "text",
-                      )
+                      .filter((p): p is Extract<typeof p, { type: "text" }> => p.type === "text")
                       .map((p) => p.text)
                       .join("")}
                   </div>
@@ -380,9 +366,7 @@ export function DocsChat({
                         );
                       }
                       if (isToolPart(part)) {
-                        return (
-                          <ToolCallDisplay key={part.toolCallId} part={part} />
-                        );
+                        return <ToolCallDisplay key={part.toolCallId} part={part} />;
                       }
                       return null;
                     })}
@@ -398,9 +382,7 @@ export function DocsChat({
                   const parsed = JSON.parse(error.message);
                   return parsed.message || parsed.error || error.message;
                 } catch {
-                  return (
-                    error.message || "Something went wrong. Please try again."
-                  );
+                  return error.message || "Something went wrong. Please try again.";
                 }
               })()}
             </div>
