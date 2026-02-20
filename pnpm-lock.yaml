@@ -7,6 +7,21 @@ settings:
 importers:
 
   .:
+    devDependencies:
+      husky:
+        specifier: ^9.1.7
+        version: 9.1.7
+      lint-staged:
+        specifier: ^16.2.7
+        version: 16.2.7
+      prettier:
+        specifier: ^3.8.1
+        version: 3.8.1
+      turbo:
+        specifier: ^2.8.10
+        version: 2.8.10
+
+  packages/portless:
     dependencies:
       chalk:
         specifier: ^5.3.0
@@ -27,15 +42,6 @@ importers:
       eslint-config-prettier:
         specifier: ^10.1.8
         version: 10.1.8(eslint@9.39.2)
-      husky:
-        specifier: ^9.1.7
-        version: 9.1.7
-      lint-staged:
-        specifier: ^16.2.7
-        version: 16.2.7
-      prettier:
-        specifier: ^3.8.1
-        version: 3.8.1
       tsup:
         specifier: ^8.0.1
         version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
@@ -1216,6 +1222,40 @@ packages:
         optional: true
       typescript:
         optional: true
+
+  turbo-darwin-64@2.8.10:
+    resolution: {integrity: sha512-A03fXh+B7S8mL3PbdhTd+0UsaGrhfyPkODvzBDpKRY7bbeac4MDFpJ7I+Slf2oSkCEeSvHKR7Z4U71uKRUfX7g==}
+    cpu: [x64]
+    os: [darwin]
+
+  turbo-darwin-arm64@2.8.10:
+    resolution: {integrity: sha512-sidzowgWL3s5xCHLeqwC9M3s9M0i16W1nuQF3Mc7fPHpZ+YPohvcbVFBB2uoRRHYZg6yBnwD4gyUHKTeXfwtXA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  turbo-linux-64@2.8.10:
+    resolution: {integrity: sha512-YK9vcpL3TVtqonB021XwgaQhY9hJJbKKUhLv16osxV0HkcQASQWUqR56yMge7puh6nxU67rQlTq1b7ksR1T3KA==}
+    cpu: [x64]
+    os: [linux]
+
+  turbo-linux-arm64@2.8.10:
+    resolution: {integrity: sha512-3+j2tL0sG95iBJTm+6J8/45JsETQABPqtFyYjVjBbi6eVGdtNTiBmHNKrbvXRlQ3ZbUG75bKLaSSDHSEEN+btQ==}
+    cpu: [arm64]
+    os: [linux]
+
+  turbo-windows-64@2.8.10:
+    resolution: {integrity: sha512-hdeF5qmVY/NFgiucf8FW0CWJWtyT2QPm5mIsX0W1DXAVzqKVXGq+Zf+dg4EUngAFKjDzoBeN6ec2Fhajwfztkw==}
+    cpu: [x64]
+    os: [win32]
+
+  turbo-windows-arm64@2.8.10:
+    resolution: {integrity: sha512-QGdr/Q8LWmj+ITMkSvfiz2glf0d7JG0oXVzGL3jxkGqiBI1zXFj20oqVY0qWi+112LO9SVrYdpHS0E/oGFrMbQ==}
+    cpu: [arm64]
+    os: [win32]
+
+  turbo@2.8.10:
+    resolution: {integrity: sha512-OxbzDES66+x7nnKGg2MwBA1ypVsZoDTLHpeaP4giyiHSixbsiTaMyeJqbEyvBdp5Cm28fc+8GG6RdQtic0ijwQ==}
+    hasBin: true
 
   type-check@0.4.0:
     resolution: {integrity: sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==}
@@ -2408,6 +2448,33 @@ snapshots:
       - supports-color
       - tsx
       - yaml
+
+  turbo-darwin-64@2.8.10:
+    optional: true
+
+  turbo-darwin-arm64@2.8.10:
+    optional: true
+
+  turbo-linux-64@2.8.10:
+    optional: true
+
+  turbo-linux-arm64@2.8.10:
+    optional: true
+
+  turbo-windows-64@2.8.10:
+    optional: true
+
+  turbo-windows-arm64@2.8.10:
+    optional: true
+
+  turbo@2.8.10:
+    optionalDependencies:
+      turbo-darwin-64: 2.8.10
+      turbo-darwin-arm64: 2.8.10
+      turbo-linux-64: 2.8.10
+      turbo-linux-arm64: 2.8.10
+      turbo-windows-64: 2.8.10
+      turbo-windows-arm64: 2.8.10
 
   type-check@0.4.0:
     dependencies:

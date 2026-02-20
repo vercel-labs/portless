@@ -3,3 +3,4 @@ node_modules/
 pnpm-lock.yaml
 .pnpm-store/
 coverage/
+.turbo

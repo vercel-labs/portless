@@ -1,77 +1,24 @@
 {
-  "name": "portless",
-  "version": "0.4.0",
-  "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+  "name": "portless-monorepo",
+  "private": true,
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
-    }
-  },
-  "bin": {
-    "portless": "./dist/cli.js"
-  },
-  "files": [
-    "dist"
-  ],
   "packageManager": "pnpm@9.15.4",
-  "engines": {
-    "node": ">=20"
-  },
-  "os": [
-    "darwin",
-    "linux"
-  ],
   "scripts": {
-    "build": "tsup",
-    "dev": "tsup --watch",
+    "build": "turbo build",
+    "dev": "turbo dev",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
-    "prepublishOnly": "pnpm build",
-    "pretest": "pnpm build",
-    "test": "vitest run",
-    "test:coverage": "vitest run --coverage",
-    "test:watch": "vitest",
-    "typecheck": "tsc --noEmit",
+    "lint": "turbo lint",
+    "lint:fix": "turbo lint:fix",
+    "test": "turbo test",
+    "typecheck": "turbo typecheck",
     "prepare": "husky"
   },
-  "keywords": [
-    "local",
-    "development",
-    "proxy",
-    "localhost"
-  ],
-  "author": "Vercel Labs",
-  "license": "Apache-2.0",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/vercel-labs/portless.git"
-  },
-  "homepage": "https://github.com/vercel-labs/portless#readme",
-  "bugs": {
-    "url": "https://github.com/vercel-labs/portless/issues"
-  },
-  "dependencies": {
-    "chalk": "^5.3.0"
-  },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "@types/node": "^20.11.0",
-    "@vitest/coverage-v8": "^4.0.18",
-    "eslint": "^9.39.2",
-    "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
     "prettier": "^3.8.1",
-    "tsup": "^8.0.1",
-    "typescript": "^5.3.3",
-    "typescript-eslint": "^8.55.0",
-    "vitest": "^4.0.18"
+    "turbo": "^2.8.10"
   },
   "lint-staged": {
     "*.{ts,js}": [

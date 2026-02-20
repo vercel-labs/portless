@@ -7,7 +7,7 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   prettierConfig,
   {
-    ignores: ["dist/", "node_modules/", ".pnpm-store/"],
+    ignores: ["**/dist/", "**/node_modules/", ".pnpm-store/"],
   },
   {
     rules: {
