@@ -3,6 +3,8 @@ import Link from "next/link";
 import { GeistPixelSquare } from "geist/font/pixel";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { DocsChat } from "@/components/docs-chat";
+import { cookies } from "next/headers";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -87,13 +89,27 @@ function Header() {
   );
 }
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default async function RootLayout({ children }: { children: React.ReactNode }) {
+  const cookieStore = await cookies();
+  const chatOpen = cookieStore.get("docs-chat-open")?.value === "true";
+  const chatWidth = Number(cookieStore.get("docs-chat-width")?.value) || 400;
+
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        {chatOpen && (
+          <style
+            dangerouslySetInnerHTML={{
+              __html: `@media(min-width:640px){body{padding-right:${chatWidth}px}}`,
+            }}
+          />
+        )}
+      </head>
       <body className="bg-white text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">
         <ThemeProvider>
           <Header />
           {children}
+          <DocsChat defaultOpen={chatOpen} defaultWidth={chatWidth} />
         </ThemeProvider>
       </body>
     </html>

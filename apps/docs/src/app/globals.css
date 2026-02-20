@@ -1,5 +1,7 @@
 @import "tailwindcss";
 
+@source "../../node_modules/streamdown/dist/index.js";
+
 @custom-variant dark (&:where(.dark, .dark *));
 
 @theme {
@@ -22,4 +24,47 @@ html {
     background-color: #fff;
     color: #000;
   }
+}
+
+/* Tool call shimmer animation */
+@keyframes tool-shimmer {
+  0% { opacity: 0.5; }
+  50% { opacity: 1; }
+  100% { opacity: 0.5; }
+}
+
+.animate-tool-shimmer {
+  animation: tool-shimmer 1.5s ease-in-out infinite;
+}
+
+/* Chat content prose overrides */
+.docs-chat-content p,
+.docs-chat-content li,
+.docs-chat-content td,
+.docs-chat-content th,
+.docs-chat-content strong,
+.docs-chat-content code {
+  color: inherit;
+}
+
+.docs-chat-content pre {
+  border: none;
+  border-radius: 0;
+  padding: revert-layer;
+}
+
+.docs-chat-content ul,
+.docs-chat-content ol {
+  list-style-position: outside;
+  padding-left: 1.25em;
+}
+
+.docs-chat-content li > p {
+  display: inline;
+  margin: 0;
+}
+
+.docs-chat-content li {
+  margin-top: 0.5em;
+  margin-bottom: 0.5em;
 }
