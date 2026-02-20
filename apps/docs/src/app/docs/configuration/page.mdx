@@ -1,0 +1,37 @@
+# Configuration
+
+Portless is configured through environment variables. No config files needed.
+
+## Environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `PORTLESS_PORT` | Proxy port | `1355` |
+| `PORTLESS_HTTPS` | Set to `1` to always enable HTTPS | off |
+| `PORTLESS_STATE_DIR` | Override the state directory | see below |
+| `PORTLESS` | Set to `0` or `skip` to bypass the proxy | enabled |
+
+## State directory
+
+Portless stores state (routes, PID file, port file, TLS marker) in a directory that depends on the proxy port:
+
+| Condition | Path |
+|-----------|------|
+| Port below 1024 (sudo) | `/tmp/portless` |
+| Port 1024+ (no sudo) | `~/.portless` |
+
+Override with `PORTLESS_STATE_DIR`.
+
+## State files
+
+| File | Purpose |
+|------|---------|
+| `routes.json` | Maps hostnames to ports |
+| `routes.lock` | Prevents concurrent writes |
+| `proxy.pid` | PID of the running proxy |
+| `proxy.port` | Port the proxy is listening on |
+| `proxy.log` | Proxy daemon log output |
+
+## Port assignment
+
+Apps get a random port in the 4000--4999 range. Portless sets `PORT` before running your command. Most frameworks respect this automatically.

@@ -1,0 +1,23 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "Segoe UI Mono",
+    Menlo, Consolas, monospace;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+::selection {
+  background-color: #000;
+  color: #fff;
+}
+
+@media (prefers-color-scheme: dark) {
+  ::selection {
+    background-color: #fff;
+    color: #000;
+  }
+}

@@ -5,3 +5,4 @@ coverage/
 .DS_Store
 .pnpm-store/
 .turbo
+.next/

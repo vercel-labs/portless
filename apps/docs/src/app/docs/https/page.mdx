@@ -1,0 +1,47 @@
+# HTTPS
+
+HTTP/2 + TLS for faster dev server page loads. Browsers limit HTTP/1.1 to 6 connections per host, which bottlenecks dev servers serving many unbundled files. HTTP/2 multiplexes all requests over a single connection.
+
+## Enable HTTPS
+
+```bash
+portless proxy start --https
+```
+
+First run generates a local CA and server certs, then prompts for sudo once to trust the CA. After that -- no prompts, no browser warnings.
+
+## Make it permanent
+
+Add to `.bashrc` or `.zshrc`:
+
+```bash
+export PORTLESS_HTTPS=1
+```
+
+Now `portless proxy start` uses HTTPS by default.
+
+## Custom certificates
+
+Use your own certs (e.g., from mkcert):
+
+```bash
+portless proxy start --cert ./cert.pem --key ./key.pem
+```
+
+Both flags imply `--https`.
+
+## Trust the CA later
+
+If you skipped the sudo prompt on first run:
+
+```bash
+sudo portless trust
+```
+
+## Disable HTTPS
+
+Override the environment variable:
+
+```bash
+portless proxy start --no-tls
+```

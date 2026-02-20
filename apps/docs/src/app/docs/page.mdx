@@ -1,0 +1,60 @@
+# Getting Started
+
+Portless replaces port numbers with stable, named `.localhost` URLs for local development. For humans and agents.
+
+```diff
+- "dev": "next dev"              # http://localhost:3000
++ "dev": "portless myapp next dev"  # http://myapp.localhost:1355
+```
+
+## Install
+
+```bash
+npm install -g portless
+```
+
+> Install globally. Do not add as a project dependency or run via npx.
+
+## Run your app
+
+```bash
+portless myapp next dev
+# -> http://myapp.localhost:1355
+```
+
+The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable, which most frameworks (Next.js, Vite, etc.) respect automatically.
+
+## Use in package.json
+
+```json
+{
+  "scripts": {
+    "dev": "portless myapp next dev"
+  }
+}
+```
+
+## Subdomains
+
+Organize services with subdomains:
+
+```bash
+portless api.myapp pnpm start
+# -> http://api.myapp.localhost:1355
+
+portless docs.myapp next dev
+# -> http://docs.myapp.localhost:1355
+```
+
+## How it works
+
+Portless runs a reverse proxy on port 1355. Each app registers a route mapping its hostname to an assigned port. Requests to `http://<name>.localhost:1355` are proxied to the app.
+
+```
+Browser (myapp.localhost:1355) -> proxy (port 1355) -> App (random port)
+```
+
+## Requirements
+
+- Node.js 20+
+- macOS or Linux
