@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Link from "next/link";
+import { GeistPixelSquare } from "geist/font/pixel";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import "./globals.css";
@@ -49,7 +50,7 @@ function Header() {
             </svg>
           </span>
           <Link href="/">
-            <span className="font-medium tracking-tight text-lg">
+            <span className={`${GeistPixelSquare.className} text-lg`}>
               portless
             </span>
           </Link>
