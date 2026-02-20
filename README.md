@@ -64,6 +64,15 @@ portless docs.myapp next dev
 }
 ```
 
+Alternatively, as another usage method, you can use `${PWD##*/}` like this. The development server on `working.localhost:<port>` when `package.json` is located at `/path/to/working`. This is useful, for example, in cases using `git worktree`.
+```json
+{
+  "scripts": {
+    "dev": "portless ${PWD##*/} next dev"
+  }
+}
+```
+
 The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
 
 ## How It Works
