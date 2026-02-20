@@ -37,26 +37,20 @@ html {
   animation: tool-shimmer 1.5s ease-in-out infinite;
 }
 
-/* Chat content prose overrides */
-.docs-chat-content p,
-.docs-chat-content li,
-.docs-chat-content td,
-.docs-chat-content th,
-.docs-chat-content strong,
-.docs-chat-content code {
-  color: inherit;
+/* Chat content styles */
+.docs-chat-content p {
+  margin-bottom: 0.75em;
 }
 
-.docs-chat-content pre {
-  border: none;
-  border-radius: 0;
-  padding: revert-layer;
+.docs-chat-content p:last-child {
+  margin-bottom: 0;
 }
 
 .docs-chat-content ul,
 .docs-chat-content ol {
   list-style-position: outside;
   padding-left: 1.25em;
+  margin-bottom: 0.75em;
 }
 
 .docs-chat-content li > p {
@@ -65,6 +59,33 @@ html {
 }
 
 .docs-chat-content li {
-  margin-top: 0.5em;
-  margin-bottom: 0.5em;
+  margin-top: 0.35em;
+  margin-bottom: 0.35em;
+}
+
+.docs-chat-content a {
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.docs-chat-content code {
+  font-size: 0.85em;
+  background: rgb(245 245 245);
+  border-radius: 0.25rem;
+  padding: 0.125rem 0.375rem;
+}
+
+:is(.dark) .docs-chat-content code {
+  background: rgb(38 38 38);
+}
+
+.docs-chat-content pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-size: inherit;
+}
+
+button {
+  cursor: pointer;
 }

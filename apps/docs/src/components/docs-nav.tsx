@@ -4,11 +4,11 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 const nav = [
-  { href: "/docs", label: "Getting Started" },
-  { href: "/docs/why", label: "Why Portless" },
-  { href: "/docs/commands", label: "Commands" },
-  { href: "/docs/https", label: "HTTPS" },
-  { href: "/docs/configuration", label: "Configuration" },
+  { href: "/", label: "Getting Started" },
+  { href: "/why", label: "Why Portless" },
+  { href: "/commands", label: "Commands" },
+  { href: "/https", label: "HTTPS" },
+  { href: "/configuration", label: "Configuration" },
 ];
 
 function Sidebar() {
@@ -63,7 +63,7 @@ function MobileNav() {
   );
 }
 
-export default function DocsLayout({ children }: { children: React.ReactNode }) {
+export function DocsNav({ children }: { children: React.ReactNode }) {
   return (
     <div className="mx-auto max-w-5xl px-6 py-12">
       <div className="flex gap-12">

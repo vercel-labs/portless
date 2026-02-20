@@ -4,9 +4,9 @@ export type NavItem = {
 };
 
 export const allDocsPages: NavItem[] = [
-  { name: "Getting Started", href: "/docs" },
-  { name: "Why Portless", href: "/docs/why" },
-  { name: "Commands", href: "/docs/commands" },
-  { name: "HTTPS", href: "/docs/https" },
-  { name: "Configuration", href: "/docs/configuration" },
+  { name: "Getting Started", href: "/" },
+  { name: "Why Portless", href: "/why" },
+  { name: "Commands", href: "/commands" },
+  { name: "HTTPS", href: "/https" },
+  { name: "Configuration", href: "/configuration" },
 ];

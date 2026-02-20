@@ -373,7 +373,7 @@ export function DocsChat({
                         return (
                           <div
                             key={i}
-                            className="docs-chat-content text-sm text-neutral-900 dark:text-neutral-100 leading-relaxed prose prose-sm prose-neutral dark:prose-invert max-w-none"
+                            className="docs-chat-content text-sm text-neutral-900 dark:text-neutral-100 leading-relaxed max-w-none"
                           >
                             <Streamdown>{part.text}</Streamdown>
                           </div>

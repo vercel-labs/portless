@@ -4,6 +4,7 @@ import { GeistPixelSquare } from "geist/font/pixel";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { DocsChat } from "@/components/docs-chat";
+import { DocsNav } from "@/components/docs-nav";
 import { cookies } from "next/headers";
 import "./globals.css";
 
@@ -108,7 +109,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body className="bg-white text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">
         <ThemeProvider>
           <Header />
-          {children}
+          <DocsNav>{children}</DocsNav>
           <DocsChat defaultOpen={chatOpen} defaultWidth={chatWidth} />
         </ThemeProvider>
       </body>

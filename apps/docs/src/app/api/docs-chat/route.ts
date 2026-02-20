@@ -22,7 +22,7 @@ You have access to the full portless documentation via the bash and readFile too
 
 When answering questions:
 - Use the bash tool to list files (ls /workspace/) or search for content (grep -r "keyword" /workspace/)
-- Use the readFile tool to read specific documentation pages (e.g. readFile with path "/workspace/docs.md")
+- Use the readFile tool to read specific documentation pages (e.g. readFile with path "/workspace/index.md")
 - Do NOT use bash to write, create, modify, or delete files (no tee, cat >, sed -i, echo >, cp, mv, rm, mkdir, touch, etc.) -- you are read-only
 - Always base your answers on the actual documentation content
 - Be concise and accurate
@@ -35,14 +35,14 @@ async function loadDocsFiles(): Promise<Record<string, string>> {
 
   const results = await Promise.allSettled(
     allDocsPages.map(async (page) => {
-      const slug = page.href.replace(/^\/docs\/?/, "");
+      const slug = page.href.replace(/^\//, "");
       const filePath = slug
-        ? join(process.cwd(), "src", "app", "docs", slug, "page.mdx")
-        : join(process.cwd(), "src", "app", "docs", "page.mdx");
+        ? join(process.cwd(), "src", "app", slug, "page.mdx")
+        : join(process.cwd(), "src", "app", "page.mdx");
 
       const raw = await readFile(filePath, "utf-8");
       const md = mdxToCleanMarkdown(raw);
-      const fileName = slug ? `/docs/${slug}.md` : "/docs.md";
+      const fileName = slug ? `/${slug}.md` : "/index.md";
       return { fileName, md };
     })
   );
