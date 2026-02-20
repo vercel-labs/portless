@@ -39,9 +39,6 @@ importers:
         specifier: ^5.3.0
         version: 5.6.2
     devDependencies:
-      '@eslint/js':
-        specifier: ^9.39.2
-        version: 9.39.2
       '@types/node':
         specifier: ^20.11.0
         version: 20.19.30
@@ -51,18 +48,12 @@ importers:
       eslint:
         specifier: ^9.39.2
         version: 9.39.2
-      eslint-config-prettier:
-        specifier: ^10.1.8
-        version: 10.1.8(eslint@9.39.2)
       tsup:
         specifier: ^8.0.1
         version: 8.5.1(postcss@8.5.6)(typescript@5.9.3)(yaml@2.8.2)
       typescript:
         specifier: ^5.3.3
         version: 5.9.3
-      typescript-eslint:
-        specifier: ^8.55.0
-        version: 8.55.0(eslint@9.39.2)(typescript@5.9.3)
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@types/node@20.19.30)(yaml@2.8.2)

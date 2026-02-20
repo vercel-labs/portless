@@ -11,6 +11,8 @@
     "lint": "turbo lint",
     "lint:fix": "turbo lint:fix",
     "test": "turbo test",
+    "test:coverage": "turbo test:coverage",
+    "test:watch": "turbo test:watch",
     "typecheck": "turbo typecheck",
     "prepare": "husky"
   },

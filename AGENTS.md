@@ -20,4 +20,4 @@ When a change affects how humans or agents use portless (new/changed/removed com
 
 1. `README.md` -- user-facing documentation
 2. `skills/portless/SKILL.md` -- agent skill for using portless
-3. `src/cli.ts` -- `--help` output
+3. `packages/portless/src/cli.ts` -- `--help` output

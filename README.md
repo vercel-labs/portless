@@ -154,6 +154,21 @@ Portless stores its state (routes, PID file, port file) in a directory that depe
 
 Override with the `PORTLESS_STATE_DIR` environment variable if needed.
 
+## Development
+
+This repo is a pnpm workspace monorepo using [Turborepo](https://turbo.build). The publishable package lives in `packages/portless/`.
+
+```bash
+pnpm install          # Install all dependencies
+pnpm build            # Build all packages
+pnpm test             # Run tests
+pnpm test:coverage    # Run tests with coverage
+pnpm test:watch       # Run tests in watch mode
+pnpm lint             # Lint all packages
+pnpm typecheck        # Type-check all packages
+pnpm format           # Format all files with Prettier
+```
+
 ## Requirements
 
 - Node.js 20+
