@@ -8,6 +8,15 @@ importers:
 
   .:
     devDependencies:
+      '@eslint/js':
+        specifier: ^9.39.2
+        version: 9.39.2
+      eslint:
+        specifier: ^9.39.2
+        version: 9.39.2
+      eslint-config-prettier:
+        specifier: ^10.1.8
+        version: 10.1.8(eslint@9.39.2)
       husky:
         specifier: ^9.1.7
         version: 9.1.7
@@ -20,6 +29,9 @@ importers:
       turbo:
         specifier: ^2.8.10
         version: 2.8.10
+      typescript-eslint:
+        specifier: ^8.55.0
+        version: 8.55.0(eslint@9.39.2)(typescript@5.9.3)
 
   packages/portless:
     dependencies:
