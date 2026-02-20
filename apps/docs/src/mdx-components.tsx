@@ -26,18 +26,9 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         {...props}
       />
     ),
-    ul: (props) => (
-      <ul className="mb-4 list-disc space-y-1 pl-5 text-sm" {...props} />
-    ),
-    ol: (props) => (
-      <ol className="mb-4 list-decimal space-y-1 pl-5 text-sm" {...props} />
-    ),
-    li: (props) => (
-      <li
-        className="text-neutral-600 dark:text-neutral-400"
-        {...props}
-      />
-    ),
+    ul: (props) => <ul className="mb-4 list-disc space-y-1 pl-5 text-sm" {...props} />,
+    ol: (props) => <ol className="mb-4 list-decimal space-y-1 pl-5 text-sm" {...props} />,
+    li: (props) => <li className="text-neutral-600 dark:text-neutral-400" {...props} />,
     a: (props) => (
       <a
         className="text-neutral-900 underline decoration-neutral-300 underline-offset-2 hover:decoration-neutral-900 dark:text-neutral-100 dark:decoration-neutral-700 dark:hover:decoration-neutral-100"
@@ -45,9 +36,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
       />
     ),
     code: (props) => {
-      const isBlock =
-        typeof props.className === "string" &&
-        props.className.includes("language-");
+      const isBlock = typeof props.className === "string" && props.className.includes("language-");
       if (isBlock) return <code {...props} />;
       return (
         <code
@@ -85,14 +74,9 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         {...props}
       />
     ),
-    hr: () => (
-      <hr className="my-8 border-neutral-200 dark:border-neutral-800" />
-    ),
+    hr: () => <hr className="my-8 border-neutral-200 dark:border-neutral-800" />,
     strong: (props) => (
-      <strong
-        className="font-medium text-neutral-900 dark:text-neutral-100"
-        {...props}
-      />
+      <strong className="font-medium text-neutral-900 dark:text-neutral-100" {...props} />
     ),
     ...components,
   };

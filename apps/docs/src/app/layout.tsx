@@ -4,8 +4,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "portless",
-  description:
-    "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+  description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
 };
 
 function Header() {
@@ -31,11 +30,7 @@ function Header() {
   );
 }
 
-export default function RootLayout({
-  children,
-}: {
-  children: React.ReactNode;
-}) {
+export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="en">
       <body className="bg-white text-neutral-900 antialiased dark:bg-neutral-950 dark:text-neutral-100">

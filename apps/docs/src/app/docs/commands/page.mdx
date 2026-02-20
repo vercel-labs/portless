@@ -38,14 +38,14 @@ Adds the portless certificate authority to your system trust store. Required onc
 portless proxy start
 ```
 
-| Flag | Description |
-|------|-------------|
+| Flag                  | Description                                           |
+| --------------------- | ----------------------------------------------------- |
 | `-p, --port <number>` | Proxy port (default: 1355). Below 1024 requires sudo. |
-| `--https` | Enable HTTP/2 + TLS with auto-generated certs |
-| `--cert <path>` | Custom TLS certificate (implies `--https`) |
-| `--key <path>` | Custom TLS private key (implies `--https`) |
-| `--no-tls` | Disable HTTPS (overrides `PORTLESS_HTTPS`) |
-| `--foreground` | Run in foreground instead of daemon mode |
+| `--https`             | Enable HTTP/2 + TLS with auto-generated certs         |
+| `--cert <path>`       | Custom TLS certificate (implies `--https`)            |
+| `--key <path>`        | Custom TLS private key (implies `--https`)            |
+| `--no-tls`            | Disable HTTPS (overrides `PORTLESS_HTTPS`)            |
+| `--foreground`        | Run in foreground instead of daemon mode              |
 
 ### Stop
 
