@@ -38,14 +38,40 @@ Adds the portless certificate authority to your system trust store. Required onc
 portless proxy start
 ```
 
-| Flag                  | Description                                           |
-| --------------------- | ----------------------------------------------------- |
-| `-p, --port <number>` | Proxy port (default: 1355). Below 1024 requires sudo. |
-| `--https`             | Enable HTTP/2 + TLS with auto-generated certs         |
-| `--cert <path>`       | Custom TLS certificate (implies `--https`)            |
-| `--key <path>`        | Custom TLS private key (implies `--https`)            |
-| `--no-tls`            | Disable HTTPS (overrides `PORTLESS_HTTPS`)            |
-| `--foreground`        | Run in foreground instead of daemon mode              |
+<table>
+  <thead>
+    <tr>
+      <th>Flag</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>`-p, --port <number>`</td>
+      <td>Proxy port (default: 1355). Below 1024 requires sudo.</td>
+    </tr>
+    <tr>
+      <td>`--https`</td>
+      <td>Enable HTTP/2 + TLS with auto-generated certs</td>
+    </tr>
+    <tr>
+      <td>`--cert <path>`</td>
+      <td>Custom TLS certificate (implies `--https`)</td>
+    </tr>
+    <tr>
+      <td>`--key <path>`</td>
+      <td>Custom TLS private key (implies `--https`)</td>
+    </tr>
+    <tr>
+      <td>`--no-tls`</td>
+      <td>Disable HTTPS (overrides `PORTLESS_HTTPS`)</td>
+    </tr>
+    <tr>
+      <td>`--foreground`</td>
+      <td>Run in foreground instead of daemon mode</td>
+    </tr>
+  </tbody>
+</table>
 
 ### Stop
 

@@ -4,33 +4,95 @@ Portless is configured through environment variables. No config files needed.
 
 ## Environment variables
 
-| Variable             | Description                              | Default   |
-| -------------------- | ---------------------------------------- | --------- |
-| `PORTLESS_PORT`      | Proxy port                               | `1355`    |
-| `PORTLESS_HTTPS`     | Set to `1` to always enable HTTPS        | off       |
-| `PORTLESS_STATE_DIR` | Override the state directory             | see below |
-| `PORTLESS`           | Set to `0` or `skip` to bypass the proxy | enabled   |
+<table>
+  <thead>
+    <tr>
+      <th>Variable</th>
+      <th>Description</th>
+      <th>Default</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>`PORTLESS_PORT`</td>
+      <td>Proxy port</td>
+      <td>`1355`</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_HTTPS`</td>
+      <td>Set to `1` to always enable HTTPS</td>
+      <td>off</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_STATE_DIR`</td>
+      <td>Override the state directory</td>
+      <td>see below</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS`</td>
+      <td>Set to `0` or `skip` to bypass the proxy</td>
+      <td>enabled</td>
+    </tr>
+  </tbody>
+</table>
 
 ## State directory
 
 Portless stores state (routes, PID file, port file, TLS marker) in a directory that depends on the proxy port:
 
-| Condition              | Path            |
-| ---------------------- | --------------- |
-| Port below 1024 (sudo) | `/tmp/portless` |
-| Port 1024+ (no sudo)   | `~/.portless`   |
+<table>
+  <thead>
+    <tr>
+      <th>Condition</th>
+      <th>Path</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>Port below 1024 (sudo)</td>
+      <td>`/tmp/portless`</td>
+    </tr>
+    <tr>
+      <td>Port 1024+ (no sudo)</td>
+      <td>`~/.portless`</td>
+    </tr>
+  </tbody>
+</table>
 
 Override with `PORTLESS_STATE_DIR`.
 
 ## State files
 
-| File          | Purpose                        |
-| ------------- | ------------------------------ |
-| `routes.json` | Maps hostnames to ports        |
-| `routes.lock` | Prevents concurrent writes     |
-| `proxy.pid`   | PID of the running proxy       |
-| `proxy.port`  | Port the proxy is listening on |
-| `proxy.log`   | Proxy daemon log output        |
+<table>
+  <thead>
+    <tr>
+      <th>File</th>
+      <th>Purpose</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>`routes.json`</td>
+      <td>Maps hostnames to ports</td>
+    </tr>
+    <tr>
+      <td>`routes.lock`</td>
+      <td>Prevents concurrent writes</td>
+    </tr>
+    <tr>
+      <td>`proxy.pid`</td>
+      <td>PID of the running proxy</td>
+    </tr>
+    <tr>
+      <td>`proxy.port`</td>
+      <td>Port the proxy is listening on</td>
+    </tr>
+    <tr>
+      <td>`proxy.log`</td>
+      <td>Proxy daemon log output</td>
+    </tr>
+  </tbody>
+</table>
 
 ## Port assignment
 
