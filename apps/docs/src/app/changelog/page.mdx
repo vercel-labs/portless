@@ -1,0 +1,41 @@
+# Changelog
+
+## 0.4.1
+
+- Fixed Vite support by auto-injecting `--port` and `--host` flags
+- Added e2e tests for 11 frameworks (Next.js, Vite, Nuxt, Astro, Angular, SvelteKit, Remix, Solid, React Router, Hono, Express)
+- Improved docs site
+- Added Turborepo for build orchestration
+
+## 0.4.0
+
+- HTTP/2 + TLS support with auto-generated certificates
+- `sudo portless trust` command for system CA trust
+- `--https`, `--cert`, `--key`, `--no-tls` flags for proxy start
+- HTTPS configuration via `portless.json` and `PORTLESS_HTTPS` env var
+
+## 0.3.0
+
+- Configuration file support (`portless.json`)
+- `PORTLESS=0` / `PORTLESS=skip` to bypass the proxy
+- Port range customization
+
+## 0.2.2
+
+- Bug fixes and stability improvements
+
+## 0.2.1
+
+- Fixed proxy routing issues
+
+## 0.2.0
+
+- Added `--port` flag to the proxy command
+
+## 0.1.0
+
+- Initial release
+- Reverse proxy on port 1355
+- Named `.localhost` URLs for dev servers
+- `portless list` command
+- Subdomain support
