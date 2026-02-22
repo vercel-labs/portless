@@ -67,6 +67,18 @@ portless api.myapp pnpm start    # http://api.myapp.localhost:1355
 portless docs.myapp next dev     # http://docs.myapp.localhost:1355
 ```
 
+### Branch-based subdomains (git worktrees)
+
+Useful for git worktrees or multiple checkouts running in parallel (especially with AI agents):
+
+```bash
+# Automatically includes branch in subdomain (except main/master/dev)
+portless --branches myapp next dev
+
+# On main -> myapp.localhost:1355
+# On feat/auth -> feat-auth.myapp.localhost:1355
+```
+
 ### Bypassing portless
 
 Set `PORTLESS=0` or `PORTLESS=skip` to run the command directly without the proxy:
@@ -120,6 +132,7 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 | Command                             | Description                                                   |
 | ----------------------------------- | ------------------------------------------------------------- |
 | `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
+| `portless --branches <name> <cmd>`  | Same as above, but includes git branch in subdomain           |
 | `portless list`                     | Show active routes                                            |
 | `portless trust`                    | Add local CA to system trust store (for HTTPS)                |
 | `portless proxy start`              | Start the proxy as a daemon (port 1355, no sudo)              |

@@ -15,6 +15,7 @@ import {
   discoverState,
   findFreePort,
   findPidOnPort,
+  getCurrentBranch,
   getDefaultPort,
   injectFrameworkFlags,
   isHttpsEnvEnabled,
@@ -22,6 +23,7 @@ import {
   prompt,
   readTlsMarker,
   resolveStateDir,
+  shouldIncludeBranch,
   spawnCommand,
   waitForProxy,
   writeTlsMarker,
@@ -293,9 +295,12 @@ async function runApp(
   stateDir: string,
   name: string,
   commandArgs: string[],
-  tls: boolean
+  tls: boolean,
+  includeBranches: boolean
 ) {
-  const hostname = parseHostname(name);
+  const branch = includeBranches ? getCurrentBranch() : null;
+  const finalName = shouldIncludeBranch(name, branch, includeBranches);
+  const hostname = parseHostname(finalName);
 
   console.log(chalk.blue.bold(`\nportless\n`));
   console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
@@ -434,11 +439,14 @@ async function main() {
     process.exit(1);
   }
 
+  // Filter out --branches flag before any other processing
+  const filteredArgs = args.filter((arg) => arg !== "--branches");
+
   // Skip portless if PORTLESS=0 or PORTLESS=skip
   const skipPortless = process.env.PORTLESS === "0" || process.env.PORTLESS === "skip";
-  if (skipPortless && args.length >= 2 && args[0] !== "proxy") {
+  if (skipPortless && filteredArgs.length >= 2 && filteredArgs[0] !== "proxy") {
     // Just run the command directly, skipping the first arg (the name)
-    spawnCommand(args.slice(1));
+    spawnCommand(filteredArgs.slice(1));
     return;
   }
 
@@ -469,6 +477,7 @@ ${chalk.bold("Examples:")}
   portless myapp next dev             # -> http://myapp.localhost:1355
   portless myapp vite dev             # -> http://myapp.localhost:1355
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
+  portless --branches myapp next dev   # With branch: feat-auth.myapp.localhost:1355
 
 ${chalk.bold("In package.json:")}
   {
@@ -498,6 +507,7 @@ ${chalk.bold("Options:")}
   --key <path>                  Use a custom TLS private key (implies --https)
   --no-tls                      Disable HTTPS (overrides PORTLESS_HTTPS)
   --foreground                  Run proxy in foreground (for debugging)
+  --branches                    Include git branch in subdomain (except main/master/dev)
 
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
@@ -783,14 +793,18 @@ ${chalk.bold("Usage: portless proxy <command>")}
     return;
   }
 
-  // Run app
-  const name = args[0];
-  const commandArgs = args.slice(1);
+  // Check if --branches flag was provided (before filtering)
+  const includeBranches = args.includes("--branches");
 
-  if (commandArgs.length === 0) {
+  // Parse remaining args for name and command
+  const name = filteredArgs[0];
+  const commandArgs = filteredArgs.slice(1);
+
+  if (!name || commandArgs.length === 0) {
     console.error(chalk.red("Error: No command provided."));
     console.error(chalk.blue("Usage:"));
     console.error(chalk.cyan("  portless <name> <command...>"));
+    console.error(chalk.cyan("  portless --branches <name> <command...>"));
     console.error(chalk.blue("Example:"));
     console.error(chalk.cyan("  portless myapp next dev"));
     process.exit(1);
@@ -800,7 +814,7 @@ ${chalk.bold("Usage: portless proxy <command>")}
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
-  await runApp(store, port, dir, name, commandArgs, tls);
+  await runApp(store, port, dir, name, commandArgs, tls, includeBranches);
 }
 
 main().catch((err: unknown) => {

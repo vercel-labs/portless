@@ -14,6 +14,35 @@ portless api pnpm start
 portless docs.myapp next dev
 ```
 
+### Flags
+
+<table>
+  <thead>
+    <tr>
+      <th>Flag</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>`--branches`</td>
+      <td>Include git branch in subdomain URL (except main/master/dev). Useful for git worktrees.</td>
+    </tr>
+  </tbody>
+</table>
+
+## Branch-based subdomains
+
+Useful for git worktrees or running multiple checkouts in parallel (especially with AI agents):
+
+```bash
+# Automatically includes branch in subdomain (except main/master/dev)
+portless --branches myapp next dev
+
+# On main/master/dev -> myapp.localhost:1355
+# On feat/auth -> feat-auth.myapp.localhost:1355
+```
+
 ## List routes
 
 ```bash

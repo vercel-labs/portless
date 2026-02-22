@@ -8,10 +8,13 @@ import {
   SYSTEM_STATE_DIR,
   USER_STATE_DIR,
   findFreePort,
+  formatBranchName,
+  getCurrentBranch,
   getDefaultPort,
   injectFrameworkFlags,
   isProxyRunning,
   resolveStateDir,
+  shouldIncludeBranch,
 } from "./cli-utils.js";
 
 describe("findFreePort", () => {
@@ -267,5 +270,91 @@ describe("injectFrameworkFlags", () => {
     const args: string[] = [];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual([]);
+  });
+});
+
+describe("getCurrentBranch", () => {
+  const originalEnv = process.env;
+
+  beforeEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  afterEach(() => {
+    process.env = originalEnv;
+  });
+
+  it("returns branch name when in a git repo", () => {
+    const branch = getCurrentBranch();
+    expect(typeof branch).toBe("string");
+  });
+
+  it("returns null when not in a git repo (uses temp dir)", async () => {
+    const branch = getCurrentBranch("/tmp");
+    expect(branch).toBeNull();
+  });
+});
+
+describe("formatBranchName", () => {
+  it("converts slashes to hyphens", () => {
+    expect(formatBranchName("feat/auth")).toBe("feat-auth");
+  });
+
+  it("converts to lowercase", () => {
+    expect(formatBranchName("FEAT/Test")).toBe("feat-test");
+  });
+
+  it("removes invalid hostname characters", () => {
+    expect(formatBranchName("feat@test$123")).toBe("feattest123");
+  });
+
+  it("removes consecutive hyphens", () => {
+    expect(formatBranchName("feat--test")).toBe("feat-test");
+  });
+
+  it("removes leading hyphens", () => {
+    expect(formatBranchName("-feat-test")).toBe("feat-test");
+  });
+
+  it("removes trailing hyphens", () => {
+    expect(formatBranchName("feat-test-")).toBe("feat-test");
+  });
+
+  it("converts underscores to hyphens", () => {
+    expect(formatBranchName("feat_test")).toBe("feat-test");
+  });
+});
+
+describe("shouldIncludeBranch", () => {
+  it("returns original name when includeBranch is false", () => {
+    expect(shouldIncludeBranch("myapp", "feat/test", false)).toBe("myapp");
+  });
+
+  it("returns original name when branch is null", () => {
+    expect(shouldIncludeBranch("myapp", null, true)).toBe("myapp");
+  });
+
+  it("returns original name for main branch", () => {
+    expect(shouldIncludeBranch("myapp", "main", true)).toBe("myapp");
+  });
+
+  it("returns original name for master branch", () => {
+    expect(shouldIncludeBranch("myapp", "master", true)).toBe("myapp");
+  });
+
+  it("returns original name for dev branch", () => {
+    expect(shouldIncludeBranch("myapp", "dev", true)).toBe("myapp");
+  });
+
+  it("returns original name for MAIN (case insensitive)", () => {
+    expect(shouldIncludeBranch("myapp", "MAIN", true)).toBe("myapp");
+  });
+
+  it("prepends branch name for feature branches", () => {
+    expect(shouldIncludeBranch("myapp", "feat/auth", true)).toBe("feat-auth-myapp");
+  });
+
+  it("prepends branch name for bugfix branches", () => {
+    expect(shouldIncludeBranch("myapp", "bugfix/login", true)).toBe("bugfix-login-myapp");
   });
 });

@@ -52,6 +52,19 @@ portless api.myapp pnpm start
 
 portless docs.myapp next dev
 # -> http://docs.myapp.localhost:1355
+
+```
+
+### Branch-based subdomains
+
+Useful for git worktrees or multiple checkouts running in parallel (especially with AI agents):
+
+```bash
+# Automatically includes branch in subdomain (except main/master/dev)
+portless --branches myapp next dev
+
+# On main/master/dev -> myapp.localhost:1355
+# On feat/auth -> feat-auth.myapp.localhost:1355
 ```
 
 ### In package.json
