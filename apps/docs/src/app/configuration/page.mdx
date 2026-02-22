@@ -96,4 +96,4 @@ Override with `PORTLESS_STATE_DIR`.
 
 ## Port assignment
 
-Apps get a random port in the 4000--4999 range. Portless sets `PORT` before running your command. Most frameworks respect this automatically.
+Apps get a random port in the 4000--4999 range. Portless sets `PORT` and `HOST` before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, Astro, React Router, Angular), portless auto-injects `--port` and `--host` flags.

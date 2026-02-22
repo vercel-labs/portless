@@ -396,7 +396,7 @@ async function runApp(
   injectFrameworkFlags(commandArgs, port);
 
   // Run the command
-  console.log(chalk.gray(`Running: PORT=${port} ${commandArgs.join(" ")}\n`));
+  console.log(chalk.gray(`Running: PORT=${port} HOST=127.0.0.1 ${commandArgs.join(" ")}\n`));
 
   spawnCommand(commandArgs, {
     env: {
@@ -482,6 +482,8 @@ ${chalk.bold("How it works:")}
   2. Run your apps - they auto-start the proxy and register automatically
   3. Access via http://<name>.localhost:1355
   4. .localhost domains auto-resolve to 127.0.0.1
+  5. Frameworks that ignore PORT (Vite, Astro, React Router, Angular) get
+     --port and --host flags injected automatically
 
 ${chalk.bold("HTTP/2 + HTTPS:")}
   Use --https for HTTP/2 multiplexing (faster dev server page loads).

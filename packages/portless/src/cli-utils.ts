@@ -379,33 +379,25 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
  *
  * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
- *
- * Returns true if any flags were injected.
  */
-export function injectFrameworkFlags(commandArgs: string[], port: number): boolean {
+export function injectFrameworkFlags(commandArgs: string[], port: number): void {
   const cmd = commandArgs[0];
-  if (!cmd) return false;
+  if (!cmd) return;
 
   const basename = path.basename(cmd);
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
-  if (!framework) return false;
-
-  let injected = false;
+  if (!framework) return;
 
   if (!commandArgs.includes("--port")) {
     commandArgs.push("--port", port.toString());
     if (framework.strictPort) {
       commandArgs.push("--strictPort");
     }
-    injected = true;
   }
 
   if (!commandArgs.includes("--host")) {
     commandArgs.push("--host", "127.0.0.1");
-    injected = true;
   }
-
-  return injected;
 }
 
 /**

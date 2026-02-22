@@ -1,7 +1,7 @@
 import { describe, it, expect, afterAll } from "vitest";
 import { startApp, fixtureDir, type E2EContext } from "./harness.js";
 
-describe("express (node http)", () => {
+describe("express", () => {
   let ctx: E2EContext;
 
   afterAll(async () => {

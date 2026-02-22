@@ -150,7 +150,9 @@ portless proxy start -p 8080
 
 ### Framework not respecting PORT
 
-Some frameworks need explicit configuration to use the `PORT` env var. Examples:
+Portless auto-injects `--port` and `--host` flags for frameworks that ignore the `PORT` env var: **Vite**, **Astro**, **React Router**, and **Angular**. SvelteKit uses Vite internally and is handled automatically.
+
+For other frameworks that don't read `PORT`, pass the port manually:
 
 - **Webpack Dev Server**: use `--port $PORT`
 - **Custom servers**: read `process.env.PORT` and listen on it
