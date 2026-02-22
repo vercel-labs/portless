@@ -9,4 +9,5 @@ export const allDocsPages: NavItem[] = [
   { name: "Commands", href: "/commands" },
   { name: "HTTPS", href: "/https" },
   { name: "Configuration", href: "/configuration" },
+  { name: "Changelog", href: "/changelog" },
 ];
