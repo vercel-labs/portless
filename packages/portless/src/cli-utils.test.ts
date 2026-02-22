@@ -185,22 +185,42 @@ describe("getDefaultPort", () => {
 });
 
 describe("injectPortFlag", () => {
-  it("injects --port and --strictPort for vite command", () => {
+  it("injects --port, --strictPort, and --host for vite command", () => {
     const args = ["vite", "dev"];
     expect(injectPortFlag(args, 4567)).toBe(true);
-    expect(args).toEqual(["vite", "dev", "--port", "4567", "--strictPort"]);
+    expect(args).toEqual(["vite", "dev", "--port", "4567", "--strictPort", "--host", "127.0.0.1"]);
   });
 
   it("injects flags for absolute/relative vite paths", () => {
     const args = ["./node_modules/.bin/vite", "dev"];
     expect(injectPortFlag(args, 4000)).toBe(true);
-    expect(args).toEqual(["./node_modules/.bin/vite", "dev", "--port", "4000", "--strictPort"]);
+    expect(args).toEqual([
+      "./node_modules/.bin/vite",
+      "dev",
+      "--port",
+      "4000",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
   });
 
-  it("skips injection when --port is already present", () => {
+  it("skips --port injection when --port is already present", () => {
     const args = ["vite", "dev", "--port", "3000"];
+    expect(injectPortFlag(args, 4567)).toBe(true);
+    expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "127.0.0.1"]);
+  });
+
+  it("skips --host injection when --host is already present", () => {
+    const args = ["vite", "dev", "--host", "0.0.0.0"];
+    expect(injectPortFlag(args, 4567)).toBe(true);
+    expect(args).toEqual(["vite", "dev", "--host", "0.0.0.0", "--port", "4567", "--strictPort"]);
+  });
+
+  it("skips all injection when both --port and --host are present", () => {
+    const args = ["vite", "dev", "--port", "3000", "--host", "0.0.0.0"];
     expect(injectPortFlag(args, 4567)).toBe(false);
-    expect(args).toEqual(["vite", "dev", "--port", "3000"]);
+    expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
   });
 
   it("does not inject for non-vite commands", () => {
