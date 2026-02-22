@@ -16,7 +16,7 @@ import {
   findFreePort,
   findPidOnPort,
   getDefaultPort,
-  injectPortFlag,
+  injectFrameworkFlags,
   isHttpsEnvEnabled,
   isProxyRunning,
   prompt,
@@ -393,7 +393,7 @@ async function runApp(
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
-  injectPortFlag(commandArgs, port);
+  injectFrameworkFlags(commandArgs, port);
 
   // Run the command
   console.log(chalk.gray(`Running: PORT=${port} ${commandArgs.join(" ")}\n`));

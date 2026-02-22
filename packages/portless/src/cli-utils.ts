@@ -354,13 +354,16 @@ export function spawnCommand(
 }
 
 // ---------------------------------------------------------------------------
-// Framework-aware port injection
+// Framework-aware flag injection
 // ---------------------------------------------------------------------------
 
 /**
  * Frameworks that ignore the `PORT` env var. Maps command basename to the
  * flags needed. `strictPort` indicates whether `--strictPort` is supported
  * (prevents the framework from silently picking a different port).
+ *
+ * SvelteKit is not listed because its dev server is Vite under the hood,
+ * so the `vite` entry already covers it.
  */
 const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   vite: { strictPort: true },
@@ -379,7 +382,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
  *
  * Returns true if any flags were injected.
  */
-export function injectPortFlag(commandArgs: string[], port: number): boolean {
+export function injectFrameworkFlags(commandArgs: string[], port: number): boolean {
   const cmd = commandArgs[0];
   if (!cmd) return false;
 

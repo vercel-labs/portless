@@ -10,6 +10,10 @@ const CLI_PATH = path.resolve(__dirname, "../../../packages/portless/dist/cli.js
 const E2E_NODE_MODULES = path.resolve(__dirname, "../node_modules");
 const VENV_DIR = path.resolve(__dirname, "../.venv");
 
+// Each e2e test uses a unique proxy port to allow sequential runs without
+// collisions. Current allocation: 19001-19011. Pick the next unused port
+// when adding a new test.
+
 /** Path to the Python binary inside the e2e venv. */
 export const PYTHON_BIN = path.join(VENV_DIR, "bin", "python3");
 
