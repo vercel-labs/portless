@@ -416,3 +416,55 @@ export function prompt(question: string): Promise<string> {
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// Git branch utilities
+// ---------------------------------------------------------------------------
+
+/** Default branch names that are excluded from branch-based subdomains. */
+export const DEFAULT_BRANCHES = ["main", "master", "dev"];
+
+/**
+ * Get the current git branch name.
+ * Returns null if not in a git repository or if the command fails.
+ */
+export function getCurrentBranch(cwd?: string): string | null {
+  try {
+    const branch = execSync("git branch --show-current", {
+      encoding: "utf-8",
+      cwd,
+      timeout: 5000,
+    }).trim();
+    return branch || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Format a branch name for use in a hostname.
+ * Converts "feat/auth" -> "feat-auth", lowercase, removes invalid chars.
+ * Allows underscores as they are valid in git branch names.
+ */
+export function formatBranchName(branch: string): string {
+  return branch
+    .toLowerCase()
+    .replace(/\//g, "-")
+    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+}
+
+/**
+ * Determine if the branch should be included in the hostname.
+ * Returns the modified name with branch prefix if applicable.
+ */
+export function shouldIncludeBranch(
+  name: string,
+  branch: string | null,
+  includeBranch: boolean
+): string {
+  if (!includeBranch || !branch) return name;
+  if (DEFAULT_BRANCHES.includes(branch.toLowerCase())) return name;
+  return `${formatBranchName(branch)}-${name}`;
+}
