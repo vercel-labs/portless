@@ -157,7 +157,7 @@ Some frameworks need explicit configuration to use the `PORT` env var. Examples:
   ```ts
   export default defineConfig({
     server: {
-      host: "0.0.0.0",
+      host: "127.0.0.1",
       port: Number(process.env.PORT) || 5173,
     },
   });
