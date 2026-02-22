@@ -9,6 +9,7 @@ import {
   USER_STATE_DIR,
   findFreePort,
   getDefaultPort,
+  injectPortFlag,
   isProxyRunning,
   resolveStateDir,
 } from "./cli-utils.js";
@@ -180,5 +181,42 @@ describe("getDefaultPort", () => {
   it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is empty", () => {
     process.env.PORTLESS_PORT = "";
     expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+  });
+});
+
+describe("injectPortFlag", () => {
+  it("injects --port and --strictPort for vite command", () => {
+    const args = ["vite", "dev"];
+    expect(injectPortFlag(args, 4567)).toBe(true);
+    expect(args).toEqual(["vite", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  it("injects flags for absolute/relative vite paths", () => {
+    const args = ["./node_modules/.bin/vite", "dev"];
+    expect(injectPortFlag(args, 4000)).toBe(true);
+    expect(args).toEqual(["./node_modules/.bin/vite", "dev", "--port", "4000", "--strictPort"]);
+  });
+
+  it("skips injection when --port is already present", () => {
+    const args = ["vite", "dev", "--port", "3000"];
+    expect(injectPortFlag(args, 4567)).toBe(false);
+    expect(args).toEqual(["vite", "dev", "--port", "3000"]);
+  });
+
+  it("does not inject for non-vite commands", () => {
+    const args = ["next", "dev"];
+    expect(injectPortFlag(args, 4567)).toBe(false);
+    expect(args).toEqual(["next", "dev"]);
+  });
+
+  it("does not inject for node commands", () => {
+    const args = ["node", "server.js"];
+    expect(injectPortFlag(args, 4567)).toBe(false);
+    expect(args).toEqual(["node", "server.js"]);
+  });
+
+  it("returns false for empty args", () => {
+    const args: string[] = [];
+    expect(injectPortFlag(args, 4567)).toBe(false);
   });
 });

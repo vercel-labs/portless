@@ -353,6 +353,44 @@ export function spawnCommand(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Framework-aware port injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Frameworks that ignore the PORT env var and need explicit CLI flags.
+ * Each entry maps a command basename to the flags to inject.
+ */
+const FRAMEWORK_PORT_FLAGS: Record<string, string[]> = {
+  vite: ["--port", "--strictPort"],
+};
+
+/**
+ * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
+ * mutate the array in-place to append the correct `--port <port>` flag.
+ *
+ * Returns true if flags were injected.
+ */
+export function injectPortFlag(commandArgs: string[], port: number): boolean {
+  const cmd = commandArgs[0];
+  if (!cmd) return false;
+
+  const basename = path.basename(cmd);
+  const flags = FRAMEWORK_PORT_FLAGS[basename];
+  if (!flags) return false;
+
+  if (commandArgs.includes("--port")) return false;
+
+  for (const flag of flags) {
+    if (flag === "--port") {
+      commandArgs.push("--port", port.toString());
+    } else {
+      commandArgs.push(flag);
+    }
+  }
+  return true;
+}
+
 /**
  * Prompt the user for input via readline. Returns empty string if stdin closes.
  */
