@@ -146,4 +146,30 @@ describe("CLI", () => {
       expect(stderr).toContain("Invalid hostname");
     });
   });
+
+  describe("--branches flag", () => {
+    it("parses --branches before the app name", () => {
+      // Should show the hostname with branch prefix (or just name if on main)
+      const { status, stdout } = run(["--branches", "myapp", "echo", "test"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      // With PORTLESS=0 it runs directly, but the parsing should work
+      expect(stdout.trim()).toBe("test");
+    });
+
+    it("parses --branches after the command", () => {
+      const { status, stdout } = run(["myapp", "echo", "test", "--branches"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("test");
+    });
+
+    it("shows --branches in --help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--branches");
+    });
+  });
 });

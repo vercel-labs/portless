@@ -439,11 +439,14 @@ async function main() {
     process.exit(1);
   }
 
+  // Filter out --branches flag before any other processing
+  const filteredArgs = args.filter((arg) => arg !== "--branches");
+
   // Skip portless if PORTLESS=0 or PORTLESS=skip
   const skipPortless = process.env.PORTLESS === "0" || process.env.PORTLESS === "skip";
-  if (skipPortless && args.length >= 2 && args[0] !== "proxy") {
+  if (skipPortless && filteredArgs.length >= 2 && filteredArgs[0] !== "proxy") {
     // Just run the command directly, skipping the first arg (the name)
-    spawnCommand(args.slice(1));
+    spawnCommand(filteredArgs.slice(1));
     return;
   }
 
@@ -790,16 +793,12 @@ ${chalk.bold("Usage: portless proxy <command>")}
     return;
   }
 
-  // Parse --branches flag - can be before or after app name
+  // Check if --branches flag was provided (before filtering)
+  const includeBranches = args.includes("--branches");
 
-  const branchesIdx = args.indexOf("--branches");
-  const includeBranches = branchesIdx !== -1;
-  if (branchesIdx !== -1) {
-    args.splice(branchesIdx, 1);
-  }
-
-  const name = args[0];
-  const commandArgs = args.slice(1);
+  // Parse remaining args for name and command
+  const name = filteredArgs[0];
+  const commandArgs = filteredArgs.slice(1);
 
   if (!name || commandArgs.length === 0) {
     console.error(chalk.red("Error: No command provided."));
