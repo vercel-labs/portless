@@ -790,22 +790,22 @@ ${chalk.bold("Usage: portless proxy <command>")}
     return;
   }
 
-  // Parse --branches flag for run app command
-  const includeBranches = args.includes("--branches");
+  // Parse --branches flag - can be before or after app name
 
-  // Run app
-  const name = args[0];
-  let commandArgs = args.slice(1);
-
-  // Remove --branches from commandArgs if present
-  if (commandArgs[0] === "--branches") {
-    commandArgs = commandArgs.slice(1);
+  const branchesIdx = args.indexOf("--branches");
+  const includeBranches = branchesIdx !== -1;
+  if (branchesIdx !== -1) {
+    args.splice(branchesIdx, 1);
   }
 
-  if (commandArgs.length === 0) {
+  const name = args[0];
+  const commandArgs = args.slice(1);
+
+  if (!name || commandArgs.length === 0) {
     console.error(chalk.red("Error: No command provided."));
     console.error(chalk.blue("Usage:"));
     console.error(chalk.cyan("  portless <name> <command...>"));
+    console.error(chalk.cyan("  portless --branches <name> <command...>"));
     console.error(chalk.blue("Example:"));
     console.error(chalk.cyan("  portless myapp next dev"));
     process.exit(1);

@@ -41,7 +41,7 @@ Portless fixes all of this by giving each dev server a stable, named `.localhost
 
 ## Usage
 
-````bash
+```bash
 # Basic
 portless myapp next dev
 # -> http://myapp.localhost:1355
@@ -53,6 +53,8 @@ portless api.myapp pnpm start
 portless docs.myapp next dev
 # -> http://docs.myapp.localhost:1355
 
+```
+
 ### Branch-based subdomains
 
 Useful for git worktrees or multiple checkouts running in parallel (especially with AI agents):
@@ -63,9 +65,7 @@ portless --branches myapp next dev
 
 # On main/master/dev -> myapp.localhost:1355
 # On feat/auth -> feat-auth.myapp.localhost:1355
-````
-
-````
+```
 
 ### In package.json
 
@@ -75,7 +75,7 @@ portless --branches myapp next dev
     "dev": "portless myapp next dev"
   }
 }
-````
+```
 
 The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
 

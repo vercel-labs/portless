@@ -443,14 +443,15 @@ export function getCurrentBranch(cwd?: string): string | null {
 
 /**
  * Format a branch name for use in a hostname.
- * Converts "feat/auth" -> "feat-auth", lowercase, removes invalid chars.
- * Allows underscores as they are valid in git branch names.
+ * Converts "feat/auth" -> "feat-auth", converts underscores to hyphens,
+ * lowercase, removes invalid chars.
  */
 export function formatBranchName(branch: string): string {
   return branch
     .toLowerCase()
+    .replace(/_/g, "-")
     .replace(/\//g, "-")
-    .replace(/[^a-z0-9_-]/g, "")
+    .replace(/[^a-z0-9-]/g, "")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 }

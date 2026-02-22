@@ -320,8 +320,8 @@ describe("formatBranchName", () => {
     expect(formatBranchName("feat-test-")).toBe("feat-test");
   });
 
-  it("handles branch names with underscores", () => {
-    expect(formatBranchName("feat_test")).toBe("feat_test");
+  it("converts underscores to hyphens", () => {
+    expect(formatBranchName("feat_test")).toBe("feat-test");
   });
 });
 
