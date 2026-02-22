@@ -353,6 +353,53 @@ export function spawnCommand(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Framework-aware flag injection
+// ---------------------------------------------------------------------------
+
+/**
+ * Frameworks that ignore the `PORT` env var. Maps command basename to the
+ * flags needed. `strictPort` indicates whether `--strictPort` is supported
+ * (prevents the framework from silently picking a different port).
+ *
+ * SvelteKit is not listed because its dev server is Vite under the hood,
+ * so the `vite` entry already covers it.
+ */
+const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
+  vite: { strictPort: true },
+  "react-router": { strictPort: true },
+  astro: { strictPort: false },
+  ng: { strictPort: false },
+};
+
+/**
+ * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
+ * mutate the array in-place to append the correct CLI flags so the app
+ * listens on the expected port and address.
+ *
+ * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
+ * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ */
+export function injectFrameworkFlags(commandArgs: string[], port: number): void {
+  const cmd = commandArgs[0];
+  if (!cmd) return;
+
+  const basename = path.basename(cmd);
+  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  if (!framework) return;
+
+  if (!commandArgs.includes("--port")) {
+    commandArgs.push("--port", port.toString());
+    if (framework.strictPort) {
+      commandArgs.push("--strictPort");
+    }
+  }
+
+  if (!commandArgs.includes("--host")) {
+    commandArgs.push("--host", "127.0.0.1");
+  }
+}
+
 /**
  * Prompt the user for input via readline. Returns empty string if stdin closes.
  */

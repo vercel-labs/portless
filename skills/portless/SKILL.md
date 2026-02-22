@@ -83,7 +83,7 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 
 `.localhost` domains resolve to `127.0.0.1` natively on macOS and Linux -- no `/etc/hosts` editing needed.
 
-Most frameworks (Next.js, Vite, Express, etc.) respect the `PORT` env var automatically.
+Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects the correct `--port` and `--host` CLI flags.
 
 ### State directory
 
@@ -150,7 +150,9 @@ portless proxy start -p 8080
 
 ### Framework not respecting PORT
 
-Some frameworks need explicit configuration to use the `PORT` env var. Examples:
+Portless auto-injects `--port` and `--host` flags for frameworks that ignore the `PORT` env var: **Vite**, **Astro**, **React Router**, and **Angular**. SvelteKit uses Vite internally and is handled automatically.
+
+For other frameworks that don't read `PORT`, pass the port manually:
 
 - **Webpack Dev Server**: use `--port $PORT`
 - **Custom servers**: read `process.env.PORT` and listen on it

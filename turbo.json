@@ -12,6 +12,10 @@
     "test": {
       "dependsOn": ["build"]
     },
+    "test:e2e": {
+      "dependsOn": ["portless#build"],
+      "cache": false
+    },
     "test:coverage": {
       "dependsOn": ["build"],
       "outputs": ["coverage/**"]

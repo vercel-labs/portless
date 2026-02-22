@@ -16,6 +16,7 @@ import {
   findFreePort,
   findPidOnPort,
   getDefaultPort,
+  injectFrameworkFlags,
   isHttpsEnvEnabled,
   isProxyRunning,
   prompt,
@@ -391,11 +392,19 @@ async function runApp(
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
 
+  // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
+  injectFrameworkFlags(commandArgs, port);
+
   // Run the command
-  console.log(chalk.gray(`Running: PORT=${port} ${commandArgs.join(" ")}\n`));
+  console.log(chalk.gray(`Running: PORT=${port} HOST=127.0.0.1 ${commandArgs.join(" ")}\n`));
 
   spawnCommand(commandArgs, {
-    env: { ...process.env, PORT: port.toString() },
+    env: {
+      ...process.env,
+      PORT: port.toString(),
+      HOST: "127.0.0.1",
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: ".localhost",
+    },
     onCleanup: () => {
       try {
         store.removeRoute(hostname);
@@ -458,6 +467,7 @@ ${chalk.bold("Examples:")}
   portless proxy start                # Start proxy on port 1355
   portless proxy start --https        # Start with HTTPS/2 (faster page loads)
   portless myapp next dev             # -> http://myapp.localhost:1355
+  portless myapp vite dev             # -> http://myapp.localhost:1355
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
 
 ${chalk.bold("In package.json:")}
@@ -472,6 +482,8 @@ ${chalk.bold("How it works:")}
   2. Run your apps - they auto-start the proxy and register automatically
   3. Access via http://<name>.localhost:1355
   4. .localhost domains auto-resolve to 127.0.0.1
+  5. Frameworks that ignore PORT (Vite, Astro, React Router, Angular) get
+     --port and --host flags injected automatically
 
 ${chalk.bold("HTTP/2 + HTTPS:")}
   Use --https for HTTP/2 multiplexing (faster dev server page loads).

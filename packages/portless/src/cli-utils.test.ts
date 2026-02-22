@@ -9,6 +9,7 @@ import {
   USER_STATE_DIR,
   findFreePort,
   getDefaultPort,
+  injectFrameworkFlags,
   isProxyRunning,
   resolveStateDir,
 } from "./cli-utils.js";
@@ -180,5 +181,91 @@ describe("getDefaultPort", () => {
   it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is empty", () => {
     process.env.PORTLESS_PORT = "";
     expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+  });
+});
+
+describe("injectFrameworkFlags", () => {
+  it("injects --port, --strictPort, and --host for vite command", () => {
+    const args = ["vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "dev", "--port", "4567", "--strictPort", "--host", "127.0.0.1"]);
+  });
+
+  it("injects flags for absolute/relative vite paths", () => {
+    const args = ["./node_modules/.bin/vite", "dev"];
+    injectFrameworkFlags(args, 4000);
+    expect(args).toEqual([
+      "./node_modules/.bin/vite",
+      "dev",
+      "--port",
+      "4000",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("skips --port injection when --port is already present", () => {
+    const args = ["vite", "dev", "--port", "3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "127.0.0.1"]);
+  });
+
+  it("skips --host injection when --host is already present", () => {
+    const args = ["vite", "dev", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "dev", "--host", "0.0.0.0", "--port", "4567", "--strictPort"]);
+  });
+
+  it("skips all injection when both --port and --host are present", () => {
+    const args = ["vite", "dev", "--port", "3000", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
+  });
+
+  it("injects for react-router with --strictPort", () => {
+    const args = ["react-router", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "react-router",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects for astro without --strictPort", () => {
+    const args = ["astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects for ng without --strictPort", () => {
+    const args = ["ng", "serve"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["ng", "serve", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("does not inject for frameworks that read PORT", () => {
+    const nextArgs = ["next", "dev"];
+    injectFrameworkFlags(nextArgs, 4567);
+    expect(nextArgs).toEqual(["next", "dev"]);
+
+    const nuxtArgs = ["nuxt", "dev"];
+    injectFrameworkFlags(nuxtArgs, 4567);
+    expect(nuxtArgs).toEqual(["nuxt", "dev"]);
+
+    const nodeArgs = ["node", "server.js"];
+    injectFrameworkFlags(nodeArgs, 4567);
+    expect(nodeArgs).toEqual(["node", "server.js"]);
+  });
+
+  it("does nothing for empty args", () => {
+    const args: string[] = [];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([]);
   });
 });

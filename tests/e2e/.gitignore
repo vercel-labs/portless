@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.venv/
+fixtures/**/node_modules/
+fixtures/**/.next/
+fixtures/**/.astro/
+fixtures/**/.nuxt/
+fixtures/**/.output/
+fixtures/**/.angular/
+fixtures/**/.react-router/
+fixtures/**/.svelte-kit/
+**/next-env.d.ts
