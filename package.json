@@ -11,6 +11,7 @@
     "lint": "turbo lint",
     "lint:fix": "turbo lint:fix",
     "test": "turbo test",
+    "test:e2e": "turbo test:e2e",
     "test:coverage": "turbo test:coverage",
     "test:watch": "turbo test:watch",
     "typecheck": "turbo typecheck",

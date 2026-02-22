@@ -358,13 +358,24 @@ export function spawnCommand(
 // ---------------------------------------------------------------------------
 
 /**
+ * Frameworks that ignore the `PORT` env var. Maps command basename to the
+ * flags needed. `strictPort` indicates whether `--strictPort` is supported
+ * (prevents the framework from silently picking a different port).
+ */
+const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
+  vite: { strictPort: true },
+  "react-router": { strictPort: true },
+  astro: { strictPort: false },
+  ng: { strictPort: false },
+};
+
+/**
  * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
  * mutate the array in-place to append the correct CLI flags so the app
  * listens on the expected port and address.
  *
- * Vite: ignores PORT env var, binds to `localhost` which may resolve to
- * IPv6 `::1`. The portless proxy connects to 127.0.0.1 (IPv4), so we
- * inject `--port`, `--strictPort`, and `--host 127.0.0.1`.
+ * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
+ * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
  *
  * Returns true if any flags were injected.
  */
@@ -373,12 +384,16 @@ export function injectPortFlag(commandArgs: string[], port: number): boolean {
   if (!cmd) return false;
 
   const basename = path.basename(cmd);
-  if (basename !== "vite") return false;
+  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  if (!framework) return false;
 
   let injected = false;
 
   if (!commandArgs.includes("--port")) {
-    commandArgs.push("--port", port.toString(), "--strictPort");
+    commandArgs.push("--port", port.toString());
+    if (framework.strictPort) {
+      commandArgs.push("--strictPort");
+    }
     injected = true;
   }
 

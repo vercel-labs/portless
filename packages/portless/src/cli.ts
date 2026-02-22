@@ -402,6 +402,7 @@ async function runApp(
     env: {
       ...process.env,
       PORT: port.toString(),
+      HOST: "127.0.0.1",
       __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: ".localhost",
     },
     onCleanup: () => {

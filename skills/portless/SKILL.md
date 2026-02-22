@@ -83,7 +83,7 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 
 `.localhost` domains resolve to `127.0.0.1` natively on macOS and Linux -- no `/etc/hosts` editing needed.
 
-Most frameworks (Next.js, Express, etc.) respect the `PORT` env var automatically. For frameworks that don't (like Vite), portless auto-injects the correct `--port` CLI flag.
+Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects the correct `--port` and `--host` CLI flags.
 
 ### State directory
 

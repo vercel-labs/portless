@@ -223,16 +223,36 @@ describe("injectPortFlag", () => {
     expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
   });
 
-  it("does not inject for non-vite commands", () => {
-    const args = ["next", "dev"];
-    expect(injectPortFlag(args, 4567)).toBe(false);
-    expect(args).toEqual(["next", "dev"]);
+  it("injects for react-router with --strictPort", () => {
+    const args = ["react-router", "dev"];
+    expect(injectPortFlag(args, 4567)).toBe(true);
+    expect(args).toEqual([
+      "react-router",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
   });
 
-  it("does not inject for node commands", () => {
-    const args = ["node", "server.js"];
-    expect(injectPortFlag(args, 4567)).toBe(false);
-    expect(args).toEqual(["node", "server.js"]);
+  it("injects for astro without --strictPort", () => {
+    const args = ["astro", "dev"];
+    expect(injectPortFlag(args, 4567)).toBe(true);
+    expect(args).toEqual(["astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects for ng without --strictPort", () => {
+    const args = ["ng", "serve"];
+    expect(injectPortFlag(args, 4567)).toBe(true);
+    expect(args).toEqual(["ng", "serve", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("does not inject for frameworks that read PORT", () => {
+    expect(injectPortFlag(["next", "dev"], 4567)).toBe(false);
+    expect(injectPortFlag(["nuxt", "dev"], 4567)).toBe(false);
+    expect(injectPortFlag(["node", "server.js"], 4567)).toBe(false);
   });
 
   it("returns false for empty args", () => {

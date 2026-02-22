@@ -7,7 +7,19 @@ export default tseslint.config(
   ...tseslint.configs.recommended,
   prettierConfig,
   {
-    ignores: ["**/dist/", "**/node_modules/", ".pnpm-store/", "**/.next/", "**/next-env.d.ts"],
+    ignores: [
+      "**/dist/",
+      "**/node_modules/",
+      ".pnpm-store/",
+      "**/.next/",
+      "**/next-env.d.ts",
+      "**/.react-router/",
+      "**/.svelte-kit/",
+      "**/.astro/",
+      "**/.nuxt/",
+      "**/.angular/",
+      "**/.output/",
+    ],
   },
   {
     rules: {

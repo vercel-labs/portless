@@ -84,7 +84,7 @@ flowchart TD
 2. **Run apps** -- `portless <name> <command>` assigns a free port and registers with the proxy
 3. **Access via URL** -- `http://<name>.localhost:1355` routes through the proxy to your app
 
-Apps are assigned a random port (4000-4999) via the `PORT` environment variable. Most frameworks (Next.js, Express, etc.) respect this automatically. For frameworks that don't read `PORT` (like Vite), portless auto-injects the correct `--port` flag.
+Apps are assigned a random port (4000-4999) via the `PORT` and `HOST` environment variables. Most frameworks (Next.js, Express, Nuxt, etc.) respect these automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects the correct `--port` and `--host` flags.
 
 ## HTTP/2 + HTTPS
 
