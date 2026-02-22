@@ -1,5 +1,6 @@
 node_modules/
 dist/
+.venv/
 fixtures/**/node_modules/
 fixtures/**/.next/
 fixtures/**/.astro/

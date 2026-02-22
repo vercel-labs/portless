@@ -8,6 +8,10 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../../../packages/portless/dist/cli.js");
 const E2E_NODE_MODULES = path.resolve(__dirname, "../node_modules");
+const VENV_DIR = path.resolve(__dirname, "../.venv");
+
+/** Path to the Python binary inside the e2e venv. */
+export const PYTHON_BIN = path.join(VENV_DIR, "bin", "python3");
 
 /** Kill any process listening on the given TCP port (skips our own PID). */
 function killPort(port: number): void {

@@ -160,6 +160,9 @@ importers:
       '@angular/platform-browser-dynamic':
         specifier: ^21.1.5
         version: 21.1.5(@angular/common@21.1.5(@angular/core@21.1.5(@angular/compiler@21.1.5)(rxjs@7.8.2)(zone.js@0.16.1))(rxjs@7.8.2))(@angular/compiler@21.1.5)(@angular/core@21.1.5(@angular/compiler@21.1.5)(rxjs@7.8.2)(zone.js@0.16.1))(@angular/platform-browser@21.1.5(@angular/common@21.1.5(@angular/core@21.1.5(@angular/compiler@21.1.5)(rxjs@7.8.2)(zone.js@0.16.1))(rxjs@7.8.2))(@angular/core@21.1.5(@angular/compiler@21.1.5)(rxjs@7.8.2)(zone.js@0.16.1)))
+      '@hono/node-server':
+        specifier: ^1.19.9
+        version: 1.19.9(hono@4.12.1)
       '@react-router/dev':
         specifier: ^7.13.0
         version: 7.13.0(@types/node@20.19.30)(jiti@2.6.1)(lightningcss@1.31.1)(react-router@7.13.0(react-dom@19.2.4(react@19.2.4))(react@19.2.4))(sass@1.97.1)(terser@5.46.0)(typescript@5.9.3)(vite@7.3.1(@types/node@20.19.30)(jiti@2.6.1)(lightningcss@1.31.1)(sass@1.97.1)(terser@5.46.0)(yaml@2.8.2))(yaml@2.8.2)
@@ -181,6 +184,9 @@ importers:
       astro:
         specifier: ^5.17.3
         version: 5.17.3(@types/node@20.19.30)(@upstash/redis@1.36.2)(db0@0.3.4)(ioredis@5.9.3)(jiti@2.6.1)(lightningcss@1.31.1)(rollup@4.57.0)(sass@1.97.1)(terser@5.46.0)(typescript@5.9.3)(yaml@2.8.2)
+      hono:
+        specifier: ^4.12.1
+        version: 4.12.1
       next:
         specifier: ^16.1.6
         version: 16.1.6(@babel/core@7.29.0)(@opentelemetry/api@1.9.0)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(sass@1.97.1)

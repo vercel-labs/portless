@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "test": "echo 'use test:e2e instead'",
-    "test:e2e": "vitest run"
+    "test:e2e": "vitest run",
+    "setup:python": "python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
   },
   "devDependencies": {
     "@angular/build": "^21.1.4",
@@ -14,6 +15,7 @@
     "@angular/core": "^21.1.5",
     "@angular/platform-browser": "^21.1.5",
     "@angular/platform-browser-dynamic": "^21.1.5",
+    "@hono/node-server": "^1.19.9",
     "@react-router/dev": "^7.13.0",
     "@react-router/node": "^7.13.0",
     "@sveltejs/adapter-auto": "^7.0.1",
@@ -21,6 +23,7 @@
     "@types/node": "^20.11.0",
     "@types/react": "^19",
     "astro": "^5.17.3",
+    "hono": "^4.12.1",
     "next": "^16.1.6",
     "nuxt": "^4.3.1",
     "react": "^19",
