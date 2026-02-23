@@ -328,12 +328,79 @@ function loginKeychainPath(): string {
 }
 
 /**
+ * Linux distro CA trust configuration.
+ * Each entry maps a distro family to its CA certificate directory and update command.
+ */
+interface LinuxCATrustConfig {
+  certDir: string;
+  updateCommand: string;
+}
+
+const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
+  debian: {
+    certDir: "/usr/local/share/ca-certificates",
+    updateCommand: "update-ca-certificates",
+  },
+  arch: {
+    certDir: "/etc/ca-certificates/trust-source/anchors",
+    updateCommand: "update-ca-trust",
+  },
+  fedora: {
+    certDir: "/etc/pki/ca-trust/source/anchors",
+    updateCommand: "update-ca-trust",
+  },
+  suse: {
+    certDir: "/etc/pki/trust/anchors",
+    updateCommand: "update-ca-certificates",
+  },
+};
+
+/**
+ * Detect the Linux distro family by reading /etc/os-release.
+ * Returns the matching config key, or undefined if unrecognized.
+ */
+function detectLinuxDistro(): string | undefined {
+  try {
+    const osRelease = fs.readFileSync("/etc/os-release", "utf-8").toLowerCase();
+    // ID_LIKE often lists parent distros (e.g., "ID_LIKE=arch" or "ID_LIKE=debian")
+    if (osRelease.includes("arch")) return "arch";
+    if (osRelease.includes("fedora") || osRelease.includes("rhel") || osRelease.includes("centos"))
+      return "fedora";
+    if (osRelease.includes("suse")) return "suse";
+    if (osRelease.includes("debian") || osRelease.includes("ubuntu")) return "debian";
+  } catch {
+    // /etc/os-release missing
+  }
+
+  // Fallback: probe for known update commands
+  for (const [distro, config] of Object.entries(LINUX_CA_TRUST_CONFIGS)) {
+    try {
+      execFileSync("which", [config.updateCommand], { stdio: "pipe", timeout: 5000 });
+      if (fs.existsSync(path.dirname(config.certDir))) return distro;
+    } catch {
+      // Not found, try next
+    }
+  }
+
+  return undefined;
+}
+
+/**
+ * Get the CA trust config for the current Linux distro.
+ * Falls back to Debian layout if detection fails.
+ */
+function getLinuxCATrustConfig(): LinuxCATrustConfig {
+  const distro = detectLinuxDistro();
+  return LINUX_CA_TRUST_CONFIGS[distro ?? "debian"];
+}
+
+/**
  * Check if the CA is trusted on Linux.
- * Uses the Debian/Ubuntu path (/usr/local/share/ca-certificates/).
- * Fedora/RHEL use /etc/pki/ca-trust/source/anchors/ which is not supported yet.
+ * Supports Debian/Ubuntu, Arch, Fedora/RHEL, and openSUSE.
  */
 function isCATrustedLinux(stateDir: string): boolean {
-  const systemCertPath = `/usr/local/share/ca-certificates/portless-ca.crt`;
+  const config = getLinuxCATrustConfig();
+  const systemCertPath = path.join(config.certDir, "portless-ca.crt");
   if (!fileExists(systemCertPath)) return false;
 
   // Compare our CA with the installed one
@@ -549,9 +616,10 @@ export function createSNICallback(
  * Add the portless CA to the system trust store.
  *
  * On macOS, adds to the login keychain (no sudo required -- the OS shows a
- * GUI authorization prompt to confirm). On Linux, copies to
- * /usr/local/share/ca-certificates and runs update-ca-certificates (requires
- * sudo).
+ * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
+ * CA directory and runs the appropriate update command (requires sudo).
+ *
+ * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
  */
 export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
@@ -569,9 +637,13 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       );
       return { trusted: true };
     } else if (process.platform === "linux") {
-      const dest = "/usr/local/share/ca-certificates/portless-ca.crt";
+      const config = getLinuxCATrustConfig();
+      if (!fs.existsSync(config.certDir)) {
+        fs.mkdirSync(config.certDir, { recursive: true });
+      }
+      const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
-      execFileSync("update-ca-certificates", [], { stdio: "pipe", timeout: 30_000 });
+      execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
       return { trusted: true };
     }
     return { trusted: false, error: `Unsupported platform: ${process.platform}` };
