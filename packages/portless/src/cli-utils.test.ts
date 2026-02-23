@@ -249,6 +249,18 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["ng", "serve", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
+  it("injects for react-native without --strictPort", () => {
+    const args = ["react-native", "start"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["react-native", "start", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects for expo without --strictPort", () => {
+    const args = ["expo", "start"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
+  });
+
   it("does not inject for frameworks that read PORT", () => {
     const nextArgs = ["next", "dev"];
     injectFrameworkFlags(nextArgs, 4567);
