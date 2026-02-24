@@ -177,6 +177,23 @@ sudo portless trust
 
 This adds the portless local CA to your system trust store. After that, restart the browser.
 
+### Proxy loop (508 Loop Detected)
+
+If your dev server proxies requests to another portless app (e.g. Vite proxying `/api` to `api.myapp.localhost:1355`), the proxy must rewrite the `Host` header. Without this, portless routes the request back to the original app, creating an infinite loop.
+
+Fix: set `changeOrigin: true` in the proxy config (Vite, webpack-dev-server, etc.):
+
+```ts
+// vite.config.ts
+proxy: {
+  "/api": {
+    target: "http://api.myapp.localhost:1355",
+    changeOrigin: true,
+    ws: true,
+  },
+}
+```
+
 ### Requirements
 
 - Node.js 20+
