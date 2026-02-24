@@ -50,6 +50,22 @@ const SERVER_CERT_FILE = "server.pem";
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * chmod wrapper that is a no-op on Windows (which ignores POSIX permissions).
+ */
+function chmodSafe(filePath: string, mode: number): void {
+  if (process.platform === "win32") return;
+  fs.chmodSync(filePath, mode);
+}
+
+/**
+ * Async chmod wrapper that is a no-op on Windows.
+ */
+async function chmodSafeAsync(filePath: string, mode: number): Promise<void> {
+  if (process.platform === "win32") return;
+  await fs.promises.chmod(filePath, mode);
+}
+
 function fileExists(filePath: string): boolean {
   try {
     fs.accessSync(filePath, fs.constants.R_OK);
@@ -88,7 +104,7 @@ function openssl(args: string[], options?: { input?: string }): string {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions).`
+      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions; on Windows it is bundled with Git for Windows).`
     );
   }
 }
@@ -110,7 +126,7 @@ async function opensslAsync(args: string[]): Promise<string> {
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions).`
+      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions; on Windows it is bundled with Git for Windows).`
     );
   }
 }
@@ -149,8 +165,8 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
     "keyUsage=critical,keyCertSign,cRLSign",
   ]);
 
-  fs.chmodSync(keyPath, 0o600);
-  fs.chmodSync(certPath, 0o644);
+  chmodSafe(keyPath, 0o600);
+  chmodSafe(certPath, 0o644);
   fixOwnership(keyPath, certPath);
 
   return { certPath, keyPath };
@@ -218,8 +234,8 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
     }
   }
 
-  fs.chmodSync(serverKeyPath, 0o600);
-  fs.chmodSync(serverCertPath, 0o644);
+  chmodSafe(serverKeyPath, 0o600);
+  chmodSafe(serverCertPath, 0o644);
   fixOwnership(serverKeyPath, serverCertPath);
 
   return { certPath: serverCertPath, keyPath: serverKeyPath };
@@ -274,6 +290,8 @@ export function isCATrusted(stateDir: string): boolean {
 
   if (process.platform === "darwin") {
     return isCATrustedMacOS(caCertPath);
+  } else if (process.platform === "win32") {
+    return isCATrustedWindows(caCertPath);
   } else if (process.platform === "linux") {
     return isCATrustedLinux(stateDir);
   }
@@ -303,6 +321,33 @@ function isCATrustedMacOS(caCertPath: string): boolean {
       }
     }
     return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check if the CA is trusted on Windows.
+ * Uses certutil to search the current user's Root certificate store.
+ */
+function isCATrustedWindows(caCertPath: string): boolean {
+  try {
+    // Extract the SHA-1 fingerprint of our CA
+    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
+      .trim()
+      .replace(/^.*=/, "")
+      .replace(/:/g, "")
+      .toLowerCase();
+
+    // certutil -store -user Root lists all certs in the user's trusted root store
+    const result = execFileSync("certutil", ["-store", "-user", "Root"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    // certutil outputs fingerprints as "Cert Hash(sha1): xx xx xx xx ..."
+    const normalized = result.replace(/\s/g, "").toLowerCase();
+    return normalized.includes(fingerprint);
   } catch {
     return false;
   }
@@ -440,8 +485,8 @@ async function generateHostCertAsync(
     }
   }
 
-  await fs.promises.chmod(keyPath, 0o600);
-  await fs.promises.chmod(certPath, 0o644);
+  await chmodSafeAsync(keyPath, 0o600);
+  await chmodSafeAsync(certPath, 0o644);
   fixOwnership(keyPath, certPath);
 
   return { certPath, keyPath };
@@ -568,6 +613,14 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
         { stdio: "pipe", timeout: 30_000 }
       );
       return { trusted: true };
+    } else if (process.platform === "win32") {
+      // certutil -addstore -user Root adds to the current user's trusted root
+      // store. Windows will show a security prompt to confirm.
+      execFileSync("certutil", ["-addstore", "-user", "Root", caCertPath], {
+        stdio: "pipe",
+        timeout: 30_000,
+      });
+      return { trusted: true };
     } else if (process.platform === "linux") {
       const dest = "/usr/local/share/ca-certificates/portless-ca.crt";
       fs.copyFileSync(caCertPath, dest);
@@ -580,12 +633,14 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
     if (
       message.includes("authorization") ||
       message.includes("permission") ||
-      message.includes("EACCES")
+      message.includes("EACCES") ||
+      message.includes("Access is denied")
     ) {
-      return {
-        trusted: false,
-        error: "Permission denied. Try: sudo portless trust",
-      };
+      const hint =
+        process.platform === "win32"
+          ? "Permission denied. Try running as Administrator."
+          : "Permission denied. Try: sudo portless trust";
+      return { trusted: false, error: hint };
     }
     return { trusted: false, error: message };
   }

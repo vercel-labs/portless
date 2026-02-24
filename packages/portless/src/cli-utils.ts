@@ -18,8 +18,11 @@ export const DEFAULT_PROXY_PORT = 1355;
 /** Ports below this threshold require root/sudo to bind. */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
 
-/** System-wide state directory (used when proxy needs sudo). */
-export const SYSTEM_STATE_DIR = "/tmp/portless";
+/** Whether the current platform is Windows. */
+export const IS_WINDOWS = process.platform === "win32";
+
+/** System-wide state directory (used when proxy needs sudo / shared state). */
+export const SYSTEM_STATE_DIR = IS_WINDOWS ? path.join(os.tmpdir(), "portless") : "/tmp/portless";
 
 /** Per-user state directory (used when proxy runs without sudo). */
 export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
@@ -36,8 +39,8 @@ const RANDOM_PORT_ATTEMPTS = 50;
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
 
-/** Timeout (ms) for lsof when finding a PID on a port. */
-const LSOF_TIMEOUT_MS = 5000;
+/** Timeout (ms) for lsof/netstat when finding a PID on a port. */
+const PID_LOOKUP_TIMEOUT_MS = 5000;
 
 /** Maximum poll attempts when waiting for the proxy to become ready. */
 export const WAIT_FOR_PROXY_MAX_ATTEMPTS = 20;
@@ -78,12 +81,15 @@ export function getDefaultPort(): number {
 
 /**
  * Determine the state directory for a given proxy port.
- * Privileged ports (< 1024) use the system dir (/tmp/portless) so both
- * root and non-root processes can share state.  Unprivileged ports use
+ * On Unix, privileged ports (< 1024) use the system dir (/tmp/portless) so
+ * both root and non-root processes can share state.  Unprivileged ports use
  * the user's home directory (~/.portless).
+ * On Windows, privileged ports are not a concern (no sudo), so the user
+ * directory is always used.
  */
 export function resolveStateDir(port: number): string {
   if (process.env.PORTLESS_STATE_DIR) return process.env.PORTLESS_STATE_DIR;
+  if (IS_WINDOWS) return USER_STATE_DIR;
   return port < PRIVILEGED_PORT_THRESHOLD ? SYSTEM_STATE_DIR : USER_STATE_DIR;
 }
 
@@ -257,14 +263,30 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
 
 /**
  * Try to find the PID of a process listening on the given TCP port.
- * Uses lsof, which is available on macOS and most Linux distributions.
+ * Uses lsof on macOS/Linux and netstat on Windows.
  * Returns null if the PID cannot be determined.
  */
 export function findPidOnPort(port: number): number | null {
   try {
+    if (IS_WINDOWS) {
+      // netstat -ano outputs lines like:
+      //   TCP    0.0.0.0:1355    0.0.0.0:0    LISTENING    12345
+      // execSync runs through a shell by default, so pipes work
+      const output = execSync(`netstat -ano | findstr :${port} | findstr LISTENING`, {
+        encoding: "utf-8",
+        timeout: PID_LOOKUP_TIMEOUT_MS,
+      });
+      const lines = output.trim().split("\n");
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parseInt(parts[parts.length - 1], 10);
+        if (!isNaN(pid) && pid > 0) return pid;
+      }
+      return null;
+    }
     const output = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, {
       encoding: "utf-8",
-      timeout: LSOF_TIMEOUT_MS,
+      timeout: PID_LOOKUP_TIMEOUT_MS,
     });
     // lsof may return multiple PIDs (one per line); take the first
     const pid = parseInt(output.trim().split("\n")[0], 10);
@@ -307,6 +329,9 @@ export function spawnCommand(
   const child = spawn(commandArgs[0], commandArgs.slice(1), {
     stdio: "inherit",
     env: options?.env,
+    // On Windows, npm/pnpm/bun packages install as .cmd batch files.
+    // shell: true is required for spawn to find and execute them.
+    shell: IS_WINDOWS,
   });
 
   let exiting = false;

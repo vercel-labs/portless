@@ -11,6 +11,7 @@ import { createProxyServer } from "./proxy.js";
 import { formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { FILE_MODE, RouteStore } from "./routes.js";
 import {
+  IS_WINDOWS,
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
   findFreePort,
@@ -105,12 +106,20 @@ function startProxyServer(
       console.error(chalk.blue("Stop the existing proxy first:"));
       console.error(chalk.cyan("  portless proxy stop"));
       console.error(chalk.blue("Or check what is using the port:"));
-      console.error(chalk.cyan(`  lsof -ti tcp:${proxyPort}`));
+      console.error(
+        chalk.cyan(
+          IS_WINDOWS ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+        )
+      );
     } else if (err.code === "EACCES") {
       console.error(chalk.red(`Permission denied for port ${proxyPort}.`));
-      console.error(chalk.blue("Either run with sudo:"));
-      console.error(chalk.cyan("  sudo portless proxy start -p 80"));
-      console.error(chalk.blue("Or use a non-privileged port (no sudo needed):"));
+      if (IS_WINDOWS) {
+        console.error(chalk.blue("Try running as Administrator, or use the default port:"));
+      } else {
+        console.error(chalk.blue("Either run with sudo:"));
+        console.error(chalk.cyan("  sudo portless proxy start -p 80"));
+        console.error(chalk.blue("Or use a non-privileged port (no sudo needed):"));
+      }
       console.error(chalk.cyan("  portless proxy start"));
     } else {
       console.error(chalk.red(`Proxy error: ${err.message}`));
@@ -166,8 +175,8 @@ function startProxyServer(
 
 async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
-  const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
-  const sudoHint = needsSudo ? "sudo " : "";
+  const needsSudo = !IS_WINDOWS && proxyPort < PRIVILEGED_PORT_THRESHOLD;
+  const elevateHint = IS_WINDOWS ? "" : needsSudo ? "sudo " : "";
 
   if (!fs.existsSync(pidPath)) {
     // PID file is missing -- check whether something is still listening
@@ -185,17 +194,27 @@ async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Pr
           console.log(chalk.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
-            console.error(chalk.red("Permission denied. The proxy was started with sudo."));
-            console.error(chalk.blue("Stop it with:"));
-            console.error(chalk.cyan("  sudo portless proxy stop"));
+            if (IS_WINDOWS) {
+              console.error(chalk.red("Permission denied. Try running as Administrator."));
+            } else {
+              console.error(chalk.red("Permission denied. The proxy was started with sudo."));
+              console.error(chalk.blue("Stop it with:"));
+              console.error(chalk.cyan("  sudo portless proxy stop"));
+            }
           } else {
             const message = err instanceof Error ? err.message : String(err);
             console.error(chalk.red(`Failed to stop proxy: ${message}`));
             console.error(chalk.blue("Check if the process is still running:"));
-            console.error(chalk.cyan(`  lsof -ti tcp:${proxyPort}`));
+            console.error(
+              chalk.cyan(
+                IS_WINDOWS
+                  ? `  netstat -ano | findstr :${proxyPort}`
+                  : `  lsof -ti tcp:${proxyPort}`
+              )
+            );
           }
         }
-      } else if (process.getuid?.() !== 0) {
+      } else if (!IS_WINDOWS && process.getuid?.() !== 0) {
         // Not running as root -- lsof likely cannot see root-owned processes
         console.error(chalk.red("Cannot identify the process. It may be running as root."));
         console.error(chalk.blue("Try stopping with sudo:"));
@@ -203,7 +222,13 @@ async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Pr
       } else {
         console.error(chalk.red(`Could not identify the process on port ${proxyPort}.`));
         console.error(chalk.blue("Try manually:"));
-        console.error(chalk.cyan(`  sudo kill "$(lsof -ti tcp:${proxyPort})"`));
+        console.error(
+          chalk.cyan(
+            IS_WINDOWS
+              ? `  taskkill /F /PID <pid>  (find PID with: netstat -ano | findstr :${proxyPort})`
+              : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
+          )
+        );
       }
     } else {
       console.log(chalk.yellow("Proxy is not running."));
@@ -256,14 +281,22 @@ async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Pr
     console.log(chalk.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      console.error(chalk.red("Permission denied. The proxy was started with sudo."));
-      console.error(chalk.blue("Stop it with:"));
-      console.error(chalk.cyan(`  ${sudoHint}portless proxy stop`));
+      if (IS_WINDOWS) {
+        console.error(chalk.red("Permission denied. Try running as Administrator."));
+      } else {
+        console.error(chalk.red("Permission denied. The proxy was started with sudo."));
+        console.error(chalk.blue("Stop it with:"));
+        console.error(chalk.cyan(`  ${elevateHint}portless proxy stop`));
+      }
     } else {
       const message = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Failed to stop proxy: ${message}`));
       console.error(chalk.blue("Check if the process is still running:"));
-      console.error(chalk.cyan(`  lsof -ti tcp:${proxyPort}`));
+      console.error(
+        chalk.cyan(
+          IS_WINDOWS ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+        )
+      );
     }
   }
 }
@@ -303,7 +336,7 @@ async function runApp(
   // Check if proxy is running, auto-start if possible
   if (!(await isProxyRunning(proxyPort, tls))) {
     const defaultPort = getDefaultPort();
-    const needsSudo = defaultPort < PRIVILEGED_PORT_THRESHOLD;
+    const needsSudo = !IS_WINDOWS && defaultPort < PRIVILEGED_PORT_THRESHOLD;
     const wantHttps = isHttpsEnvEnabled();
 
     if (needsSudo) {
@@ -646,8 +679,8 @@ ${chalk.bold("Usage: portless proxy <command>")}
       return;
     }
 
-    // Check if running as root (only required for privileged ports)
-    if (proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
+    // Check if running as root (only required for privileged ports on Unix)
+    if (!IS_WINDOWS && proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
       console.error(chalk.red(`Error: Port ${proxyPort} requires sudo.`));
       console.error(chalk.blue("Either run with sudo:"));
       console.error(chalk.cyan("  sudo portless proxy start -p 80"));

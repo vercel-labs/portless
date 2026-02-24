@@ -109,17 +109,26 @@ describe("isProxyRunning", () => {
 });
 
 describe("resolveStateDir", () => {
-  it("returns system dir for privileged ports", () => {
-    expect(resolveStateDir(80)).toBe(SYSTEM_STATE_DIR);
-    expect(resolveStateDir(443)).toBe(SYSTEM_STATE_DIR);
-    expect(resolveStateDir(1023)).toBe(SYSTEM_STATE_DIR);
-  });
+  if (process.platform === "win32") {
+    it("always returns user dir on Windows", () => {
+      expect(resolveStateDir(80)).toBe(USER_STATE_DIR);
+      expect(resolveStateDir(443)).toBe(USER_STATE_DIR);
+      expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
+      expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
+    });
+  } else {
+    it("returns system dir for privileged ports", () => {
+      expect(resolveStateDir(80)).toBe(SYSTEM_STATE_DIR);
+      expect(resolveStateDir(443)).toBe(SYSTEM_STATE_DIR);
+      expect(resolveStateDir(1023)).toBe(SYSTEM_STATE_DIR);
+    });
 
-  it("returns user dir for non-privileged ports", () => {
-    expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
-  });
+    it("returns user dir for non-privileged ports", () => {
+      expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
+      expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
+      expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
+    });
+  }
 });
 
 describe("constants", () => {
@@ -131,8 +140,12 @@ describe("constants", () => {
     expect(PRIVILEGED_PORT_THRESHOLD).toBe(1024);
   });
 
-  it("SYSTEM_STATE_DIR is /tmp/portless", () => {
-    expect(SYSTEM_STATE_DIR).toBe("/tmp/portless");
+  it("SYSTEM_STATE_DIR is a temp-based path", () => {
+    if (process.platform === "win32") {
+      expect(SYSTEM_STATE_DIR).toContain("portless");
+    } else {
+      expect(SYSTEM_STATE_DIR).toBe("/tmp/portless");
+    }
   });
 
   it("USER_STATE_DIR is in home directory", () => {
