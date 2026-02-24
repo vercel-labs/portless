@@ -21,6 +21,31 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 /**
+ * Bun currently has intermittent issues proxying WebSocket upgrades via
+ * http.request(). Use raw TCP tunneling there as a compatibility fallback.
+ */
+const USE_RAW_UPGRADE_PROXY = typeof (globalThis as { Bun?: unknown }).Bun !== "undefined";
+
+function sanitizeHeaderToken(value: string): string {
+  return value.replace(/[\r\n]+/g, " ");
+}
+
+function formatRawHeaderLines(headers: http.OutgoingHttpHeaders): string[] {
+  const lines: string[] = [];
+  for (const [rawKey, rawValue] of Object.entries(headers)) {
+    if (rawValue === undefined) continue;
+
+    const key = sanitizeHeaderToken(rawKey);
+    const values = Array.isArray(rawValue) ? rawValue : [rawValue];
+
+    for (const value of values) {
+      lines.push(`${key}: ${sanitizeHeaderToken(String(value))}`);
+    }
+  }
+  return lines;
+}
+
+/**
  * Get the effective host value from a request.
  * HTTP/2 uses the :authority pseudo-header; HTTP/1.1 uses Host.
  */
@@ -192,6 +217,37 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       if (key.startsWith(":")) {
         delete proxyReqHeaders[key];
       }
+    }
+
+    if (USE_RAW_UPGRADE_PROXY) {
+      const proxySocket = net.createConnection({ host: "127.0.0.1", port: route.port });
+
+      proxySocket.on("connect", () => {
+        const method = req.method || "GET";
+        const requestPath = req.url || "/";
+        const headerLines = formatRawHeaderLines(proxyReqHeaders);
+
+        const requestHead =
+          `${sanitizeHeaderToken(method)} ${sanitizeHeaderToken(requestPath)} HTTP/1.1\r\n` +
+          `${headerLines.join("\r\n")}\r\n\r\n`;
+
+        proxySocket.write(requestHead);
+        if (head.length > 0) {
+          proxySocket.write(head);
+        }
+
+        proxySocket.pipe(socket);
+        socket.pipe(proxySocket);
+      });
+
+      proxySocket.on("error", (err) => {
+        onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
+        socket.destroy();
+      });
+
+      socket.on("error", () => proxySocket.destroy());
+      socket.on("close", () => proxySocket.destroy());
+      return;
     }
 
     const proxyReq = http.request({
