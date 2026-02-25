@@ -52,6 +52,24 @@ function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<
   return headers;
 }
 
+/**
+ * Maximum number of hops allowed in X-Forwarded-For before treating the
+ * request as a proxy loop. A loop typically happens when a backend proxies
+ * back through portless without rewriting the Host header (e.g. Vite proxy
+ * without `changeOrigin: true`), causing an infinite Vite <-> portless cycle.
+ */
+const MAX_FORWARDED_HOPS = 10;
+
+/**
+ * Check if the request has been forwarded too many times, indicating a loop.
+ */
+function isProxyLoop(req: http.IncomingMessage): boolean {
+  const xff = req.headers["x-forwarded-for"];
+  if (!xff || typeof xff !== "string") return false;
+  const hops = xff.split(",").length;
+  return hops >= MAX_FORWARDED_HOPS;
+}
+
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
 export type ProxyServer = http.Server | net.Server;
 
@@ -80,6 +98,21 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     if (!host) {
       res.writeHead(400, { "Content-Type": "text/plain" });
       res.end("Missing Host header");
+      return;
+    }
+
+    if (isProxyLoop(req)) {
+      onError(
+        `Loop detected for ${host}: X-Forwarded-For has ${MAX_FORWARDED_HOPS}+ hops. ` +
+          `This usually means a backend is proxying back through portless without rewriting ` +
+          `the Host header. If you use Vite/webpack proxy, set changeOrigin: true.`
+      );
+      res.writeHead(508, { "Content-Type": "text/plain" });
+      res.end(
+        "508 Loop Detected: request has been forwarded too many times through the proxy. " +
+          "If your dev server proxies API requests to another portless app, make sure the " +
+          "proxy rewrites the Host header (e.g. set changeOrigin: true in Vite proxy config).\n"
+      );
       return;
     }
 
@@ -175,6 +208,16 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
     const routes = getRoutes();
     const host = getRequestHost(req).split(":")[0];
+
+    if (isProxyLoop(req)) {
+      onError(
+        `WebSocket loop detected for ${host}: X-Forwarded-For has ${MAX_FORWARDED_HOPS}+ hops. ` +
+          `Set changeOrigin: true in your proxy config.`
+      );
+      socket.destroy();
+      return;
+    }
+
     const route = routes.find((r) => r.hostname === host);
 
     if (!route) {

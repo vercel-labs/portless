@@ -169,6 +169,38 @@ pnpm typecheck        # Type-check all packages
 pnpm format           # Format all files with Prettier
 ```
 
+## Proxying Between Portless Apps
+
+If your frontend dev server (e.g. Vite, webpack) proxies API requests to another portless app, make sure the proxy rewrites the `Host` header. Without this, the proxy sends the **original** Host header, causing portless to route the request back to the frontend in an infinite loop.
+
+**Vite** (`vite.config.ts`):
+
+```ts
+server: {
+  proxy: {
+    "/api": {
+      target: "http://api.myapp.localhost:1355",
+      changeOrigin: true,  // Required: rewrites Host header to match target
+      ws: true,
+    },
+  },
+}
+```
+
+**webpack-dev-server** (`webpack.config.js`):
+
+```js
+devServer: {
+  proxy: [{
+    context: ["/api"],
+    target: "http://api.myapp.localhost:1355",
+    changeOrigin: true,  // Required: rewrites Host header to match target
+  }],
+}
+```
+
+Portless detects this misconfiguration and responds with `508 Loop Detected` along with a message pointing to this fix.
+
 ## Requirements
 
 - Node.js 20+
