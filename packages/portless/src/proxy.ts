@@ -53,22 +53,19 @@ function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<
 }
 
 /**
- * Maximum number of hops allowed in X-Forwarded-For before treating the
- * request as a proxy loop. A loop typically happens when a backend proxies
- * back through portless without rewriting the Host header (e.g. Vite proxy
- * without `changeOrigin: true`), causing an infinite Vite <-> portless cycle.
+ * Request header tracking how many times a request has passed through a
+ * portless proxy. Used to detect forwarding loops (e.g. a frontend dev
+ * server proxying back through portless without rewriting the Host header).
  */
-const MAX_FORWARDED_HOPS = 10;
+const PORTLESS_HOPS_HEADER = "x-portless-hops";
 
 /**
- * Check if the request has been forwarded too many times, indicating a loop.
+ * Maximum number of times a request may pass through the portless proxy
+ * before it is rejected as a loop. Two hops is normal when a frontend
+ * proxies API calls to a separate portless-managed backend; five gives
+ * comfortable headroom for multi-tier setups while catching loops quickly.
  */
-function isProxyLoop(req: http.IncomingMessage): boolean {
-  const xff = req.headers["x-forwarded-for"];
-  if (!xff || typeof xff !== "string") return false;
-  const hops = xff.split(",").length;
-  return hops >= MAX_FORWARDED_HOPS;
-}
+const MAX_PROXY_HOPS = 5;
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
 export type ProxyServer = http.Server | net.Server;
@@ -101,17 +98,25 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    if (isProxyLoop(req)) {
+    const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
+    if (hops >= MAX_PROXY_HOPS) {
       onError(
-        `Loop detected for ${host}: X-Forwarded-For has ${MAX_FORWARDED_HOPS}+ hops. ` +
+        `Loop detected for ${host}: request has passed through portless ${hops} times. ` +
           `This usually means a backend is proxying back through portless without rewriting ` +
           `the Host header. If you use Vite/webpack proxy, set changeOrigin: true.`
       );
       res.writeHead(508, { "Content-Type": "text/plain" });
       res.end(
-        "508 Loop Detected: request has been forwarded too many times through the proxy. " +
-          "If your dev server proxies API requests to another portless app, make sure the " +
-          "proxy rewrites the Host header (e.g. set changeOrigin: true in Vite proxy config).\n"
+        `Loop Detected: this request has passed through portless ${hops} times.\n\n` +
+          "This usually means a dev server (Vite, webpack, etc.) is proxying\n" +
+          "requests back through portless without rewriting the Host header.\n\n" +
+          "Fix: add changeOrigin: true to your proxy config, e.g.:\n\n" +
+          "  proxy: {\n" +
+          '    "/api": {\n' +
+          '      target: "http://<backend>.localhost:<port>",\n' +
+          "      changeOrigin: true,\n" +
+          "    },\n" +
+          "  }\n"
       );
       return;
     }
@@ -149,6 +154,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
     }
+    proxyReqHeaders[PORTLESS_HOPS_HEADER] = String(hops + 1);
     // Remove HTTP/2 pseudo-headers before forwarding to HTTP/1.1 backend
     for (const key of Object.keys(proxyReqHeaders)) {
       if (key.startsWith(":")) {
@@ -206,18 +212,25 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
-    const routes = getRoutes();
-    const host = getRequestHost(req).split(":")[0];
-
-    if (isProxyLoop(req)) {
+    const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
+    if (hops >= MAX_PROXY_HOPS) {
+      const host = getRequestHost(req).split(":")[0];
       onError(
-        `WebSocket loop detected for ${host}: X-Forwarded-For has ${MAX_FORWARDED_HOPS}+ hops. ` +
+        `WebSocket loop detected for ${host}: request has passed through portless ${hops} times. ` +
           `Set changeOrigin: true in your proxy config.`
       );
-      socket.destroy();
+      socket.end(
+        "HTTP/1.1 508 Loop Detected\r\n" +
+          "Content-Type: text/plain\r\n" +
+          "\r\n" +
+          "Loop Detected: request has passed through portless too many times.\n" +
+          "Add changeOrigin: true to your dev server proxy config.\n"
+      );
       return;
     }
 
+    const routes = getRoutes();
+    const host = getRequestHost(req).split(":")[0];
     const route = routes.find((r) => r.hostname === host);
 
     if (!route) {
@@ -230,6 +243,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
     }
+    proxyReqHeaders[PORTLESS_HOPS_HEADER] = String(hops + 1);
     // Remove HTTP/2 pseudo-headers before forwarding to HTTP/1.1 backend
     for (const key of Object.keys(proxyReqHeaders)) {
       if (key.startsWith(":")) {

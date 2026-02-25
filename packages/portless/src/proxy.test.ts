@@ -249,7 +249,7 @@ describe("createProxyServer", () => {
   });
 
   describe("proxy loop detection", () => {
-    it("returns 508 when x-forwarded-for exceeds max hops", async () => {
+    it("returns 508 when X-Portless-Hops reaches the threshold", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
           res.writeHead(200);
@@ -274,8 +274,6 @@ describe("createProxyServer", () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") throw new Error("no addr");
 
-      // Simulate a looping request with many hops in x-forwarded-for
-      const manyHops = Array(20).fill("127.0.0.1").join(", ");
       const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
         const req = http.request(
           {
@@ -285,7 +283,7 @@ describe("createProxyServer", () => {
             method: "GET",
             headers: {
               host: "app.localhost",
-              "x-forwarded-for": manyHops,
+              "x-portless-hops": "5",
             },
           },
           (res) => {
@@ -300,9 +298,12 @@ describe("createProxyServer", () => {
 
       expect(res.status).toBe(508);
       expect(res.body).toContain("Loop Detected");
+      expect(res.body).toContain("changeOrigin");
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0]).toContain("Loop detected");
     });
 
-    it("allows requests with few hops in x-forwarded-for", async () => {
+    it("allows requests with hops below the threshold", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
           res.writeHead(200, { "Content-Type": "text/plain" });
@@ -322,7 +323,6 @@ describe("createProxyServer", () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") throw new Error("no addr");
 
-      // A normal request that has been through a couple of proxies
       const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
         const req = http.request(
           {
@@ -332,7 +332,7 @@ describe("createProxyServer", () => {
             method: "GET",
             headers: {
               host: "app.localhost",
-              "x-forwarded-for": "127.0.0.1, 192.168.1.1",
+              "x-portless-hops": "2",
             },
           },
           (res) => {
@@ -349,7 +349,57 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("ok");
     });
 
-    it("destroys socket on WebSocket upgrade with too many hops", async () => {
+    it("increments X-Portless-Hops when forwarding to backend", async () => {
+      let receivedHops = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          receivedHops = req.headers["x-portless-hops"] as string;
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      // Request with no existing hops header -- should be set to 1
+      await request(server, { host: "myapp.localhost" });
+      expect(receivedHops).toBe("1");
+
+      // Request with existing hops -- should be incremented
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/",
+            method: "GET",
+            headers: {
+              host: "myapp.localhost",
+              "x-portless-hops": "3",
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve());
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+      expect(receivedHops).toBe("4");
+    });
+
+    it("closes socket on WebSocket upgrade when hops exceed threshold", async () => {
       const backend = trackServer(http.createServer());
       backend.on("upgrade", (_req, socket) => {
         socket.write(
@@ -378,7 +428,6 @@ describe("createProxyServer", () => {
       const addr = server.address();
       if (!addr || typeof addr === "string") throw new Error("no addr");
 
-      const manyHops = Array(20).fill("127.0.0.1").join(", ");
       const destroyed = await new Promise<boolean>((resolve) => {
         const req = http.request({
           hostname: "127.0.0.1",
@@ -388,7 +437,7 @@ describe("createProxyServer", () => {
             host: "ws.localhost",
             connection: "Upgrade",
             upgrade: "websocket",
-            "x-forwarded-for": manyHops,
+            "x-portless-hops": "5",
           },
         });
         req.on("error", () => resolve(true));
@@ -398,6 +447,85 @@ describe("createProxyServer", () => {
       });
 
       expect(destroyed).toBe(true);
+      expect(errors.length).toBeGreaterThan(0);
+      expect(errors[0]).toContain("WebSocket loop detected");
+    });
+
+    it("detects loop with real proxy loop scenario", async () => {
+      const routes: RouteInfo[] = [];
+      const proxyServer = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+        })
+      );
+      await listen(proxyServer);
+      const proxyAddr = proxyServer.address();
+      if (!proxyAddr || typeof proxyAddr === "string") throw new Error("no addr");
+
+      // Backend that proxies /api requests back through portless with the
+      // same Host header -- simulates Vite without changeOrigin: true
+      const loopingBackend = trackServer(
+        http.createServer((req, res) => {
+          if (req.url?.startsWith("/api")) {
+            const proxyReq = http.request(
+              {
+                hostname: "127.0.0.1",
+                port: proxyAddr.port,
+                path: req.url,
+                method: req.method,
+                headers: { ...req.headers },
+              },
+              (proxyRes) => {
+                res.writeHead(proxyRes.statusCode || 502, proxyRes.headers);
+                proxyRes.pipe(res);
+              }
+            );
+            proxyReq.on("error", () => {
+              if (!res.headersSent) {
+                res.writeHead(502);
+                res.end("proxy error");
+              }
+            });
+            req.pipe(proxyReq);
+          } else {
+            res.writeHead(200);
+            res.end("frontend page");
+          }
+        })
+      );
+      await listen(loopingBackend);
+      const backendAddr = loopingBackend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      routes.push({ hostname: "frontend.localhost", port: backendAddr.port });
+
+      const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: proxyAddr.port,
+            path: "/api/tasks",
+            method: "GET",
+            headers: { host: "frontend.localhost" },
+          },
+          (res) => {
+            let body = "";
+            res.on("data", (chunk) => (body += chunk));
+            res.on("end", () => resolve({ status: res.statusCode!, body }));
+          }
+        );
+        req.on("error", reject);
+        req.setTimeout(5000, () => {
+          req.destroy();
+          reject(new Error("timeout - loop was not detected"));
+        });
+        req.end();
+      });
+
+      expect(res.status).toBe(508);
+      expect(res.body).toContain("Loop Detected");
     });
   });
 
