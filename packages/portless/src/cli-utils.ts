@@ -408,6 +408,8 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   "react-router": { strictPort: true },
   astro: { strictPort: false },
   ng: { strictPort: false },
+  "react-native": { strictPort: false },
+  expo: { strictPort: false },
 };
 
 /**
@@ -434,7 +436,8 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   }
 
   if (!commandArgs.includes("--host")) {
-    commandArgs.push("--host", "127.0.0.1");
+    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
+    commandArgs.push("--host", hostValue);
   }
 }
 
