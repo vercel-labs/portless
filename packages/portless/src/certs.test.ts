@@ -209,7 +209,7 @@ describe("createSNICallback", () => {
     expect(ctx).toBeDefined();
   });
 
-  it("returns default context for simple *.localhost subdomains", async () => {
+  it("generates per-hostname cert for single-level subdomains", async () => {
     const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("myapp.localhost", (err, ctx) => {
@@ -219,9 +219,18 @@ describe("createSNICallback", () => {
     });
 
     expect(ctx).toBeDefined();
+
+    // Single-level subdomains must get a per-hostname cert with an exact SAN.
+    // RFC 2606 §2 reserves ".localhost" as a TLD, so "*.localhost" sits at the
+    // public-suffix boundary and wildcard certificates there are not valid per spec.
+    const hostCertPath = path.join(tmpDir, "host-certs", "myapp_localhost.pem");
+    expect(fs.existsSync(hostCertPath)).toBe(true);
+
+    const cert = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
+    expect(cert.subjectAltName).toContain("DNS:myapp.localhost");
   });
 
-  it("generates per-hostname cert for deep subdomains", async () => {
+  it("generates per-hostname cert for multi-level subdomains", async () => {
     const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("chat.myapp.localhost", (err, ctx) => {

@@ -484,24 +484,21 @@ async function generateHostCertAsync(
 }
 
 /**
- * Check if a hostname matches `*.localhost` (single-level subdomain).
- * These are covered by the default server cert's wildcard SAN.
- */
-function isSimpleLocalhostSubdomain(hostname: string): boolean {
-  const parts = hostname.split(".");
-  // "foo.localhost" => ["foo", "localhost"] => 2 parts
-  return parts.length === 2 && parts[1] === "localhost";
-}
-
-/**
  * Create an SNI callback for the TLS server.
  *
- * For simple hostnames matching `*.localhost`, uses the default server cert.
- * For deeper subdomains (e.g., `chat.myapp.localhost`), generates a
- * per-hostname certificate on demand, signed by the local CA, and caches it.
+ * Only `localhost` itself uses the default server cert. All subdomains
+ * (e.g., `tools.localhost`, `chat.myapp.localhost`) get a per-hostname
+ * certificate generated on demand and signed by the local CA.
+ *
+ * RFC 2606 §2 reserves `.localhost` as a top-level domain (TLD). Because
+ * `localhost` is a TLD, `*.localhost` sits at the public-suffix boundary and
+ * TLS implementations are not permitted to honour wildcard certificates there.
+ * Each subdomain therefore requires a certificate with an exact SAN entry.
  *
  * Certificate generation is async to avoid blocking the event loop. A
  * pending-promise map deduplicates concurrent requests for the same hostname.
+ *
+ * @see https://datatracker.ietf.org/doc/html/rfc2606#section-2
  */
 export function createSNICallback(
   stateDir: string,
@@ -511,12 +508,16 @@ export function createSNICallback(
   const cache = new Map<string, tls.SecureContext>();
   const pending = new Map<string, Promise<tls.SecureContext>>();
 
-  // Pre-cache the default context for simple subdomains
+  // Pre-cache the default context for "localhost" itself
   const defaultCtx = tls.createSecureContext({ cert: defaultCert, key: defaultKey });
 
   return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
-    // Simple subdomains (foo.localhost) and "localhost" itself are covered by the default cert
-    if (servername === "localhost" || isSimpleLocalhostSubdomain(servername)) {
+    // Only bare "localhost" uses the default cert. All subdomains (including
+    // single-level ones like "tools.localhost") need a cert with an exact SAN.
+    // RFC 2606 §2 designates ".localhost" as a reserved TLD, so "*.localhost"
+    // sits at the public-suffix boundary -- TLS specs do not permit wildcard
+    // certificates at that level.
+    if (servername === "localhost") {
       cb(null, defaultCtx);
       return;
     }
