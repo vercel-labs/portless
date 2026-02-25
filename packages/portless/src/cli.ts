@@ -420,6 +420,16 @@ async function runApp(
 // ---------------------------------------------------------------------------
 
 async function main() {
+  if (process.stdin.isTTY) {
+    process.on("exit", () => {
+      try {
+        process.stdin.setRawMode(false);
+      } catch {
+        // stdin may already be destroyed; non-fatal
+      }
+    });
+  }
+
   const args = process.argv.slice(2);
 
   // Block npx / pnpm dlx -- portless should be installed globally, not run
