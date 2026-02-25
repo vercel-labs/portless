@@ -293,9 +293,45 @@ export async function waitForProxy(
   return false;
 }
 
+/** Escape a string for safe inclusion in a single-quoted shell argument. */
+function shellEscape(arg: string): string {
+  return `'${arg.replace(/'/g, "'\\''")}'`;
+}
+
+/**
+ * Walk up from `cwd` to the filesystem root, collecting all
+ * `node_modules/.bin` directories that exist. Returns them in
+ * nearest-first order so the closest binaries take priority.
+ */
+function collectBinPaths(cwd: string): string[] {
+  const dirs: string[] = [];
+  let dir = cwd;
+  for (;;) {
+    const bin = path.join(dir, "node_modules", ".bin");
+    if (fs.existsSync(bin)) {
+      dirs.push(bin);
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return dirs;
+}
+
+/**
+ * Build a PATH string with `node_modules/.bin` directories prepended.
+ */
+function augmentedPath(env: NodeJS.ProcessEnv | undefined): string {
+  const base = (env ?? process.env).PATH ?? "";
+  const bins = collectBinPaths(process.cwd());
+  return bins.length > 0 ? bins.join(path.delimiter) + path.delimiter + base : base;
+}
+
 /**
  * Spawn a command with proper signal forwarding, error handling, and exit
- * code propagation. Optionally runs a cleanup callback on exit/error/signal.
+ * code propagation. Uses /bin/sh so that shell scripts and version manager
+ * shims are resolved. Prepends node_modules/.bin to PATH so local project
+ * binaries (e.g. next, vite) are found.
  */
 export function spawnCommand(
   commandArgs: string[],
@@ -304,9 +340,11 @@ export function spawnCommand(
     onCleanup?: () => void;
   }
 ): void {
-  const child = spawn(commandArgs[0], commandArgs.slice(1), {
+  const env = { ...(options?.env ?? process.env), PATH: augmentedPath(options?.env) };
+  const shellCmd = commandArgs.map(shellEscape).join(" ");
+  const child = spawn("/bin/sh", ["-c", shellCmd], {
     stdio: "inherit",
-    env: options?.env,
+    env,
   });
 
   let exiting = false;

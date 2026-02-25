@@ -1,3 +1,22 @@
+import * as fs from "node:fs";
+
+/**
+ * When running under sudo, fix file ownership so the real user can
+ * read/write the file later without sudo. No-op when not running as root.
+ */
+export function fixOwnership(...paths: string[]): void {
+  const uid = process.env.SUDO_UID;
+  const gid = process.env.SUDO_GID;
+  if (!uid || process.getuid?.() !== 0) return;
+  for (const p of paths) {
+    try {
+      fs.chownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
+    } catch {
+      // Best-effort
+    }
+  }
+}
+
 /** Type guard for Node.js system errors with an error code. */
 export function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return (

@@ -127,6 +127,7 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 | `portless proxy start -p <number>`  | Start the proxy on a custom port                              |
 | `portless proxy start --foreground` | Start the proxy in foreground (for debugging)                 |
 | `portless proxy stop`               | Stop the proxy                                                |
+| `portless <name> --force <cmd>`     | Override an existing route registered by another process      |
 | `portless --help` / `-h`            | Show help                                                     |
 | `portless --version` / `-v`         | Show version                                                  |
 

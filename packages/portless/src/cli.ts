@@ -8,8 +8,8 @@ import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import { createProxyServer } from "./proxy.js";
-import { formatUrl, isErrnoException, parseHostname } from "./utils.js";
-import { FILE_MODE, RouteStore } from "./routes.js";
+import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
@@ -66,6 +66,7 @@ function startProxyServer(
   } catch {
     // May fail if file is owned by another user; non-fatal
   }
+  fixOwnership(routesPath);
 
   // Cache routes in memory and reload on file change (debounced)
   let cachedRoutes = store.loadRoutes();
@@ -123,6 +124,7 @@ function startProxyServer(
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     writeTlsMarker(store.dir, isTls);
+    fixOwnership(store.dir, store.pidPath, store.portFilePath);
     const proto = isTls ? "HTTPS/2" : "HTTP";
     console.log(chalk.green(`${proto} proxy listening on port ${proxyPort}`));
   });
@@ -293,7 +295,8 @@ async function runApp(
   stateDir: string,
   name: string,
   commandArgs: string[],
-  tls: boolean
+  tls: boolean,
+  force: boolean
 ) {
   const hostname = parseHostname(name);
 
@@ -387,7 +390,15 @@ async function runApp(
   console.log(chalk.green(`-- Using port ${port}`));
 
   // Register route
-  store.addRoute(hostname, port, process.pid);
+  try {
+    store.addRoute(hostname, port, process.pid, force);
+  } catch (err) {
+    if (err instanceof RouteConflictError) {
+      console.error(chalk.red(`Error: ${err.message}`));
+      process.exit(1);
+    }
+    throw err;
+  }
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
@@ -508,6 +519,7 @@ ${chalk.bold("Options:")}
   --key <path>                  Use a custom TLS private key (implies --https)
   --no-tls                      Disable HTTPS (overrides PORTLESS_HTTPS)
   --foreground                  Run proxy in foreground (for debugging)
+  --force                       Override an existing route registered by another process
 
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
@@ -753,6 +765,7 @@ ${chalk.bold("Usage: portless proxy <command>")}
       } catch {
         // May fail if file is owned by another user; non-fatal
       }
+      fixOwnership(logPath);
 
       const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
       if (portFlagIndex !== -1) {
@@ -794,8 +807,10 @@ ${chalk.bold("Usage: portless proxy <command>")}
   }
 
   // Run app
-  const name = args[0];
-  const commandArgs = args.slice(1);
+  const force = args.includes("--force");
+  const appArgs = args.filter((a) => a !== "--force");
+  const name = appArgs[0];
+  const commandArgs = appArgs.slice(1);
 
   if (commandArgs.length === 0) {
     console.error(chalk.red("Error: No command provided."));
@@ -810,7 +825,7 @@ ${chalk.bold("Usage: portless proxy <command>")}
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
-  await runApp(store, port, dir, name, commandArgs, tls);
+  await runApp(store, port, dir, name, commandArgs, tls, force);
 }
 
 main().catch((err: unknown) => {

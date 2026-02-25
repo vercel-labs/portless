@@ -4,26 +4,10 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
+import { fixOwnership } from "./utils.js";
 
 /** How long the CA certificate is valid (10 years, in days). */
 const CA_VALIDITY_DAYS = 3650;
-
-/**
- * When running under sudo, fix file ownership so the real user can
- * read/write the file later without sudo. No-op when not running as root.
- */
-function fixOwnership(...paths: string[]): void {
-  const uid = process.env.SUDO_UID;
-  const gid = process.env.SUDO_GID;
-  if (!uid || process.getuid?.() !== 0) return;
-  for (const p of paths) {
-    try {
-      fs.chownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
-    } catch {
-      // Best-effort
-    }
-  }
-}
 
 /** How long server certificates are valid (1 year, in days). */
 const SERVER_VALIDITY_DAYS = 365;

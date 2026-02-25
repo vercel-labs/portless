@@ -134,6 +134,7 @@ portless proxy stop              # Stop the proxy
 --key <path>                     # Use a custom TLS private key (implies --https)
 --no-tls                         # Disable HTTPS (overrides PORTLESS_HTTPS)
 --foreground                     # Run proxy in foreground instead of daemon
+--force                          # Override a route registered by another process
 
 # Environment variables
 PORTLESS_PORT=<number>           # Override the default proxy port
