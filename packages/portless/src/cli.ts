@@ -806,9 +806,10 @@ ${chalk.bold("Usage: portless proxy <command>")}
     return;
   }
 
-  // Run app
-  const force = args.includes("--force");
-  const appArgs = args.filter((a) => a !== "--force");
+  // Run app -- only recognize --force before the command (position 0 or 1)
+  const forceIdx = args.indexOf("--force");
+  const force = forceIdx >= 0 && forceIdx <= 1;
+  const appArgs = force ? [...args.slice(0, forceIdx), ...args.slice(forceIdx + 1)] : args;
   const name = appArgs[0];
   const commandArgs = appArgs.slice(1);
 
