@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.2
+
+### Bug Fixes
+
+- **spawn ENOENT**: Use `/bin/sh -c` for command execution so shell scripts and version-manager shims (nvm, fnm, mise) are resolved correctly. Prepend `node_modules/.bin` to `PATH` so local project binaries (e.g. `next`, `vite`) are found without a global install.
+- **sudo state directory permissions**: System state directory (`/tmp/portless`) now uses world-writable + sticky-bit permissions so non-root processes can register routes after a sudo proxy start. State files created under sudo are chowned back to the real user.
+- **duplicate route names**: `addRoute` now checks for an existing live route and throws an error if the hostname is already registered by a running process. Use `--force` to override.
+- **TLS SHA-1 rejection**: Force SHA-256 for all CA and server certificate generation. Detect and regenerate existing SHA-1 certificates automatically.
+- **per-hostname certs for `.localhost` subdomains**: Issue a per-hostname certificate with an exact SAN for every `.localhost` subdomain. `*.localhost` wildcard certs are invalid because `.localhost` is a reserved TLD per RFC 2606.
+- **terminal left in raw mode**: Reset `stdin.setRawMode(false)` on process exit so the terminal is not left in raw mode after Ctrl+C.
+
+### Features
+
+- **proxy loop detection**: Detect forwarding loops (e.g. a Vite dev server proxying back through portless without `changeOrigin: true`) using the `X-Portless-Hops` header. Respond with `508 Loop Detected` and a message explaining the fix. Also detects loops on WebSocket upgrades.
+- **`--force` flag**: Override a route registered by another process with `portless <name> --force <cmd>`.
+
 ## 0.4.1
 
 - Fixed Vite support by auto-injecting `--port` and `--host` flags
