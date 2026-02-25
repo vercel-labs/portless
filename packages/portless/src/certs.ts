@@ -75,6 +75,27 @@ function isCertValid(certPath: string): boolean {
 }
 
 /**
+ * Check whether a certificate uses a strong signature algorithm.
+ * Reject SHA-1 signatures to avoid OpenSSL "ca md too weak" failures.
+ *
+ * Uses openssl rather than X509Certificate.signatureAlgorithm because that
+ * property was only added in Node.js 24.9.0 and is undefined on older releases.
+ */
+function isCertSignatureStrong(certPath: string): boolean {
+  try {
+    const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
+    const match = text.match(/Signature Algorithm:\s*(\S+)/i);
+    if (!match) return false;
+    const algo = match[1].toLowerCase();
+    // SHA-1 variants: sha1WithRSAEncryption, ecdsa-with-SHA1, etc.
+    // SHA-256+ variants do not contain "sha1" as a substring.
+    return !algo.includes("sha1");
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run openssl and return stdout. Throws on non-zero exit.
  */
 function openssl(args: string[], options?: { input?: string }): string {
@@ -135,6 +156,7 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
     "req",
     "-new",
     "-x509",
+    "-sha256",
     "-key",
     keyPath,
     "-out",
@@ -194,6 +216,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   openssl([
     "x509",
     "-req",
+    "-sha256",
     "-in",
     csrPath,
     "-CA",
@@ -243,17 +266,29 @@ export function ensureCerts(stateDir: string): {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   const caKeyPath = path.join(stateDir, CA_KEY_FILE);
   const serverCertPath = path.join(stateDir, SERVER_CERT_FILE);
+  const serverKeyPath = path.join(stateDir, SERVER_KEY_FILE);
 
   let caGenerated = false;
 
   // Ensure CA exists
-  if (!fileExists(caCertPath) || !fileExists(caKeyPath) || !isCertValid(caCertPath)) {
+  if (
+    !fileExists(caCertPath) ||
+    !fileExists(caKeyPath) ||
+    !isCertValid(caCertPath) ||
+    !isCertSignatureStrong(caCertPath)
+  ) {
     generateCA(stateDir);
     caGenerated = true;
   }
 
   // Ensure server cert exists and is valid
-  if (caGenerated || !fileExists(serverCertPath) || !isCertValid(serverCertPath)) {
+  if (
+    caGenerated ||
+    !fileExists(serverCertPath) ||
+    !fileExists(serverKeyPath) ||
+    !isCertValid(serverCertPath) ||
+    !isCertSignatureStrong(serverCertPath)
+  ) {
     generateServerCert(stateDir);
   }
 
@@ -416,6 +451,7 @@ async function generateHostCertAsync(
   await opensslAsync([
     "x509",
     "-req",
+    "-sha256",
     "-in",
     csrPath,
     "-CA",
@@ -498,7 +534,12 @@ export function createSNICallback(
     const keyPath = path.join(hostDir, `${safeName}-key.pem`);
 
     // Try reading existing cert from disk (may fail if files are root-owned)
-    if (fileExists(certPath) && fileExists(keyPath) && isCertValid(certPath)) {
+    if (
+      fileExists(certPath) &&
+      fileExists(keyPath) &&
+      isCertValid(certPath) &&
+      isCertSignatureStrong(certPath)
+    ) {
       try {
         const ctx = tls.createSecureContext({
           cert: fs.readFileSync(certPath),

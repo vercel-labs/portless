@@ -4,7 +4,21 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
+import { execFileSync } from "node:child_process";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
+
+/**
+ * Return the signature algorithm string for a PEM cert file using openssl.
+ * X509Certificate.signatureAlgorithm was only added in Node.js 24.9.0 and
+ * is undefined on older releases, so we use openssl for compatibility.
+ */
+function getCertSignatureAlgo(certPath: string): string {
+  const text = execFileSync("openssl", ["x509", "-in", certPath, "-noout", "-text"], {
+    encoding: "utf-8",
+  });
+  const match = text.match(/Signature Algorithm:\s*(\S+)/i);
+  return match ? match[1].toLowerCase() : "";
+}
 
 describe("ensureCerts", () => {
   let tmpDir: string;
@@ -68,6 +82,13 @@ describe("ensureCerts", () => {
     expect(caCert.ca).toBe(true);
   });
 
+  it("generates CA and server certs with SHA-256 signatures", () => {
+    const result = ensureCerts(tmpDir);
+
+    expect(getCertSignatureAlgo(result.caPath)).toContain("sha256");
+    expect(getCertSignatureAlgo(result.certPath)).toContain("sha256");
+  });
+
   it("reuses existing certs on second call", () => {
     const first = ensureCerts(tmpDir);
     expect(first.caGenerated).toBe(true);
@@ -95,6 +116,57 @@ describe("ensureCerts", () => {
     // New cert should be different (regenerated)
     const secondCert = fs.readFileSync(second.certPath, "utf-8");
     expect(secondCert).not.toBe(firstCert);
+  });
+
+  it("regenerates server cert if it uses SHA-1 signature", () => {
+    const first = ensureCerts(tmpDir);
+    const caKeyPath = path.join(tmpDir, "ca-key.pem");
+    const csrPath = path.join(tmpDir, "server-weak.csr");
+    const extPath = path.join(tmpDir, "server-weak-ext.cnf");
+
+    execFileSync("openssl", [
+      "req",
+      "-new",
+      "-key",
+      first.keyPath,
+      "-out",
+      csrPath,
+      "-subj",
+      "/CN=localhost",
+    ]);
+    fs.writeFileSync(
+      extPath,
+      [
+        "authorityKeyIdentifier=keyid,issuer",
+        "basicConstraints=CA:FALSE",
+        "keyUsage=digitalSignature,keyEncipherment",
+        "extendedKeyUsage=serverAuth",
+        "subjectAltName=DNS:localhost,DNS:*.localhost",
+      ].join("\n") + "\n"
+    );
+    execFileSync("openssl", [
+      "x509",
+      "-req",
+      "-sha1",
+      "-in",
+      csrPath,
+      "-CA",
+      first.caPath,
+      "-CAkey",
+      caKeyPath,
+      "-CAcreateserial",
+      "-out",
+      first.certPath,
+      "-days",
+      "365",
+      "-extfile",
+      extPath,
+    ]);
+
+    expect(getCertSignatureAlgo(first.certPath)).toContain("sha1");
+
+    const second = ensureCerts(tmpDir);
+    expect(getCertSignatureAlgo(second.certPath)).toContain("sha256");
   });
 
   it("sets restrictive permissions on key files", () => {
