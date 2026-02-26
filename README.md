@@ -136,7 +136,12 @@ portless proxy stop              # Stop the proxy
 --foreground                     # Run proxy in foreground instead of daemon
 --force                          # Override a route registered by another process
 
-# Environment variables
+# Injected into child processes
+PORT                             # Ephemeral port the child should listen on
+HOST                             # Always 127.0.0.1
+PORTLESS_URL                     # Public URL (e.g. http://myapp.localhost:1355)
+
+# Configuration
 PORTLESS_PORT=<number>           # Override the default proxy port
 PORTLESS_HTTPS=1                 # Always enable HTTPS
 PORTLESS_STATE_DIR=<path>        # Override the state directory
