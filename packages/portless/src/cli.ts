@@ -414,6 +414,7 @@ async function runApp(
       ...process.env,
       PORT: port.toString(),
       HOST: "127.0.0.1",
+      PORTLESS_URL: finalUrl,
       __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: ".localhost",
     },
     onCleanup: () => {
@@ -526,6 +527,11 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
+
+${chalk.bold("Child process environment:")}
+  PORT                          Ephemeral port the child should listen on
+  HOST                          Always 127.0.0.1
+  PORTLESS_URL                  Public URL of the app (e.g. http://myapp.localhost:1355)
 
 ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy

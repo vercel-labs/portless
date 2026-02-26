@@ -40,6 +40,7 @@ describe("CLI", () => {
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
       expect(stdout).toContain("PORTLESS_STATE_DIR");
+      expect(stdout).toContain("PORTLESS_URL");
     });
 
     it("prints help and exits 0 with -h", () => {
