@@ -178,6 +178,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           }
         }
         res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+        proxyRes.on("error", () => {
+          if (!res.headersSent) {
+            res.writeHead(502, { "Content-Type": "text/plain" });
+          }
+          res.end();
+        });
         proxyRes.pipe(res);
       }
     );
@@ -212,6 +218,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
+    socket.on("error", () => socket.destroy());
+
     const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
     if (hops >= MAX_PROXY_HOPS) {
       const host = getRequestHost(req).split(":")[0];
@@ -294,6 +302,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         }
         response += "\r\n";
         socket.write(response);
+        res.on("error", () => socket.destroy());
         res.pipe(socket);
       }
     });
