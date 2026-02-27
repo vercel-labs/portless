@@ -10,6 +10,7 @@ import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js
 import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import { inferProjectName, detectWorktreePrefix } from "./auto.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
@@ -296,12 +297,20 @@ async function runApp(
   name: string,
   commandArgs: string[],
   tls: boolean,
-  force: boolean
+  force: boolean,
+  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string }
 ) {
   const hostname = parseHostname(name);
 
   console.log(chalk.blue.bold(`\nportless\n`));
   console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
+  if (autoInfo) {
+    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
+    console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
+    if (autoInfo.prefix) {
+      console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+    }
+  }
 
   // Check if proxy is running, auto-start if possible
   if (!(await isProxyRunning(proxyPort, tls))) {
@@ -427,6 +436,96 @@ async function runApp(
 }
 
 // ---------------------------------------------------------------------------
+// Argument parsing
+// ---------------------------------------------------------------------------
+
+interface ParsedRunArgs {
+  force: boolean;
+  /** The child command and its arguments, passed through untouched. */
+  commandArgs: string[];
+}
+
+interface ParsedAppArgs extends ParsedRunArgs {
+  /** App name. */
+  name: string;
+}
+
+/**
+ * Parse `run` subcommand arguments: `[--force] [--] <command...>`
+ *
+ * Only `--force` is recognized. `--` stops flag parsing. Everything
+ * after the flag region is the child command, passed through untouched.
+ */
+function parseRunArgs(args: string[]): ParsedRunArgs {
+  let force = false;
+  let i = 0;
+
+  while (i < args.length && args[i].startsWith("--")) {
+    if (args[i] === "--") {
+      i++;
+      break;
+    } else if (args[i] === "--force") {
+      force = true;
+    } else {
+      console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
+      console.error(chalk.blue("Known flags: --force"));
+      process.exit(1);
+    }
+    i++;
+  }
+
+  return { force, commandArgs: args.slice(i) };
+}
+
+/**
+ * Parse named-mode arguments: `[--force] <name> [--force] [--] <command...>`
+ *
+ * `--force` is recognized before and after the name. `--` stops flag
+ * parsing. Everything after the flag region is the child command.
+ * Unrecognized `--` flags are rejected to catch typos.
+ */
+function parseAppArgs(args: string[]): ParsedAppArgs {
+  let force = false;
+  let i = 0;
+
+  // Consume leading flags before name
+  while (i < args.length && args[i].startsWith("--")) {
+    if (args[i] === "--") {
+      i++;
+      break;
+    } else if (args[i] === "--force") {
+      force = true;
+    } else {
+      console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
+      console.error(chalk.blue("Known flags: --force"));
+      process.exit(1);
+    }
+    i++;
+  }
+
+  // Next token is the app name
+  const name = args[i];
+  i++;
+
+  // Allow --force immediately after name (e.g. `portless myapp --force next dev`)
+  while (i < args.length && args[i].startsWith("--")) {
+    if (args[i] === "--") {
+      i++;
+      break;
+    } else if (args[i] === "--force") {
+      force = true;
+    } else {
+      console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
+      console.error(chalk.blue("Known flags: --force"));
+      process.exit(1);
+    }
+    i++;
+  }
+
+  return { force, name, commandArgs: args.slice(i) };
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -455,17 +554,31 @@ async function main() {
     process.exit(1);
   }
 
+  // `run` subcommand: strip it, rest is parsed as run-mode args
+  const isRunCommand = args[0] === "run";
+  if (isRunCommand) {
+    args.shift();
+  }
+
   // Skip portless if PORTLESS=0 or PORTLESS=skip
   const skipPortless = process.env.PORTLESS === "0" || process.env.PORTLESS === "skip";
-  if (skipPortless && args.length >= 2 && args[0] !== "proxy") {
-    // Just run the command directly, skipping the first arg (the name)
-    spawnCommand(args.slice(1));
+  if (skipPortless && (isRunCommand || (args.length >= 2 && args[0] !== "proxy"))) {
+    const { commandArgs } = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    if (commandArgs.length === 0) {
+      console.error(chalk.red("Error: No command provided."));
+      process.exit(1);
+    }
+    spawnCommand(commandArgs);
     return;
   }
 
-  // Help
-  if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
-    console.log(`
+  // Global dispatch: help, version, trust, list, proxy
+  // When `run` is used, skip these so args like "list" or "--help" are treated
+  // as child-command tokens, not portless subcommands.
+  if (!isRunCommand) {
+    // Help
+    if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+      console.log(`
 ${chalk.bold("portless")} - Replace port numbers with stable, named .localhost URLs. For humans and agents.
 
 Eliminates port conflicts, memorizing port numbers, and cookie/storage
@@ -481,6 +594,7 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
+  ${chalk.cyan("portless run <cmd>")}               Infer name from project, run through proxy
   ${chalk.cyan("portless list")}                    Show active routes
   ${chalk.cyan("portless trust")}                   Add local CA to system trust store
 
@@ -490,11 +604,13 @@ ${chalk.bold("Examples:")}
   portless myapp next dev             # -> http://myapp.localhost:1355
   portless myapp vite dev             # -> http://myapp.localhost:1355
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
+  portless run next dev               # -> http://<project>.localhost:1355
+  portless run next dev               # in worktree -> http://<worktree>.<project>.localhost:1355
 
 ${chalk.bold("In package.json:")}
   {
     "scripts": {
-      "dev": "portless myapp next dev"
+      "dev": "portless run next dev"
     }
   }
 
@@ -512,6 +628,8 @@ ${chalk.bold("HTTP/2 + HTTPS:")}
   system trust store. No browser warnings. No sudo required on macOS.
 
 ${chalk.bold("Options:")}
+  run <cmd>                      Infer project name from package.json / git / cwd
+                                Adds worktree prefix in git worktrees
   -p, --port <number>           Port for the proxy to listen on (default: 1355)
                                 Ports < 1024 require sudo
   --https                       Enable HTTP/2 + TLS with auto-generated certs
@@ -531,56 +649,56 @@ ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
   PORTLESS=skip pnpm dev        # Same as above
 `);
-    process.exit(0);
-  }
-
-  if (args[0] === "--version" || args[0] === "-v") {
-    console.log(__VERSION__);
-    process.exit(0);
-  }
-
-  // Trust command
-  if (args[0] === "trust") {
-    const { dir } = await discoverState();
-    const result = trustCA(dir);
-    if (result.trusted) {
-      console.log(chalk.green("Local CA added to system trust store."));
-      console.log(chalk.gray("Browsers will now trust portless HTTPS certificates."));
-    } else {
-      console.error(chalk.red(`Failed to trust CA: ${result.error}`));
-      if (result.error?.includes("sudo")) {
-        console.error(chalk.blue("Run with sudo:"));
-        console.error(chalk.cyan("  sudo portless trust"));
-      }
-      process.exit(1);
+      process.exit(0);
     }
-    return;
-  }
 
-  // List routes
-  if (args[0] === "list") {
-    const { dir, port, tls } = await discoverState();
-    const store = new RouteStore(dir, {
-      onWarning: (msg) => console.warn(chalk.yellow(msg)),
-    });
-    listRoutes(store, port, tls);
-    return;
-  }
+    if (args[0] === "--version" || args[0] === "-v") {
+      console.log(__VERSION__);
+      process.exit(0);
+    }
 
-  // Proxy commands
-  if (args[0] === "proxy") {
-    if (args[1] === "stop") {
+    // Trust command
+    if (args[0] === "trust") {
+      const { dir } = await discoverState();
+      const result = trustCA(dir);
+      if (result.trusted) {
+        console.log(chalk.green("Local CA added to system trust store."));
+        console.log(chalk.gray("Browsers will now trust portless HTTPS certificates."));
+      } else {
+        console.error(chalk.red(`Failed to trust CA: ${result.error}`));
+        if (result.error?.includes("sudo")) {
+          console.error(chalk.blue("Run with sudo:"));
+          console.error(chalk.cyan("  sudo portless trust"));
+        }
+        process.exit(1);
+      }
+      return;
+    }
+
+    // List routes
+    if (args[0] === "list") {
       const { dir, port, tls } = await discoverState();
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(chalk.yellow(msg)),
       });
-      await stopProxy(store, port, tls);
+      listRoutes(store, port, tls);
       return;
     }
 
-    if (args[1] !== "start") {
-      // Bare "portless proxy" or unknown subcommand -- show usage hint
-      console.log(`
+    // Proxy commands
+    if (args[0] === "proxy") {
+      if (args[1] === "stop") {
+        const { dir, port, tls } = await discoverState();
+        const store = new RouteStore(dir, {
+          onWarning: (msg) => console.warn(chalk.yellow(msg)),
+        });
+        await stopProxy(store, port, tls);
+        return;
+      }
+
+      if (args[1] !== "start") {
+        // Bare "portless proxy" or unknown subcommand -- show usage hint
+        console.log(`
 ${chalk.bold("Usage: portless proxy <command>")}
 
   ${chalk.cyan("portless proxy start")}                Start the proxy (daemon)
@@ -589,244 +707,270 @@ ${chalk.bold("Usage: portless proxy <command>")}
   ${chalk.cyan("portless proxy start -p 80")}          Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}                 Stop the proxy
 `);
-      process.exit(args[1] ? 1 : 0);
-    }
-
-    const isForeground = args.includes("--foreground");
-
-    // Parse --port / -p flag
-    let proxyPort = getDefaultPort();
-    let portFlagIndex = args.indexOf("--port");
-    if (portFlagIndex === -1) portFlagIndex = args.indexOf("-p");
-    if (portFlagIndex !== -1) {
-      const portValue = args[portFlagIndex + 1];
-      if (!portValue || portValue.startsWith("-")) {
-        console.error(chalk.red("Error: --port / -p requires a port number."));
-        console.error(chalk.blue("Usage:"));
-        console.error(chalk.cyan("  portless proxy start -p 8080"));
-        process.exit(1);
+        process.exit(args[1] ? 1 : 0);
       }
-      proxyPort = parseInt(portValue, 10);
-      if (isNaN(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
-        console.error(chalk.red(`Error: Invalid port number: ${portValue}`));
-        console.error(chalk.blue("Port must be between 1 and 65535."));
-        process.exit(1);
-      }
-    }
 
-    // Parse HTTPS / TLS flags
-    const hasNoTls = args.includes("--no-tls");
-    const hasHttpsFlag = args.includes("--https");
-    const wantHttps = !hasNoTls && (hasHttpsFlag || isHttpsEnvEnabled());
+      const isForeground = args.includes("--foreground");
 
-    // Parse optional --cert / --key for custom certificates
-    let customCertPath: string | null = null;
-    let customKeyPath: string | null = null;
-    const certIdx = args.indexOf("--cert");
-    if (certIdx !== -1) {
-      customCertPath = args[certIdx + 1] || null;
-      if (!customCertPath || customCertPath.startsWith("-")) {
-        console.error(chalk.red("Error: --cert requires a file path."));
-        process.exit(1);
-      }
-    }
-    const keyIdx = args.indexOf("--key");
-    if (keyIdx !== -1) {
-      customKeyPath = args[keyIdx + 1] || null;
-      if (!customKeyPath || customKeyPath.startsWith("-")) {
-        console.error(chalk.red("Error: --key requires a file path."));
-        process.exit(1);
-      }
-    }
-    if ((customCertPath && !customKeyPath) || (!customCertPath && customKeyPath)) {
-      console.error(chalk.red("Error: --cert and --key must be used together."));
-      process.exit(1);
-    }
-
-    // Custom cert/key implies HTTPS
-    const useHttps = wantHttps || !!(customCertPath && customKeyPath);
-
-    // Resolve state directory based on the port
-    const stateDir = resolveStateDir(proxyPort);
-    const store = new RouteStore(stateDir, {
-      onWarning: (msg) => console.warn(chalk.yellow(msg)),
-    });
-
-    // Check if already running. Plain HTTP check detects both TLS and non-TLS
-    // proxies because the TLS-enabled proxy accepts plain HTTP via byte-peeking.
-    if (await isProxyRunning(proxyPort)) {
-      if (isForeground) {
-        // Foreground mode is used internally by the daemon fork; exit silently
-        return;
-      }
-      const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
-      const sudoPrefix = needsSudo ? "sudo " : "";
-      console.log(chalk.yellow(`Proxy is already running on port ${proxyPort}.`));
-      console.log(
-        chalk.blue(`To restart: portless proxy stop && ${sudoPrefix}portless proxy start`)
-      );
-      return;
-    }
-
-    // Check if running as root (only required for privileged ports)
-    if (proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
-      console.error(chalk.red(`Error: Port ${proxyPort} requires sudo.`));
-      console.error(chalk.blue("Either run with sudo:"));
-      console.error(chalk.cyan("  sudo portless proxy start -p 80"));
-      console.error(chalk.blue("Or use the default port (no sudo needed):"));
-      console.error(chalk.cyan("  portless proxy start"));
-      process.exit(1);
-    }
-
-    // Prepare TLS options if HTTPS is requested
-    let tlsOptions: import("./types.js").ProxyServerOptions["tls"];
-    if (useHttps) {
-      store.ensureDir();
-      if (customCertPath && customKeyPath) {
-        // Use user-provided certificates
-        try {
-          const cert = fs.readFileSync(customCertPath);
-          const key = fs.readFileSync(customKeyPath);
-
-          // Validate PEM format
-          const certStr = cert.toString("utf-8");
-          const keyStr = key.toString("utf-8");
-          if (!certStr.includes("-----BEGIN CERTIFICATE-----")) {
-            console.error(chalk.red(`Error: ${customCertPath} is not a valid PEM certificate.`));
-            console.error(chalk.gray("Expected a file starting with -----BEGIN CERTIFICATE-----"));
-            process.exit(1);
-          }
-          if (!keyStr.match(/-----BEGIN [\w\s]*PRIVATE KEY-----/)) {
-            console.error(chalk.red(`Error: ${customKeyPath} is not a valid PEM private key.`));
-            console.error(
-              chalk.gray("Expected a file starting with -----BEGIN ...PRIVATE KEY-----")
-            );
-            process.exit(1);
-          }
-
-          tlsOptions = { cert, key };
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          console.error(chalk.red(`Error reading certificate files: ${message}`));
+      // Parse --port / -p flag
+      let proxyPort = getDefaultPort();
+      let portFlagIndex = args.indexOf("--port");
+      if (portFlagIndex === -1) portFlagIndex = args.indexOf("-p");
+      if (portFlagIndex !== -1) {
+        const portValue = args[portFlagIndex + 1];
+        if (!portValue || portValue.startsWith("-")) {
+          console.error(chalk.red("Error: --port / -p requires a port number."));
+          console.error(chalk.blue("Usage:"));
+          console.error(chalk.cyan("  portless proxy start -p 8080"));
           process.exit(1);
         }
-      } else {
-        // Auto-generate certificates using built-in CA
-        console.log(chalk.gray("Ensuring TLS certificates..."));
-        const certs = ensureCerts(stateDir);
-        if (certs.caGenerated) {
-          console.log(chalk.green("Generated local CA certificate."));
+        proxyPort = parseInt(portValue, 10);
+        if (isNaN(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
+          console.error(chalk.red(`Error: Invalid port number: ${portValue}`));
+          console.error(chalk.blue("Port must be between 1 and 65535."));
+          process.exit(1);
         }
+      }
 
-        // Trust the CA if not already trusted
-        if (!isCATrusted(stateDir)) {
-          console.log(chalk.yellow("Adding CA to system trust store..."));
-          const trustResult = trustCA(stateDir);
-          if (trustResult.trusted) {
-            console.log(
-              chalk.green("CA added to system trust store. Browsers will trust portless certs.")
-            );
-          } else {
-            console.warn(chalk.yellow("Could not add CA to system trust store."));
-            if (trustResult.error) {
-              console.warn(chalk.gray(trustResult.error));
+      // Parse HTTPS / TLS flags
+      const hasNoTls = args.includes("--no-tls");
+      const hasHttpsFlag = args.includes("--https");
+      const wantHttps = !hasNoTls && (hasHttpsFlag || isHttpsEnvEnabled());
+
+      // Parse optional --cert / --key for custom certificates
+      let customCertPath: string | null = null;
+      let customKeyPath: string | null = null;
+      const certIdx = args.indexOf("--cert");
+      if (certIdx !== -1) {
+        customCertPath = args[certIdx + 1] || null;
+        if (!customCertPath || customCertPath.startsWith("-")) {
+          console.error(chalk.red("Error: --cert requires a file path."));
+          process.exit(1);
+        }
+      }
+      const keyIdx = args.indexOf("--key");
+      if (keyIdx !== -1) {
+        customKeyPath = args[keyIdx + 1] || null;
+        if (!customKeyPath || customKeyPath.startsWith("-")) {
+          console.error(chalk.red("Error: --key requires a file path."));
+          process.exit(1);
+        }
+      }
+      if ((customCertPath && !customKeyPath) || (!customCertPath && customKeyPath)) {
+        console.error(chalk.red("Error: --cert and --key must be used together."));
+        process.exit(1);
+      }
+
+      // Custom cert/key implies HTTPS
+      const useHttps = wantHttps || !!(customCertPath && customKeyPath);
+
+      // Resolve state directory based on the port
+      const stateDir = resolveStateDir(proxyPort);
+      const store = new RouteStore(stateDir, {
+        onWarning: (msg) => console.warn(chalk.yellow(msg)),
+      });
+
+      // Check if already running. Plain HTTP check detects both TLS and non-TLS
+      // proxies because the TLS-enabled proxy accepts plain HTTP via byte-peeking.
+      if (await isProxyRunning(proxyPort)) {
+        if (isForeground) {
+          // Foreground mode is used internally by the daemon fork; exit silently
+          return;
+        }
+        const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
+        const sudoPrefix = needsSudo ? "sudo " : "";
+        console.log(chalk.yellow(`Proxy is already running on port ${proxyPort}.`));
+        console.log(
+          chalk.blue(`To restart: portless proxy stop && ${sudoPrefix}portless proxy start`)
+        );
+        return;
+      }
+
+      // Check if running as root (only required for privileged ports)
+      if (proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
+        console.error(chalk.red(`Error: Port ${proxyPort} requires sudo.`));
+        console.error(chalk.blue("Either run with sudo:"));
+        console.error(chalk.cyan("  sudo portless proxy start -p 80"));
+        console.error(chalk.blue("Or use the default port (no sudo needed):"));
+        console.error(chalk.cyan("  portless proxy start"));
+        process.exit(1);
+      }
+
+      // Prepare TLS options if HTTPS is requested
+      let tlsOptions: import("./types.js").ProxyServerOptions["tls"];
+      if (useHttps) {
+        store.ensureDir();
+        if (customCertPath && customKeyPath) {
+          // Use user-provided certificates
+          try {
+            const cert = fs.readFileSync(customCertPath);
+            const key = fs.readFileSync(customKeyPath);
+
+            // Validate PEM format
+            const certStr = cert.toString("utf-8");
+            const keyStr = key.toString("utf-8");
+            if (!certStr.includes("-----BEGIN CERTIFICATE-----")) {
+              console.error(chalk.red(`Error: ${customCertPath} is not a valid PEM certificate.`));
+              console.error(
+                chalk.gray("Expected a file starting with -----BEGIN CERTIFICATE-----")
+              );
+              process.exit(1);
             }
-            console.warn(
-              chalk.yellow("Browsers will show certificate warnings. To fix this later, run:")
-            );
-            console.warn(chalk.cyan("  portless trust"));
+            if (!keyStr.match(/-----BEGIN [\w\s]*PRIVATE KEY-----/)) {
+              console.error(chalk.red(`Error: ${customKeyPath} is not a valid PEM private key.`));
+              console.error(
+                chalk.gray("Expected a file starting with -----BEGIN ...PRIVATE KEY-----")
+              );
+              process.exit(1);
+            }
+
+            tlsOptions = { cert, key };
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            console.error(chalk.red(`Error reading certificate files: ${message}`));
+            process.exit(1);
+          }
+        } else {
+          // Auto-generate certificates using built-in CA
+          console.log(chalk.gray("Ensuring TLS certificates..."));
+          const certs = ensureCerts(stateDir);
+          if (certs.caGenerated) {
+            console.log(chalk.green("Generated local CA certificate."));
+          }
+
+          // Trust the CA if not already trusted
+          if (!isCATrusted(stateDir)) {
+            console.log(chalk.yellow("Adding CA to system trust store..."));
+            const trustResult = trustCA(stateDir);
+            if (trustResult.trusted) {
+              console.log(
+                chalk.green("CA added to system trust store. Browsers will trust portless certs.")
+              );
+            } else {
+              console.warn(chalk.yellow("Could not add CA to system trust store."));
+              if (trustResult.error) {
+                console.warn(chalk.gray(trustResult.error));
+              }
+              console.warn(
+                chalk.yellow("Browsers will show certificate warnings. To fix this later, run:")
+              );
+              console.warn(chalk.cyan("  portless trust"));
+            }
+          }
+
+          const cert = fs.readFileSync(certs.certPath);
+          const key = fs.readFileSync(certs.keyPath);
+          tlsOptions = {
+            cert,
+            key,
+            SNICallback: createSNICallback(stateDir, cert, key),
+          };
+        }
+      }
+
+      // Foreground mode: run the proxy directly in this process
+      if (isForeground) {
+        console.log(chalk.blue.bold("\nportless proxy\n"));
+        startProxyServer(store, proxyPort, tlsOptions);
+        return;
+      }
+
+      // Daemon mode (default): fork and detach, logging to file
+      store.ensureDir();
+      const logPath = path.join(stateDir, "proxy.log");
+      const logFd = fs.openSync(logPath, "a");
+      try {
+        try {
+          fs.chmodSync(logPath, FILE_MODE);
+        } catch {
+          // May fail if file is owned by another user; non-fatal
+        }
+        fixOwnership(logPath);
+
+        const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
+        if (portFlagIndex !== -1) {
+          daemonArgs.push("--port", proxyPort.toString());
+        }
+        if (useHttps) {
+          if (customCertPath && customKeyPath) {
+            daemonArgs.push("--cert", customCertPath, "--key", customKeyPath);
+          } else {
+            daemonArgs.push("--https");
           }
         }
 
-        const cert = fs.readFileSync(certs.certPath);
-        const key = fs.readFileSync(certs.keyPath);
-        tlsOptions = {
-          cert,
-          key,
-          SNICallback: createSNICallback(stateDir, cert, key),
-        };
+        const child = spawn(process.execPath, daemonArgs, {
+          detached: true,
+          stdio: ["ignore", logFd, logFd],
+          env: process.env,
+        });
+        child.unref();
+      } finally {
+        fs.closeSync(logFd);
       }
-    }
 
-    // Foreground mode: run the proxy directly in this process
-    if (isForeground) {
-      console.log(chalk.blue.bold("\nportless proxy\n"));
-      startProxyServer(store, proxyPort, tlsOptions);
+      // Wait for proxy to be ready
+      if (!(await waitForProxy(proxyPort, undefined, undefined, useHttps))) {
+        console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
+        console.error(chalk.blue("Try starting the proxy in the foreground to see the error:"));
+        const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
+        console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start --foreground`));
+        if (fs.existsSync(logPath)) {
+          console.error(chalk.gray(`Logs: ${logPath}`));
+        }
+        process.exit(1);
+      }
+
+      const proto = useHttps ? "HTTPS/2" : "HTTP";
+      console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
       return;
     }
+  } // end !isRunCommand
 
-    // Daemon mode (default): fork and detach, logging to file
-    store.ensureDir();
-    const logPath = path.join(stateDir, "proxy.log");
-    const logFd = fs.openSync(logPath, "a");
-    try {
-      try {
-        fs.chmodSync(logPath, FILE_MODE);
-      } catch {
-        // May fail if file is owned by another user; non-fatal
-      }
-      fixOwnership(logPath);
+  // Run app
+  if (isRunCommand) {
+    const parsed = parseRunArgs(args);
 
-      const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
-      if (portFlagIndex !== -1) {
-        daemonArgs.push("--port", proxyPort.toString());
-      }
-      if (useHttps) {
-        if (customCertPath && customKeyPath) {
-          daemonArgs.push("--cert", customCertPath, "--key", customKeyPath);
-        } else {
-          daemonArgs.push("--https");
-        }
-      }
-
-      const child = spawn(process.execPath, daemonArgs, {
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-        env: process.env,
-      });
-      child.unref();
-    } finally {
-      fs.closeSync(logFd);
-    }
-
-    // Wait for proxy to be ready
-    if (!(await waitForProxy(proxyPort, undefined, undefined, useHttps))) {
-      console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
-      console.error(chalk.blue("Try starting the proxy in the foreground to see the error:"));
-      const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
-      console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start --foreground`));
-      if (fs.existsSync(logPath)) {
-        console.error(chalk.gray(`Logs: ${logPath}`));
-      }
+    if (parsed.commandArgs.length === 0) {
+      console.error(chalk.red("Error: No command provided."));
+      console.error(chalk.blue("Usage:"));
+      console.error(chalk.cyan("  portless run <command...>"));
+      console.error(chalk.blue("Example:"));
+      console.error(chalk.cyan("  portless run next dev"));
       process.exit(1);
     }
 
-    const proto = useHttps ? "HTTPS/2" : "HTTP";
-    console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
-    return;
+    const inferred = inferProjectName();
+    const worktree = detectWorktreePrefix();
+    const effectiveName = worktree ? `${worktree.prefix}.${inferred.name}` : inferred.name;
+
+    const { dir, port, tls } = await discoverState();
+    const store = new RouteStore(dir, {
+      onWarning: (msg) => console.warn(chalk.yellow(msg)),
+    });
+    await runApp(store, port, dir, effectiveName, parsed.commandArgs, tls, parsed.force, {
+      nameSource: inferred.source,
+      prefix: worktree?.prefix,
+      prefixSource: worktree?.source,
+    });
+  } else {
+    const parsed = parseAppArgs(args);
+
+    if (parsed.commandArgs.length === 0) {
+      console.error(chalk.red("Error: No command provided."));
+      console.error(chalk.blue("Usage:"));
+      console.error(chalk.cyan("  portless <name> <command...>"));
+      console.error(chalk.blue("Example:"));
+      console.error(chalk.cyan("  portless myapp next dev"));
+      process.exit(1);
+    }
+
+    const { dir, port, tls } = await discoverState();
+    const store = new RouteStore(dir, {
+      onWarning: (msg) => console.warn(chalk.yellow(msg)),
+    });
+    await runApp(store, port, dir, parsed.name, parsed.commandArgs, tls, parsed.force);
   }
-
-  // Run app -- only recognize --force before the command (position 0 or 1)
-  const forceIdx = args.indexOf("--force");
-  const force = forceIdx >= 0 && forceIdx <= 1;
-  const appArgs = force ? [...args.slice(0, forceIdx), ...args.slice(forceIdx + 1)] : args;
-  const name = appArgs[0];
-  const commandArgs = appArgs.slice(1);
-
-  if (commandArgs.length === 0) {
-    console.error(chalk.red("Error: No command provided."));
-    console.error(chalk.blue("Usage:"));
-    console.error(chalk.cyan("  portless <name> <command...>"));
-    console.error(chalk.blue("Example:"));
-    console.error(chalk.cyan("  portless myapp next dev"));
-    process.exit(1);
-  }
-
-  const { dir, port, tls } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(chalk.yellow(msg)),
-  });
-  await runApp(store, port, dir, name, commandArgs, tls, force);
 }
 
 main().catch((err: unknown) => {

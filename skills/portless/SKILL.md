@@ -39,6 +39,10 @@ npm install -g portless
 portless proxy start
 
 # Run your app (auto-starts the proxy if needed)
+portless run next dev
+# -> http://<project>.localhost:1355
+
+# Or with an explicit name
 portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
@@ -52,7 +56,7 @@ The proxy auto-starts when you run an app. You can also start it explicitly with
 ```json
 {
   "scripts": {
-    "dev": "portless myapp next dev"
+    "dev": "portless run next dev"
   }
 }
 ```
@@ -119,6 +123,7 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 
 | Command                             | Description                                                   |
 | ----------------------------------- | ------------------------------------------------------------- |
+| `portless run <cmd> [args...]`      | Infer name from project, run through proxy (auto-starts)      |
 | `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
 | `portless list`                     | Show active routes                                            |
 | `portless trust`                    | Add local CA to system trust store (for HTTPS)                |
