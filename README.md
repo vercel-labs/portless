@@ -71,7 +71,7 @@ The proxy auto-starts when you run an app. Or start it explicitly: `portless pro
 ```mermaid
 flowchart TD
     Browser["Browser\nmyapp.localhost:1355"]
-    Proxy["portless proxy\n(port 1355)"]
+    Proxy["portless proxy<br>(port 1355)"]
     App1[":4123\nmyapp"]
     App2[":4567\napi"]
 
