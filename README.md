@@ -16,12 +16,16 @@ npm install -g portless
 # Start the proxy (once, no sudo needed)
 portless proxy start
 
-# Run your app (auto-starts the proxy if needed)
+# Run your app (builtin provider, auto-starts proxy if needed)
 portless myapp next dev
 # -> http://myapp.localhost:1355
+
+# Run your app with tailscale serve
+portless --provider tailscale myapp next dev
+# -> https://<node>.<tailnet>.ts.net/myapp
 ```
 
-> The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`.
+> Builtin mode auto-starts the proxy when you run an app. Tailscale mode requires `tailscale` to be installed and connected.
 
 ## Why
 
@@ -42,7 +46,7 @@ Portless fixes all of this by giving each dev server a stable, named `.localhost
 ## Usage
 
 ```bash
-# Basic
+# Builtin provider (default)
 portless myapp next dev
 # -> http://myapp.localhost:1355
 
@@ -52,6 +56,10 @@ portless api.myapp pnpm start
 
 portless docs.myapp next dev
 # -> http://docs.myapp.localhost:1355
+
+# Tailscale provider
+portless --provider tailscale myapp next dev
+# -> https://<node>.<tailnet>.ts.net/myapp
 ```
 
 ### In package.json
@@ -59,12 +67,13 @@ portless docs.myapp next dev
 ```json
 {
   "scripts": {
-    "dev": "portless myapp next dev"
+    "dev": "portless myapp next dev",
+    "dev:tailnet": "portless --provider tailscale myapp next dev"
   }
 }
 ```
 
-The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
+Builtin mode auto-starts the proxy when you run an app. You can also start it explicitly: `portless proxy start`.
 
 ## How It Works
 
@@ -80,11 +89,29 @@ flowchart TD
     Proxy --> App2
 ```
 
-1. **Start the proxy** -- auto-starts when you run an app, or start explicitly with `portless proxy start`
-2. **Run apps** -- `portless <name> <command>` assigns a free port and registers with the proxy
-3. **Access via URL** -- `http://<name>.localhost:1355` routes through the proxy to your app
+1. **Choose provider** -- builtin (default) or tailscale (`--provider tailscale`)
+2. **Run apps** -- `portless <name> <command>` assigns a free local port and starts your app
+3. **Builtin URL** -- `http://<name>.localhost:1355` through the local proxy
+4. **Tailscale URL** -- `https://<node>.<tailnet>.ts.net/<name>` via `tailscale serve`
 
 Apps are assigned a random port (4000-4999) via the `PORT` and `HOST` environment variables. Most frameworks (Next.js, Express, Nuxt, etc.) respect these automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects the correct `--port` and `--host` flags.
+
+## Tailscale Provider
+
+Tailscale mode is tailnet-only in this release (no Funnel support).
+
+```bash
+# Verify tailscale is installed and connected
+tailscale status
+
+# Run app via tailscale serve
+portless --provider tailscale myapp pnpm dev
+
+# Replace an existing tailscale path mount for this app
+portless --provider tailscale --force myapp pnpm dev
+```
+
+Portless registers `/<name>` with `tailscale serve` while your app is running and removes it on process exit.
 
 ## HTTP/2 + HTTPS
 
@@ -111,15 +138,16 @@ sudo portless trust
 ## Commands
 
 ```bash
-portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
-portless list                    # Show active routes
-portless trust                   # Add local CA to system trust store
+portless <name> <cmd> [args...]                       # Run app with builtin provider
+portless --provider tailscale <name> <cmd> [args...] # Run app with tailscale provider
+portless list                                         # Show routes for active provider
+portless trust                                        # Add local CA to system trust store (builtin only)
 
 # Disable portless (run command directly)
 PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 # Also accepts PORTLESS=skip
 
-# Proxy control
+# Builtin proxy control
 portless proxy start             # Start the proxy (port 1355, daemon)
 portless proxy start --https     # Start with HTTP/2 + TLS
 portless proxy start -p 80       # Start on port 80 (requires sudo)
@@ -127,6 +155,7 @@ portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy stop              # Stop the proxy
 
 # Options
+--provider <builtin|tailscale>   # Select routing provider (default: builtin)
 -p, --port <number>              # Port for the proxy (default: 1355)
                                  # Ports < 1024 require sudo
 --https                          # Enable HTTP/2 + TLS with auto-generated certs
@@ -137,6 +166,7 @@ portless proxy stop              # Stop the proxy
 --force                          # Override a route registered by another process
 
 # Environment variables
+PORTLESS_PROVIDER=<name>         # Default provider (builtin or tailscale)
 PORTLESS_PORT=<number>           # Override the default proxy port
 PORTLESS_HTTPS=1                 # Always enable HTTPS
 PORTLESS_STATE_DIR=<path>        # Override the state directory
@@ -206,3 +236,4 @@ Portless detects this misconfiguration and responds with `508 Loop Detected` alo
 
 - Node.js 20+
 - macOS or Linux
+- Tailscale CLI (optional, only for `--provider tailscale`)
