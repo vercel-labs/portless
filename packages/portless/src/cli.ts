@@ -9,7 +9,15 @@ import { spawn, spawnSync } from "node:child_process";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
-import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import { DEFAULT_ROUTE_PROVIDER, FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import {
+  ensureTailscaleReady,
+  formatTailscaleUrl,
+  registerServePath,
+  tailscalePathFor,
+  unregisterServePath,
+} from "./tailscale.js";
+import type { RouteProvider } from "./types.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
@@ -43,6 +51,57 @@ const EXIT_TIMEOUT_MS = 2000;
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 
+/** Supported provider values for --provider / PORTLESS_PROVIDER. */
+const SUPPORTED_PROVIDERS: readonly RouteProvider[] = ["builtin", "tailscale"];
+
+function parseProvider(raw: string | undefined): RouteProvider | null {
+  if (!raw) return DEFAULT_ROUTE_PROVIDER;
+  if (raw === "builtin" || raw === "tailscale") return raw;
+  return null;
+}
+
+function parseGlobalProvider(args: string[]): {
+  provider: RouteProvider;
+  args: string[];
+  error?: string;
+} {
+  const index = args.indexOf("--provider");
+  if (index === -1) {
+    const provider = parseProvider(process.env.PORTLESS_PROVIDER);
+    if (!provider) {
+      return {
+        provider: DEFAULT_ROUTE_PROVIDER,
+        args,
+        error: `Invalid PORTLESS_PROVIDER value: ${process.env.PORTLESS_PROVIDER}`,
+      };
+    }
+    return { provider, args };
+  }
+
+  const value = args[index + 1];
+  if (!value || value.startsWith("-")) {
+    return {
+      provider: DEFAULT_ROUTE_PROVIDER,
+      args,
+      error: "Error: --provider requires one of: builtin, tailscale.",
+    };
+  }
+
+  const provider = parseProvider(value);
+  if (!provider) {
+    return {
+      provider: DEFAULT_ROUTE_PROVIDER,
+      args,
+      error: `Error: Invalid provider "${value}". Use one of: ${SUPPORTED_PROVIDERS.join(", ")}.`,
+    };
+  }
+
+  return {
+    provider,
+    args: [...args.slice(0, index), ...args.slice(index + 2)],
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -69,14 +128,14 @@ function startProxyServer(
   fixOwnership(routesPath);
 
   // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes = store.loadRoutes();
+  let cachedRoutes = store.loadRoutes(false, "builtin");
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
   const reloadRoutes = () => {
     try {
-      cachedRoutes = store.loadRoutes();
+      cachedRoutes = store.loadRoutes(false, "builtin");
     } catch {
       // File may be mid-write; keep existing cached routes
     }
@@ -270,18 +329,34 @@ async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Pr
   }
 }
 
-function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
-  const routes = store.loadRoutes();
+function listRoutes(
+  store: RouteStore,
+  proxyPort: number,
+  tls: boolean,
+  provider: RouteProvider
+): void {
+  const routes = store.loadRoutes(false, provider);
 
   if (routes.length === 0) {
     console.log(chalk.yellow("No active routes."));
-    console.log(chalk.gray("Start an app with: portless <name> <command>"));
+    console.log(
+      chalk.gray(
+        provider === "tailscale"
+          ? "Start an app with: portless --provider tailscale <name> <command>"
+          : "Start an app with: portless <name> <command>"
+      )
+    );
     return;
   }
 
   console.log(chalk.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
-    const url = formatUrl(route.hostname, proxyPort, tls);
+    let url = formatUrl(route.hostname, proxyPort, tls);
+    if (provider === "tailscale") {
+      url = route.tailscaleBaseUrl
+        ? formatTailscaleUrl(route.tailscaleBaseUrl, route.hostname)
+        : `[unknown-tailnet-url]${tailscalePathFor(route.hostname)}`;
+    }
     console.log(
       `  ${chalk.cyan(url)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(`(pid ${route.pid})`)}`
     );
@@ -289,7 +364,7 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   console.log();
 }
 
-async function runApp(
+async function runBuiltinApp(
   store: RouteStore,
   proxyPort: number,
   stateDir: string,
@@ -391,7 +466,7 @@ async function runApp(
 
   // Register route
   try {
-    store.addRoute(hostname, port, process.pid, force);
+    store.addRoute(hostname, port, process.pid, { force, provider: "builtin" });
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(chalk.red(`Error: ${err.message}`));
@@ -418,12 +493,119 @@ async function runApp(
     },
     onCleanup: () => {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, "builtin");
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
     },
   });
+}
+
+async function runTailscaleApp(
+  store: RouteStore,
+  name: string,
+  commandArgs: string[],
+  force: boolean
+): Promise<void> {
+  const hostname = parseHostname(name);
+
+  console.log(chalk.blue.bold(`\nportless\n`));
+  console.log(chalk.gray(`-- ${hostname} (served via tailscale)`));
+
+  let baseUrl: string;
+  try {
+    const status = ensureTailscaleReady();
+    baseUrl = status.baseUrl;
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(chalk.red(`Error: ${message}`));
+    console.error(chalk.blue("If Tailscale is installed, make sure you're connected:"));
+    console.error(chalk.cyan("  tailscale up"));
+    process.exit(1);
+  }
+
+  const port = await findFreePort();
+  console.log(chalk.green(`-- Using port ${port}`));
+
+  try {
+    registerServePath(hostname, port, { force });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(chalk.red(`Error: ${message}`));
+    process.exit(1);
+  }
+
+  try {
+    store.addRoute(hostname, port, process.pid, {
+      force,
+      provider: "tailscale",
+      tailscalePath: tailscalePathFor(hostname),
+      tailscaleBaseUrl: baseUrl,
+      tailscaleHttpsPort: 443,
+    });
+  } catch (err) {
+    try {
+      unregisterServePath(hostname, { ignoreMissing: true });
+    } catch {
+      // Best-effort rollback if route persistence fails.
+    }
+    if (err instanceof RouteConflictError) {
+      console.error(chalk.red(`Error: ${err.message}`));
+      process.exit(1);
+    }
+    throw err;
+  }
+
+  const finalUrl = formatTailscaleUrl(baseUrl, hostname);
+  console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+
+  injectFrameworkFlags(commandArgs, port);
+
+  console.log(chalk.gray(`Running: PORT=${port} HOST=127.0.0.1 ${commandArgs.join(" ")}\n`));
+
+  spawnCommand(commandArgs, {
+    env: {
+      ...process.env,
+      PORT: port.toString(),
+      HOST: "127.0.0.1",
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: ".localhost",
+    },
+    onCleanup: () => {
+      try {
+        unregisterServePath(hostname, { ignoreMissing: true });
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(chalk.yellow(`Warning: ${message}`));
+        console.warn(
+          chalk.gray(
+            `Manual cleanup: tailscale serve --yes --https=443 --set-path=/${hostname} off`
+          )
+        );
+      }
+      try {
+        store.removeRoute(hostname, "tailscale");
+      } catch {
+        // Lock acquisition may fail during cleanup; non-fatal
+      }
+    },
+  });
+}
+
+async function runApp(
+  provider: RouteProvider,
+  store: RouteStore,
+  proxyPort: number,
+  stateDir: string,
+  name: string,
+  commandArgs: string[],
+  tls: boolean,
+  force: boolean
+): Promise<void> {
+  if (provider === "tailscale") {
+    await runTailscaleApp(store, name, commandArgs, force);
+    return;
+  }
+  await runBuiltinApp(store, proxyPort, stateDir, name, commandArgs, tls, force);
 }
 
 // ---------------------------------------------------------------------------
@@ -441,7 +623,19 @@ async function main() {
     });
   }
 
-  const args = process.argv.slice(2);
+  const rawArgs = process.argv.slice(2);
+  const providerResult = parseGlobalProvider(rawArgs);
+  if (providerResult.error) {
+    console.error(chalk.red(providerResult.error));
+    console.error(
+      chalk.gray(
+        `Valid providers: ${SUPPORTED_PROVIDERS.join(", ")} (default: ${DEFAULT_ROUTE_PROVIDER})`
+      )
+    );
+    process.exit(1);
+  }
+  const provider = providerResult.provider;
+  const args = providerResult.args;
 
   // Block npx / pnpm dlx -- portless should be installed globally, not run
   // via npx. Running "sudo npx" is unsafe because it performs package
@@ -457,7 +651,13 @@ async function main() {
 
   // Skip portless if PORTLESS=0 or PORTLESS=skip
   const skipPortless = process.env.PORTLESS === "0" || process.env.PORTLESS === "skip";
-  if (skipPortless && args.length >= 2 && args[0] !== "proxy") {
+  if (
+    skipPortless &&
+    args.length >= 2 &&
+    args[0] !== "proxy" &&
+    args[0] !== "list" &&
+    args[0] !== "trust"
+  ) {
     // Just run the command directly, skipping the first arg (the name)
     spawnCommand(args.slice(1));
     return;
@@ -480,16 +680,17 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start --https")}     Start with HTTP/2 + TLS (auto-generates certs)
   ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
-  ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
-  ${chalk.cyan("portless list")}                    Show active routes
-  ${chalk.cyan("portless trust")}                   Add local CA to system trust store
+  ${chalk.cyan("portless <name> <cmd>")}            Run your app with the builtin provider
+  ${chalk.cyan("portless --provider tailscale <name> <cmd>")}  Run your app via tailscale serve
+  ${chalk.cyan("portless list")}                    Show active routes for the active provider
+  ${chalk.cyan("portless trust")}                   Add local CA to system trust store (builtin only)
 
 ${chalk.bold("Examples:")}
   portless proxy start                # Start proxy on port 1355
   portless proxy start --https        # Start with HTTPS/2 (faster page loads)
   portless myapp next dev             # -> http://myapp.localhost:1355
-  portless myapp vite dev             # -> http://myapp.localhost:1355
-  portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
+  portless --provider tailscale myapp next dev  # -> https://<node>.<tailnet>.ts.net/myapp
+  portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355 (builtin default)
 
 ${chalk.bold("In package.json:")}
   {
@@ -499,10 +700,10 @@ ${chalk.bold("In package.json:")}
   }
 
 ${chalk.bold("How it works:")}
-  1. Start the proxy once (listens on port 1355 by default, no sudo needed)
-  2. Run your apps - they auto-start the proxy and register automatically
-  3. Access via http://<name>.localhost:1355
-  4. .localhost domains auto-resolve to 127.0.0.1
+  1. Choose a provider: builtin (default) or tailscale
+  2. Builtin mode uses a local proxy on port 1355 and .localhost hostnames
+  3. Tailscale mode uses tailscale serve paths on your tailnet
+  4. Run apps with portless; each app gets a random local port automatically
   5. Frameworks that ignore PORT (Vite, Astro, React Router, Angular) get
      --port and --host flags injected automatically
 
@@ -512,6 +713,7 @@ ${chalk.bold("HTTP/2 + HTTPS:")}
   system trust store. No browser warnings. No sudo required on macOS.
 
 ${chalk.bold("Options:")}
+  --provider <builtin|tailscale>  Select routing provider (default: builtin)
   -p, --port <number>           Port for the proxy to listen on (default: 1355)
                                 Ports < 1024 require sudo
   --https                       Enable HTTP/2 + TLS with auto-generated certs
@@ -522,6 +724,7 @@ ${chalk.bold("Options:")}
   --force                       Override an existing route registered by another process
 
 ${chalk.bold("Environment variables:")}
+  PORTLESS_PROVIDER=<name>      Default provider (builtin or tailscale)
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_STATE_DIR=<path>     Override the state directory
@@ -541,6 +744,13 @@ ${chalk.bold("Skip portless:")}
 
   // Trust command
   if (args[0] === "trust") {
+    if (provider === "tailscale") {
+      console.error(
+        chalk.red("Error: `portless trust` is only available with the builtin provider.")
+      );
+      console.error(chalk.blue("Use the default provider or run without --provider tailscale."));
+      process.exit(1);
+    }
     const { dir } = await discoverState();
     const result = trustCA(dir);
     if (result.trusted) {
@@ -559,16 +769,33 @@ ${chalk.bold("Skip portless:")}
 
   // List routes
   if (args[0] === "list") {
-    const { dir, port, tls } = await discoverState();
-    const store = new RouteStore(dir, {
+    const defaultPort = getDefaultPort();
+    const state =
+      provider === "tailscale"
+        ? {
+            dir: process.env.PORTLESS_STATE_DIR ?? resolveStateDir(defaultPort),
+            port: defaultPort,
+            tls: false,
+          }
+        : await discoverState();
+    const store = new RouteStore(state.dir, {
       onWarning: (msg) => console.warn(chalk.yellow(msg)),
     });
-    listRoutes(store, port, tls);
+    listRoutes(store, state.port, state.tls, provider);
     return;
   }
 
   // Proxy commands
   if (args[0] === "proxy") {
+    if (provider === "tailscale") {
+      console.error(
+        chalk.red("Error: `portless proxy` commands are only available with the builtin provider.")
+      );
+      console.error(chalk.blue("Run app routes in tailscale mode instead:"));
+      console.error(chalk.cyan("  portless --provider tailscale <name> <command...>"));
+      process.exit(1);
+    }
+
     if (args[1] === "stop") {
       const { dir, port, tls } = await discoverState();
       const store = new RouteStore(dir, {
@@ -822,11 +1049,19 @@ ${chalk.bold("Usage: portless proxy <command>")}
     process.exit(1);
   }
 
-  const { dir, port, tls } = await discoverState();
-  const store = new RouteStore(dir, {
+  const defaultPort = getDefaultPort();
+  const state =
+    provider === "tailscale"
+      ? {
+          dir: process.env.PORTLESS_STATE_DIR ?? resolveStateDir(defaultPort),
+          port: defaultPort,
+          tls: false,
+        }
+      : await discoverState();
+  const store = new RouteStore(state.dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
-  await runApp(store, port, dir, name, commandArgs, tls, force);
+  await runApp(provider, store, state.port, state.dir, name, commandArgs, state.tls, force);
 }
 
 main().catch((err: unknown) => {
