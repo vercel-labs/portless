@@ -127,22 +127,263 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       const safeHost = escapeHtml(host);
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(`
-        <html>
-          <head><title>portless - Not Found</title></head>
-          <body style="font-family: system-ui; padding: 40px; max-width: 600px; margin: 0 auto;">
-            <h1>Not Found</h1>
-            <p>No app registered for <strong>${safeHost}</strong></p>
-            ${
-              routes.length > 0
-                ? `
+        <!DOCTYPE html>
+        <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>portless - Not Found</title>
+            <style>
+              :root {
+                --background: #ffffff;
+                --foreground: #171717;
+                --muted: #737373;
+                --border: #e5e5e5;
+                --card-bg: #fafafa;
+                --link: #0070f3;
+                --link-hover: #0051cc;
+                --code-bg: #f5f5f5;
+                --toggle-bg: #e5e5e5;
+                --toggle-hover: #d4d4d4;
+              }
+
+              @media (prefers-color-scheme: dark) {
+                :root:not([data-theme="light"]) {
+                  --background: #0a0a0a;
+                  --foreground: #ededed;
+                  --muted: #a3a3a3;
+                  --border: #262626;
+                  --card-bg: #171717;
+                  --link: #3b82f6;
+                  --link-hover: #60a5fa;
+                  --code-bg: #262626;
+                  --toggle-bg: #262626;
+                  --toggle-hover: #404040;
+                }
+              }
+
+              [data-theme="dark"] {
+                --background: #0a0a0a;
+                --foreground: #ededed;
+                --muted: #a3a3a3;
+                --border: #262626;
+                --card-bg: #171717;
+                --link: #3b82f6;
+                --link-hover: #60a5fa;
+                --code-bg: #262626;
+                --toggle-bg: #262626;
+                --toggle-hover: #404040;
+              }
+
+              * {
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+              }
+
+              body {
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+                background-color: var(--background);
+                color: var(--foreground);
+                padding: 40px 20px;
+                line-height: 1.6;
+                transition: background-color 0.2s, color 0.2s;
+              }
+
+              .container {
+                max-width: 600px;
+                margin: 0 auto;
+              }
+
+              .header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 32px;
+              }
+
+              h1 {
+                font-size: 28px;
+                font-weight: 600;
+                margin-bottom: 16px;
+              }
+
+              h2 {
+                font-size: 20px;
+                font-weight: 600;
+                margin-top: 32px;
+                margin-bottom: 16px;
+              }
+
+              p {
+                margin-bottom: 16px;
+                color: var(--foreground);
+              }
+
+              em {
+                color: var(--muted);
+              }
+
+              strong {
+                font-weight: 600;
+                color: var(--foreground);
+              }
+
+              code {
+                background-color: var(--code-bg);
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+                font-size: 14px;
+                color: var(--foreground);
+              }
+
+              ul {
+                list-style: none;
+                background-color: var(--card-bg);
+                border: 1px solid var(--border);
+                border-radius: 8px;
+                padding: 16px;
+                margin-bottom: 16px;
+              }
+
+              li {
+                padding: 8px 0;
+                border-bottom: 1px solid var(--border);
+              }
+
+              li:last-child {
+                border-bottom: none;
+              }
+
+              a {
+                color: var(--link);
+                text-decoration: none;
+                transition: color 0.2s;
+              }
+
+              a:hover {
+                color: var(--link-hover);
+                text-decoration: underline;
+              }
+
+              .theme-toggle {
+                background: var(--toggle-bg);
+                border: 1px solid var(--border);
+                border-radius: 6px;
+                width: 36px;
+                height: 36px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                cursor: pointer;
+                transition: background-color 0.2s;
+              }
+
+              .theme-toggle:hover {
+                background: var(--toggle-hover);
+              }
+
+              .theme-toggle svg {
+                width: 18px;
+                height: 18px;
+                stroke: var(--foreground);
+              }
+
+              .sun-icon {
+                display: none;
+              }
+
+              [data-theme="dark"] .sun-icon {
+                display: block;
+              }
+
+              [data-theme="dark"] .moon-icon {
+                display: none;
+              }
+
+              @media (prefers-color-scheme: dark) {
+                :root:not([data-theme="light"]) .sun-icon {
+                  display: block;
+                }
+                :root:not([data-theme="light"]) .moon-icon {
+                  display: none;
+                }
+              }
+            </style>
+            <script>
+              // Apply saved theme immediately (before render) to prevent flash
+              (function() {
+                const savedTheme = localStorage.getItem('portless-theme');
+                if (savedTheme) {
+                  document.documentElement.setAttribute('data-theme', savedTheme);
+                }
+              })();
+            </script>
+          </head>
+          <body>
+            <div class="container">
+              <div class="header">
+                <h1>Not Found</h1>
+                <button class="theme-toggle" id="theme-toggle" aria-label="Toggle theme">
+                  <svg class="sun-icon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <circle cx="12" cy="12" r="4"/>
+                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/>
+                  </svg>
+                  <svg class="moon-icon" viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/>
+                  </svg>
+                </button>
+              </div>
+              <p>No app registered for <strong>${safeHost}</strong></p>
+              ${
+                routes.length > 0
+                  ? `
               <h2>Active apps:</h2>
               <ul>
                 ${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, isTls))}">${escapeHtml(r.hostname)}</a> - localhost:${escapeHtml(String(r.port))}</li>`).join("")}
               </ul>
             `
-                : "<p><em>No apps running.</em></p>"
-            }
-            <p>Start an app with: <code>portless ${safeHost.replace(".localhost", "")} your-command</code></p>
+                  : "<p><em>No apps running.</em></p>"
+              }
+              <p>Start an app with: <code>portless ${safeHost.replace(".localhost", "")} your-command</code></p>
+            </div>
+            <script>
+              // Theme toggle functionality
+              const toggle = document.getElementById('theme-toggle');
+              const root = document.documentElement;
+              
+              function getEffectiveTheme() {
+                const savedTheme = localStorage.getItem('portless-theme');
+                if (savedTheme) return savedTheme;
+                
+                // Check system preference
+                if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                  return 'dark';
+                }
+                return 'light';
+              }
+              
+              function setTheme(theme) {
+                root.setAttribute('data-theme', theme);
+                localStorage.setItem('portless-theme', theme);
+              }
+              
+              toggle.addEventListener('click', function() {
+                const currentTheme = getEffectiveTheme();
+                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+                setTheme(newTheme);
+              });
+              
+              // Update theme when system preference changes
+              if (window.matchMedia) {
+                window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+                  if (!localStorage.getItem('portless-theme')) {
+                    root.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+                  }
+                });
+              }
+            </script>
           </body>
         </html>
       `);
