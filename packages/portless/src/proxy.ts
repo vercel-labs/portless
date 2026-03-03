@@ -7,6 +7,235 @@ import { escapeHtml, formatUrl } from "./utils.js";
 /** Response header used to identify a portless proxy (for health checks). */
 export const PORTLESS_HEADER = "X-Portless";
 
+/** Dark mode CSS styles for 404 page */
+const DARK_MODE_STYLES = `
+  :root {
+    --background: #ffffff;
+    --foreground: #171717;
+    --muted: #737373;
+    --border: #e5e5e5;
+    --card-bg: #fafafa;
+    --link: #0070f3;
+    --link-hover: #0051cc;
+    --code-bg: #f5f5f5;
+    --toggle-bg: #e5e5e5;
+    --toggle-hover: #d4d4d4;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --background: #0a0a0a;
+      --foreground: #ededed;
+      --muted: #a3a3a3;
+      --border: #262626;
+      --card-bg: #171717;
+      --link: #3b82f6;
+      --link-hover: #60a5fa;
+      --code-bg: #262626;
+      --toggle-bg: #262626;
+      --toggle-hover: #404040;
+    }
+  }
+
+  [data-theme="dark"] {
+    --background: #0a0a0a;
+    --foreground: #ededed;
+    --muted: #a3a3a3;
+    --border: #262626;
+    --card-bg: #171717;
+    --link: #3b82f6;
+    --link-hover: #60a5fa;
+    --code-bg: #262626;
+    --toggle-bg: #262626;
+    --toggle-hover: #404040;
+  }
+
+  * {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+  }
+
+  body {
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: var(--background);
+    color: var(--foreground);
+    padding: 40px 20px;
+    line-height: 1.6;
+    transition: background-color 0.2s, color 0.2s;
+  }
+
+  .container {
+    max-width: 600px;
+    margin: 0 auto;
+  }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 32px;
+  }
+
+  h1 {
+    font-size: 28px;
+    font-weight: 600;
+    margin-bottom: 16px;
+  }
+
+  h2 {
+    font-size: 20px;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 16px;
+  }
+
+  p {
+    margin-bottom: 16px;
+    color: var(--foreground);
+  }
+
+  em {
+    color: var(--muted);
+  }
+
+  strong {
+    font-weight: 600;
+    color: var(--foreground);
+  }
+
+  code {
+    background-color: var(--code-bg);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
+    font-size: 14px;
+    color: var(--foreground);
+  }
+
+  ul {
+    list-style: none;
+    background-color: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+  }
+
+  li {
+    padding: 8px 0;
+    border-bottom: 1px solid var(--border);
+  }
+
+  li:last-child {
+    border-bottom: none;
+  }
+
+  a {
+    color: var(--link);
+    text-decoration: none;
+    transition: color 0.2s;
+  }
+
+  a:hover {
+    color: var(--link-hover);
+    text-decoration: underline;
+  }
+
+  .theme-toggle {
+    background: var(--toggle-bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    width: 36px;
+    height: 36px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+
+  .theme-toggle:hover {
+    background: var(--toggle-hover);
+  }
+
+  .theme-toggle svg {
+    width: 18px;
+    height: 18px;
+    stroke: var(--foreground);
+  }
+
+  .sun-icon {
+    display: none;
+  }
+
+  [data-theme="dark"] .sun-icon {
+    display: block;
+  }
+
+  [data-theme="dark"] .moon-icon {
+    display: none;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .sun-icon {
+      display: block;
+    }
+    :root:not([data-theme="light"]) .moon-icon {
+      display: none;
+    }
+  }
+`;
+
+/** Script to apply saved theme before render (prevents flash) */
+const THEME_INIT_SCRIPT = `
+  // Apply saved theme immediately (before render) to prevent flash
+  (function() {
+    const savedTheme = localStorage.getItem('portless-theme');
+    if (savedTheme) {
+      document.documentElement.setAttribute('data-theme', savedTheme);
+    }
+  })();
+`;
+
+/** Script for theme toggle functionality */
+const THEME_TOGGLE_SCRIPT = `
+  // Theme toggle functionality
+  const toggle = document.getElementById('theme-toggle');
+  const root = document.documentElement;
+  
+  function getEffectiveTheme() {
+    const savedTheme = localStorage.getItem('portless-theme');
+    if (savedTheme) return savedTheme;
+    
+    // Check system preference
+    if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+      return 'dark';
+    }
+    return 'light';
+  }
+  
+  function setTheme(theme) {
+    root.setAttribute('data-theme', theme);
+    localStorage.setItem('portless-theme', theme);
+  }
+  
+  toggle.addEventListener('click', function() {
+    const currentTheme = getEffectiveTheme();
+    const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+    setTheme(newTheme);
+  });
+  
+  // Update theme when system preference changes
+  if (window.matchMedia) {
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
+      if (!localStorage.getItem('portless-theme')) {
+        root.setAttribute('data-theme', e.matches ? 'dark' : 'light');
+      }
+    });
+  }
+`;
+
 /**
  * HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2 responses.
  * These must be stripped when proxying an HTTP/1.1 backend response
@@ -133,193 +362,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1.0">
             <title>portless - Not Found</title>
-            <style>
-              :root {
-                --background: #ffffff;
-                --foreground: #171717;
-                --muted: #737373;
-                --border: #e5e5e5;
-                --card-bg: #fafafa;
-                --link: #0070f3;
-                --link-hover: #0051cc;
-                --code-bg: #f5f5f5;
-                --toggle-bg: #e5e5e5;
-                --toggle-hover: #d4d4d4;
-              }
-
-              @media (prefers-color-scheme: dark) {
-                :root:not([data-theme="light"]) {
-                  --background: #0a0a0a;
-                  --foreground: #ededed;
-                  --muted: #a3a3a3;
-                  --border: #262626;
-                  --card-bg: #171717;
-                  --link: #3b82f6;
-                  --link-hover: #60a5fa;
-                  --code-bg: #262626;
-                  --toggle-bg: #262626;
-                  --toggle-hover: #404040;
-                }
-              }
-
-              [data-theme="dark"] {
-                --background: #0a0a0a;
-                --foreground: #ededed;
-                --muted: #a3a3a3;
-                --border: #262626;
-                --card-bg: #171717;
-                --link: #3b82f6;
-                --link-hover: #60a5fa;
-                --code-bg: #262626;
-                --toggle-bg: #262626;
-                --toggle-hover: #404040;
-              }
-
-              * {
-                margin: 0;
-                padding: 0;
-                box-sizing: border-box;
-              }
-
-              body {
-                font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-                background-color: var(--background);
-                color: var(--foreground);
-                padding: 40px 20px;
-                line-height: 1.6;
-                transition: background-color 0.2s, color 0.2s;
-              }
-
-              .container {
-                max-width: 600px;
-                margin: 0 auto;
-              }
-
-              .header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 32px;
-              }
-
-              h1 {
-                font-size: 28px;
-                font-weight: 600;
-                margin-bottom: 16px;
-              }
-
-              h2 {
-                font-size: 20px;
-                font-weight: 600;
-                margin-top: 32px;
-                margin-bottom: 16px;
-              }
-
-              p {
-                margin-bottom: 16px;
-                color: var(--foreground);
-              }
-
-              em {
-                color: var(--muted);
-              }
-
-              strong {
-                font-weight: 600;
-                color: var(--foreground);
-              }
-
-              code {
-                background-color: var(--code-bg);
-                padding: 2px 8px;
-                border-radius: 4px;
-                font-family: 'SF Mono', Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-                font-size: 14px;
-                color: var(--foreground);
-              }
-
-              ul {
-                list-style: none;
-                background-color: var(--card-bg);
-                border: 1px solid var(--border);
-                border-radius: 8px;
-                padding: 16px;
-                margin-bottom: 16px;
-              }
-
-              li {
-                padding: 8px 0;
-                border-bottom: 1px solid var(--border);
-              }
-
-              li:last-child {
-                border-bottom: none;
-              }
-
-              a {
-                color: var(--link);
-                text-decoration: none;
-                transition: color 0.2s;
-              }
-
-              a:hover {
-                color: var(--link-hover);
-                text-decoration: underline;
-              }
-
-              .theme-toggle {
-                background: var(--toggle-bg);
-                border: 1px solid var(--border);
-                border-radius: 6px;
-                width: 36px;
-                height: 36px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                cursor: pointer;
-                transition: background-color 0.2s;
-              }
-
-              .theme-toggle:hover {
-                background: var(--toggle-hover);
-              }
-
-              .theme-toggle svg {
-                width: 18px;
-                height: 18px;
-                stroke: var(--foreground);
-              }
-
-              .sun-icon {
-                display: none;
-              }
-
-              [data-theme="dark"] .sun-icon {
-                display: block;
-              }
-
-              [data-theme="dark"] .moon-icon {
-                display: none;
-              }
-
-              @media (prefers-color-scheme: dark) {
-                :root:not([data-theme="light"]) .sun-icon {
-                  display: block;
-                }
-                :root:not([data-theme="light"]) .moon-icon {
-                  display: none;
-                }
-              }
-            </style>
-            <script>
-              // Apply saved theme immediately (before render) to prevent flash
-              (function() {
-                const savedTheme = localStorage.getItem('portless-theme');
-                if (savedTheme) {
-                  document.documentElement.setAttribute('data-theme', savedTheme);
-                }
-              })();
-            </script>
+            <style>${DARK_MODE_STYLES}</style>
+            <script>${THEME_INIT_SCRIPT}</script>
           </head>
           <body>
             <div class="container">
@@ -348,42 +392,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
               }
               <p>Start an app with: <code>portless ${safeHost.replace(".localhost", "")} your-command</code></p>
             </div>
-            <script>
-              // Theme toggle functionality
-              const toggle = document.getElementById('theme-toggle');
-              const root = document.documentElement;
-              
-              function getEffectiveTheme() {
-                const savedTheme = localStorage.getItem('portless-theme');
-                if (savedTheme) return savedTheme;
-                
-                // Check system preference
-                if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
-                  return 'dark';
-                }
-                return 'light';
-              }
-              
-              function setTheme(theme) {
-                root.setAttribute('data-theme', theme);
-                localStorage.setItem('portless-theme', theme);
-              }
-              
-              toggle.addEventListener('click', function() {
-                const currentTheme = getEffectiveTheme();
-                const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-                setTheme(newTheme);
-              });
-              
-              // Update theme when system preference changes
-              if (window.matchMedia) {
-                window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function(e) {
-                  if (!localStorage.getItem('portless-theme')) {
-                    root.setAttribute('data-theme', e.matches ? 'dark' : 'light');
-                  }
-                });
-              }
-            </script>
+            <script>${THEME_TOGGLE_SCRIPT}</script>
           </body>
         </html>
       `);
