@@ -94,13 +94,7 @@ function SheetTrigger({
   className,
   ...props
 }: React.ComponentProps<typeof SheetPrimitive.Trigger>) {
-  return (
-    <SheetPrimitive.Trigger
-      data-slot="sheet-trigger"
-      className={cn(className)}
-      {...props}
-    />
-  );
+  return <SheetPrimitive.Trigger data-slot="sheet-trigger" className={cn(className)} {...props} />;
 }
 
 export { Sheet, SheetTrigger, SheetContent, SheetTitle };
