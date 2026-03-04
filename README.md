@@ -116,6 +116,8 @@ portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
+portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
+portless hosts clean             # Remove portless entries from /etc/hosts
 
 # Disable portless (run command directly)
 PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
@@ -148,6 +150,7 @@ PORTLESS_URL                     # Public URL (e.g. http://myapp.localhost:1355)
 PORTLESS_PORT=<number>           # Override the default proxy port
 PORTLESS_APP_PORT=<number>       # Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=1                 # Always enable HTTPS
+PORTLESS_SYNC_HOSTS=1            # Auto-sync /etc/hosts when routes change
 PORTLESS_STATE_DIR=<path>        # Override the state directory
 
 # Info
@@ -177,6 +180,27 @@ pnpm test:watch       # Run tests in watch mode
 pnpm lint             # Lint all packages
 pnpm typecheck        # Type-check all packages
 pnpm format           # Format all files with Prettier
+```
+
+## Safari / DNS
+
+`.localhost` subdomains auto-resolve to `127.0.0.1` in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations.
+
+If Safari can't find your `.localhost` URL:
+
+```bash
+# Add current routes to /etc/hosts (requires sudo)
+sudo portless hosts sync
+
+# Clean up later
+sudo portless hosts clean
+```
+
+To auto-sync `/etc/hosts` whenever routes change, set `PORTLESS_SYNC_HOSTS=1` and start the proxy with sudo:
+
+```bash
+export PORTLESS_SYNC_HOSTS=1
+sudo portless proxy start
 ```
 
 ## Proxying Between Portless Apps

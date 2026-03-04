@@ -85,7 +85,7 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `http://<name>.localhost:1355` on the proxy port; the proxy forwards to the app's assigned port
 
-`.localhost` domains resolve to `127.0.0.1` natively on macOS and Linux -- no `/etc/hosts` editing needed.
+`.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `sudo portless hosts sync` to add entries to `/etc/hosts` if needed.
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects the correct `--port` and `--host` CLI flags.
 
@@ -100,13 +100,14 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 
 ### Environment variables
 
-| Variable             | Description                                         |
-| -------------------- | --------------------------------------------------- |
-| `PORTLESS_PORT`      | Override the default proxy port (default: 1355)     |
-| `PORTLESS_APP_PORT`  | Use a fixed port for the app (skip auto-assignment) |
-| `PORTLESS_HTTPS`     | Set to `1` to always enable HTTPS/HTTP/2            |
-| `PORTLESS_STATE_DIR` | Override the state directory                        |
-| `PORTLESS=0\|skip`   | Bypass the proxy, run the command directly          |
+| Variable              | Description                                           |
+| --------------------- | ----------------------------------------------------- |
+| `PORTLESS_PORT`       | Override the default proxy port (default: 1355)       |
+| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)   |
+| `PORTLESS_HTTPS`      | Set to `1` to always enable HTTPS/HTTP/2              |
+| `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts when routes change |
+| `PORTLESS_STATE_DIR`  | Override the state directory                          |
+| `PORTLESS=0\|skip`    | Bypass the proxy, run the command directly            |
 
 ### HTTP/2 + HTTPS
 
@@ -135,6 +136,8 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 | `portless proxy stop`                  | Stop the proxy                                                |
 | `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)          |
 | `portless alias --remove <name>`       | Remove a static route                                         |
+| `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                       |
+| `portless hosts clean`                 | Remove portless entries from /etc/hosts                       |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment       |
 | `portless <name> --force <cmd>`        | Override an existing route registered by another process      |
 | `portless --help` / `-h`               | Show help                                                     |
@@ -176,6 +179,19 @@ sudo portless proxy start -p 80       # Port 80, requires sudo
 portless proxy start                   # Port 1355, no sudo needed
 portless proxy stop                    # Stop (use sudo if started with sudo)
 ```
+
+### Safari can't find .localhost URLs
+
+Safari relies on the system DNS resolver for `.localhost` subdomains, which may not resolve them on all macOS configurations. Chrome, Firefox, and Edge have built-in handling.
+
+Fix:
+
+```bash
+sudo portless hosts sync    # Adds current routes to /etc/hosts
+sudo portless hosts clean   # Remove entries later
+```
+
+To auto-sync whenever routes change, set `PORTLESS_SYNC_HOSTS=1` and start the proxy with sudo.
 
 ### Browser shows certificate warning with --https
 

@@ -9,6 +9,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import { syncHostsFile, cleanHostsFile } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import { inferProjectName, detectWorktreePrefix } from "./auto.js";
 import {
@@ -75,9 +76,14 @@ function startProxyServer(
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
+  const autoSyncHosts = process.env.PORTLESS_SYNC_HOSTS === "1";
+
   const reloadRoutes = () => {
     try {
       cachedRoutes = store.loadRoutes();
+      if (autoSyncHosts) {
+        syncHostsFile(cachedRoutes.map((r) => r.hostname));
+      }
     } catch {
       // File may be mid-write; keep existing cached routes
     }
@@ -92,6 +98,10 @@ function startProxyServer(
     // fs.watch may not be supported; fall back to periodic polling
     console.warn(chalk.yellow("fs.watch unavailable; falling back to polling for route changes"));
     pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
+  }
+
+  if (autoSyncHosts) {
+    syncHostsFile(cachedRoutes.map((r) => r.hostname));
   }
 
   const server = createProxyServer({
@@ -151,6 +161,7 @@ function startProxyServer(
       // Port file may already be removed; non-fatal
     }
     writeTlsMarker(store.dir, false);
+    if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
     setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
@@ -646,6 +657,8 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless alias --remove <name>")}   Remove a static route
   ${chalk.cyan("portless list")}                    Show active routes
   ${chalk.cyan("portless trust")}                   Add local CA to system trust store
+  ${chalk.cyan("portless hosts sync")}              Add routes to /etc/hosts (fixes Safari)
+  ${chalk.cyan("portless hosts clean")}             Remove portless entries from /etc/hosts
 
 ${chalk.bold("Examples:")}
   portless proxy start                # Start proxy on port 1355
@@ -693,6 +706,7 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
+  PORTLESS_SYNC_HOSTS=1         Auto-sync /etc/hosts when proxy routes change
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
 
@@ -700,6 +714,16 @@ ${chalk.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
   HOST                          Always 127.0.0.1
   PORTLESS_URL                  Public URL of the app (e.g. http://myapp.localhost:1355)
+
+${chalk.bold("Safari / DNS:")}
+  .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
+  Safari relies on the system DNS resolver, which may not handle them.
+  If Safari can't find your .localhost URL, run:
+    ${chalk.cyan("sudo portless hosts sync")}
+  This adds entries to /etc/hosts. Clean up later with:
+    ${chalk.cyan("sudo portless hosts clean")}
+  To auto-sync whenever routes change, set PORTLESS_SYNC_HOSTS=1 and
+  start the proxy with sudo.
 
 ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
@@ -789,6 +813,44 @@ ${chalk.bold("Skip portless:")}
       const force = args.includes("--force");
       store.addRoute(hostname, port, 0, force);
       console.log(chalk.green(`Alias registered: ${hostname} -> localhost:${port}`));
+      return;
+    }
+
+    // Hosts commands (Safari .localhost workaround)
+    if (args[0] === "hosts") {
+      const { dir } = await discoverState();
+      const store = new RouteStore(dir, {
+        onWarning: (msg) => console.warn(chalk.yellow(msg)),
+      });
+
+      if (args[1] === "clean") {
+        if (cleanHostsFile()) {
+          console.log(chalk.green("Removed portless entries from /etc/hosts."));
+        } else {
+          console.error(chalk.red("Failed to update /etc/hosts (requires sudo)."));
+          console.error(chalk.cyan("  sudo portless hosts clean"));
+          process.exit(1);
+        }
+        return;
+      }
+
+      // Default: sync
+      const routes = store.loadRoutes();
+      if (routes.length === 0) {
+        console.log(chalk.yellow("No active routes to sync."));
+        return;
+      }
+      const hostnames = routes.map((r) => r.hostname);
+      if (syncHostsFile(hostnames)) {
+        console.log(chalk.green(`Synced ${hostnames.length} hostname(s) to /etc/hosts:`));
+        for (const h of hostnames) {
+          console.log(chalk.cyan(`  127.0.0.1 ${h}`));
+        }
+      } else {
+        console.error(chalk.red("Failed to update /etc/hosts (requires sudo)."));
+        console.error(chalk.cyan("  sudo portless hosts sync"));
+        process.exit(1);
+      }
       return;
     }
 
