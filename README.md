@@ -112,6 +112,8 @@ sudo portless trust
 
 ```bash
 portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
+portless alias <name> <port>     # Register a static route (e.g. for Docker)
+portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
 

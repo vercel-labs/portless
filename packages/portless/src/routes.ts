@@ -191,7 +191,7 @@ export class RouteStore {
       }
       const routes: RouteMapping[] = parsed.filter(isValidRoute);
       // Filter out stale routes whose owning process is no longer alive
-      const alive = routes.filter((r) => this.isProcessAlive(r.pid));
+      const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
       if (persistCleanup && alive.length !== routes.length) {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.

@@ -133,6 +133,8 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 | `portless proxy start -p <number>`     | Start the proxy on a custom port                              |
 | `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                 |
 | `portless proxy stop`                  | Stop the proxy                                                |
+| `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)          |
+| `portless alias --remove <name>`       | Remove a static route                                         |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment       |
 | `portless <name> --force <cmd>`        | Override an existing route registered by another process      |
 | `portless --help` / `-h`               | Show help                                                     |

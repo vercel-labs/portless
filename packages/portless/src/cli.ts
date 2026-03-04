@@ -283,8 +283,9 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   console.log(chalk.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
     const url = formatUrl(route.hostname, proxyPort, tls);
+    const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
     console.log(
-      `  ${chalk.cyan(url)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(`(pid ${route.pid})`)}`
+      `  ${chalk.cyan(url)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(label)}`
     );
   }
   console.log();
@@ -641,6 +642,8 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
   ${chalk.cyan("portless run <cmd>")}               Infer name from project, run through proxy
+  ${chalk.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
+  ${chalk.cyan("portless alias --remove <name>")}   Remove a static route
   ${chalk.cyan("portless list")}                    Show active routes
   ${chalk.cyan("portless trust")}                   Add local CA to system trust store
 
@@ -735,6 +738,57 @@ ${chalk.bold("Skip portless:")}
         onWarning: (msg) => console.warn(chalk.yellow(msg)),
       });
       listRoutes(store, port, tls);
+      return;
+    }
+
+    // Alias commands
+    if (args[0] === "alias") {
+      const { dir } = await discoverState();
+      const store = new RouteStore(dir, {
+        onWarning: (msg) => console.warn(chalk.yellow(msg)),
+      });
+
+      if (args[1] === "--remove") {
+        const aliasName = args[2];
+        if (!aliasName) {
+          console.error(chalk.red("Error: No alias name provided."));
+          console.error(chalk.cyan("  portless alias --remove <name>"));
+          process.exit(1);
+        }
+        const hostname = parseHostname(aliasName);
+        const routes = store.loadRoutes();
+        const existing = routes.find((r) => r.hostname === hostname && r.pid === 0);
+        if (!existing) {
+          console.error(chalk.red(`Error: No alias found for "${hostname}".`));
+          process.exit(1);
+        }
+        store.removeRoute(hostname);
+        console.log(chalk.green(`Removed alias: ${hostname}`));
+        return;
+      }
+
+      const aliasName = args[1];
+      const aliasPort = args[2];
+      if (!aliasName || !aliasPort) {
+        console.error(chalk.red("Error: Missing arguments."));
+        console.error(chalk.blue("Usage:"));
+        console.error(chalk.cyan("  portless alias <name> <port>"));
+        console.error(chalk.cyan("  portless alias --remove <name>"));
+        console.error(chalk.blue("Example:"));
+        console.error(chalk.cyan("  portless alias my-postgres 5432"));
+        process.exit(1);
+      }
+
+      const hostname = parseHostname(aliasName);
+      const port = parseInt(aliasPort, 10);
+      if (isNaN(port) || port < 1 || port > 65535) {
+        console.error(chalk.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
+        process.exit(1);
+      }
+
+      const force = args.includes("--force");
+      store.addRoute(hostname, port, 0, force);
+      console.log(chalk.green(`Alias registered: ${hostname} -> localhost:${port}`));
       return;
     }
 
