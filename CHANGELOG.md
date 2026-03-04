@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.2
+
+### Documentation
+
+- Add git worktree documentation to README, docs site, and agent skill. `portless run` automatically detects linked worktrees and prefixes the URL with the branch name (e.g. `fix-ui.myapp.localhost`).
+- Document worktree support in 0.5.0 changelog entry.
+
 ## 0.5.1
 
 ### Bug Fixes
