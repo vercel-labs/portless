@@ -38,12 +38,16 @@ npm install -g portless
 # Start the proxy (once, no sudo needed)
 portless proxy start
 
-# Run your app (auto-starts the proxy if needed)
+# Run your app (builtin provider, auto-starts the proxy if needed)
 portless myapp next dev
 # -> http://myapp.localhost:1355
+
+# Run your app with tailscale serve
+portless --provider tailscale myapp next dev
+# -> https://<node>.<tailnet>.ts.net/myapp
 ```
 
-The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`.
+Builtin mode auto-starts the proxy when you run an app. Tailscale mode requires `tailscale` to be installed and connected.
 
 ## Integration Patterns
 
@@ -52,12 +56,13 @@ The proxy auto-starts when you run an app. You can also start it explicitly with
 ```json
 {
   "scripts": {
-    "dev": "portless myapp next dev"
+    "dev": "portless myapp next dev",
+    "dev:tailnet": "portless --provider tailscale myapp next dev"
   }
 }
 ```
 
-The proxy auto-starts when you run an app. Or start it explicitly: `portless proxy start`.
+Builtin mode auto-starts the proxy when you run an app. Or start it explicitly: `portless proxy start`.
 
 ### Multi-app setups with subdomains
 
@@ -85,6 +90,13 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects the correct `--port` and `--host` CLI flags.
 
+Tailscale mode uses `tailscale serve` with path mounts:
+
+1. Run with `--provider tailscale`
+2. Portless starts your app on a random local port
+3. Portless registers `/<name>` on your node's tailnet URL
+4. Portless removes the mapping when the app exits
+
 ### State directory
 
 Portless stores its state (routes, PID file, port file) in a directory that depends on the proxy port:
@@ -98,6 +110,7 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 
 | Variable             | Description                                     |
 | -------------------- | ----------------------------------------------- |
+| `PORTLESS_PROVIDER`  | Set provider (`builtin` or `tailscale`)         |
 | `PORTLESS_PORT`      | Override the default proxy port (default: 1355) |
 | `PORTLESS_HTTPS`     | Set to `1` to always enable HTTPS/HTTP/2        |
 | `PORTLESS_STATE_DIR` | Override the state directory                    |
@@ -117,19 +130,20 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 
 ## CLI Reference
 
-| Command                             | Description                                                   |
-| ----------------------------------- | ------------------------------------------------------------- |
-| `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
-| `portless list`                     | Show active routes                                            |
-| `portless trust`                    | Add local CA to system trust store (for HTTPS)                |
-| `portless proxy start`              | Start the proxy as a daemon (port 1355, no sudo)              |
-| `portless proxy start --https`      | Start with HTTP/2 + TLS (auto-generates certs)                |
-| `portless proxy start -p <number>`  | Start the proxy on a custom port                              |
-| `portless proxy start --foreground` | Start the proxy in foreground (for debugging)                 |
-| `portless proxy stop`               | Stop the proxy                                                |
-| `portless <name> --force <cmd>`     | Override an existing route registered by another process      |
-| `portless --help` / `-h`            | Show help                                                     |
-| `portless --version` / `-v`         | Show version                                                  |
+| Command                                                | Description                                                        |
+| ------------------------------------------------------ | ------------------------------------------------------------------ |
+| `portless <name> <cmd> [args...]`                      | Run app with builtin provider at `http://<name>.localhost:1355`    |
+| `portless --provider tailscale <name> <cmd> [args...]` | Run app with tailscale at `https://<node>.<tailnet>.ts.net/<name>` |
+| `portless list`                                        | Show active routes for the selected provider                       |
+| `portless trust`                                       | Add local CA to system trust store (builtin HTTPS only)            |
+| `portless proxy start`                                 | Start the proxy as a daemon (port 1355, no sudo)                   |
+| `portless proxy start --https`                         | Start with HTTP/2 + TLS (auto-generates certs)                     |
+| `portless proxy start -p <number>`                     | Start the proxy on a custom port                                   |
+| `portless proxy start --foreground`                    | Start the proxy in foreground (for debugging)                      |
+| `portless proxy stop`                                  | Stop the proxy                                                     |
+| `portless <name> --force <cmd>`                        | Override an existing route registered by another process           |
+| `portless --help` / `-h`                               | Show help                                                          |
+| `portless --version` / `-v`                            | Show version                                                       |
 
 ## Troubleshooting
 
@@ -140,6 +154,17 @@ The proxy auto-starts when you run an app with `portless <name> <cmd>`. If it do
 ```bash
 portless proxy start
 ```
+
+### Tailscale command fails
+
+If you run with `--provider tailscale` and see setup errors:
+
+```bash
+tailscale status
+tailscale up
+```
+
+`portless proxy start/stop` and `portless trust` are builtin-only commands.
 
 ### Port already in use
 
@@ -200,3 +225,4 @@ proxy: {
 - Node.js 20+
 - macOS or Linux
 - `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions)
+- `tailscale` CLI (optional, for `--provider tailscale`)

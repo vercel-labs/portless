@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { RouteStore } from "./routes.js";
+import { getRouteProvider, RouteStore } from "./routes.js";
 
 describe("RouteStore", () => {
   let tmpDir: string;
@@ -89,6 +89,37 @@ describe("RouteStore", () => {
       expect(loaded).toHaveLength(1);
       expect(loaded[0].hostname).toBe("app.localhost");
       expect(loaded[0].port).toBe(4001);
+    });
+
+    it("defaults legacy routes without provider to builtin", () => {
+      const routes = [{ hostname: "legacy.localhost", port: 4010, pid: process.pid }];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const loaded = store.loadRoutes();
+      expect(loaded).toHaveLength(1);
+      expect(getRouteProvider(loaded[0])).toBe("builtin");
+    });
+
+    it("loads provider-aware tailscale route metadata", () => {
+      const routes = [
+        {
+          hostname: "api.localhost",
+          port: 4011,
+          pid: process.pid,
+          provider: "tailscale",
+          tailscalePath: "/api.localhost",
+          tailscaleBaseUrl: "https://devbox.example.ts.net",
+          tailscaleHttpsPort: 443,
+        },
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const loaded = store.loadRoutes();
+      expect(loaded).toHaveLength(1);
+      expect(getRouteProvider(loaded[0])).toBe("tailscale");
+      expect(loaded[0].tailscalePath).toBe("/api.localhost");
+      expect(loaded[0].tailscaleBaseUrl).toBe("https://devbox.example.ts.net");
+      expect(loaded[0].tailscaleHttpsPort).toBe(443);
     });
 
     it("filters out routes with dead PIDs", () => {
@@ -183,6 +214,19 @@ describe("RouteStore", () => {
       const hostnames = routes.map((r) => r.hostname).sort();
       expect(hostnames).toEqual(["app1.localhost", "app2.localhost"]);
     });
+
+    it("stores tailscale provider metadata", () => {
+      store.addRoute("api.localhost", 4003, process.pid, {
+        provider: "tailscale",
+        tailscalePath: "/api.localhost",
+        tailscaleBaseUrl: "https://devbox.example.ts.net",
+        tailscaleHttpsPort: 443,
+      });
+      const routes = store.loadRoutes(false, "tailscale");
+      expect(routes).toHaveLength(1);
+      expect(routes[0].provider).toBe("tailscale");
+      expect(routes[0].tailscalePath).toBe("/api.localhost");
+    });
   });
 
   describe("removeRoute", () => {
@@ -207,6 +251,17 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].hostname).toBe("app2.localhost");
+    });
+
+    it("removes only the selected provider route", () => {
+      store.addRoute("same.localhost", 4012, process.pid);
+      store.addRoute("same.localhost", 4013, process.pid, { provider: "tailscale" });
+      store.removeRoute("same.localhost", "tailscale");
+      const builtin = store.loadRoutes(false, "builtin");
+      const tailscale = store.loadRoutes(false, "tailscale");
+      expect(builtin).toHaveLength(1);
+      expect(tailscale).toHaveLength(0);
+      expect(builtin[0].port).toBe(4012);
     });
   });
 

@@ -1,7 +1,14 @@
+/** Supported routing backends. */
+export type RouteProvider = "builtin" | "tailscale";
+
 /** Route info used by the proxy server to map hostnames to ports. */
 export interface RouteInfo {
   hostname: string;
   port: number;
+  provider?: RouteProvider;
+  tailscalePath?: string;
+  tailscaleBaseUrl?: string;
+  tailscaleHttpsPort?: number;
 }
 
 export interface ProxyServerOptions {

@@ -39,6 +39,8 @@ describe("CLI", () => {
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
+      expect(stdout).toContain("--provider");
+      expect(stdout).toContain("PORTLESS_PROVIDER");
       expect(stdout).toContain("PORTLESS_STATE_DIR");
     });
 
@@ -92,6 +94,42 @@ describe("CLI", () => {
       const { status, stdout } = run(["proxy", "unknown"]);
       expect(status).toBe(1);
       expect(stdout).toContain("proxy start");
+    });
+
+    it("exits 1 when proxy command is used with tailscale provider", () => {
+      const { status, stderr } = run(["--provider", "tailscale", "proxy", "start"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("only available with the builtin provider");
+    });
+  });
+
+  describe("provider", () => {
+    it("exits 1 for invalid --provider value", () => {
+      const { status, stderr } = run(["--provider", "invalid", "--help"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid provider");
+    });
+
+    it("exits 1 for invalid PORTLESS_PROVIDER value", () => {
+      const { status, stderr } = run(["--help"], {
+        env: { PORTLESS_PROVIDER: "invalid" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid PORTLESS_PROVIDER");
+    });
+
+    it("exits 1 for trust command in tailscale provider", () => {
+      const { status, stderr } = run(["--provider", "tailscale", "trust"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("only available with the builtin provider");
+    });
+
+    it("fails with actionable message when tailscale is not installed", () => {
+      const { status, stderr } = run(["--provider", "tailscale", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale CLI not found");
     });
   });
 
