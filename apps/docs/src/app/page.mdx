@@ -46,6 +46,20 @@ portless docs.myapp next dev
 # -> http://docs.myapp.localhost:1355
 ```
 
+## Git Worktrees
+
+`portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
+
+```bash
+# Main worktree -- no prefix
+portless run next dev   # -> http://myapp.localhost:1355
+
+# Linked worktree on branch "fix-ui"
+portless run next dev   # -> http://fix-ui.myapp.localhost:1355
+```
+
+Put `portless run` in your `package.json` once and it works everywhere -- the main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+
 ## How it works
 
 Portless runs a reverse proxy on port 1355. Each app registers a route mapping its hostname to an assigned port. Requests to `http://<name>.localhost:1355` are proxied to the app.

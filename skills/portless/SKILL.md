@@ -73,6 +73,20 @@ portless docs.myapp next dev     # http://docs.myapp.localhost:1355
 
 Wildcard subdomain routing: any subdomain of a registered route routes to that app automatically (e.g. `tenant1.myapp.localhost:1355` routes to the `myapp` app without extra registration). Exact matches take priority over wildcards.
 
+### Git worktrees
+
+`portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain prefix so each worktree gets a unique URL:
+
+```bash
+# Main worktree -- no prefix
+portless run next dev   # -> http://myapp.localhost:1355
+
+# Linked worktree on branch "fix-ui"
+portless run next dev   # -> http://fix-ui.myapp.localhost:1355
+```
+
+No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` or `PORTLESS=skip` to run the command directly without the proxy:

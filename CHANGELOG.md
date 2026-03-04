@@ -11,7 +11,7 @@
 
 ### Features
 
-- **`portless run` subcommand**: Automatically infer the project name from `package.json`, git root, or directory name instead of specifying it manually. (#55)
+- **`portless run` subcommand**: Automatically infer the project name from `package.json`, git root, or directory name instead of specifying it manually. In git worktrees, the branch name is prepended as a subdomain prefix (e.g. `fix-ui.myapp.localhost`) so each worktree gets a unique URL with no config changes. (#55, #68)
 - **`portless alias` command**: Register routes for services not spawned by portless (e.g. Docker containers with published ports). Aliases persist across stale-route cleanup. (#73)
 - **`PORTLESS_URL` env var**: Child processes now receive `PORTLESS_URL` containing the public `.localhost` URL (e.g. `http://myapp.localhost:1355`) so apps can self-reference their own URL. (#56)
 - **`--app-port` flag**: Specify a fixed port for the app instead of automatic assignment. Also configurable via `PORTLESS_APP_PORT` env var. Useful when integrating with tools that provide their own port. (#72)

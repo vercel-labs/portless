@@ -64,6 +64,26 @@ portless docs.myapp next dev
 #   tenant2.myapp.localhost:1355  -> myapp
 ```
 
+### Git Worktrees
+
+`portless run` automatically detects git worktrees. When you're in a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
+
+```bash
+# Main worktree (main/master branch) -- no prefix, works normally
+portless run next dev
+# -> http://myapp.localhost:1355
+
+# Linked worktree on branch "fix-ui" -- branch name becomes a prefix
+portless run next dev
+# -> http://fix-ui.myapp.localhost:1355
+
+# Linked worktree on branch "feature/auth" -- uses last segment
+portless run next dev
+# -> http://auth.myapp.localhost:1355
+```
+
+This means you can put `portless run` in your `package.json` once and it just works everywhere -- the main checkout uses the plain name, and each worktree gets a unique subdomain. No `--force` needed, no name collisions.
+
 ### In package.json
 
 ```json
