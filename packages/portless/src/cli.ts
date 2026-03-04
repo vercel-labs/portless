@@ -298,7 +298,8 @@ async function runApp(
   commandArgs: string[],
   tls: boolean,
   force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string }
+  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  desiredPort?: number
 ) {
   const hostname = parseHostname(name);
 
@@ -394,9 +395,12 @@ async function runApp(
     console.log(chalk.gray("-- Proxy is running"));
   }
 
-  // Find a free port
-  const port = await findFreePort();
-  console.log(chalk.green(`-- Using port ${port}`));
+  const port = desiredPort ?? (await findFreePort());
+  if (desiredPort) {
+    console.log(chalk.green(`-- Using port ${port} (fixed)`));
+  } else {
+    console.log(chalk.green(`-- Using port ${port}`));
+  }
 
   // Register route
   try {
@@ -442,6 +446,8 @@ async function runApp(
 
 interface ParsedRunArgs {
   force: boolean;
+  /** Fixed app port (overrides automatic assignment). */
+  appPort?: number;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -449,6 +455,30 @@ interface ParsedRunArgs {
 interface ParsedAppArgs extends ParsedRunArgs {
   /** App name. */
   name: string;
+}
+
+function parseAppPort(value: string | undefined): number {
+  if (!value || value.startsWith("--")) {
+    console.error(chalk.red("Error: --app-port requires a port number."));
+    process.exit(1);
+  }
+  const port = parseInt(value, 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error(chalk.red(`Error: Invalid app port "${value}". Must be 1-65535.`));
+    process.exit(1);
+  }
+  return port;
+}
+
+function appPortFromEnv(): number | undefined {
+  const envVal = process.env.PORTLESS_APP_PORT;
+  if (!envVal) return undefined;
+  const port = parseInt(envVal, 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    console.error(chalk.red(`Error: Invalid PORTLESS_APP_PORT="${envVal}". Must be 1-65535.`));
+    process.exit(1);
+  }
+  return port;
 }
 
 /**
@@ -459,6 +489,7 @@ interface ParsedAppArgs extends ParsedRunArgs {
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
+  let appPort: number | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("--")) {
@@ -467,15 +498,20 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       break;
     } else if (args[i] === "--force") {
       force = true;
+    } else if (args[i] === "--app-port") {
+      i++;
+      appPort = parseAppPort(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force"));
+      console.error(chalk.blue("Known flags: --force, --app-port"));
       process.exit(1);
     }
     i++;
   }
 
-  return { force, commandArgs: args.slice(i) };
+  if (!appPort) appPort = appPortFromEnv();
+
+  return { force, appPort, commandArgs: args.slice(i) };
 }
 
 /**
@@ -487,6 +523,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
  */
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
+  let appPort: number | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -496,9 +533,12 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       break;
     } else if (args[i] === "--force") {
       force = true;
+    } else if (args[i] === "--app-port") {
+      i++;
+      appPort = parseAppPort(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force"));
+      console.error(chalk.blue("Known flags: --force, --app-port"));
       process.exit(1);
     }
     i++;
@@ -508,22 +548,27 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   const name = args[i];
   i++;
 
-  // Allow --force immediately after name (e.g. `portless myapp --force next dev`)
+  // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
   while (i < args.length && args[i].startsWith("--")) {
     if (args[i] === "--") {
       i++;
       break;
     } else if (args[i] === "--force") {
       force = true;
+    } else if (args[i] === "--app-port") {
+      i++;
+      appPort = parseAppPort(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force"));
+      console.error(chalk.blue("Known flags: --force, --app-port"));
       process.exit(1);
     }
     i++;
   }
 
-  return { force, name, commandArgs: args.slice(i) };
+  if (!appPort) appPort = appPortFromEnv();
+
+  return { force, appPort, name, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -638,10 +683,12 @@ ${chalk.bold("Options:")}
   --key <path>                  Use a custom TLS private key (implies --https)
   --no-tls                      Disable HTTPS (overrides PORTLESS_HTTPS)
   --foreground                  Run proxy in foreground (for debugging)
+  --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --force                       Override an existing route registered by another process
 
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
+  PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
@@ -954,11 +1001,17 @@ ${chalk.bold("Usage: portless proxy <command>")}
     const store = new RouteStore(dir, {
       onWarning: (msg) => console.warn(chalk.yellow(msg)),
     });
-    await runApp(store, port, dir, effectiveName, parsed.commandArgs, tls, parsed.force, {
-      nameSource: inferred.source,
-      prefix: worktree?.prefix,
-      prefixSource: worktree?.source,
-    });
+    await runApp(
+      store,
+      port,
+      dir,
+      effectiveName,
+      parsed.commandArgs,
+      tls,
+      parsed.force,
+      { nameSource: inferred.source, prefix: worktree?.prefix, prefixSource: worktree?.source },
+      parsed.appPort
+    );
   } else {
     const parsed = parseAppArgs(args);
 
@@ -975,7 +1028,17 @@ ${chalk.bold("Usage: portless proxy <command>")}
     const store = new RouteStore(dir, {
       onWarning: (msg) => console.warn(chalk.yellow(msg)),
     });
-    await runApp(store, port, dir, parsed.name, parsed.commandArgs, tls, parsed.force);
+    await runApp(
+      store,
+      port,
+      dir,
+      parsed.name,
+      parsed.commandArgs,
+      tls,
+      parsed.force,
+      undefined,
+      parsed.appPort
+    );
   }
 }
 

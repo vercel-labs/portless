@@ -100,12 +100,13 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 
 ### Environment variables
 
-| Variable             | Description                                     |
-| -------------------- | ----------------------------------------------- |
-| `PORTLESS_PORT`      | Override the default proxy port (default: 1355) |
-| `PORTLESS_HTTPS`     | Set to `1` to always enable HTTPS/HTTP/2        |
-| `PORTLESS_STATE_DIR` | Override the state directory                    |
-| `PORTLESS=0\|skip`   | Bypass the proxy, run the command directly      |
+| Variable             | Description                                         |
+| -------------------- | --------------------------------------------------- |
+| `PORTLESS_PORT`      | Override the default proxy port (default: 1355)     |
+| `PORTLESS_APP_PORT`  | Use a fixed port for the app (skip auto-assignment) |
+| `PORTLESS_HTTPS`     | Set to `1` to always enable HTTPS/HTTP/2            |
+| `PORTLESS_STATE_DIR` | Override the state directory                        |
+| `PORTLESS=0\|skip`   | Bypass the proxy, run the command directly          |
 
 ### HTTP/2 + HTTPS
 
@@ -121,20 +122,21 @@ First run generates a local CA and prompts for sudo to add it to the system trus
 
 ## CLI Reference
 
-| Command                             | Description                                                   |
-| ----------------------------------- | ------------------------------------------------------------- |
-| `portless run <cmd> [args...]`      | Infer name from project, run through proxy (auto-starts)      |
-| `portless <name> <cmd> [args...]`   | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
-| `portless list`                     | Show active routes                                            |
-| `portless trust`                    | Add local CA to system trust store (for HTTPS)                |
-| `portless proxy start`              | Start the proxy as a daemon (port 1355, no sudo)              |
-| `portless proxy start --https`      | Start with HTTP/2 + TLS (auto-generates certs)                |
-| `portless proxy start -p <number>`  | Start the proxy on a custom port                              |
-| `portless proxy start --foreground` | Start the proxy in foreground (for debugging)                 |
-| `portless proxy stop`               | Stop the proxy                                                |
-| `portless <name> --force <cmd>`     | Override an existing route registered by another process      |
-| `portless --help` / `-h`            | Show help                                                     |
-| `portless --version` / `-v`         | Show version                                                  |
+| Command                                | Description                                                   |
+| -------------------------------------- | ------------------------------------------------------------- |
+| `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)      |
+| `portless <name> <cmd> [args...]`      | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
+| `portless list`                        | Show active routes                                            |
+| `portless trust`                       | Add local CA to system trust store (for HTTPS)                |
+| `portless proxy start`                 | Start the proxy as a daemon (port 1355, no sudo)              |
+| `portless proxy start --https`         | Start with HTTP/2 + TLS (auto-generates certs)                |
+| `portless proxy start -p <number>`     | Start the proxy on a custom port                              |
+| `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                 |
+| `portless proxy stop`                  | Stop the proxy                                                |
+| `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment       |
+| `portless <name> --force <cmd>`        | Override an existing route registered by another process      |
+| `portless --help` / `-h`               | Show help                                                     |
+| `portless --version` / `-v`            | Show version                                                  |
 
 ## Troubleshooting
 

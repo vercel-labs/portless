@@ -134,6 +134,7 @@ portless proxy stop              # Stop the proxy
 --key <path>                     # Use a custom TLS private key (implies --https)
 --no-tls                         # Disable HTTPS (overrides PORTLESS_HTTPS)
 --foreground                     # Run proxy in foreground instead of daemon
+--app-port <number>              # Use a fixed port for the app (skip auto-assignment)
 --force                          # Override a route registered by another process
 
 # Injected into child processes
@@ -143,6 +144,7 @@ PORTLESS_URL                     # Public URL (e.g. http://myapp.localhost:1355)
 
 # Configuration
 PORTLESS_PORT=<number>           # Override the default proxy port
+PORTLESS_APP_PORT=<number>       # Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=1                 # Always enable HTTPS
 PORTLESS_STATE_DIR=<path>        # Override the state directory
 
