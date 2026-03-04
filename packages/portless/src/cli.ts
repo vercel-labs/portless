@@ -504,10 +504,36 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let appPort: number | undefined;
   let i = 0;
 
-  while (i < args.length && args[i].startsWith("--")) {
+  while (i < args.length && args[i].startsWith("-")) {
     if (args[i] === "--") {
       i++;
       break;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      console.log(`
+${chalk.bold("portless run")} - Infer project name and run through the proxy.
+
+${chalk.bold("Usage:")}
+  ${chalk.cyan("portless run [options] <command...>")}
+
+${chalk.bold("Options:")}
+  --force                Override an existing route registered by another process
+  --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --help, -h             Show this help
+
+${chalk.bold("Name inference (in order):")}
+  1. package.json "name" field (walks up directories)
+  2. Git repo root directory name
+  3. Current directory basename
+
+  In git worktrees, the branch name is prepended as a subdomain prefix
+  (e.g. feature-auth.myapp.localhost).
+
+${chalk.bold("Examples:")}
+  portless run next dev               # -> http://<project>.localhost:1355
+  portless run vite dev               # -> http://<project>.localhost:1355
+  portless run --app-port 3000 pnpm start
+`);
+      process.exit(0);
     } else if (args[i] === "--force") {
       force = true;
     } else if (args[i] === "--app-port") {
@@ -515,7 +541,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       appPort = parseAppPort(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --help"));
       process.exit(1);
     }
     i++;
@@ -539,7 +565,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   let i = 0;
 
   // Consume leading flags before name
-  while (i < args.length && args[i].startsWith("--")) {
+  while (i < args.length && args[i].startsWith("-")) {
     if (args[i] === "--") {
       i++;
       break;
@@ -767,6 +793,23 @@ ${chalk.bold("Skip portless:")}
 
     // Alias commands
     if (args[0] === "alias") {
+      if (args[1] === "--help" || args[1] === "-h") {
+        console.log(`
+${chalk.bold("portless alias")} - Register a static route for services not managed by portless.
+
+${chalk.bold("Usage:")}
+  ${chalk.cyan("portless alias <name> <port>")}        Register a route
+  ${chalk.cyan("portless alias --remove <name>")}      Remove a route
+  ${chalk.cyan("portless alias <name> <port> --force")} Override existing route
+
+${chalk.bold("Examples:")}
+  portless alias my-postgres 5432     # -> http://my-postgres.localhost:1355
+  portless alias redis 6379           # -> http://redis.localhost:1355
+  portless alias --remove my-postgres # Remove the alias
+`);
+        process.exit(0);
+      }
+
       const { dir } = await discoverState();
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(chalk.yellow(msg)),
@@ -818,6 +861,24 @@ ${chalk.bold("Skip portless:")}
 
     // Hosts commands (Safari .localhost workaround)
     if (args[0] === "hosts") {
+      if (args[1] === "--help" || args[1] === "-h") {
+        console.log(`
+${chalk.bold("portless hosts")} - Manage /etc/hosts entries for .localhost subdomains.
+
+Safari relies on the system DNS resolver, which may not handle .localhost
+subdomains. This command adds entries to /etc/hosts as a workaround.
+
+${chalk.bold("Usage:")}
+  ${chalk.cyan("sudo portless hosts sync")}    Add current routes to /etc/hosts
+  ${chalk.cyan("sudo portless hosts clean")}   Remove portless entries from /etc/hosts
+
+${chalk.bold("Auto-sync:")}
+  Set PORTLESS_SYNC_HOSTS=1 and start the proxy with sudo to auto-sync
+  /etc/hosts whenever routes change.
+`);
+        process.exit(0);
+      }
+
       const { dir } = await discoverState();
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(chalk.yellow(msg)),
@@ -834,7 +895,14 @@ ${chalk.bold("Skip portless:")}
         return;
       }
 
-      // Default: sync
+      if (args[1] && args[1] !== "sync") {
+        console.error(chalk.red(`Error: Unknown hosts subcommand "${args[1]}".`));
+        console.error(chalk.blue("Usage:"));
+        console.error(chalk.cyan("  portless hosts sync    # Add routes to /etc/hosts"));
+        console.error(chalk.cyan("  portless hosts clean   # Remove portless entries"));
+        process.exit(1);
+      }
+
       const routes = store.loadRoutes();
       if (routes.length === 0) {
         console.log(chalk.yellow("No active routes to sync."));

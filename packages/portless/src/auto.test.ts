@@ -243,16 +243,22 @@ describe("detectWorktreePrefix", () => {
 // ---------------------------------------------------------------------------
 
 describe("detectWorktreePrefix (git CLI path)", () => {
-  let gitAvailable = true;
+  let gitInitWorks = true;
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
+    // Also verify git init actually works (may be blocked in sandboxes)
+    const probe = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "portless-git-probe-"));
+    try {
+      execFileSync("git", ["init"], { cwd: probe, stdio: "ignore" });
+    } finally {
+      fs.rmSync(probe, { recursive: true, force: true });
+    }
   } catch {
-    gitAvailable = false;
+    gitInitWorks = false;
   }
 
-  // Skip the entire block if git is not available
-  if (!gitAvailable) {
-    it.skip("git not available", () => {});
+  if (!gitInitWorks) {
+    it.skip("git init not available (sandboxed environment)", () => {});
     return;
   }
 

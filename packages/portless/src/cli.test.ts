@@ -236,11 +236,113 @@ describe("CLI", () => {
       expect(stderr).toContain("Unknown flag");
     });
 
-    it("does not print help for run --help", () => {
-      // parseRunArgs rejects unknown flags
-      const { status, stderr } = run(["run", "--help"]);
+    it("prints run-specific help for run --help", () => {
+      const { status, stdout } = run(["run", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless run");
+      expect(stdout).toContain("--force");
+      expect(stdout).toContain("--app-port");
+    });
+
+    it("prints run-specific help for run -h", () => {
+      const { status, stdout } = run(["run", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless run");
+    });
+  });
+
+  describe("--app-port flag", () => {
+    it("passes --app-port through in bypass mode (PORTLESS=0)", () => {
+      const { status, stdout } = run(["run", "--app-port", "4567", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("rejects invalid --app-port value", () => {
+      const { status, stderr } = run(["run", "--app-port", "abc", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
       expect(status).toBe(1);
-      expect(stderr).toContain("Unknown flag");
+      expect(stderr).toContain("Invalid app port");
+    });
+
+    it("rejects --app-port without a value", () => {
+      const { status, stderr } = run(["run", "--app-port"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("--app-port requires");
+    });
+
+    it("accepts --app-port in named mode (PORTLESS=0)", () => {
+      const { status, stdout } = run(["myapp", "--app-port", "3000", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+  });
+
+  describe("alias subcommand", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["alias", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless alias");
+      expect(stdout).toContain("--remove");
+    });
+
+    it("prints help with -h", () => {
+      const { status, stdout } = run(["alias", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless alias");
+    });
+
+    it("exits 1 with usage when no args given", () => {
+      const { status, stderr } = run(["alias"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Missing arguments");
+    });
+
+    it("exits 1 with usage when only name is given", () => {
+      const { status, stderr } = run(["alias", "mydb"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Missing arguments");
+    });
+
+    it("exits 1 for invalid port", () => {
+      const { status, stderr } = run(["alias", "mydb", "notaport"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid port");
+    });
+
+    it("exits 1 when --remove has no name", () => {
+      const { status, stderr } = run(["alias", "--remove"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("No alias name");
+    });
+  });
+
+  describe("hosts subcommand", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["hosts", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless hosts");
+      expect(stdout).toContain("sync");
+      expect(stdout).toContain("clean");
+    });
+
+    it("prints help with -h", () => {
+      const { status, stdout } = run(["hosts", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless hosts");
+    });
+
+    it("rejects unknown hosts subcommand", () => {
+      const { status, stderr } = run(["hosts", "typo"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown hosts subcommand");
     });
   });
 });

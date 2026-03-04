@@ -4,7 +4,7 @@ Replace port numbers with stable, named .localhost URLs. For humans and agents.
 
 ```diff
 - "dev": "next dev"              # http://localhost:3000
-+ "dev": "portless myapp next dev"  # http://myapp.localhost:1355
++ "dev": "portless run next dev"   # http://myapp.localhost:1355
 ```
 
 ## Quick Start
@@ -13,10 +13,11 @@ Replace port numbers with stable, named .localhost URLs. For humans and agents.
 # Install
 npm install -g portless
 
-# Start the proxy (once, no sudo needed)
-portless proxy start
-
 # Run your app (auto-starts the proxy if needed)
+portless run next dev
+# -> http://<project>.localhost:1355
+
+# Or specify a name explicitly
 portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
@@ -42,7 +43,11 @@ Portless fixes all of this by giving each dev server a stable, named `.localhost
 ## Usage
 
 ```bash
-# Basic
+# Auto-infer name from package.json / git / directory
+portless run next dev
+# -> http://<project>.localhost:1355
+
+# Explicit name
 portless myapp next dev
 # -> http://myapp.localhost:1355
 
@@ -59,7 +64,7 @@ portless docs.myapp next dev
 ```json
 {
   "scripts": {
-    "dev": "portless myapp next dev"
+    "dev": "portless run next dev"
   }
 }
 ```
@@ -111,6 +116,7 @@ sudo portless trust
 ## Commands
 
 ```bash
+portless run <cmd> [args...]     # Infer name from project, run through proxy
 portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias --remove <name>   # Remove a static route

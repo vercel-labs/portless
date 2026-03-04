@@ -22,7 +22,7 @@ function readHostsFile(): string {
  * Returns the lines between the markers (exclusive), or an empty array
  * if no managed block exists.
  */
-function extractManagedBlock(content: string): string[] {
+export function extractManagedBlock(content: string): string[] {
   const startIdx = content.indexOf(MARKER_START);
   const endIdx = content.indexOf(MARKER_END);
   if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
@@ -37,7 +37,7 @@ function extractManagedBlock(content: string): string[] {
  * Remove the portless-managed block from /etc/hosts content and return
  * the cleaned content with trailing newlines normalized.
  */
-function removeBlock(content: string): string {
+export function removeBlock(content: string): string {
   const startIdx = content.indexOf(MARKER_START);
   const endIdx = content.indexOf(MARKER_END);
   if (startIdx === -1 || endIdx === -1) return content;
@@ -49,7 +49,7 @@ function removeBlock(content: string): string {
 /**
  * Build a portless-managed block for the given hostnames.
  */
-function buildBlock(hostnames: string[]): string {
+export function buildBlock(hostnames: string[]): string {
   if (hostnames.length === 0) return "";
   const entries = hostnames.map((h) => `127.0.0.1 ${h}`).join("\n");
   return `${MARKER_START}\n${entries}\n${MARKER_END}`;
