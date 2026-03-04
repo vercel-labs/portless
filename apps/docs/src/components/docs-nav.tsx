@@ -9,6 +9,7 @@ const nav = [
   { href: "/commands", label: "Commands" },
   { href: "/https", label: "HTTPS" },
   { href: "/configuration", label: "Configuration" },
+  { href: "/changelog", label: "Changelog" },
 ];
 
 function Sidebar() {
