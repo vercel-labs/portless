@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+### Bug Fixes
+
+- **npm README**: Copy root `README.md` into the package at publish time so it appears on npmjs.com.
+- **homepage**: Point npm homepage to https://port1355.dev.
+
 ## 0.5.0
 
 ### Features
