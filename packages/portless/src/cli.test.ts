@@ -130,6 +130,7 @@ describe("CLI", () => {
       const { status, stdout } = run(["completion", "fish"]);
       expect(status).toBe(0);
       expect(stdout).toContain("complete -c portless");
+      expect(stdout).toContain('complete -c portless -n "__fish_is_nth_token 1" -f');
     });
 
     it("exits 1 for unknown shell", () => {

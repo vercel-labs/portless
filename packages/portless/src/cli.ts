@@ -731,12 +731,13 @@ _portless() {
   esac
 }
 
-_portless "$@"
+compdef _portless portless
 `;
 }
 
 function getFishCompletionScript(): string {
   return `# fish completion for portless
+complete -c portless -n "__fish_is_nth_token 1" -f
 complete -c portless -n "__fish_is_nth_token 1" -a "run" -d "Infer project name and run through proxy"
 complete -c portless -n "__fish_is_nth_token 1" -a "alias" -d "Register or remove a static route"
 complete -c portless -n "__fish_is_nth_token 1" -a "hosts" -d "Manage /etc/hosts entries"
