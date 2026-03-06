@@ -92,7 +92,8 @@ describe("truncateLabel", () => {
   });
 
   it("is deterministic", () => {
-    const input = "my-very-long-feature-branch-name-that-exceeds-the-dns-label-limit-by-quite-a-bit";
+    const input =
+      "my-very-long-feature-branch-name-that-exceeds-the-dns-label-limit-by-quite-a-bit";
     expect(truncateLabel(input)).toBe(truncateLabel(input));
   });
 

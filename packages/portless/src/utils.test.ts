@@ -154,8 +154,6 @@ describe("parseHostname", () => {
 
   it("throws when any label in multi-part hostname exceeds 63 characters", () => {
     const longLabel = "a".repeat(64);
-    expect(() => parseHostname(`prefix.${longLabel}`)).toThrow(
-      "exceeds 63-character DNS limit"
-    );
+    expect(() => parseHostname(`prefix.${longLabel}`)).toThrow("exceeds 63-character DNS limit");
   });
 });
