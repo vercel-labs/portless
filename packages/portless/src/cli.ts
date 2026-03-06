@@ -617,6 +617,199 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 // Subcommand handlers
 // ---------------------------------------------------------------------------
 
+const COMPLETION_SHELLS = ["bash", "zsh", "fish"] as const;
+
+type CompletionShell = (typeof COMPLETION_SHELLS)[number];
+
+function isCompletionShell(value: string): value is CompletionShell {
+  return COMPLETION_SHELLS.includes(value as CompletionShell);
+}
+
+function getBashCompletionScript(): string {
+  return `# bash completion for portless
+_portless_completions() {
+  local cur prev cmd
+  COMPREPLY=()
+  cur="\${COMP_WORDS[COMP_CWORD]}"
+  prev="\${COMP_WORDS[COMP_CWORD-1]}"
+
+  if [[ $COMP_CWORD -eq 1 ]]; then
+    COMPREPLY=( $(compgen -W "run alias hosts list trust proxy completion --help -h --version -v --name" -- "$cur") )
+    return 0
+  fi
+
+  cmd="\${COMP_WORDS[1]}"
+
+  case "$cmd" in
+    run)
+      COMPREPLY=( $(compgen -W "--force --app-port --help -h --" -- "$cur") )
+      ;;
+    alias)
+      COMPREPLY=( $(compgen -W "--remove --force --help -h" -- "$cur") )
+      ;;
+    hosts)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "sync clean --help -h" -- "$cur") )
+      fi
+      ;;
+    proxy)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "start stop --help -h" -- "$cur") )
+      elif [[ \${COMP_WORDS[2]} == "start" ]]; then
+        COMPREPLY=( $(compgen -W "--https --no-tls --cert --key --foreground --port -p" -- "$cur") )
+      fi
+      ;;
+    completion)
+      if [[ $COMP_CWORD -eq 2 ]]; then
+        COMPREPLY=( $(compgen -W "bash zsh fish --help -h" -- "$cur") )
+      fi
+      ;;
+    --name)
+      return 0
+      ;;
+    *)
+      COMPREPLY=( $(compgen -W "--force --app-port --help -h --" -- "$cur") )
+      ;;
+  esac
+}
+
+complete -F _portless_completions portless
+`;
+}
+
+function getZshCompletionScript(): string {
+  return `#compdef portless
+
+_portless() {
+  local -a commands
+  commands=(
+    'run:Infer project name and run through the proxy'
+    'alias:Register or remove a static route'
+    'hosts:Manage /etc/hosts entries'
+    'list:Show active routes'
+    'trust:Add local CA to system trust store'
+    'proxy:Manage proxy lifecycle'
+    'completion:Generate shell completion script'
+  )
+
+  _arguments -C \
+    '--help[Show help]' \
+    '-h[Show help]' \
+    '--version[Show version]' \
+    '-v[Show version]' \
+    '--name[Use explicit app name]:name:' \
+    '1:command:->command' \
+    '*::arg:->args'
+
+  case $state in
+    command)
+      _describe 'command' commands
+      ;;
+    args)
+      case $words[2] in
+        run)
+          _arguments '--force[Override existing route]' '--app-port[Use fixed app port]:port:' '--help[Show help]' '-h[Show help]'
+          ;;
+        alias)
+          _arguments '--remove[Remove alias]' '--force[Override existing route]' '--help[Show help]' '-h[Show help]'
+          ;;
+        hosts)
+          _values 'hosts command' sync clean
+          ;;
+        proxy)
+          if (( CURRENT == 3 )); then
+            _values 'proxy command' start stop
+          else
+            _arguments '--https[Enable HTTPS/2]' '--no-tls[Disable TLS]' '--cert[Certificate path]:path:_files' '--key[Private key path]:path:_files' '--foreground[Run in foreground]' '--port[Proxy port]:port:' '-p[Proxy port]:port:'
+          fi
+          ;;
+        completion)
+          _values 'shell' bash zsh fish
+          ;;
+      esac
+      ;;
+  esac
+}
+
+compdef _portless portless
+`;
+}
+
+function getFishCompletionScript(): string {
+  return `# fish completion for portless
+complete -c portless -n "__fish_is_nth_token 1" -f
+complete -c portless -n "__fish_is_nth_token 1" -a "run" -d "Infer project name and run through proxy"
+complete -c portless -n "__fish_is_nth_token 1" -a "alias" -d "Register or remove a static route"
+complete -c portless -n "__fish_is_nth_token 1" -a "hosts" -d "Manage /etc/hosts entries"
+complete -c portless -n "__fish_is_nth_token 1" -a "list" -d "Show active routes"
+complete -c portless -n "__fish_is_nth_token 1" -a "trust" -d "Add local CA to system trust store"
+complete -c portless -n "__fish_is_nth_token 1" -a "proxy" -d "Manage proxy lifecycle"
+complete -c portless -n "__fish_is_nth_token 1" -a "completion" -d "Generate shell completion script"
+
+complete -c portless -s h -l help -d "Show help"
+complete -c portless -s v -l version -d "Show version"
+complete -c portless -l name -d "Use explicit app name"
+
+complete -c portless -n "__fish_seen_subcommand_from run" -l force -d "Override existing route"
+complete -c portless -n "__fish_seen_subcommand_from run" -l app-port -d "Use fixed app port"
+complete -c portless -n "__fish_seen_subcommand_from alias" -l remove -d "Remove alias"
+complete -c portless -n "__fish_seen_subcommand_from alias" -l force -d "Override existing route"
+complete -c portless -n "__fish_seen_subcommand_from hosts; and __fish_is_nth_token 2" -a "sync clean"
+complete -c portless -n "__fish_seen_subcommand_from proxy; and __fish_is_nth_token 2" -a "start stop"
+complete -c portless -n "__fish_seen_subcommand_from proxy" -s p -l port -d "Proxy port"
+complete -c portless -n "__fish_seen_subcommand_from proxy" -l https -d "Enable HTTPS/2"
+complete -c portless -n "__fish_seen_subcommand_from proxy" -l no-tls -d "Disable TLS"
+complete -c portless -n "__fish_seen_subcommand_from proxy" -l cert -r -d "Certificate path"
+complete -c portless -n "__fish_seen_subcommand_from proxy" -l key -r -d "Private key path"
+complete -c portless -n "__fish_seen_subcommand_from proxy" -l foreground -d "Run in foreground"
+complete -c portless -n "__fish_seen_subcommand_from completion; and __fish_is_nth_token 2" -a "bash zsh fish"
+`;
+}
+
+function getCompletionScript(shell: CompletionShell): string {
+  if (shell === "bash") return getBashCompletionScript();
+  if (shell === "zsh") return getZshCompletionScript();
+  return getFishCompletionScript();
+}
+
+function printCompletionHelp(exitCode = 0): void {
+  console.log(`
+${chalk.bold("portless completion")} - Generate shell completion scripts.
+
+${chalk.bold("Usage:")}
+  ${chalk.cyan("portless completion <bash|zsh|fish>")}
+
+${chalk.bold("Examples:")}
+  # Bash (~/.bashrc)
+  source <(portless completion bash)
+
+  # Zsh (~/.zshrc)
+  eval "$(portless completion zsh)"
+
+  # Fish
+  mkdir -p ~/.config/fish/completions
+  portless completion fish > ~/.config/fish/completions/portless.fish
+`);
+  process.exit(exitCode);
+}
+
+function handleCompletion(args: string[]): void {
+  const shell = args[1];
+  if (!shell || shell === "--help" || shell === "-h") {
+    printCompletionHelp(0);
+  }
+
+  if (!isCompletionShell(shell)) {
+    console.error(chalk.red(`Error: Unknown shell "${shell}".`));
+    console.error(chalk.blue("Supported shells: bash, zsh, fish"));
+    console.error(chalk.cyan("  portless completion --help"));
+    process.exit(1);
+  }
+
+  console.log(getCompletionScript(shell));
+  process.exit(0);
+}
+
 function printHelp(): void {
   console.log(`
 ${chalk.bold("portless")} - Replace port numbers with stable, named .localhost URLs. For humans and agents.
@@ -641,6 +834,7 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless trust")}                   Add local CA to system trust store
   ${chalk.cyan("portless hosts sync")}              Add routes to /etc/hosts (fixes Safari)
   ${chalk.cyan("portless hosts clean")}             Remove portless entries from /etc/hosts
+  ${chalk.cyan("portless completion <shell>")}      Print shell completions (bash, zsh, fish)
 
 ${chalk.bold("Examples:")}
   portless proxy start                # Start proxy on port 1355
@@ -716,7 +910,7 @@ ${chalk.bold("Skip portless:")}
   PORTLESS=skip pnpm dev        # Same as above
 
 ${chalk.bold("Reserved names:")}
-  run, alias, hosts, list, trust, proxy are subcommands and cannot be
+  run, alias, hosts, list, trust, proxy, completion are subcommands and cannot be
   used as app names directly. Use "portless run" to infer the name, or
   "portless --name <name>" to force any name including reserved ones.
 `);
@@ -1230,6 +1424,11 @@ async function main() {
       return;
     }
     await handleNamedMode(args);
+    return;
+  }
+
+  if (args[0] === "completion") {
+    handleCompletion(args);
     return;
   }
 

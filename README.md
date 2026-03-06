@@ -152,6 +152,7 @@ portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
 portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
+portless completion <bash|zsh|fish>  # Print shell completion script
 
 # Disable portless (run command directly)
 PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
@@ -191,11 +192,26 @@ PORTLESS_STATE_DIR=<path>        # Override the state directory
 
 # Info
 portless --help                  # Show help
+portless completion --help       # Show completion command help
 portless run --help              # Show help for a specific subcommand
 portless --version               # Show version
 ```
 
-> **Reserved names:** `run`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `alias`, `hosts`, `list`, `trust`, `proxy`, and `completion` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## Shell Completion
+
+```bash
+# Bash (~/.bashrc)
+source <(portless completion bash)
+
+# Zsh (~/.zshrc)
+eval "$(portless completion zsh)"
+
+# Fish
+mkdir -p ~/.config/fish/completions
+portless completion fish > ~/.config/fish/completions/portless.fish
+```
 
 ## State Directory
 

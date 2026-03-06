@@ -37,6 +37,7 @@ describe("CLI", () => {
       expect(stdout).toContain("Examples:");
       expect(stdout).toContain("proxy start");
       expect(stdout).toContain("portless run");
+      expect(stdout).toContain("portless completion <shell>");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
@@ -94,6 +95,48 @@ describe("CLI", () => {
       const { status, stdout } = run(["proxy", "unknown"]);
       expect(status).toBe(1);
       expect(stdout).toContain("proxy start");
+    });
+  });
+
+  describe("completion", () => {
+    it("prints completion usage with bare command", () => {
+      const { status, stdout } = run(["completion"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless completion");
+      expect(stdout).toContain("bash|zsh|fish");
+    });
+
+    it("prints completion usage with --help", () => {
+      const { status, stdout } = run(["completion", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless completion");
+    });
+
+    it("prints bash completion script", () => {
+      const { status, stdout } = run(["completion", "bash"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("_portless_completions");
+      expect(stdout).toContain("complete -F _portless_completions portless");
+    });
+
+    it("prints zsh completion script", () => {
+      const { status, stdout } = run(["completion", "zsh"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("#compdef portless");
+      expect(stdout).toContain("_portless");
+    });
+
+    it("prints fish completion script", () => {
+      const { status, stdout } = run(["completion", "fish"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("complete -c portless");
+      expect(stdout).toContain('complete -c portless -n "__fish_is_nth_token 1" -f');
+    });
+
+    it("exits 1 for unknown shell", () => {
+      const { status, stderr } = run(["completion", "pwsh"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain('Unknown shell "pwsh"');
     });
   });
 

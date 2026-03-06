@@ -141,31 +141,47 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 
 ## CLI Reference
 
-| Command                                | Description                                                   |
-| -------------------------------------- | ------------------------------------------------------------- |
-| `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)      |
-| `portless <name> <cmd> [args...]`      | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
-| `portless list`                        | Show active routes                                            |
-| `portless trust`                       | Add local CA to system trust store (for HTTPS)                |
-| `portless proxy start`                 | Start the proxy as a daemon (port 1355, no sudo)              |
-| `portless proxy start --https`         | Start with HTTP/2 + TLS (auto-generates certs)                |
-| `portless proxy start -p <number>`     | Start the proxy on a custom port                              |
-| `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                 |
-| `portless proxy stop`                  | Stop the proxy                                                |
-| `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)          |
-| `portless alias <name> <port> --force` | Overwrite an existing route                                   |
-| `portless alias --remove <name>`       | Remove a static route                                         |
-| `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                       |
-| `portless hosts clean`                 | Remove portless entries from /etc/hosts                       |
-| `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment       |
-| `portless <name> --force <cmd>`        | Override an existing route registered by another process      |
-| `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)     |
-| `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child   |
-| `portless --help` / `-h`               | Show help                                                     |
-| `portless run --help`                  | Show help for a subcommand (also: alias, hosts)               |
-| `portless --version` / `-v`            | Show version                                                  |
+| Command                                 | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `portless run <cmd> [args...]`          | Infer name from project, run through proxy (auto-starts)      |
+| `portless <name> <cmd> [args...]`       | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
+| `portless list`                         | Show active routes                                            |
+| `portless trust`                        | Add local CA to system trust store (for HTTPS)                |
+| `portless proxy start`                  | Start the proxy as a daemon (port 1355, no sudo)              |
+| `portless proxy start --https`          | Start with HTTP/2 + TLS (auto-generates certs)                |
+| `portless proxy start -p <number>`      | Start the proxy on a custom port                              |
+| `portless proxy start --foreground`     | Start the proxy in foreground (for debugging)                 |
+| `portless proxy stop`                   | Stop the proxy                                                |
+| `portless alias <name> <port>`          | Register a static route (e.g. for Docker containers)          |
+| `portless alias <name> <port> --force`  | Overwrite an existing route                                   |
+| `portless alias --remove <name>`        | Remove a static route                                         |
+| `portless hosts sync`                   | Add routes to /etc/hosts (fixes Safari)                       |
+| `portless hosts clean`                  | Remove portless entries from /etc/hosts                       |
+| `portless completion <bash\|zsh\|fish>` | Print shell completion script                                 |
+| `portless <name> --app-port <n> <cmd>`  | Use a fixed port for the app instead of auto-assignment       |
+| `portless <name> --force <cmd>`         | Override an existing route registered by another process      |
+| `portless --name <name> <cmd>`          | Force `<name>` as app name (bypasses subcommand dispatch)     |
+| `portless <name> -- <cmd> [args...]`    | Stop flag parsing; everything after `--` is passed to child   |
+| `portless --help` / `-h`                | Show help                                                     |
+| `portless completion --help`            | Show completion command help                                  |
+| `portless run --help`                   | Show help for a subcommand (also: alias, hosts)               |
+| `portless --version` / `-v`             | Show version                                                  |
 
-**Reserved names:** `run`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `alias`, `hosts`, `list`, `trust`, `proxy`, and `completion` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## Shell Completion
+
+```bash
+# Bash (~/.bashrc)
+source <(portless completion bash)
+
+# Zsh (~/.zshrc)
+eval "$(portless completion zsh)"
+
+# Fish
+mkdir -p ~/.config/fish/completions
+portless completion fish > ~/.config/fish/completions/portless.fish
+```
 
 ## Troubleshooting
 
