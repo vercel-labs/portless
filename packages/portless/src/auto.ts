@@ -152,25 +152,127 @@ function branchToPrefix(branch: string): string | null {
 }
 
 /**
- * Detect if the current directory is inside a multi-worktree git repo and
- * return the current branch name as a prefix for hostname composition.
+ * Detect if the current directory is inside a multi-worktree git repo (or
+ * a Jujutsu multi-workspace repo) and return a prefix for hostname
+ * composition.
  *
- * Heuristic:
- *   1. `git worktree list` — if there are multiple worktrees, this repo
- *      uses worktrees and checkouts need distinguishing.
- *   2. `git rev-parse --abbrev-ref HEAD` — get the current branch name.
- *   3. If the branch is `main` or `master`, no prefix (primary checkout).
- *   4. Otherwise, the sanitized branch name is the prefix.
- *
- * Falls back to parsing `.git` file + HEAD when git CLI is unavailable.
+ * Checks (in order):
+ *   1. Jujutsu (jj) workspaces — `.jj/repo` as a file indicates a linked
+ *      workspace. The workspace name is used as the prefix.
+ *   2. `git worktree list` — if there are multiple worktrees, the branch
+ *      name is used as the prefix.
+ *   3. `.git` file parsing — fallback when git CLI is unavailable.
  */
 export function detectWorktreePrefix(cwd: string = process.cwd()): WorktreePrefix | null {
+  // Jujutsu (jj) workspaces
+  const jjResult = detectJujutsuWorkspacePrefix(cwd);
+  if (jjResult !== undefined) return jjResult;
+
   // Primary: git CLI
   const cliResult = detectWorktreeViaCli(cwd);
   if (cliResult !== undefined) return cliResult;
 
   // Fallback: parse .git file and HEAD when git binary is unavailable
   return detectWorktreeViaFilesystem(cwd);
+}
+
+/** Workspace names that represent the default/primary checkout — no prefix needed. */
+const DEFAULT_WORKSPACES = new Set(["default"]);
+
+/**
+ * Detect Jujutsu (jj) workspace prefix. Returns:
+ *   - `{ prefix, source }` if in a non-default linked workspace
+ *   - `null` if in the default workspace or not using multiple workspaces
+ *   - `undefined` if not a jj repo (caller should try git detection)
+ *
+ * Jujutsu workspaces are similar to git worktrees but use a `.jj/` directory.
+ * In a linked workspace, `.jj/repo` is a *file* pointing to the main repo's
+ * `.jj/repo/` directory. In the main workspace, `.jj/repo` is a directory.
+ *
+ * The workspace name is obtained via `jj log` and used as the prefix after
+ * stripping the project name prefix (e.g. workspace "myapp-fix-ui" with
+ * project "myapp" yields prefix "fix-ui").
+ */
+function detectJujutsuWorkspacePrefix(cwd: string): WorktreePrefix | null | undefined {
+  // Walk up to find .jj directory
+  let dir = cwd;
+  let jjDir: string | null = null;
+  for (;;) {
+    const candidate = path.join(dir, ".jj");
+    try {
+      const stat = fs.statSync(candidate);
+      if (stat.isDirectory()) {
+        jjDir = candidate;
+        break;
+      }
+    } catch {
+      // No .jj here; keep walking
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+
+  if (!jjDir) return undefined; // Not a jj repo
+
+  // Check if .jj/repo is a file (linked workspace) or directory (main)
+  const repoPath = path.join(jjDir, "repo");
+  try {
+    const stat = fs.statSync(repoPath);
+    if (stat.isDirectory()) {
+      // Main workspace — check if there are multiple workspaces
+      // by looking for a workspace_store directory with entries
+      try {
+        const wsStorePath = path.join(repoPath, "workspace_store");
+        const wsStoreEntries = fs.readdirSync(wsStorePath).filter((f) => f !== "index");
+        if (wsStoreEntries.length === 0) return null; // Single workspace
+      } catch {
+        return null; // No workspace_store or not readable
+      }
+
+      // Multiple workspaces exist but we're in the main/default one
+      return null;
+    }
+  } catch {
+    return undefined; // Can't stat .jj/repo
+  }
+
+  // Linked workspace — get the workspace name via jj CLI
+  try {
+    const wsName = execFileSync(
+      "jj",
+      ["log", "-r", "@", "--no-graph", "-T", "self.working_copies()", "--ignore-working-copy"],
+      {
+        cwd,
+        encoding: "utf-8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }
+    )
+      .trim()
+      .replace(/@$/, ""); // Strip trailing @
+
+    if (!wsName || DEFAULT_WORKSPACES.has(wsName)) return null;
+
+    // Try to strip the project name prefix for a cleaner subdomain.
+    // e.g. workspace "smile-admin-act-1408" with project "smile-admin" → "act-1408"
+    const projectName = inferProjectName(cwd).name;
+    let prefix = wsName;
+    if (projectName && wsName.startsWith(projectName + "-")) {
+      prefix = wsName.slice(projectName.length + 1);
+    }
+
+    const sanitized = sanitizeForHostname(prefix);
+    if (!sanitized) return null;
+
+    return { prefix: sanitized, source: "jj workspace" };
+  } catch {
+    // jj CLI unavailable — try filesystem fallback
+    // The checkout file in .jj/working_copy/ contains the workspace name
+    // as a suffix in the binary data, but parsing it is fragile.
+    // Fall through to git detection (jj repos may be colocated with git).
+    return undefined;
+  }
 }
 
 /**
