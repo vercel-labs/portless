@@ -3,13 +3,18 @@
 ## Run an app
 
 ```bash
+portless run [--name <name>] <cmd> [args...]
 portless <name> <cmd> [args...]
 ```
 
-Starts your command and maps it to `http://<name>.localhost:1355`. Auto-starts the proxy if needed.
+`portless run` infers the project name from package.json, git root, or directory name. Use `--name` to override the inferred name while still applying worktree prefixes.
+
+`portless <name>` uses an explicit name with no inference or prefixing.
 
 ```bash
-portless myapp next dev
+portless run next dev                    # infer name from project
+portless run --name myapp next dev       # override inferred name
+portless myapp next dev                  # explicit name
 portless api pnpm start
 portless docs.myapp next dev
 ```

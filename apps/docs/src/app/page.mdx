@@ -60,6 +60,12 @@ portless run next dev   # -> http://fix-ui.myapp.localhost:1355
 
 Put `portless run` in your `package.json` once and it works everywhere -- the main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
+Use `--name` to override the inferred base name while keeping the worktree prefix:
+
+```bash
+portless run --name myapp next dev   # -> http://fix-ui.myapp.localhost:1355
+```
+
 ## How it works
 
 Portless runs a reverse proxy on port 1355. Each app registers a route mapping its hostname to an assigned port. Requests to `http://<name>.localhost:1355` are proxied to the app.

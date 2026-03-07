@@ -144,6 +144,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | Command                                | Description                                                   |
 | -------------------------------------- | ------------------------------------------------------------- |
 | `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)      |
+| `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies)   |
 | `portless <name> <cmd> [args...]`      | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
 | `portless list`                        | Show active routes                                            |
 | `portless trust`                       | Add local CA to system trust store (for HTTPS)                |

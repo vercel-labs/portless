@@ -47,6 +47,10 @@ Portless fixes all of this by giving each dev server a stable, named `.localhost
 portless run next dev
 # -> http://<project>.localhost:1355
 
+# Override the inferred name (worktree prefix still applies)
+portless run --name myapp next dev
+# -> http://myapp.localhost:1355
+
 # Explicit name
 portless myapp next dev
 # -> http://myapp.localhost:1355
@@ -143,7 +147,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 ## Commands
 
 ```bash
-portless run <cmd> [args...]     # Infer name from project, run through proxy
+portless run [--name <name>] <cmd> [args...]  # Infer name (or override with --name), run through proxy
 portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route

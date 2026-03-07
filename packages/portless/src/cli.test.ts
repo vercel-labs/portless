@@ -38,6 +38,7 @@ describe("CLI", () => {
       expect(stdout).toContain("proxy start");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
+      expect(stdout).toContain("run [--name <name>]");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
@@ -460,6 +461,50 @@ describe("CLI", () => {
       const { status, stderr } = run(["--name", "myapp"]);
       expect(status).toBe(1);
       expect(stderr).toContain("No command provided");
+    });
+  });
+
+  describe("run --name flag", () => {
+    it("shows --name in run help", () => {
+      const { status, stdout } = run(["run", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--name");
+    });
+
+    it("strips --name and passes command through (PORTLESS=0)", () => {
+      const { status, stdout } = run(["run", "--name", "custom", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("exits 1 when --name has no value", () => {
+      const { status, stderr } = run(["run", "--name"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("--name requires");
+    });
+
+    it("exits 1 when --name value looks like a flag", () => {
+      const { status, stderr } = run(["run", "--name", "--force", "echo", "ok"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("--name requires");
+    });
+
+    it("combines --name with --force (PORTLESS=0)", () => {
+      const { status, stdout } = run(["run", "--name", "foo", "--force", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("does not consume --name after -- separator (PORTLESS=0)", () => {
+      const { status, stdout } = run(["run", "--", "echo", "--name", "foo"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("--name foo");
     });
   });
 });
