@@ -11,7 +11,7 @@ import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
-import { inferProjectName, detectWorktreePrefix } from "./auto.js";
+import { inferProjectName, detectWorktreePrefix, sanitizeForHostname } from "./auto.js";
 import {
   PRIVILEGED_PORT_THRESHOLD,
   discoverState,
@@ -464,6 +464,8 @@ interface ParsedRunArgs {
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
+  /** Override the inferred base name (from --name flag). */
+  name?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -498,14 +500,16 @@ function appPortFromEnv(): number | undefined {
 }
 
 /**
- * Parse `run` subcommand arguments: `[--force] [--] <command...>`
+ * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
- * Only `--force` is recognized. `--` stops flag parsing. Everything
- * after the flag region is the child command, passed through untouched.
+ * `--name`, `--force`, and `--app-port` are recognized. `--` stops flag
+ * parsing. Everything after the flag region is the child command, passed
+ * through untouched.
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
+  let name: string | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -520,6 +524,7 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless run [options] <command...>")}
 
 ${chalk.bold("Options:")}
+  --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Override an existing route registered by another process
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --help, -h             Show this help
@@ -529,11 +534,13 @@ ${chalk.bold("Name inference (in order):")}
   2. Git repo root directory name
   3. Current directory basename
 
+  Use --name to override the inferred name while keeping worktree prefixes.
   In git worktrees, the branch name is prepended as a subdomain prefix
   (e.g. feature-auth.myapp.localhost).
 
 ${chalk.bold("Examples:")}
   portless run next dev               # -> http://<project>.localhost:1355
+  portless run --name myapp next dev  # -> http://myapp.localhost:1355
   portless run vite dev               # -> http://<project>.localhost:1355
   portless run --app-port 3000 pnpm start
 `);
@@ -543,9 +550,17 @@ ${chalk.bold("Examples:")}
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--name") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(chalk.red("Error: --name requires a name value."));
+        console.error(chalk.cyan("  portless run --name <name> <command...>"));
+        process.exit(1);
+      }
+      name = args[i];
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port, --help"));
+      console.error(chalk.blue("Known flags: --name, --force, --app-port, --help"));
       process.exit(1);
     }
     i++;
@@ -553,7 +568,7 @@ ${chalk.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, commandArgs: args.slice(i) };
+  return { force, appPort, name, commandArgs: args.slice(i) };
 }
 
 /**
@@ -676,7 +691,7 @@ ${chalk.bold("HTTP/2 + HTTPS:")}
   system trust store. No browser warnings. No sudo required on macOS.
 
 ${chalk.bold("Options:")}
-  run <cmd>                      Infer project name from package.json / git / cwd
+  run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
   -p, --port <number>           Port for the proxy to listen on (default: 1355)
                                 Ports < 1024 require sudo
@@ -1193,9 +1208,25 @@ async function handleRunMode(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  const inferred = inferProjectName();
+  let baseName: string;
+  let nameSource: string;
+
+  if (parsed.name) {
+    const sanitized = sanitizeForHostname(parsed.name);
+    if (!sanitized) {
+      console.error(chalk.red(`Error: --name value "${parsed.name}" produces an empty hostname.`));
+      process.exit(1);
+    }
+    baseName = sanitized;
+    nameSource = "--name flag";
+  } else {
+    const inferred = inferProjectName();
+    baseName = inferred.name;
+    nameSource = inferred.source;
+  }
+
   const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${inferred.name}` : inferred.name;
+  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
@@ -1209,7 +1240,7 @@ async function handleRunMode(args: string[]): Promise<void> {
     parsed.commandArgs,
     tls,
     parsed.force,
-    { nameSource: inferred.source, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort
   );
 }
