@@ -1,4 +1,5 @@
 import type { MDXComponents } from "mdx/types";
+import { CodeBlock } from "./components/code-block";
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
@@ -45,12 +46,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         />
       );
     },
-    pre: (props) => (
-      <pre
-        className="mb-4 overflow-x-auto rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-[13px] leading-relaxed dark:border-neutral-800 dark:bg-neutral-900"
-        {...props}
-      />
-    ),
+    pre: (props) => <CodeBlock {...props} />,
     blockquote: (props) => (
       <blockquote
         className="mb-4 border-l-2 border-neutral-200 pl-4 text-sm text-neutral-500 dark:border-neutral-800 dark:text-neutral-500"
