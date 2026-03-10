@@ -187,14 +187,16 @@ function startProxyServer(
 // Commands
 // ---------------------------------------------------------------------------
 
-async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Promise<void> {
+async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
   const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
   const sudoHint = needsSudo ? "sudo " : "";
 
   if (!fs.existsSync(pidPath)) {
-    // PID file is missing -- check whether something is still listening
-    if (await isProxyRunning(proxyPort, tls)) {
+    // PID file is missing -- check whether something is still listening.
+    // Use plain HTTP: the TLS proxy accepts it via byte-peeking, and this
+    // avoids false negatives from TLS handshake timeouts.
+    if (await isProxyRunning(proxyPort)) {
       console.log(chalk.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
       const pid = findPidOnPort(proxyPort);
       if (pid !== null) {
@@ -258,7 +260,8 @@ async function stopProxy(store: RouteStore, proxyPort: number, tls: boolean): Pr
 
     // Verify the process is actually running a proxy on the expected port.
     // If the PID was recycled by an unrelated process, the port won't be listening.
-    if (!(await isProxyRunning(proxyPort, tls))) {
+    // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
+    if (!(await isProxyRunning(proxyPort))) {
       console.log(
         chalk.yellow(
           `PID file exists but port ${proxyPort} is not listening. The PID may have been recycled.`
@@ -1081,8 +1084,13 @@ ${chalk.bold("Usage:")}
     }
     const needsSudo = proxyPort < PRIVILEGED_PORT_THRESHOLD;
     const sudoPrefix = needsSudo ? "sudo " : "";
+    const portFlag = proxyPort !== getDefaultPort() ? ` -p ${proxyPort}` : "";
     console.log(chalk.yellow(`Proxy is already running on port ${proxyPort}.`));
-    console.log(chalk.blue(`To restart: portless proxy stop && ${sudoPrefix}portless proxy start`));
+    console.log(
+      chalk.blue(
+        `To restart: ${sudoPrefix}portless proxy stop${portFlag} && ${sudoPrefix}portless proxy start${portFlag}`
+      )
+    );
     return;
   }
 
