@@ -81,7 +81,8 @@ function startProxyServer(
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
-  const autoSyncHosts = process.env.PORTLESS_SYNC_HOSTS === "1";
+  const syncVal = process.env.PORTLESS_SYNC_HOSTS;
+  const autoSyncHosts = syncVal !== "0" && syncVal !== "false";
 
   const reloadRoutes = () => {
     try {
@@ -712,7 +713,7 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=1|true         Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
-  PORTLESS_SYNC_HOSTS=1         Auto-sync /etc/hosts (requires sudo proxy start)
+  PORTLESS_SYNC_HOSTS=0         Disable auto-sync of /etc/hosts (enabled by default)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0 | PORTLESS=skip    Run command directly without proxy
 
@@ -724,12 +725,11 @@ ${chalk.bold("Child process environment:")}
 ${chalk.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
-  If Safari can't find your .localhost URL, run:
+  The proxy auto-syncs /etc/hosts when started with sudo. To manually sync:
     ${chalk.cyan("sudo portless hosts sync")}
-  This adds entries to /etc/hosts. Clean up later with:
+  Clean up later with:
     ${chalk.cyan("sudo portless hosts clean")}
-  To auto-sync whenever routes change, set PORTLESS_SYNC_HOSTS=1 and
-  start the proxy with sudo.
+  To disable auto-sync, set PORTLESS_SYNC_HOSTS=0.
 
 ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
@@ -912,8 +912,8 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("sudo portless hosts clean")}   Remove portless entries from /etc/hosts
 
 ${chalk.bold("Auto-sync:")}
-  Set PORTLESS_SYNC_HOSTS=1 and start the proxy with sudo to auto-sync
-  /etc/hosts whenever routes change.
+  The proxy auto-syncs /etc/hosts whenever routes change (requires sudo).
+  To disable, set PORTLESS_SYNC_HOSTS=0.
 `);
     process.exit(0);
   }
@@ -1059,11 +1059,13 @@ ${chalk.bold("Usage:")}
     tld = tldValue.trim().toLowerCase();
   }
 
-  if (tld !== DEFAULT_TLD && process.env.PORTLESS_SYNC_HOSTS !== "1") {
+  const syncDisabled =
+    process.env.PORTLESS_SYNC_HOSTS === "0" || process.env.PORTLESS_SYNC_HOSTS === "false";
+  if (tld !== DEFAULT_TLD && syncDisabled) {
     console.warn(
       chalk.yellow(`Warning: .${tld} domains require /etc/hosts entries to resolve to 127.0.0.1.`)
     );
-    console.warn(chalk.yellow("Set PORTLESS_SYNC_HOSTS=1 and start the proxy with sudo, or run:"));
+    console.warn(chalk.yellow("Hosts sync is disabled. To add entries manually, run:"));
     console.warn(chalk.cyan("  sudo portless hosts sync"));
   }
 

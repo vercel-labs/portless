@@ -188,7 +188,7 @@ PORTLESS_PORT=<number>           # Override the default proxy port
 PORTLESS_APP_PORT=<number>       # Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=1|true            # Always enable HTTPS
 PORTLESS_TLD=<tld>               # Use a custom TLD (e.g. test; default: localhost)
-PORTLESS_SYNC_HOSTS=1            # Auto-sync /etc/hosts when routes change
+PORTLESS_SYNC_HOSTS=0            # Disable auto-sync of /etc/hosts (enabled by default)
 PORTLESS_STATE_DIR=<path>        # Override the state directory
 
 # Info
@@ -237,11 +237,10 @@ sudo portless hosts sync
 sudo portless hosts clean
 ```
 
-To auto-sync `/etc/hosts` whenever routes change, set `PORTLESS_SYNC_HOSTS=1` and start the proxy with sudo:
+The proxy auto-syncs `/etc/hosts` whenever routes change (when started with sudo). To disable auto-sync:
 
 ```bash
-export PORTLESS_SYNC_HOSTS=1
-sudo portless proxy start
+PORTLESS_SYNC_HOSTS=0 sudo portless proxy start
 ```
 
 ## Custom TLD
@@ -257,11 +256,10 @@ export PORTLESS_TLD=test
 portless proxy start
 ```
 
-Custom TLDs require `/etc/hosts` entries to resolve to `127.0.0.1`. Enable auto-sync so portless manages this for you:
+Custom TLDs require `/etc/hosts` entries to resolve to `127.0.0.1`. The proxy auto-syncs `/etc/hosts` when started with sudo:
 
 ```bash
 export PORTLESS_TLD=test
-export PORTLESS_SYNC_HOSTS=1
 sudo portless proxy start
 
 # Apps now use .test URLs:

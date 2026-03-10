@@ -116,15 +116,15 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 
 ### Environment variables
 
-| Variable              | Description                                           |
-| --------------------- | ----------------------------------------------------- |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 1355)       |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)   |
-| `PORTLESS_HTTPS`      | Set to `1` or `true` to always enable HTTPS/HTTP/2    |
-| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)     |
-| `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts when routes change |
-| `PORTLESS_STATE_DIR`  | Override the state directory                          |
-| `PORTLESS=0\|skip`    | Bypass the proxy, run the command directly            |
+| Variable              | Description                                                        |
+| --------------------- | ------------------------------------------------------------------ |
+| `PORTLESS_PORT`       | Override the default proxy port (default: 1355)                    |
+| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                |
+| `PORTLESS_HTTPS`      | Set to `1` or `true` to always enable HTTPS/HTTP/2                 |
+| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                  |
+| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (enabled by default) |
+| `PORTLESS_STATE_DIR`  | Override the state directory                                       |
+| `PORTLESS=0\|skip`    | Bypass the proxy, run the command directly                         |
 
 ### HTTP/2 + HTTPS
 
@@ -217,7 +217,7 @@ sudo portless hosts sync    # Adds current routes to /etc/hosts
 sudo portless hosts clean   # Remove entries later
 ```
 
-To auto-sync whenever routes change, set `PORTLESS_SYNC_HOSTS=1` and start the proxy with sudo.
+The proxy auto-syncs `/etc/hosts` whenever routes change (when started with sudo). To disable, set `PORTLESS_SYNC_HOSTS=0`.
 
 ### Browser shows certificate warning with --https
 
