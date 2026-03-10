@@ -36,13 +36,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         {...props}
       />
     ),
-    code: ({
-      children,
-      className,
-    }: {
-      children?: React.ReactNode;
-      className?: string;
-    }) => {
+    code: ({ children, className }: { children?: React.ReactNode; className?: string }) => {
       if (className) {
         return <code className={className}>{children}</code>;
       }
@@ -61,11 +55,7 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
       const lang = className.replace("language-", "") || "typescript";
       const code = codeElement?.props?.children || "";
 
-      return (
-        <Code lang={lang}>
-          {typeof code === "string" ? code : String(code)}
-        </Code>
-      );
+      return <Code lang={lang}>{typeof code === "string" ? code : String(code)}</Code>;
     },
     blockquote: (props) => (
       <blockquote

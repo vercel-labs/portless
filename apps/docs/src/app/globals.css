@@ -186,19 +186,19 @@ article td {
 
 /* Diff line highlighting */
 .diff-add {
-  color: #16a34a;
+  color: #00952d;
 }
 
 .diff-remove {
-  color: #dc2626;
+  color: #f32e40;
 }
 
 .dark .diff-add {
-  color: #4ade80;
+  color: #00ca50;
 }
 
 .dark .diff-remove {
-  color: #f87171;
+  color: #f32e40;
 }
 
 /* Shiki dual theme support */

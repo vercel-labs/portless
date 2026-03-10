@@ -20,6 +20,16 @@ npm install -g portless
 ```bash
 portless myapp next dev
 # -> http://myapp.localhost:1355
+
+# HTTPS on port 443 (default with --https)
+sudo portless proxy start --https
+portless myapp next dev
+# -> https://myapp.localhost
+
+# HTTP on port 80
+sudo portless proxy start -p 80
+portless myapp next dev
+# -> http://myapp.localhost
 ```
 
 The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects `--port` and `--host` flags.
@@ -59,6 +69,20 @@ portless run next dev   # -> http://fix-ui.myapp.localhost:1355
 ```
 
 Put `portless run` in your `package.json` once and it works everywhere -- the main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+
+## Custom TLD
+
+By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
+
+```bash
+sudo portless proxy start --https --tld test
+portless myapp next dev
+# -> https://myapp.test
+```
+
+The proxy auto-syncs `/etc/hosts` when started with sudo, so `.test` domains resolve correctly.
+
+Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
 ## How it works
 
