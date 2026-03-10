@@ -301,27 +301,28 @@ export function isCATrusted(stateDir: string): boolean {
 
 function isCATrustedMacOS(caCertPath: string): boolean {
   try {
-    // Extract the SHA-1 fingerprint of our CA
-    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
-      .trim()
-      .replace(/^.*=/, "")
-      .replace(/:/g, "")
-      .toLowerCase();
+    const isRoot = (process.getuid?.() ?? -1) === 0;
+    const sudoUser = process.env.SUDO_USER;
 
-    // Check the login keychain first, then the system keychain
-    for (const keychain of [loginKeychainPath(), "/Library/Keychains/System.keychain"]) {
-      try {
-        const result = execFileSync("security", ["find-certificate", "-a", "-Z", keychain], {
-          encoding: "utf-8",
+    if (isRoot && sudoUser) {
+      // When running as root via sudo, check trust from the *browser user's*
+      // perspective. Root may have the CA in its own trust settings, but
+      // Chrome runs as the real user and won't see those.
+      execFileSync(
+        "sudo",
+        ["-u", sudoUser, "security", "verify-cert", "-c", caCertPath, "-L", "-p", "ssl"],
+        {
+          stdio: "pipe",
           timeout: 5000,
-          stdio: ["pipe", "pipe", "pipe"],
-        });
-        if (result.toLowerCase().includes(fingerprint)) return true;
-      } catch {
-        // Not found in this keychain, try next
-      }
+        }
+      );
+    } else {
+      execFileSync("security", ["verify-cert", "-c", caCertPath, "-L", "-p", "ssl"], {
+        stdio: "pipe",
+        timeout: 5000,
+      });
     }
-    return false;
+    return true;
   } catch {
     return false;
   }
@@ -554,21 +555,22 @@ async function generateHostCertAsync(
 export function createSNICallback(
   stateDir: string,
   defaultCert: Buffer,
-  defaultKey: Buffer
+  defaultKey: Buffer,
+  tld = "localhost"
 ): (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void {
   const cache = new Map<string, tls.SecureContext>();
   const pending = new Map<string, Promise<tls.SecureContext>>();
 
-  // Pre-cache the default context for "localhost" itself
+  // Pre-cache the default context for the bare TLD itself
   const defaultCtx = tls.createSecureContext({ cert: defaultCert, key: defaultKey });
 
   return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
-    // Only bare "localhost" uses the default cert. All subdomains (including
-    // single-level ones like "tools.localhost") need a cert with an exact SAN.
-    // RFC 2606 §2 designates ".localhost" as a reserved TLD, so "*.localhost"
-    // sits at the public-suffix boundary -- TLS specs do not permit wildcard
-    // certificates at that level.
-    if (servername === "localhost") {
+    // The bare TLD (e.g. "localhost" or "test") uses the default cert.
+    // All subdomains need a cert with an exact SAN entry.
+    // For .localhost: RFC 2606 §2 designates it as a reserved TLD, so
+    // "*.localhost" sits at the public-suffix boundary and TLS specs do
+    // not permit wildcard certificates at that level.
+    if (servername === tld) {
       cb(null, defaultCtx);
       return;
     }
@@ -655,12 +657,29 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
 
   try {
     if (process.platform === "darwin") {
-      const keychain = loginKeychainPath();
-      execFileSync(
-        "security",
-        ["add-trusted-cert", "-r", "trustRoot", "-k", keychain, caCertPath],
-        { stdio: "pipe", timeout: 30_000 }
-      );
+      const isRoot = (process.getuid?.() ?? -1) === 0;
+      if (isRoot) {
+        execFileSync(
+          "security",
+          [
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            "/Library/Keychains/System.keychain",
+            caCertPath,
+          ],
+          { stdio: "pipe", timeout: 30_000 }
+        );
+      } else {
+        const keychain = loginKeychainPath();
+        execFileSync(
+          "security",
+          ["add-trusted-cert", "-r", "trustRoot", "-k", keychain, caCertPath],
+          { stdio: "pipe", timeout: 30_000 }
+        );
+      }
       return { trusted: true };
     } else if (process.platform === "linux") {
       const config = getLinuxCATrustConfig();

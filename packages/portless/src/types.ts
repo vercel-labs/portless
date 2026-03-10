@@ -9,6 +9,8 @@ export interface ProxyServerOptions {
   getRoutes: () => RouteInfo[];
   /** The port the proxy is listening on (used to build correct URLs). */
   proxyPort: number;
+  /** TLD suffix used for hostnames (default: "localhost"). */
+  tld?: string;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
   /** When provided, enables HTTP/2 over TLS (HTTPS). */

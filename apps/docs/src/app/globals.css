@@ -184,6 +184,36 @@ article td {
   color: #a3a3a3;
 }
 
+/* Diff line highlighting */
+.diff-add {
+  color: #00952d;
+}
+
+.diff-remove {
+  color: #f32e40;
+}
+
+.dark .diff-add {
+  color: #00ca50;
+}
+
+.dark .diff-remove {
+  color: #f32e40;
+}
+
+/* Shiki dual theme support */
+.shiki,
+.shiki span {
+  color: var(--shiki-light) !important;
+  background-color: var(--shiki-light-bg) !important;
+}
+
+.dark .shiki,
+.dark .shiki span {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
+}
+
 button {
   cursor: pointer;
 }

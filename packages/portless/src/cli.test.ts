@@ -1,6 +1,7 @@
-import { describe, it, expect, beforeAll } from "vitest";
+import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -384,6 +385,18 @@ describe("CLI", () => {
   });
 
   describe("get subcommand", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-get-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    const getEnv = () => ({ PORTLESS_STATE_DIR: tmpDir });
+
     it("prints help with --help", () => {
       const { status, stdout } = run(["get", "--help"]);
       expect(status).toBe(0);
@@ -404,13 +417,13 @@ describe("CLI", () => {
     });
 
     it("prints URL for a given service name", () => {
-      const { status, stdout } = run(["get", "backend"]);
+      const { status, stdout } = run(["get", "backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
     it("prints URL for a dotted service name", () => {
-      const { status, stdout } = run(["get", "api.backend"]);
+      const { status, stdout } = run(["get", "api.backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/api\.backend\.localhost(:\d+)?$/);
     });
@@ -422,7 +435,7 @@ describe("CLI", () => {
     });
 
     it("accepts --no-worktree flag", () => {
-      const { status, stdout } = run(["get", "--no-worktree", "backend"]);
+      const { status, stdout } = run(["get", "--no-worktree", "backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });

@@ -89,7 +89,7 @@ No config changes needed. Put `portless run` in `package.json` once and it works
 
 ### Bypassing portless
 
-Set `PORTLESS=0` or `PORTLESS=skip` to run the command directly without the proxy:
+Set `PORTLESS=0` to run the command directly without the proxy:
 
 ```bash
 PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
@@ -116,14 +116,15 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 
 ### Environment variables
 
-| Variable              | Description                                           |
-| --------------------- | ----------------------------------------------------- |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 1355)       |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)   |
-| `PORTLESS_HTTPS`      | Set to `1` or `true` to always enable HTTPS/HTTP/2    |
-| `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts when routes change |
-| `PORTLESS_STATE_DIR`  | Override the state directory                          |
-| `PORTLESS=0\|skip`    | Bypass the proxy, run the command directly            |
+| Variable              | Description                                                       |
+| --------------------- | ----------------------------------------------------------------- |
+| `PORTLESS_PORT`       | Override the default proxy port (default: 1355)                   |
+| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)               |
+| `PORTLESS_HTTPS`      | Set to `1` to always enable HTTPS/HTTP/2                          |
+| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                 |
+| `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts (auto-enabled for custom TLDs) |
+| `PORTLESS_STATE_DIR`  | Override the state directory                                      |
+| `PORTLESS=0`          | Bypass the proxy, run the command directly                        |
 
 ### HTTP/2 + HTTPS
 
@@ -151,6 +152,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | `portless proxy start`                 | Start the proxy as a daemon (port 1355, no sudo)              |
 | `portless proxy start --https`         | Start with HTTP/2 + TLS (auto-generates certs)                |
 | `portless proxy start -p <number>`     | Start the proxy on a custom port                              |
+| `portless proxy start --tld test`      | Use .test instead of .localhost (requires /etc/hosts sync)    |
 | `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                 |
 | `portless proxy stop`                  | Stop the proxy                                                |
 | `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)          |
@@ -216,7 +218,7 @@ sudo portless hosts sync    # Adds current routes to /etc/hosts
 sudo portless hosts clean   # Remove entries later
 ```
 
-To auto-sync whenever routes change, set `PORTLESS_SYNC_HOSTS=1` and start the proxy with sudo.
+Auto-syncs `/etc/hosts` for custom TLDs (e.g. `--tld test`). For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable.
 
 ### Browser shows certificate warning with --https
 

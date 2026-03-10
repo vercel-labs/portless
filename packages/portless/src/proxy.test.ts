@@ -597,6 +597,94 @@ describe("createProxyServer", () => {
     });
   });
 
+  describe("custom TLD", () => {
+    it("uses custom TLD in 404 page suggested command", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, tld: "test" })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "unknown.test" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("unknown.test");
+      expect(res.body).toContain("portless unknown your-command");
+    });
+
+    it("uses custom TLD in 508 loop detection page", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "app.test", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+          onError: () => {},
+        })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const res = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/",
+            method: "GET",
+            headers: {
+              host: "app.test",
+              "x-portless-hops": "5",
+            },
+          },
+          (res) => {
+            let body = "";
+            res.on("data", (chunk) => (body += chunk));
+            res.on("end", () => resolve({ status: res.statusCode!, body }));
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+      expect(res.status).toBe(508);
+      expect(res.body).toContain(".test");
+    });
+
+    it("routes requests with custom TLD hostnames", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("custom tld hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.test", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, tld: "test" })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.test" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("custom tld hit");
+    });
+  });
+
   describe("XSS safety", () => {
     it("escapes hostname in 404 page", async () => {
       const routes: RouteInfo[] = [];

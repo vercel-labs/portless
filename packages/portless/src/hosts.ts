@@ -106,10 +106,10 @@ export function getManagedHostnames(): string[] {
 }
 
 /**
- * Check whether a .localhost subdomain resolves to 127.0.0.1 via the
- * system DNS resolver. Returns true if resolution works, false otherwise.
+ * Check whether a hostname resolves to 127.0.0.1 via the system DNS resolver.
+ * Returns true if resolution works, false otherwise.
  */
-export function checkLocalhostResolution(hostname: string): Promise<boolean> {
+export function checkHostResolution(hostname: string): Promise<boolean> {
   return new Promise((resolve) => {
     dns.lookup(hostname, { family: 4 }, (err, address) => {
       if (err) {

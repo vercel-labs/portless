@@ -1,4 +1,5 @@
 import type { MDXComponents } from "mdx/types";
+import { Code } from "@/components/code";
 
 export function useMDXComponents(components: MDXComponents): MDXComponents {
   return {
@@ -35,22 +36,27 @@ export function useMDXComponents(components: MDXComponents): MDXComponents {
         {...props}
       />
     ),
-    code: (props) => {
-      const isBlock = typeof props.className === "string" && props.className.includes("language-");
-      if (isBlock) return <code {...props} />;
+    code: ({ children, className }: { children?: React.ReactNode; className?: string }) => {
+      if (className) {
+        return <code className={className}>{children}</code>;
+      }
       return (
-        <code
-          className="rounded bg-neutral-100 px-1.5 py-0.5 text-[13px] dark:bg-neutral-800"
-          {...props}
-        />
+        <code className="rounded bg-neutral-100 px-1.5 py-0.5 text-[13px] dark:bg-neutral-800">
+          {children}
+        </code>
       );
     },
-    pre: (props) => (
-      <pre
-        className="mb-4 overflow-x-auto rounded-lg border border-neutral-200 bg-neutral-50 p-4 text-[13px] leading-relaxed dark:border-neutral-800 dark:bg-neutral-900"
-        {...props}
-      />
-    ),
+    pre: async ({ children }: { children?: React.ReactNode }) => {
+      const codeElement = children as React.ReactElement<{
+        className?: string;
+        children?: string;
+      }>;
+      const className = codeElement?.props?.className || "";
+      const lang = className.replace("language-", "") || "typescript";
+      const code = codeElement?.props?.children || "";
+
+      return <Code lang={lang}>{typeof code === "string" ? code : String(code)}</Code>;
+    },
     blockquote: (props) => (
       <blockquote
         className="mb-4 border-l-2 border-neutral-200 pl-4 text-sm text-neutral-500 dark:border-neutral-800 dark:text-neutral-500"

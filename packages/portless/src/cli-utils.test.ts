@@ -1,17 +1,25 @@
 import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import * as fs from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
+import * as path from "node:path";
 import {
   DEFAULT_PROXY_PORT,
+  DEFAULT_TLD,
   PRIVILEGED_PORT_THRESHOLD,
+  RISKY_TLDS,
   SYSTEM_STATE_DIR,
   USER_STATE_DIR,
   findFreePort,
   getDefaultPort,
+  getDefaultTld,
   injectFrameworkFlags,
   isProxyRunning,
+  readTldFromDir,
   resolveStateDir,
+  validateTld,
+  writeTldFile,
 } from "./cli-utils.js";
 
 describe("findFreePort", () => {
@@ -279,5 +287,120 @@ describe("injectFrameworkFlags", () => {
     const args: string[] = [];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual([]);
+  });
+});
+
+describe("DEFAULT_TLD", () => {
+  it("is localhost", () => {
+    expect(DEFAULT_TLD).toBe("localhost");
+  });
+});
+
+describe("getDefaultTld", () => {
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    originalEnv = process.env.PORTLESS_TLD;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.PORTLESS_TLD;
+    } else {
+      process.env.PORTLESS_TLD = originalEnv;
+    }
+  });
+
+  it("returns DEFAULT_TLD when PORTLESS_TLD is not set", () => {
+    delete process.env.PORTLESS_TLD;
+    expect(getDefaultTld()).toBe(DEFAULT_TLD);
+  });
+
+  it("returns PORTLESS_TLD when set", () => {
+    process.env.PORTLESS_TLD = "test";
+    expect(getDefaultTld()).toBe("test");
+  });
+
+  it("lowercases the value", () => {
+    process.env.PORTLESS_TLD = "TEST";
+    expect(getDefaultTld()).toBe("test");
+  });
+
+  it("trims whitespace", () => {
+    process.env.PORTLESS_TLD = "  test  ";
+    expect(getDefaultTld()).toBe("test");
+  });
+
+  it("returns DEFAULT_TLD when PORTLESS_TLD is empty", () => {
+    process.env.PORTLESS_TLD = "";
+    expect(getDefaultTld()).toBe(DEFAULT_TLD);
+  });
+});
+
+describe("readTldFromDir / writeTldFile", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tld-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns DEFAULT_TLD when file does not exist", () => {
+    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
+  });
+
+  it("writes and reads a custom TLD", () => {
+    writeTldFile(tmpDir, "test");
+    expect(readTldFromDir(tmpDir)).toBe("test");
+  });
+
+  it("removes the file when writing the default TLD", () => {
+    writeTldFile(tmpDir, "test");
+    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(true);
+
+    writeTldFile(tmpDir, DEFAULT_TLD);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(false);
+    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
+  });
+
+  it("handles removing the default TLD file when it does not exist", () => {
+    writeTldFile(tmpDir, DEFAULT_TLD);
+    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
+  });
+});
+
+describe("validateTld", () => {
+  it("returns null for valid TLDs", () => {
+    expect(validateTld("localhost")).toBeNull();
+    expect(validateTld("test")).toBeNull();
+    expect(validateTld("internal")).toBeNull();
+  });
+
+  it("rejects empty string", () => {
+    expect(validateTld("")).toMatch(/cannot be empty/);
+  });
+
+  it("rejects TLDs with invalid characters", () => {
+    expect(validateTld("my-tld")).toMatch(/must contain only/);
+    expect(validateTld("my.tld")).toMatch(/must contain only/);
+    expect(validateTld("MY_TLD")).toMatch(/must contain only/);
+    expect(validateTld("tld!")).toMatch(/must contain only/);
+  });
+
+  it("allows public TLDs (they produce warnings elsewhere)", () => {
+    for (const tld of ["com", "org", "net", "io", "app"]) {
+      expect(validateTld(tld)).toBeNull();
+      expect(RISKY_TLDS.has(tld)).toBe(true);
+    }
+  });
+
+  it("allows risky TLDs (they produce warnings elsewhere)", () => {
+    for (const tld of ["local", "dev"]) {
+      expect(validateTld(tld)).toBeNull();
+      expect(RISKY_TLDS.has(tld)).toBe(true);
+    }
   });
 });

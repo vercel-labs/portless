@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { checkLocalhostResolution, extractManagedBlock, removeBlock, buildBlock } from "./hosts.js";
+import { checkHostResolution, extractManagedBlock, removeBlock, buildBlock } from "./hosts.js";
 
 // ---------------------------------------------------------------------------
 // extractManagedBlock
@@ -130,17 +130,17 @@ describe("buildBlock", () => {
 });
 
 // ---------------------------------------------------------------------------
-// checkLocalhostResolution
+// checkHostResolution
 // ---------------------------------------------------------------------------
 
-describe("checkLocalhostResolution", () => {
+describe("checkHostResolution", () => {
   it("resolves localhost to 127.0.0.1", async () => {
-    const result = await checkLocalhostResolution("localhost");
+    const result = await checkHostResolution("localhost");
     expect(result).toBe(true);
   });
 
   it("returns false for a nonexistent domain", async () => {
-    const result = await checkLocalhostResolution("this-should-never-exist.invalid");
+    const result = await checkHostResolution("this-should-never-exist.invalid");
     expect(result).toBe(false);
   });
 });

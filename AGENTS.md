@@ -14,6 +14,10 @@ Always check for the latest npm version when adding dependencies. Use `pnpm add 
 
 Do not use emojis anywhere in this repository (code, comments, output, docs).
 
+## Boolean Environment Variables
+
+Document boolean env vars using only `0` and `1` in CLI help, SKILL.md, docs pages, and README. Code accepts `true`/`false` as well (and `skip` for `PORTLESS`), but these alternatives are not documented.
+
 ## Docs Updates
 
 When a change affects how humans or agents use portless (new/changed/removed commands, flags, behavior, or config), update all of these:

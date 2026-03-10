@@ -6,5 +6,6 @@ coverage/
 .pnpm-store/
 .turbo
 .next/
+next-env.d.ts
 .env*
 ~.env.example

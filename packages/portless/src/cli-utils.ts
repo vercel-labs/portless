@@ -124,6 +124,75 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/** Default TLD when PORTLESS_TLD is not set. */
+export const DEFAULT_TLD = "localhost";
+
+/** TLDs that work but have known pitfalls worth warning about. */
+export const RISKY_TLDS = new Map<string, string>([
+  ["local", "conflicts with mDNS/Bonjour on macOS"],
+  ["dev", "Google-owned; browsers force HTTPS via preloaded HSTS"],
+  ["com", "public TLD -- DNS requests will leak to the internet"],
+  ["org", "public TLD -- DNS requests will leak to the internet"],
+  ["net", "public TLD -- DNS requests will leak to the internet"],
+  ["io", "public TLD -- DNS requests will leak to the internet"],
+  ["app", "public TLD -- DNS requests will leak to the internet"],
+  ["edu", "public TLD -- DNS requests will leak to the internet"],
+  ["gov", "public TLD -- DNS requests will leak to the internet"],
+  ["mil", "public TLD -- DNS requests will leak to the internet"],
+  ["int", "public TLD -- DNS requests will leak to the internet"],
+]);
+
+/**
+ * Validate a TLD string. Returns an error message if invalid, or null if OK.
+ * Does not check for risky TLDs (those produce warnings, not errors).
+ */
+export function validateTld(tld: string): string | null {
+  if (!tld) return "TLD cannot be empty";
+  if (!/^[a-z0-9]+$/.test(tld)) {
+    return `Invalid TLD "${tld}": must contain only lowercase letters and digits`;
+  }
+  return null;
+}
+
+/** Name of the file that stores the proxy's active TLD. */
+const TLD_FILE = "proxy.tld";
+
+/** Read the TLD from a state directory. Returns DEFAULT_TLD if absent. */
+export function readTldFromDir(dir: string): string {
+  try {
+    const raw = fs.readFileSync(path.join(dir, TLD_FILE), "utf-8").trim();
+    return raw || DEFAULT_TLD;
+  } catch {
+    return DEFAULT_TLD;
+  }
+}
+
+/** Write or remove the TLD file in the state directory. */
+export function writeTldFile(dir: string, tld: string): void {
+  const filePath = path.join(dir, TLD_FILE);
+  if (tld === DEFAULT_TLD) {
+    try {
+      fs.unlinkSync(filePath);
+    } catch {
+      // File may already be absent; non-fatal
+    }
+  } else {
+    fs.writeFileSync(filePath, tld, { mode: 0o644 });
+  }
+}
+
+/**
+ * Return the effective TLD. Reads the PORTLESS_TLD env var first,
+ * falling back to DEFAULT_TLD ("localhost"). Throws on invalid values.
+ */
+export function getDefaultTld(): string {
+  const val = process.env.PORTLESS_TLD?.trim().toLowerCase();
+  if (!val) return DEFAULT_TLD;
+  const err = validateTld(val);
+  if (err) throw new Error(`PORTLESS_TLD: ${err}`);
+  return val;
+}
+
 /**
  * Return whether HTTPS mode is requested via the PORTLESS_HTTPS env var.
  */
@@ -133,40 +202,63 @@ export function isHttpsEnvEnabled(): boolean {
 }
 
 /**
- * Discover the active proxy's state directory, port, and TLS mode.
+ * Discover the active proxy's state directory, port, TLS mode, and TLD.
  * Checks the user-level dir first, then the system-level dir.
  * Falls back to the system dir with the default port if nothing is running.
  */
-export async function discoverState(): Promise<{ dir: string; port: number; tls: boolean }> {
+export async function discoverState(): Promise<{
+  dir: string;
+  port: number;
+  tls: boolean;
+  tld: string;
+}> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
     const port = readPortFromDir(dir) ?? getDefaultPort();
     const tls = readTlsMarker(dir);
-    return { dir, port, tls };
+    const tld = readTldFromDir(dir);
+    return { dir, port, tls, tld };
   }
 
   // Check user-level state first (~/.portless)
   const userPort = readPortFromDir(USER_STATE_DIR);
   if (userPort !== null) {
-    const tls = readTlsMarker(USER_STATE_DIR);
-    if (await isProxyRunning(userPort, tls)) {
-      return { dir: USER_STATE_DIR, port: userPort, tls };
+    // Always use plain HTTP for the liveness check. The TLS-enabled proxy
+    // accepts plain HTTP via byte-peeking, so this works for both modes and
+    // avoids TLS handshake timeouts that can cause false negatives.
+    if (await isProxyRunning(userPort)) {
+      const tls = readTlsMarker(USER_STATE_DIR);
+      const tld = readTldFromDir(USER_STATE_DIR);
+      return { dir: USER_STATE_DIR, port: userPort, tls, tld };
     }
   }
 
   // Check system-level state (/tmp/portless)
   const systemPort = readPortFromDir(SYSTEM_STATE_DIR);
   if (systemPort !== null) {
-    const tls = readTlsMarker(SYSTEM_STATE_DIR);
-    if (await isProxyRunning(systemPort, tls)) {
-      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls };
+    if (await isProxyRunning(systemPort)) {
+      const tls = readTlsMarker(SYSTEM_STATE_DIR);
+      const tld = readTldFromDir(SYSTEM_STATE_DIR);
+      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls, tld };
     }
   }
 
-  // Nothing running; fall back based on default port
+  // State files didn't help. Probe well-known ports as a last resort --
+  // privileged-port proxies store state in /tmp which macOS cleans on reboot,
+  // so the daemon may still be alive after the port file is gone.
   const defaultPort = getDefaultPort();
-  return { dir: resolveStateDir(defaultPort), port: defaultPort, tls: false };
+  const probePorts = new Set([defaultPort, 443, 80]);
+  for (const port of probePorts) {
+    if (await isProxyRunning(port)) {
+      const dir = resolveStateDir(port);
+      const tls = readTlsMarker(dir);
+      const tld = readTldFromDir(dir);
+      return { dir, port, tls, tld };
+    }
+  }
+
+  return { dir: resolveStateDir(defaultPort), port: defaultPort, tls: false, tld: getDefaultTld() };
 }
 
 // ---------------------------------------------------------------------------

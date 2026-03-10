@@ -25,6 +25,7 @@
     "radix-ui": "^1.4.3",
     "react": "^19",
     "react-dom": "^19",
+    "shiki": "^4.0.2",
     "streamdown": "^2.3.0",
     "tailwind-merge": "^3.5.0",
     "tailwindcss-animate": "^1.0.7"
