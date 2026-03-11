@@ -356,6 +356,53 @@ describe("CLI", () => {
     });
   });
 
+  describe("tunnel subcommand", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["tunnel", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless tunnel");
+      expect(stdout).toContain("map");
+      expect(stdout).toContain("unmap");
+      expect(stdout).toContain("list");
+    });
+
+    it("prints help with -h", () => {
+      const { status, stdout } = run(["tunnel", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless tunnel");
+    });
+
+    it("exits 1 with usage when no subcommand given", () => {
+      const { status, stdout } = run(["tunnel"]);
+      expect(status).toBe(1);
+      expect(stdout).toContain("portless tunnel");
+    });
+
+    it("exits 1 for unknown tunnel subcommand", () => {
+      const { status, stderr } = run(["tunnel", "typo"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown tunnel subcommand");
+    });
+
+    it("exits 1 when map has missing arguments", () => {
+      const { status, stderr } = run(["tunnel", "map"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Missing arguments");
+    });
+
+    it("exits 1 when map has only name but no hostname", () => {
+      const { status, stderr } = run(["tunnel", "map", "myapp"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Missing arguments");
+    });
+
+    it("exits 1 when unmap has no hostname", () => {
+      const { status, stderr } = run(["tunnel", "unmap"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("No hostname provided");
+    });
+  });
+
   describe("proxy subcommand", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["proxy", "--help"]);

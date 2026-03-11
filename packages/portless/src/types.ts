@@ -13,6 +13,11 @@ export interface ProxyServerOptions {
   tld?: string;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
+  /**
+   * Called on each request to get current hostname aliases.
+   * Maps external hostnames (e.g. ngrok URLs) to portless route hostnames.
+   */
+  getAliases?: () => Record<string, string>;
   /** When provided, enables HTTP/2 over TLS (HTTPS). */
   tls?: {
     cert: Buffer;

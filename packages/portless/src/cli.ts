@@ -12,6 +12,8 @@ import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./util
 import { syncHostsFile, cleanHostsFile } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import { inferProjectName, detectWorktreePrefix, sanitizeForHostname } from "./auto.js";
+import { getTunnelProvider, TUNNEL_PROVIDERS } from "./tunnel.js";
+import type { TunnelInstance } from "./tunnel.js";
 import {
   DEFAULT_TLD,
   PRIVILEGED_PORT_THRESHOLD,
@@ -79,7 +81,9 @@ function startProxyServer(
 
   // Cache routes in memory and reload on file change (debounced)
   let cachedRoutes = store.loadRoutes();
+  let cachedAliases = store.loadAliases();
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  let aliasDebounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -100,6 +104,14 @@ function startProxyServer(
     }
   };
 
+  const reloadAliases = () => {
+    try {
+      cachedAliases = store.loadAliases();
+    } catch {
+      // File may be mid-write; keep existing cached aliases
+    }
+  };
+
   try {
     watcher = fs.watch(routesPath, () => {
       if (debounceTimer) clearTimeout(debounceTimer);
@@ -111,12 +123,32 @@ function startProxyServer(
     pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
   }
 
+  // Watch aliases file. Use fs.watchFile (stat-based polling) instead of
+  // fs.watch because the file may not exist yet at proxy startup -- it is
+  // created on first `portless tunnel map` or `--tunnel` invocation.
+  const aliasesPath = store.getAliasesPath();
+  fs.watchFile(aliasesPath, { interval: POLL_INTERVAL_MS }, () => {
+    if (aliasDebounceTimer) clearTimeout(aliasDebounceTimer);
+    aliasDebounceTimer = setTimeout(reloadAliases, DEBOUNCE_MS);
+  });
+  if (pollingInterval) {
+    // Piggyback alias reloads on the existing polling interval (fs.watch
+    // was unavailable for routes, so we already fall back to polling)
+    const existingInterval = pollingInterval;
+    clearInterval(existingInterval);
+    pollingInterval = setInterval(() => {
+      reloadRoutes();
+      reloadAliases();
+    }, POLL_INTERVAL_MS);
+  }
+
   if (autoSyncHosts) {
     syncHostsFile(cachedRoutes.map((r) => r.hostname));
   }
 
   const server = createProxyServer({
     getRoutes: () => cachedRoutes,
+    getAliases: () => cachedAliases,
     proxyPort,
     tld,
     onError: (msg) => console.error(chalk.red(msg)),
@@ -160,10 +192,12 @@ function startProxyServer(
     if (exiting) return;
     exiting = true;
     if (debounceTimer) clearTimeout(debounceTimer);
+    if (aliasDebounceTimer) clearTimeout(aliasDebounceTimer);
     if (pollingInterval) clearInterval(pollingInterval);
     if (watcher) {
       watcher.close();
     }
+    fs.unwatchFile(aliasesPath);
     try {
       fs.unlinkSync(store.pidPath);
     } catch {
@@ -330,7 +364,8 @@ async function runApp(
   tld: string,
   force: boolean,
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
-  desiredPort?: number
+  desiredPort?: number,
+  tunnelProviderName?: string
 ) {
   const hostname = parseHostname(name, tld);
 
@@ -463,27 +498,93 @@ async function runApp(
   }
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
-  console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+  console.log(chalk.cyan.bold(`\n  -> ${finalUrl}`));
+
+  // Start tunnel if requested
+  let tunnelInstance: TunnelInstance | undefined;
+  let tunnelUrl: string | undefined;
+  if (tunnelProviderName) {
+    const provider = getTunnelProvider(tunnelProviderName);
+    if (!provider) {
+      console.error(chalk.red(`Error: Unknown tunnel provider "${tunnelProviderName}".`));
+      process.exit(1);
+    }
+    if (!provider.isAvailable()) {
+      console.error(chalk.red(`Error: ${tunnelProviderName} is not installed.`));
+      console.error(chalk.blue(`Install it first:`));
+      if (tunnelProviderName === "ngrok") {
+        console.error(chalk.cyan("  https://ngrok.com/download"));
+      } else if (tunnelProviderName === "cloudflare") {
+        console.error(
+          chalk.cyan(
+            "  https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
+          )
+        );
+      }
+      process.exit(1);
+    }
+
+    console.log(chalk.gray(`\n-- Starting ${tunnelProviderName} tunnel...`));
+    try {
+      tunnelInstance = await provider.start(proxyPort);
+      tunnelUrl = tunnelInstance.url;
+
+      // Register alias so the proxy routes tunnel traffic correctly
+      const tunnelHostname = new URL(tunnelUrl).hostname;
+      store.addAlias(tunnelHostname, hostname);
+
+      console.log(chalk.cyan.bold(`  -> ${tunnelUrl} (tunnel)`));
+    } catch (err) {
+      console.error(chalk.red(`Error starting tunnel: ${(err as Error).message}`));
+      try {
+        store.removeRoute(hostname);
+      } catch {
+        // Non-fatal
+      }
+      process.exit(1);
+    }
+  }
+
+  console.log();
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
   injectFrameworkFlags(commandArgs, port);
 
+  // Build environment variables for the child process
+  const childEnv: Record<string, string> = {
+    ...(process.env as Record<string, string>),
+    PORT: port.toString(),
+    HOST: "127.0.0.1",
+    PORTLESS_URL: finalUrl,
+    __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: `.${tld}`,
+  };
+  if (tunnelUrl) {
+    childEnv.PORTLESS_TUNNEL_URL = tunnelUrl;
+  }
+
   // Run the command
+  const tunnelEnvStr = tunnelUrl ? ` PORTLESS_TUNNEL_URL=${tunnelUrl}` : "";
   console.log(
     chalk.gray(
-      `Running: PORT=${port} HOST=127.0.0.1 PORTLESS_URL=${finalUrl} ${commandArgs.join(" ")}\n`
+      `Running: PORT=${port} HOST=127.0.0.1 PORTLESS_URL=${finalUrl}${tunnelEnvStr} ${commandArgs.join(" ")}\n`
     )
   );
 
   spawnCommand(commandArgs, {
-    env: {
-      ...process.env,
-      PORT: port.toString(),
-      HOST: "127.0.0.1",
-      PORTLESS_URL: finalUrl,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: `.${tld}`,
-    },
+    env: childEnv,
     onCleanup: () => {
+      // Stop tunnel first
+      if (tunnelInstance) {
+        tunnelInstance.stop();
+        try {
+          if (tunnelUrl) {
+            const tunnelHostname = new URL(tunnelUrl).hostname;
+            store.removeAlias(tunnelHostname);
+          }
+        } catch {
+          // Non-fatal
+        }
+      }
       try {
         store.removeRoute(hostname);
       } catch {
@@ -498,11 +599,14 @@ async function runApp(
 // ---------------------------------------------------------------------------
 
 interface ParsedRunArgs {
+  /** Whether --force was specified. */
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** Tunnel provider name (e.g. "ngrok", "cloudflare"). */
+  tunnel?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -536,6 +640,33 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+function parseTunnelArg(value: string | undefined): string {
+  if (!value || value.startsWith("-")) {
+    console.error(chalk.red("Error: --tunnel requires a provider name."));
+    console.error(chalk.blue(`Available providers: ${TUNNEL_PROVIDERS.join(", ")}`));
+    process.exit(1);
+  }
+  const provider = getTunnelProvider(value);
+  if (!provider) {
+    console.error(chalk.red(`Error: Unknown tunnel provider "${value}".`));
+    console.error(chalk.blue(`Available providers: ${TUNNEL_PROVIDERS.join(", ")}`));
+    process.exit(1);
+  }
+  return value;
+}
+
+function tunnelFromEnv(): string | undefined {
+  const envVal = process.env.PORTLESS_TUNNEL;
+  if (!envVal) return undefined;
+  const provider = getTunnelProvider(envVal);
+  if (!provider) {
+    console.error(chalk.red(`Error: Unknown PORTLESS_TUNNEL="${envVal}".`));
+    console.error(chalk.blue(`Available providers: ${TUNNEL_PROVIDERS.join(", ")}`));
+    process.exit(1);
+  }
+  return envVal;
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -547,6 +678,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let tunnel: string | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -564,6 +696,7 @@ ${chalk.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Override an existing route registered by another process
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --tunnel <provider>    Start a tunnel (ngrok, cloudflare)
   --help, -h             Show this help
 
 ${chalk.bold("Name inference (in order):")}
@@ -580,6 +713,7 @@ ${chalk.bold("Examples:")}
   portless run --name myapp next dev  # -> http://myapp.localhost:1355
   portless run vite dev               # -> http://<project>.localhost:1355
   portless run --app-port 3000 pnpm start
+  portless run --tunnel ngrok next dev
 `);
       process.exit(0);
     } else if (args[i] === "--force") {
@@ -587,6 +721,9 @@ ${chalk.bold("Examples:")}
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--tunnel") {
+      i++;
+      tunnel = parseTunnelArg(args[i]);
     } else if (args[i] === "--name") {
       i++;
       if (!args[i] || args[i].startsWith("-")) {
@@ -597,15 +734,16 @@ ${chalk.bold("Examples:")}
       name = args[i];
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --name, --force, --app-port, --help"));
+      console.error(chalk.blue("Known flags: --name, --force, --app-port, --tunnel, --help"));
       process.exit(1);
     }
     i++;
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  if (!tunnel) tunnel = tunnelFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, tunnel, commandArgs: args.slice(i) };
 }
 
 /**
@@ -618,6 +756,7 @@ ${chalk.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let tunnel: string | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -630,9 +769,12 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--tunnel") {
+      i++;
+      tunnel = parseTunnelArg(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --tunnel"));
       process.exit(1);
     }
     i++;
@@ -652,17 +794,21 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--tunnel") {
+      i++;
+      tunnel = parseTunnelArg(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --tunnel"));
       process.exit(1);
     }
     i++;
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  if (!tunnel) tunnel = tunnelFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, tunnel, name, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -692,6 +838,9 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless alias --remove <name>")}   Remove a static route
   ${chalk.cyan("portless list")}                    Show active routes
   ${chalk.cyan("portless trust")}                   Add local CA to system trust store
+  ${chalk.cyan("portless tunnel map <n> <host>")}   Map external tunnel hostname to an app
+  ${chalk.cyan("portless tunnel unmap <host>")}     Remove a tunnel hostname mapping
+  ${chalk.cyan("portless tunnel list")}             Show tunnel hostname mappings
   ${chalk.cyan("portless hosts sync")}              Add routes to /etc/hosts (fixes Safari)
   ${chalk.cyan("portless hosts clean")}             Remove portless entries from /etc/hosts
 
@@ -705,6 +854,13 @@ ${chalk.bold("Examples:")}
   portless run next dev               # in worktree -> http://<worktree>.<project>.localhost:1355
   portless get backend                 # -> http://backend.localhost:1355 (for cross-service refs)
   # Wildcard subdomains: tenant.myapp.localhost also routes to myapp
+
+${chalk.bold("Tunnels (ngrok, Cloudflare Tunnel):")}
+  portless myapp --tunnel ngrok next dev        # Starts app + ngrok tunnel
+  portless run --tunnel cloudflare next dev     # Starts app + cloudflare tunnel
+  # Single-app tunnel also works without --tunnel:
+  portless myapp next dev                       # Start app
+  ngrok http 1355                               # In another terminal; auto-routed
 
 ${chalk.bold("In package.json:")}
   {
@@ -739,6 +895,7 @@ ${chalk.bold("Options:")}
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
+  --tunnel <provider>           Start a tunnel (ngrok, cloudflare)
   --force                       Override an existing route registered by another process
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -750,12 +907,14 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_SYNC_HOSTS=1         Auto-sync /etc/hosts (auto-enabled for custom TLDs)
   PORTLESS_STATE_DIR=<path>     Override the state directory
+  PORTLESS_TUNNEL=<provider>    Start a tunnel automatically (ngrok, cloudflare)
   PORTLESS=0                    Run command directly without proxy
 
 ${chalk.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
   HOST                          Always 127.0.0.1
   PORTLESS_URL                  Public URL of the app (e.g. http://myapp.localhost:1355)
+  PORTLESS_TUNNEL_URL           Tunnel URL when --tunnel is used (e.g. https://abc123.ngrok-free.app)
 
 ${chalk.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
@@ -770,7 +929,7 @@ ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${chalk.bold("Reserved names:")}
-  run, get, alias, hosts, list, trust, proxy are subcommands and cannot
+  run, get, alias, tunnel, hosts, list, trust, proxy are subcommands and cannot
   be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
@@ -931,6 +1090,105 @@ ${chalk.bold("Examples:")}
   const force = args.includes("--force");
   store.addRoute(hostname, port, 0, force);
   console.log(chalk.green(`Alias registered: ${hostname} -> 127.0.0.1:${port}`));
+}
+
+async function handleTunnel(args: string[]): Promise<void> {
+  if (args[1] === "--help" || args[1] === "-h" || !args[1]) {
+    console.log(`
+${chalk.bold("portless tunnel")} - Map external tunnel hostnames to portless apps.
+
+${chalk.bold("Usage:")}
+  ${chalk.cyan("portless tunnel map <name> <hostname>")}    Map external hostname to a portless app
+  ${chalk.cyan("portless tunnel unmap <hostname>")}          Remove a hostname mapping
+  ${chalk.cyan("portless tunnel list")}                      Show all tunnel mappings
+
+${chalk.bold("Examples:")}
+  portless tunnel map myapp abc123.ngrok-free.app
+  portless tunnel map api.myapp mysite.trycloudflare.com
+  portless tunnel unmap abc123.ngrok-free.app
+  portless tunnel list
+
+${chalk.bold("How it works:")}
+  When a tunnel provider (ngrok, Cloudflare Tunnel, etc.) forwards traffic
+  to the portless proxy, the Host header is the tunnel's public hostname.
+  Tunnel mappings tell portless which app to route that traffic to.
+
+  Note: with a single app running, portless auto-routes tunnel traffic
+  without needing an explicit mapping.
+`);
+    process.exit(!args[1] ? 1 : 0);
+  }
+
+  const { dir, tld } = await discoverState();
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(chalk.yellow(msg)),
+  });
+
+  if (args[1] === "list") {
+    const aliases = store.loadAliases();
+    const entries = Object.entries(aliases);
+    if (entries.length === 0) {
+      console.log(chalk.gray("No tunnel mappings."));
+      return;
+    }
+    console.log(chalk.bold("\nTunnel mappings:\n"));
+    for (const [external, target] of entries) {
+      console.log(`  ${chalk.cyan(external)} -> ${chalk.green(target)}`);
+    }
+    console.log();
+    return;
+  }
+
+  if (args[1] === "map") {
+    const name = args[2];
+    const externalHostname = args[3];
+    if (!name || !externalHostname) {
+      console.error(chalk.red("Error: Missing arguments."));
+      console.error(chalk.blue("Usage:"));
+      console.error(chalk.cyan("  portless tunnel map <name> <hostname>"));
+      console.error(chalk.blue("Example:"));
+      console.error(chalk.cyan("  portless tunnel map myapp abc123.ngrok-free.app"));
+      process.exit(1);
+    }
+
+    const portlessHostname = parseHostname(name, tld);
+
+    // Validate that the target route exists
+    const routes = store.loadRoutes();
+    const routeExists = routes.some((r) => r.hostname === portlessHostname);
+    if (!routeExists) {
+      console.warn(
+        chalk.yellow(
+          `Warning: No active route for "${portlessHostname}". ` +
+            `The mapping will take effect when the app starts.`
+        )
+      );
+    }
+
+    store.addAlias(externalHostname, portlessHostname);
+    console.log(chalk.green(`Tunnel mapped: ${externalHostname} -> ${portlessHostname}`));
+    return;
+  }
+
+  if (args[1] === "unmap") {
+    const externalHostname = args[2];
+    if (!externalHostname) {
+      console.error(chalk.red("Error: No hostname provided."));
+      console.error(chalk.cyan("  portless tunnel unmap <hostname>"));
+      process.exit(1);
+    }
+    const removed = store.removeAlias(externalHostname);
+    if (!removed) {
+      console.error(chalk.red(`Error: No tunnel mapping found for "${externalHostname}".`));
+      process.exit(1);
+    }
+    console.log(chalk.green(`Tunnel mapping removed: ${externalHostname}`));
+    return;
+  }
+
+  console.error(chalk.red(`Unknown tunnel subcommand: ${args[1]}`));
+  console.error(chalk.cyan("  portless tunnel --help"));
+  process.exit(1);
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -1325,7 +1583,8 @@ async function handleRunMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    parsed.appPort
+    parsed.appPort,
+    parsed.tunnel
   );
 }
 
@@ -1355,7 +1614,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     undefined,
-    parsed.appPort
+    parsed.appPort,
+    parsed.tunnel
   );
 }
 
@@ -1390,7 +1650,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, proxy).
+  // subcommand (run, get, alias, tunnel, hosts, list, trust, proxy).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
@@ -1461,6 +1721,10 @@ async function main() {
     }
     if (args[0] === "alias") {
       await handleAlias(args);
+      return;
+    }
+    if (args[0] === "tunnel") {
+      await handleTunnel(args);
       return;
     }
     if (args[0] === "hosts") {

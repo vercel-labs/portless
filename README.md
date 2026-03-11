@@ -131,6 +131,34 @@ sudo portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`).
 
+## Tunnels (ngrok, Cloudflare Tunnel)
+
+Expose your local dev server to the internet using [ngrok](https://ngrok.com) or [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/).
+
+**Managed tunnel (recommended)** -- portless starts the tunnel for you:
+
+```bash
+portless myapp --tunnel ngrok next dev        # Starts app + ngrok tunnel
+portless run --tunnel cloudflare next dev     # Starts app + cloudflare tunnel
+```
+
+The child process receives `PORTLESS_TUNNEL_URL` with the public tunnel URL.
+
+**Single-app passthrough** -- with one app running, portless auto-routes tunnel traffic without any extra config:
+
+```bash
+portless myapp next dev       # Terminal 1: start app
+ngrok http 1355               # Terminal 2: start tunnel; auto-routed
+```
+
+**Multi-app with explicit mapping** -- when running multiple apps, map the tunnel hostname to a specific app:
+
+```bash
+portless tunnel map myapp abc123.ngrok-free.app
+portless tunnel unmap abc123.ngrok-free.app
+portless tunnel list
+```
+
 ## Commands
 
 ```bash
@@ -143,6 +171,9 @@ portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
 portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
+portless tunnel map <name> <host>  # Map external tunnel hostname to an app
+portless tunnel unmap <host>     # Remove a tunnel hostname mapping
+portless tunnel list             # Show tunnel hostname mappings
 
 # Disable portless (run command directly)
 PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
@@ -166,6 +197,7 @@ portless proxy stop              # Stop the proxy
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--tunnel <provider>              Start a tunnel (ngrok, cloudflare)
 --force                          Override a route registered by another process
 --name <name>                    Use <name> as the app name
 ```
@@ -180,14 +212,16 @@ PORTLESS_HTTPS=1                 Always enable HTTPS
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
 PORTLESS_STATE_DIR=<path>        Override the state directory
+PORTLESS_TUNNEL=<provider>       Start a tunnel automatically (ngrok, cloudflare)
 
 # Injected into child processes
 PORT                             Ephemeral port the child should listen on
 HOST                             Always 127.0.0.1
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
+PORTLESS_TUNNEL_URL              Tunnel URL when --tunnel is used
 ```
 
-> **Reserved names:** `run`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `tunnel`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Safari / DNS
 

@@ -72,14 +72,45 @@ const MAX_PROXY_HOPS = 5;
  * Find the route matching a given host. Matches exact hostname first, then
  * falls back to wildcard subdomain matching (e.g. tenant.myapp.localhost
  * matches a route registered for myapp.localhost).
+ *
+ * When the host is not a portless-managed hostname (i.e. it does not end with
+ * the configured TLD suffix) and exactly one route is registered, we return
+ * that route as a tunnel passthrough. This lets external tunnel providers
+ * (ngrok, Cloudflare Tunnel, etc.) forward traffic to the proxy without
+ * requiring explicit hostname mapping.
  */
 function findRoute(
   routes: { hostname: string; port: number }[],
-  host: string
+  host: string,
+  tldSuffix: string,
+  aliases?: Record<string, string>
 ): { hostname: string; port: number } | undefined {
-  return (
-    routes.find((r) => r.hostname === host) || routes.find((r) => host.endsWith("." + r.hostname))
-  );
+  // 1. Exact match
+  const exact = routes.find((r) => r.hostname === host);
+  if (exact) return exact;
+
+  // 2. Wildcard subdomain match
+  const wildcard = routes.find((r) => host.endsWith("." + r.hostname));
+  if (wildcard) return wildcard;
+
+  // 3. Alias lookup (e.g. "abc123.ngrok-free.app" -> "myapp.localhost")
+  if (aliases) {
+    const aliasTarget = aliases[host];
+    if (aliasTarget) {
+      const aliased = routes.find((r) => r.hostname === aliasTarget);
+      if (aliased) return aliased;
+    }
+  }
+
+  // 4. Tunnel passthrough: if the host is NOT a portless hostname and there
+  //    is exactly one registered route, assume traffic is arriving via an
+  //    external tunnel and route to the single app.
+  const isPortlessHost = host.endsWith(tldSuffix) || host === tldSuffix.slice(1);
+  if (!isPortlessHost && routes.length === 1) {
+    return routes[0];
+  }
+
+  return undefined;
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
@@ -102,6 +133,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     proxyPort,
     tld = "localhost",
     onError = (msg: string) => console.error(msg),
+    getAliases,
     tls,
   } = options;
   const tldSuffix = `.${tld}`;
@@ -143,7 +175,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, host);
+    const route = findRoute(routes, host, tldSuffix, getAliases?.());
 
     if (!route) {
       const safeHost = escapeHtml(host);
@@ -260,7 +292,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const routes = getRoutes();
     const host = getRequestHost(req).split(":")[0];
-    const route = findRoute(routes, host);
+    const route = findRoute(routes, host, tldSuffix, getAliases?.());
 
     if (!route) {
       socket.destroy();

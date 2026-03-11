@@ -95,6 +95,34 @@ Set `PORTLESS=0` to run the command directly without the proxy:
 PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 ```
 
+### Tunnels (ngrok, Cloudflare Tunnel)
+
+Expose your local dev server to the internet using ngrok or Cloudflare Tunnel.
+
+**Managed tunnel** -- portless starts the tunnel for you:
+
+```bash
+portless myapp --tunnel ngrok next dev        # Starts app + ngrok tunnel
+portless run --tunnel cloudflare next dev     # Starts app + cloudflare tunnel
+```
+
+The child process receives `PORTLESS_TUNNEL_URL` with the public tunnel URL. Requires `ngrok` or `cloudflared` to be installed.
+
+**Single-app passthrough** -- with one app running, portless auto-routes tunnel traffic:
+
+```bash
+portless myapp next dev       # Terminal 1
+ngrok http 1355               # Terminal 2; auto-routed to the single app
+```
+
+**Multi-app with explicit mapping:**
+
+```bash
+portless tunnel map myapp abc123.ngrok-free.app    # Map tunnel hostname
+portless tunnel unmap abc123.ngrok-free.app        # Remove mapping
+portless tunnel list                                # Show all mappings
+```
+
 ## How It Works
 
 1. `portless proxy start` starts an HTTP reverse proxy on port 1355 as a background daemon (configurable with `-p` / `--port` or the `PORTLESS_PORT` env var). The proxy also auto-starts when you run an app.
@@ -124,6 +152,7 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 | `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                 |
 | `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts (auto-enabled for custom TLDs) |
 | `PORTLESS_STATE_DIR`  | Override the state directory                                      |
+| `PORTLESS_TUNNEL`     | Start a tunnel automatically (ngrok, cloudflare)                  |
 | `PORTLESS=0`          | Bypass the proxy, run the command directly                        |
 
 ### HTTP/2 + HTTPS
@@ -142,33 +171,37 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 
 ## CLI Reference
 
-| Command                                | Description                                                   |
-| -------------------------------------- | ------------------------------------------------------------- |
-| `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)      |
-| `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies)   |
-| `portless <name> <cmd> [args...]`      | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
-| `portless list`                        | Show active routes                                            |
-| `portless trust`                       | Add local CA to system trust store (for HTTPS)                |
-| `portless proxy start`                 | Start the proxy as a daemon (port 1355, no sudo)              |
-| `portless proxy start --https`         | Start with HTTP/2 + TLS (auto-generates certs)                |
-| `portless proxy start -p <number>`     | Start the proxy on a custom port                              |
-| `portless proxy start --tld test`      | Use .test instead of .localhost (requires /etc/hosts sync)    |
-| `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                 |
-| `portless proxy stop`                  | Stop the proxy                                                |
-| `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)          |
-| `portless alias <name> <port> --force` | Overwrite an existing route                                   |
-| `portless alias --remove <name>`       | Remove a static route                                         |
-| `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                       |
-| `portless hosts clean`                 | Remove portless entries from /etc/hosts                       |
-| `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment       |
-| `portless <name> --force <cmd>`        | Override an existing route registered by another process      |
-| `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)     |
-| `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child   |
-| `portless --help` / `-h`               | Show help                                                     |
-| `portless run --help`                  | Show help for a subcommand (also: alias, hosts)               |
-| `portless --version` / `-v`            | Show version                                                  |
+| Command                                 | Description                                                   |
+| --------------------------------------- | ------------------------------------------------------------- |
+| `portless run <cmd> [args...]`          | Infer name from project, run through proxy (auto-starts)      |
+| `portless run --name <name> <cmd>`      | Override inferred base name (worktree prefix still applies)   |
+| `portless <name> <cmd> [args...]`       | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
+| `portless list`                         | Show active routes                                            |
+| `portless trust`                        | Add local CA to system trust store (for HTTPS)                |
+| `portless proxy start`                  | Start the proxy as a daemon (port 1355, no sudo)              |
+| `portless proxy start --https`          | Start with HTTP/2 + TLS (auto-generates certs)                |
+| `portless proxy start -p <number>`      | Start the proxy on a custom port                              |
+| `portless proxy start --tld test`       | Use .test instead of .localhost (requires /etc/hosts sync)    |
+| `portless proxy start --foreground`     | Start the proxy in foreground (for debugging)                 |
+| `portless proxy stop`                   | Stop the proxy                                                |
+| `portless alias <name> <port>`          | Register a static route (e.g. for Docker containers)          |
+| `portless alias <name> <port> --force`  | Overwrite an existing route                                   |
+| `portless alias --remove <name>`        | Remove a static route                                         |
+| `portless hosts sync`                   | Add routes to /etc/hosts (fixes Safari)                       |
+| `portless hosts clean`                  | Remove portless entries from /etc/hosts                       |
+| `portless <name> --tunnel <prov> <cmd>` | Start app with a tunnel (ngrok, cloudflare)                   |
+| `portless tunnel map <name> <host>`     | Map external tunnel hostname to a portless app                |
+| `portless tunnel unmap <host>`          | Remove a tunnel hostname mapping                              |
+| `portless tunnel list`                  | Show all tunnel hostname mappings                             |
+| `portless <name> --app-port <n> <cmd>`  | Use a fixed port for the app instead of auto-assignment       |
+| `portless <name> --force <cmd>`         | Override an existing route registered by another process      |
+| `portless --name <name> <cmd>`          | Force `<name>` as app name (bypasses subcommand dispatch)     |
+| `portless <name> -- <cmd> [args...]`    | Stop flag parsing; everything after `--` is passed to child   |
+| `portless --help` / `-h`                | Show help                                                     |
+| `portless run --help`                   | Show help for a subcommand (also: alias, tunnel, hosts)       |
+| `portless --version` / `-v`             | Show version                                                  |
 
-**Reserved names:** `run`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `tunnel`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Troubleshooting
 

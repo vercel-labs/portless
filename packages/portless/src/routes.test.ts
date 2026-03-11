@@ -226,4 +226,83 @@ describe("RouteStore", () => {
       expect(routes[0].hostname).toBe("test.localhost");
     });
   });
+
+  describe("aliases", () => {
+    it("returns empty object when aliases file does not exist", () => {
+      expect(store.loadAliases()).toEqual({});
+    });
+
+    it("returns empty object for invalid JSON", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getAliasesPath(), "not json");
+      expect(store.loadAliases()).toEqual({});
+    });
+
+    it("returns empty object for non-object JSON", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getAliasesPath(), "[]");
+      expect(store.loadAliases()).toEqual({});
+    });
+
+    it("adds and loads an alias", () => {
+      store.addAlias("abc123.ngrok-free.app", "myapp.localhost");
+      const aliases = store.loadAliases();
+      expect(aliases).toEqual({ "abc123.ngrok-free.app": "myapp.localhost" });
+    });
+
+    it("overwrites existing alias", () => {
+      store.addAlias("abc123.ngrok-free.app", "app1.localhost");
+      store.addAlias("abc123.ngrok-free.app", "app2.localhost");
+      const aliases = store.loadAliases();
+      expect(aliases["abc123.ngrok-free.app"]).toBe("app2.localhost");
+    });
+
+    it("stores multiple aliases", () => {
+      store.addAlias("tunnel1.ngrok-free.app", "frontend.localhost");
+      store.addAlias("tunnel2.trycloudflare.com", "api.localhost");
+      const aliases = store.loadAliases();
+      expect(Object.keys(aliases)).toHaveLength(2);
+      expect(aliases["tunnel1.ngrok-free.app"]).toBe("frontend.localhost");
+      expect(aliases["tunnel2.trycloudflare.com"]).toBe("api.localhost");
+    });
+
+    it("removes an alias", () => {
+      store.addAlias("abc123.ngrok-free.app", "myapp.localhost");
+      const removed = store.removeAlias("abc123.ngrok-free.app");
+      expect(removed).toBe(true);
+      expect(store.loadAliases()).toEqual({});
+    });
+
+    it("returns false when removing non-existent alias", () => {
+      const removed = store.removeAlias("nonexistent.example.com");
+      expect(removed).toBe(false);
+    });
+
+    it("removes all aliases for a route", () => {
+      store.addAlias("tunnel1.ngrok-free.app", "myapp.localhost");
+      store.addAlias("tunnel2.ngrok-free.app", "myapp.localhost");
+      store.addAlias("other.trycloudflare.com", "api.localhost");
+      store.removeAliasesForRoute("myapp.localhost");
+      const aliases = store.loadAliases();
+      expect(Object.keys(aliases)).toHaveLength(1);
+      expect(aliases["other.trycloudflare.com"]).toBe("api.localhost");
+    });
+
+    it("does nothing when removing aliases for route with no aliases", () => {
+      store.addAlias("abc123.ngrok-free.app", "myapp.localhost");
+      store.removeAliasesForRoute("other.localhost");
+      const aliases = store.loadAliases();
+      expect(Object.keys(aliases)).toHaveLength(1);
+    });
+
+    it("filters out non-string values from aliases file", () => {
+      store.ensureDir();
+      fs.writeFileSync(
+        store.getAliasesPath(),
+        JSON.stringify({ valid: "myapp.localhost", invalid: 123, nullish: null })
+      );
+      const aliases = store.loadAliases();
+      expect(aliases).toEqual({ valid: "myapp.localhost" });
+    });
+  });
 });
