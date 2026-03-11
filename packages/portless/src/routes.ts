@@ -67,6 +67,7 @@ export class RouteStore {
   /** The state directory path. */
   readonly dir: string;
   private readonly routesPath: string;
+  private readonly aliasesPath: string;
   private readonly lockPath: string;
   readonly pidPath: string;
   readonly portFilePath: string;
@@ -75,6 +76,7 @@ export class RouteStore {
   constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
     this.dir = dir;
     this.routesPath = path.join(dir, "routes.json");
+    this.aliasesPath = path.join(dir, "aliases.json");
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
     this.portFilePath = path.join(dir, "proxy.port");
@@ -241,6 +243,112 @@ export class RouteStore {
     try {
       const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
       this.saveRoutes(routes);
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  // -- Alias I/O -------------------------------------------------------------
+
+  getAliasesPath(): string {
+    return this.aliasesPath;
+  }
+
+  /**
+   * Load hostname aliases from disk.
+   * Returns a map of external hostname -> portless hostname.
+   */
+  loadAliases(): Record<string, string> {
+    if (!fs.existsSync(this.aliasesPath)) {
+      return {};
+    }
+    try {
+      const raw = fs.readFileSync(this.aliasesPath, "utf-8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        this.onWarning?.(`Corrupted aliases file (invalid JSON): ${this.aliasesPath}`);
+        return {};
+      }
+      if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+        this.onWarning?.(`Corrupted aliases file (expected object): ${this.aliasesPath}`);
+        return {};
+      }
+      // Validate that all values are strings
+      const aliases: Record<string, string> = {};
+      for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+        if (typeof value === "string") {
+          aliases[key] = value;
+        }
+      }
+      return aliases;
+    } catch {
+      return {};
+    }
+  }
+
+  private saveAliases(aliases: Record<string, string>): void {
+    fs.writeFileSync(this.aliasesPath, JSON.stringify(aliases, null, 2), { mode: this.fileMode });
+    fixOwnership(this.aliasesPath);
+  }
+
+  /**
+   * Map an external hostname (e.g. ngrok URL) to a portless route hostname.
+   */
+  addAlias(externalHostname: string, portlessHostname: string): void {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const aliases = this.loadAliases();
+      aliases[externalHostname] = portlessHostname;
+      this.saveAliases(aliases);
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /**
+   * Remove a specific alias by its external hostname.
+   */
+  removeAlias(externalHostname: string): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const aliases = this.loadAliases();
+      if (!(externalHostname in aliases)) return false;
+      delete aliases[externalHostname];
+      this.saveAliases(aliases);
+      return true;
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /**
+   * Remove all aliases pointing at a given portless hostname.
+   */
+  removeAliasesForRoute(portlessHostname: string): void {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const aliases = this.loadAliases();
+      let changed = false;
+      for (const [ext, target] of Object.entries(aliases)) {
+        if (target === portlessHostname) {
+          delete aliases[ext];
+          changed = true;
+        }
+      }
+      if (changed) {
+        this.saveAliases(aliases);
+      }
     } finally {
       this.releaseLock();
     }

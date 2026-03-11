@@ -244,6 +244,240 @@ describe("createProxyServer", () => {
     });
   });
 
+  describe("tunnel passthrough", () => {
+    it("routes non-portless hostname to single registered route", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("tunnel passthrough");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      // Simulate ngrok forwarding with its own Host header
+      const res = await request(server, { host: "abc123.ngrok-free.app" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("tunnel passthrough");
+    });
+
+    it("returns 404 for non-portless hostname when multiple routes exist", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "app1.localhost", port: 4001 },
+        { hostname: "app2.localhost", port: 4002 },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "abc123.ngrok-free.app" });
+      expect(res.status).toBe(404);
+    });
+
+    it("returns 404 for non-portless hostname when no routes exist", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "abc123.ngrok-free.app" });
+      expect(res.status).toBe(404);
+    });
+
+    it("does not trigger tunnel passthrough for unregistered portless hostname", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      // This is a .localhost hostname -- should NOT fall back to single route
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+    });
+
+    it("does not trigger tunnel passthrough for bare TLD hostname", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "localhost" });
+      expect(res.status).toBe(404);
+    });
+
+    it("works with cloudflare tunnel hostnames", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("cloudflare tunnel");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "random-words.trycloudflare.com" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("cloudflare tunnel");
+    });
+  });
+
+  describe("alias routing", () => {
+    it("routes aliased hostname to correct backend", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("via alias");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const aliases: Record<string, string> = {
+        "abc123.ngrok-free.app": "myapp.localhost",
+      };
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          getAliases: () => aliases,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "abc123.ngrok-free.app" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("via alias");
+    });
+
+    it("routes to correct app in multi-app setup via alias", async () => {
+      const backend1 = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app1");
+        })
+      );
+      await listen(backend1);
+      const addr1 = backend1.address();
+      if (!addr1 || typeof addr1 === "string") throw new Error("no addr");
+
+      const backend2 = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app2");
+        })
+      );
+      await listen(backend2);
+      const addr2 = backend2.address();
+      if (!addr2 || typeof addr2 === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        { hostname: "frontend.localhost", port: addr1.port },
+        { hostname: "api.localhost", port: addr2.port },
+      ];
+      const aliases: Record<string, string> = {
+        "my-tunnel.ngrok-free.app": "api.localhost",
+      };
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          getAliases: () => aliases,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-tunnel.ngrok-free.app" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("app2");
+    });
+
+    it("returns 404 when alias points to non-existent route", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "app1.localhost", port: 4001 },
+        { hostname: "app2.localhost", port: 4002 },
+      ];
+      const aliases: Record<string, string> = {
+        "abc123.ngrok-free.app": "other.localhost",
+      };
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          getAliases: () => aliases,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      // Alias points to "other.localhost" which doesn't exist;
+      // multiple routes exist so tunnel passthrough does not apply
+      const res = await request(server, { host: "abc123.ngrok-free.app" });
+      expect(res.status).toBe(404);
+    });
+
+    it("prefers exact route match over alias", async () => {
+      const exactBackend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("exact");
+        })
+      );
+      await listen(exactBackend);
+      const exactAddr = exactBackend.address();
+      if (!exactAddr || typeof exactAddr === "string") throw new Error("no addr");
+
+      const aliasBackend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("aliased");
+        })
+      );
+      await listen(aliasBackend);
+      const aliasAddr = aliasBackend.address();
+      if (!aliasAddr || typeof aliasAddr === "string") throw new Error("no addr");
+
+      // The host is also a registered route -- exact match should win
+      const routes: RouteInfo[] = [
+        { hostname: "abc123.ngrok-free.app", port: exactAddr.port },
+        { hostname: "other.localhost", port: aliasAddr.port },
+      ];
+      const aliases: Record<string, string> = {
+        "abc123.ngrok-free.app": "other.localhost",
+      };
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          getAliases: () => aliases,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "abc123.ngrok-free.app" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("exact");
+    });
+  });
+
   describe("missing Host header", () => {
     it("returns 400 when Host header is missing", async () => {
       const routes: RouteInfo[] = [];
