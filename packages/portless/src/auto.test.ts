@@ -391,6 +391,23 @@ describe("detectWorktreePrefix (git CLI path)", () => {
     expect(result).toBeNull();
   });
 
+  it("returns null for root worktree on a feature branch (not a linked worktree)", () => {
+    const repo = path.join(tmpDir, "repo");
+    initRepoWithCommit(repo);
+
+    // Create a linked worktree so worktreeCount > 1
+    runGit(repo, ["branch", "feature-auth"]);
+    const wtDir = path.join(tmpDir, "wt-feature-auth");
+    runGit(repo, ["worktree", "add", wtDir, "feature-auth"]);
+
+    // Switch the root worktree to a feature branch
+    runGit(repo, ["checkout", "-b", "feature-other"]);
+
+    // Root worktree on a non-default branch should NOT get a prefix
+    const result = detectWorktreePrefix(repo);
+    expect(result).toBeNull();
+  });
+
   it("returns last segment as prefix for slash-prefixed branch (feature/main)", () => {
     const repo = path.join(tmpDir, "repo");
     initRepoWithCommit(repo);

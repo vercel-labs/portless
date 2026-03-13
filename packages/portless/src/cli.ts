@@ -11,7 +11,7 @@ import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
-import { inferProjectName, detectWorktreePrefix, sanitizeForHostname } from "./auto.js";
+import { inferProjectName, detectWorktreePrefix } from "./auto.js";
 import {
   DEFAULT_TLD,
   PRIVILEGED_PORT_THRESHOLD,
@@ -1295,12 +1295,11 @@ async function handleRunMode(args: string[]): Promise<void> {
   let nameSource: string;
 
   if (parsed.name) {
-    const sanitized = sanitizeForHostname(parsed.name);
-    if (!sanitized) {
-      console.error(chalk.red(`Error: --name value "${parsed.name}" produces an empty hostname.`));
-      process.exit(1);
-    }
-    baseName = sanitized;
+    // Treat --name as an explicit hostname label: pass it through as-is
+    // (same as the direct `portless <name> <cmd>` form). Do NOT sanitize,
+    // since sanitizeForHostname strips dots which are valid and intentional
+    // in hostnames like "local.metaview".
+    baseName = parsed.name;
     nameSource = "--name flag";
   } else {
     const inferred = inferProjectName();

@@ -198,8 +198,8 @@ export function detectWorktreePrefix(cwd: string = process.cwd()): WorktreePrefi
 
 /**
  * Use git CLI to detect worktree prefix. Returns:
- *   - `{ prefix, source }` if in a non-default-branch worktree
- *   - `null` if not in a worktree setup, or on main/master
+ *   - `{ prefix, source }` if in a linked worktree on a non-default branch
+ *   - `null` if not in a linked worktree, or on main/master
  *   - `undefined` if git CLI is unavailable (caller should try fallback)
  */
 function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
@@ -215,7 +215,38 @@ function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
     const worktreeCount = listOutput.split("\n").filter((l) => l.startsWith("worktree ")).length;
     if (worktreeCount <= 1) return null;
 
-    // Multiple worktrees exist — use branch name as prefix
+    // Multiple worktrees exist, but only add a prefix if the current
+    // directory is a *linked* worktree (created via `git worktree add`),
+    // not the root/main worktree. Developers frequently work on feature
+    // branches in their main clone and don't want branch prefixes there.
+    //
+    // In a linked worktree, --git-dir points to .git/worktrees/<name>
+    // while --git-common-dir points to the shared .git directory. In the
+    // root worktree they resolve to the same path.
+    const gitDir = path.resolve(
+      cwd,
+      execFileSync("git", ["rev-parse", "--git-dir"], {
+        cwd,
+        encoding: "utf-8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim()
+    );
+
+    const gitCommonDir = path.resolve(
+      cwd,
+      execFileSync("git", ["rev-parse", "--git-common-dir"], {
+        cwd,
+        encoding: "utf-8",
+        timeout: 5000,
+        stdio: ["ignore", "pipe", "ignore"],
+      }).trim()
+    );
+
+    // If gitDir === gitCommonDir, we're in the root worktree — no prefix
+    if (gitDir === gitCommonDir) return null;
+
+    // Linked worktree — use branch name as prefix
     const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd,
       encoding: "utf-8",
