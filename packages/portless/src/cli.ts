@@ -1295,10 +1295,6 @@ async function handleRunMode(args: string[]): Promise<void> {
   let nameSource: string;
 
   if (parsed.name) {
-    // Treat --name as an explicit hostname label: pass it through as-is
-    // (same as the direct `portless <name> <cmd>` form). Do NOT sanitize,
-    // since sanitizeForHostname strips dots which are valid and intentional
-    // in hostnames like "local.metaview".
     baseName = parsed.name;
     nameSource = "--name flag";
   } else {

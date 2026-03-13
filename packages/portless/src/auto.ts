@@ -243,10 +243,8 @@ function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
       }).trim()
     );
 
-    // If gitDir === gitCommonDir, we're in the root worktree — no prefix
     if (gitDir === gitCommonDir) return null;
 
-    // Linked worktree — use branch name as prefix
     const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
       cwd,
       encoding: "utf-8",
