@@ -295,8 +295,28 @@ export function isCATrusted(stateDir: string): boolean {
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
     return isCATrustedLinux(stateDir);
+  } else if (process.platform === "win32") {
+    return isCATrustedWindows(caCertPath);
   }
   return false;
+}
+
+function isCATrustedWindows(caCertPath: string): boolean {
+  try {
+    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
+      .trim()
+      .replace(/^.*=/, "")
+      .replace(/:/g, "")
+      .toLowerCase();
+    const result = execFileSync("certutil", ["-store", "-user", "Root"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    return result.replace(/\s/g, "").toLowerCase().includes(fingerprint);
+  } catch {
+    return false;
+  }
 }
 
 function isCATrustedMacOS(caCertPath: string): boolean {
@@ -689,6 +709,12 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      return { trusted: true };
+    } else if (process.platform === "win32") {
+      execFileSync("certutil", ["-addstore", "-user", "Root", caCertPath], {
+        stdio: "pipe",
+        timeout: 30_000,
+      });
       return { trusted: true };
     }
     return { trusted: false, error: `Unsupported platform: ${process.platform}` };

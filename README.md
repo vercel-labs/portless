@@ -251,4 +251,4 @@ pnpm format           # Format all files with Prettier
 ## Requirements
 
 - Node.js 20+
-- macOS or Linux
+- macOS, Linux, or Windows

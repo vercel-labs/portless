@@ -12,14 +12,17 @@ import { PORTLESS_HEADER } from "./proxy.js";
 // Constants
 // ---------------------------------------------------------------------------
 
+/** True when running on Windows. */
+export const isWindows = process.platform === "win32";
+
 /** Default proxy port. Uses an unprivileged port so sudo is not required. */
 export const DEFAULT_PROXY_PORT = 1355;
 
-/** Ports below this threshold require root/sudo to bind. */
+/** Ports below this threshold require root/sudo to bind (Unix only). */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
 
-/** System-wide state directory (used when proxy needs sudo). */
-export const SYSTEM_STATE_DIR = "/tmp/portless";
+/** System-wide state directory (used when proxy needs sudo on Unix). */
+export const SYSTEM_STATE_DIR = path.join(os.tmpdir(), "portless");
 
 /** Per-user state directory (used when proxy runs without sudo). */
 export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
@@ -36,8 +39,8 @@ const RANDOM_PORT_ATTEMPTS = 50;
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
 
-/** Timeout (ms) for lsof when finding a PID on a port. */
-const LSOF_TIMEOUT_MS = 5000;
+/** Timeout (ms) for PID lookup when finding a process on a port. */
+const PID_LOOKUP_TIMEOUT_MS = 5000;
 
 /** Maximum poll attempts when waiting for the proxy to become ready. */
 export const WAIT_FOR_PROXY_MAX_ATTEMPTS = 20;
@@ -78,12 +81,14 @@ export function getDefaultPort(): number {
 
 /**
  * Determine the state directory for a given proxy port.
- * Privileged ports (< 1024) use the system dir (/tmp/portless) so both
- * root and non-root processes can share state.  Unprivileged ports use
- * the user's home directory (~/.portless).
+ * On Unix, privileged ports (< 1024) use the system dir so both root and
+ * non-root processes can share state. Unprivileged ports use the user's
+ * home directory (~/.portless). On Windows, always use the user dir
+ * (no privileged port concept).
  */
 export function resolveStateDir(port: number): string {
   if (process.env.PORTLESS_STATE_DIR) return process.env.PORTLESS_STATE_DIR;
+  if (isWindows) return USER_STATE_DIR;
   return port < PRIVILEGED_PORT_THRESHOLD ? SYSTEM_STATE_DIR : USER_STATE_DIR;
 }
 
@@ -348,15 +353,45 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
 // ---------------------------------------------------------------------------
 
 /**
+ * Parse the PID of a process listening on a given port from netstat output.
+ * Exported for testing.
+ */
+export function parsePidFromNetstat(output: string, port: number): number | null {
+  for (const line of output.split(/\r?\n/)) {
+    if (!line.includes("LISTENING")) continue;
+    const parts = line.trim().split(/\s+/);
+    // Format: TCP  0.0.0.0:PORT  0.0.0.0:0  LISTENING  PID
+    if (parts.length < 5) continue;
+    const localAddr = parts[1];
+    const lastColon = localAddr.lastIndexOf(":");
+    if (lastColon === -1) continue;
+    const addrPort = parseInt(localAddr.substring(lastColon + 1), 10);
+    if (addrPort === port) {
+      const pid = parseInt(parts[parts.length - 1], 10);
+      if (!isNaN(pid) && pid > 0) return pid;
+    }
+  }
+  return null;
+}
+
+/**
  * Try to find the PID of a process listening on the given TCP port.
- * Uses lsof, which is available on macOS and most Linux distributions.
+ * Uses lsof on macOS/Linux and netstat on Windows.
  * Returns null if the PID cannot be determined.
  */
 export function findPidOnPort(port: number): number | null {
   try {
+    if (isWindows) {
+      const output = execSync("netstat -ano -p tcp", {
+        encoding: "utf-8",
+        timeout: PID_LOOKUP_TIMEOUT_MS,
+      });
+      return parsePidFromNetstat(output, port);
+    }
+
     const output = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, {
       encoding: "utf-8",
-      timeout: LSOF_TIMEOUT_MS,
+      timeout: PID_LOOKUP_TIMEOUT_MS,
     });
     // lsof may return multiple PIDs (one per line); take the first
     const pid = parseInt(output.trim().split("\n")[0], 10);
@@ -421,9 +456,9 @@ function augmentedPath(env: NodeJS.ProcessEnv | undefined): string {
 
 /**
  * Spawn a command with proper signal forwarding, error handling, and exit
- * code propagation. Uses /bin/sh so that shell scripts and version manager
- * shims are resolved. Prepends node_modules/.bin to PATH so local project
- * binaries (e.g. next, vite) are found.
+ * code propagation. Uses /bin/sh (Unix) or cmd.exe (Windows) so that shell
+ * scripts and version manager shims are resolved. Prepends node_modules/.bin
+ * to PATH so local project binaries (e.g. next, vite) are found.
  */
 export function spawnCommand(
   commandArgs: string[],
@@ -433,11 +468,17 @@ export function spawnCommand(
   }
 ): void {
   const env = { ...(options?.env ?? process.env), PATH: augmentedPath(options?.env) };
-  const shellCmd = commandArgs.map(shellEscape).join(" ");
-  const child = spawn("/bin/sh", ["-c", shellCmd], {
-    stdio: "inherit",
-    env,
-  });
+
+  const child = isWindows
+    ? spawn(commandArgs[0], commandArgs.slice(1), {
+        stdio: "inherit",
+        env,
+        shell: true,
+      })
+    : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
+        stdio: "inherit",
+        env,
+      });
 
   let exiting = false;
 
