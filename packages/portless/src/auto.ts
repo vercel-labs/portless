@@ -284,7 +284,7 @@ function detectWorktreeViaFilesystem(startDir: string): WorktreePrefix | null {
         const gitdir = match[1];
         // Only treat as a worktree if gitdir points into a /worktrees/ path.
         // Submodules point to /modules/ instead.
-        if (!gitdir.match(/\/worktrees\/[^/]+$/)) return null;
+        if (!gitdir.match(/[/\\]worktrees[/\\][^/\\]+$/)) return null;
 
         // Read the branch name from the worktree's HEAD file
         const branch = readBranchFromHead(path.resolve(dir, gitdir));
