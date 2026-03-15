@@ -118,7 +118,7 @@ describe("isProxyRunning", () => {
 });
 
 describe("resolveStateDir", () => {
-  it("returns system dir for privileged ports", () => {
+  it.skipIf(process.platform === "win32")("returns system dir for privileged ports", () => {
     expect(resolveStateDir(80)).toBe(SYSTEM_STATE_DIR);
     expect(resolveStateDir(443)).toBe(SYSTEM_STATE_DIR);
     expect(resolveStateDir(1023)).toBe(SYSTEM_STATE_DIR);

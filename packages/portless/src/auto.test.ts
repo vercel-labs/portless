@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
   sanitizeForHostname,
@@ -115,7 +116,7 @@ describe("inferProjectName", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "portless-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
   });
 
   afterEach(() => {
@@ -193,7 +194,7 @@ describe("detectWorktreePrefix", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "portless-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
   });
 
   afterEach(() => {
@@ -310,7 +311,7 @@ describe("detectWorktreePrefix (git CLI path)", () => {
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
     // Also verify git init actually works (may be blocked in sandboxes)
-    const probe = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "portless-git-probe-"));
+    const probe = fs.mkdtempSync(path.join(os.tmpdir(), "portless-git-probe-"));
     try {
       execFileSync("git", ["init"], { cwd: probe, stdio: "ignore" });
     } finally {
@@ -352,7 +353,7 @@ describe("detectWorktreePrefix (git CLI path)", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(process.env.TMPDIR || "/tmp", "portless-git-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-git-test-"));
   });
 
   afterEach(() => {

@@ -169,7 +169,7 @@ describe("ensureCerts", () => {
     expect(getCertSignatureAlgo(second.certPath)).toContain("sha256");
   });
 
-  it("sets restrictive permissions on key files", () => {
+  it.skipIf(process.platform === "win32")("sets restrictive permissions on key files", () => {
     const result = ensureCerts(tmpDir);
 
     const caKeyPath = path.join(tmpDir, "ca-key.pem");
