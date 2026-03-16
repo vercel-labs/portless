@@ -140,8 +140,12 @@ describe("constants", () => {
     expect(PRIVILEGED_PORT_THRESHOLD).toBe(1024);
   });
 
-  it("SYSTEM_STATE_DIR is in tmpdir", () => {
-    expect(SYSTEM_STATE_DIR).toBe(path.join(os.tmpdir(), "portless"));
+  it("SYSTEM_STATE_DIR is /tmp/portless on Unix, os.tmpdir() on Windows", () => {
+    if (process.platform === "win32") {
+      expect(SYSTEM_STATE_DIR).toBe(path.join(os.tmpdir(), "portless"));
+    } else {
+      expect(SYSTEM_STATE_DIR).toBe("/tmp/portless");
+    }
   });
 
   it("USER_STATE_DIR is in home directory", () => {

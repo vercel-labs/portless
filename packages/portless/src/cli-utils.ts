@@ -21,8 +21,13 @@ export const DEFAULT_PROXY_PORT = 1355;
 /** Ports below this threshold require root/sudo to bind (Unix only). */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
 
-/** System-wide state directory (used when proxy needs sudo on Unix). */
-export const SYSTEM_STATE_DIR = path.join(os.tmpdir(), "portless");
+/**
+ * System-wide state directory (used when proxy needs sudo on Unix).
+ * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
+ * a per-user dir from os.tmpdir() (/var/folders/...) while sudo (root)
+ * gets /tmp -- causing the proxy writer and client reader to disagree.
+ */
+export const SYSTEM_STATE_DIR = isWindows ? path.join(os.tmpdir(), "portless") : "/tmp/portless";
 
 /** Per-user state directory (used when proxy runs without sudo). */
 export const USER_STATE_DIR = path.join(os.homedir(), ".portless");

@@ -1,0 +1,29 @@
+{
+  "name": "google-oauth-example",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "portless myapp.local.mydomain next dev"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.3.0",
+    "@tailwindcss/postcss": "^4",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.577.0",
+    "next": "^16.1.6",
+    "next-auth": "^4.24.13",
+    "postcss": "^8.5.8",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "shadcn": "^4.0.8",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4",
+    "tw-animate-css": "^1.4.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^19.1.0",
+    "typescript": "^5.8.0"
+  }
+}
