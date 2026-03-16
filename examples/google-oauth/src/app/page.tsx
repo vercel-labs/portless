@@ -30,7 +30,17 @@ function GoogleIcon() {
 
 function LockIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      className={className}
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <rect width="18" height="11" x="3" y="11" rx="2" ry="2" />
       <path d="M7 11V7a5 5 0 0 1 10 0v4" />
     </svg>
@@ -39,7 +49,17 @@ function LockIcon({ className }: { className?: string }) {
 
 function GlobeIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      className={className}
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <circle cx="12" cy="12" r="10" />
       <path d="M12 2a14.5 14.5 0 0 0 0 20 14.5 14.5 0 0 0 0-20" />
       <path d="M2 12h20" />
@@ -49,7 +69,17 @@ function GlobeIcon({ className }: { className?: string }) {
 
 function ShieldIcon({ className }: { className?: string }) {
   return (
-    <svg className={className} width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <svg
+      className={className}
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
       <path d="M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z" />
       <path d="m9 12 2 2 4-4" />
     </svg>
@@ -81,15 +111,11 @@ function AuthCard() {
             {session.user?.image && (
               <AvatarImage src={session.user.image} alt={session.user?.name ?? ""} />
             )}
-            <AvatarFallback>
-              {session.user?.name?.[0]?.toUpperCase() ?? "?"}
-            </AvatarFallback>
+            <AvatarFallback>{session.user?.name?.[0]?.toUpperCase() ?? "?"}</AvatarFallback>
           </Avatar>
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-medium">{session.user?.name}</p>
-            <p className="truncate text-sm text-muted-foreground">
-              {session.user?.email}
-            </p>
+            <p className="truncate text-sm text-muted-foreground">{session.user?.email}</p>
           </div>
         </div>
         <div className="border-t bg-muted/30 px-6 py-3">
@@ -147,13 +173,14 @@ function Content() {
     <div className="flex min-h-svh items-center justify-center px-6 py-16">
       <div className="w-full max-w-md space-y-8">
         <div className="space-y-3">
-          <h1 className="text-3xl font-semibold tracking-tight">
-            Google OAuth + Portless
-          </h1>
+          <h1 className="text-3xl font-semibold tracking-tight">Google OAuth + Portless</h1>
           <p className="text-base leading-relaxed text-muted-foreground">
-            Google OAuth rejects <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">.localhost</code> subdomains.
-            Portless fixes this by serving your app on any valid TLD.
-            Use a domain you own to keep traffic from reaching something you don&apos;t control.
+            Google OAuth rejects{" "}
+            <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs text-foreground">
+              .localhost
+            </code>{" "}
+            subdomains. Portless fixes this by serving your app on any valid TLD. Use a domain you
+            own to keep traffic from reaching something you don&apos;t control.
           </p>
         </div>
 
@@ -165,23 +192,13 @@ function Content() {
               Connection details
             </p>
             <div className="space-y-4">
-              <InfoRow
-                icon={<GlobeIcon />}
-                label="Domain"
-                value={new URL(origin).hostname}
-              />
+              <InfoRow icon={<GlobeIcon />} label="Domain" value={new URL(origin).hostname} />
               <InfoRow
                 icon={<LockIcon />}
                 label="Protocol"
                 value={new URL(origin).protocol === "https:" ? "HTTPS (TLS)" : "HTTP"}
               />
-              {tld && (
-                <InfoRow
-                  icon={<ShieldIcon />}
-                  label="TLD"
-                  value={tld}
-                />
-              )}
+              {tld && <InfoRow icon={<ShieldIcon />} label="TLD" value={tld} />}
             </div>
           </div>
         )}

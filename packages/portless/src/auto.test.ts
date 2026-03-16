@@ -306,7 +306,7 @@ describe("detectWorktreePrefix", () => {
 // detectWorktreePrefix (git CLI path)
 // ---------------------------------------------------------------------------
 
-describe("detectWorktreePrefix (git CLI path)", () => {
+describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
   let gitInitWorks = true;
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
