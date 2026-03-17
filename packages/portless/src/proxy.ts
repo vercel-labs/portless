@@ -358,6 +358,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     // Wrap both in a net.Server that peeks at the first byte to decide
     // whether the connection is TLS (0x16 = ClientHello) or plain HTTP.
     const wrapper = net.createServer((socket) => {
+      // Absorb connection errors (ECONNRESET, EPIPE, etc.) from abrupt
+      // client disconnects (tab close, page reload, HMR) so they don't
+      // bubble up as uncaught exceptions and crash the proxy (#111).
+      socket.on("error", () => {
+        socket.destroy();
+      });
       socket.once("readable", () => {
         const buf: Buffer | null = socket.read(1);
         if (!buf) {
