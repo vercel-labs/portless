@@ -7,5 +7,5 @@
   "access": "public",
   "baseBranch": "main",
   "updateInternalDependencies": "patch",
-  "ignore": ["portless-monorepo", "@portless/docs", "google-oauth-example", "portless-e2e"]
+  "ignore": ["@portless/docs", "google-oauth-example", "portless-e2e"]
 }
