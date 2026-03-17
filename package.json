@@ -15,9 +15,12 @@
     "test:coverage": "turbo test:coverage",
     "test:watch": "turbo test:watch",
     "typecheck": "turbo typecheck",
+    "ci:version": "changeset version",
+    "ci:publish": "pnpm build && changeset publish",
     "prepare": "husky"
   },
   "devDependencies": {
+    "@changesets/cli": "^2.30.0",
     "@eslint/js": "^9.39.2",
     "eslint": "^9.39.2",
     "eslint-config-prettier": "^10.1.8",
