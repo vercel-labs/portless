@@ -131,6 +131,39 @@ describe("createProxyServer", () => {
       expect(res.body).not.toContain(":80");
     });
 
+    it("preserves path in 404 page links", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost", path: "/some/path" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain('href="http://myapp.localhost:8080/some/path"');
+    });
+
+    it("preserves path and query params in 404 page links", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
+      await listen(server);
+
+      const res = await request(server, {
+        host: "other.localhost",
+        path: "/some/path?foo=bar&baz=1",
+      });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain('href="http://myapp.localhost:8080/some/path?foo=bar&amp;baz=1"');
+    });
+
+    it("omits path suffix for root path in 404 page links", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost", path: "/" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain('href="http://myapp.localhost:8080"');
+    });
+
     it("proxies request to matching route", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
