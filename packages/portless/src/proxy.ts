@@ -9,6 +9,13 @@ import { ARROW_SVG, renderPage } from "./pages.js";
 export const PORTLESS_HEADER = "X-Portless";
 
 /**
+ * Response header reporting the actual local TCP port that accepted the
+ * request. This lets health checks distinguish a proxy bound to the probed
+ * port from traffic redirected there by pf/NAT rules.
+ */
+export const PORTLESS_LISTENER_PORT_HEADER = "X-Portless-Listener-Port";
+
+/**
  * HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2 responses.
  * These must be stripped when proxying an HTTP/1.1 backend response
  * back to an HTTP/2 client.
@@ -30,6 +37,12 @@ function getRequestHost(req: http.IncomingMessage): string {
   const authority = req.headers[":authority"];
   if (typeof authority === "string" && authority) return authority;
   return req.headers.host || "";
+}
+
+/** Return the local TCP port that accepted this request. */
+function getListenerPort(req: http.IncomingMessage, fallbackPort: number): string {
+  const port = req.socket.localPort;
+  return typeof port === "number" && port > 0 ? String(port) : String(fallbackPort);
 }
 
 /**
@@ -110,6 +123,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
     res.setHeader(PORTLESS_HEADER, "1");
+    res.setHeader(PORTLESS_LISTENER_PORT_HEADER, getListenerPort(req, proxyPort));
 
     const routes = getRoutes();
     const host = getRequestHost(req).split(":")[0];
