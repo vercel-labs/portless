@@ -98,12 +98,17 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 ## How It Works
 
 1. `portless proxy start` starts an HTTP reverse proxy on port 1355 as a background daemon (configurable with `-p` / `--port` or the `PORTLESS_PORT` env var). The proxy also auto-starts when you run an app.
-2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
+2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var by default and registers the app with the proxy
 3. The browser hits `http://<name>.localhost:1355` on the proxy port; the proxy forwards to the app's assigned port
 
 `.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `sudo portless hosts sync` to add entries to `/etc/hosts` if needed.
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` and `--host` CLI flags.
+
+If your app expects different env var names, use:
+
+- `--port-var <name>` and `--host-var <name>` per command
+- `PORTLESS_PORT_VAR=<name>` and `PORTLESS_HOST_VAR=<name>` as defaults
 
 ### State directory
 
@@ -199,6 +204,8 @@ For other frameworks that don't read `PORT`, pass the port manually:
 
 - **Webpack Dev Server**: use `--port $PORT`
 - **Custom servers**: read `process.env.PORT` and listen on it
+
+If you use custom names (`--port-var` / `PORTLESS_PORT_VAR`), read that variable instead.
 
 ### Permission errors
 
