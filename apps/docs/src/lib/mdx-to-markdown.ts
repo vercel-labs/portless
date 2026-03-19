@@ -1,7 +1,8 @@
 /**
- * Converts raw MDX content to clean Markdown suitable for AI agents.
+ * Converts raw MDX content to clean Markdown suitable for indexing.
  *
- * Strips export/import statements and JSX blocks with className attributes.
+ * Strips export/import statements and standalone JSX divs with className
+ * attributes, passing everything else through as valid Markdown.
  */
 export function mdxToCleanMarkdown(raw: string): string {
   const lines = raw.split("\n");

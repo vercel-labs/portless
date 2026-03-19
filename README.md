@@ -29,7 +29,7 @@ portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable by default. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular), portless auto-injects `--port` and `--host` flags.
+The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable by default. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
 
 ## Use in package.json
 
@@ -93,10 +93,10 @@ Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflic
 
 ```mermaid
 flowchart TD
-    Browser["Browser\nmyapp.localhost:1355"]
-    Proxy["portless proxy\n(port 1355)"]
-    App1[":4123\nmyapp"]
-    App2[":4567\napi"]
+    Browser["Browser<br>myapp.localhost:1355"]
+    Proxy["portless proxy<br>(port 1355)"]
+    App1[":4123<br>myapp"]
+    App2[":4567<br>api"]
 
     Browser -->|port 1355| Proxy
     Proxy --> App1

@@ -3,6 +3,7 @@ import Link from "next/link";
 import { GeistPixelSquare } from "geist/font/pixel";
 import { ThemeProvider } from "@/components/theme-provider";
 import { ThemeToggle } from "@/components/theme-toggle";
+import { Search } from "@/components/search";
 import { DocsChat } from "@/components/docs-chat";
 import { DocsMobileNav } from "@/components/docs-mobile-nav";
 import { DocsNav } from "@/components/docs-nav";
@@ -10,8 +11,27 @@ import { cookies } from "next/headers";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "portless",
+  metadataBase: new URL("https://portless.dev"),
+  title: {
+    default: "portless | Named .localhost URLs for Development",
+    template: "%s | portless",
+  },
   description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+  openGraph: {
+    type: "website",
+    locale: "en_US",
+    url: "https://portless.dev",
+    siteName: "portless",
+    title: "portless | Named .localhost URLs for Development",
+    description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+    images: [{ url: "/og", width: 1200, height: 630, alt: "portless" }],
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "portless | Named .localhost URLs for Development",
+    description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+    images: ["/og"],
+  },
 };
 
 function Header() {
@@ -58,6 +78,7 @@ function Header() {
           </Link>
         </div>
         <nav className="flex items-center gap-4">
+          <Search />
           <a
             href="https://github.com/vercel-labs/portless"
             target="_blank"
