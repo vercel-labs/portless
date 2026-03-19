@@ -11,7 +11,7 @@ import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
-import { inferProjectName, detectWorktreePrefix } from "./auto.js";
+import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
 import {
   DEFAULT_TLD,
   PRIVILEGED_PORT_THRESHOLD,
@@ -1341,7 +1341,12 @@ async function handleRunMode(args: string[]): Promise<void> {
   let nameSource: string;
 
   if (parsed.name) {
-    baseName = parsed.name;
+    // Truncate individual labels that exceed the DNS limit. Dots are preserved
+    // as intentional subdomain separators (e.g. --name local.myapp).
+    baseName = parsed.name
+      .split(".")
+      .map((label) => truncateLabel(label))
+      .join(".");
     nameSource = "--name flag";
   } else {
     const inferred = inferProjectName();
