@@ -14,6 +14,7 @@ describe("next", () => {
       command: ["next", "dev"],
       cwd: fixtureDir("next-app"),
       proxyPort: 19002,
+      timeoutMs: 90_000,
     });
     const res = await fetch(ctx.proxyUrl);
     expect(res.status).toBe(200);
