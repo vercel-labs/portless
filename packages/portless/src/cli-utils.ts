@@ -557,21 +557,66 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   expo: { strictPort: false },
 };
 
+/** Known package runners. Values list subcommands that run a package. */
+const PACKAGE_RUNNERS: Record<string, string[]> = {
+  npx: [],
+  bunx: [],
+  pnpx: [],
+  yarn: ["dlx", "exec"],
+  pnpm: ["dlx", "exec"],
+};
+
+/**
+ * Find the basename of the framework command inside `commandArgs`, looking
+ * past known package runners (npx, bunx, yarn dlx, …) and their flags.
+ */
+function findFrameworkBasename(commandArgs: string[]): string | null {
+  if (commandArgs.length === 0) return null;
+
+  const first = path.basename(commandArgs[0]);
+  if (FRAMEWORKS_NEEDING_PORT[first]) return first;
+
+  const subcommands = PACKAGE_RUNNERS[first];
+  if (!subcommands) return null;
+
+  let i = 1;
+
+  if (subcommands.length > 0) {
+    // Skip flags before the subcommand
+    while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
+    if (i >= commandArgs.length) return null;
+    if (!subcommands.includes(commandArgs[i])) {
+      // Not a recognized subcommand — might be an implicit bin (e.g. `yarn vite`)
+      const name = path.basename(commandArgs[i]);
+      return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+    }
+    i++;
+  }
+
+  // Skip runner flags (e.g. `--bun`, `--yes`)
+  while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
+
+  if (i >= commandArgs.length) return null;
+  const name = path.basename(commandArgs[i]);
+  return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+}
+
 /**
  * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
  * mutate the array in-place to append the correct CLI flags so the app
  * listens on the expected port and address.
  *
+ * Handles both direct invocation (`vite dev`) and invocation via package
+ * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
+ *
  * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
-  const cmd = commandArgs[0];
-  if (!cmd) return;
+  const basename = findFrameworkBasename(commandArgs);
+  if (!basename) return;
 
-  const basename = path.basename(cmd);
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
-  if (!framework) return;
 
   if (!commandArgs.includes("--port")) {
     commandArgs.push("--port", port.toString());

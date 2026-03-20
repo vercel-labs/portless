@@ -350,6 +350,261 @@ describe("injectFrameworkFlags", () => {
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual([]);
   });
+
+  // Package runner support (issue #146: bunx --bun vite dev gives 502)
+
+  // -- Simple runners (npx, bunx, pnpx) --
+
+  it("injects flags for bunx vite dev", () => {
+    const args = ["bunx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "bunx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for bunx --bun vite dev", () => {
+    const args = ["bunx", "--bun", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "bunx",
+      "--bun",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npx vite dev", () => {
+    const args = ["npx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npx with flags before framework", () => {
+    const args = ["npx", "--yes", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--yes",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for pnpx vite dev", () => {
+    const args = ["pnpx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "pnpx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // -- Subcommand runners (yarn dlx/exec, pnpm dlx/exec) --
+
+  it("injects flags for yarn dlx vite dev", () => {
+    const args = ["yarn", "dlx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "yarn",
+      "dlx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for yarn exec vite dev", () => {
+    const args = ["yarn", "exec", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "yarn",
+      "exec",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for pnpm dlx vite dev", () => {
+    const args = ["pnpm", "dlx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "pnpm",
+      "dlx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for pnpm exec astro dev", () => {
+    const args = ["pnpm", "exec", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  // -- Implicit bin (yarn <framework>) --
+
+  it("injects flags for yarn vite (implicit bin)", () => {
+    const args = ["yarn", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "yarn",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // -- Runner with multiple flags --
+
+  it("skips multiple runner flags before framework", () => {
+    const args = ["npx", "--yes", "--quiet", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--yes",
+      "--quiet",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // -- Runner + --port / --host already present --
+
+  it("skips --port when already present via runner", () => {
+    const args = ["bunx", "vite", "dev", "--port", "3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toContain("3000");
+    expect(args).not.toContain("4567");
+  });
+
+  it("skips --host when already present via runner", () => {
+    const args = ["npx", "vite", "dev", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "vite",
+      "dev",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "4567",
+      "--strictPort",
+    ]);
+  });
+
+  it("skips all injection when both --port and --host present via runner", () => {
+    const args = ["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
+  });
+
+  // -- Negative cases: runner with non-framework commands --
+
+  it("does not inject for bunx with non-framework command", () => {
+    const args = ["bunx", "--bun", "next", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun", "next", "dev"]);
+  });
+
+  it("does not inject for npx with non-framework command", () => {
+    const args = ["npx", "next", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx", "next", "dev"]);
+  });
+
+  it("does not inject for yarn with unrecognized subcommand", () => {
+    const args = ["yarn", "run", "next", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["yarn", "run", "next", "dev"]);
+  });
+
+  it("does not inject for pnpm with unrecognized subcommand", () => {
+    const args = ["pnpm", "run", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["pnpm", "run", "vite", "dev"]);
+  });
+
+  // -- Edge cases --
+
+  it("does not inject when runner has only flags and no command", () => {
+    const args = ["bunx", "--bun"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun"]);
+  });
+
+  it("does not inject for runner alone with no arguments", () => {
+    const args = ["npx"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx"]);
+  });
+
+  it("does not inject for yarn subcommand with no further arguments", () => {
+    const args = ["yarn", "dlx"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["yarn", "dlx"]);
+  });
+
+  it("does not inject for yarn with only flags and no subcommand", () => {
+    const args = ["yarn", "--silent"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["yarn", "--silent"]);
+  });
 });
 
 describe("DEFAULT_TLD", () => {
