@@ -24,6 +24,7 @@ import {
   injectFrameworkFlags,
   isHttpsEnvEnabled,
   isProxyRunning,
+  isReservedAppPort,
   isWindows,
   prompt,
   readTldFromDir,
@@ -563,6 +564,13 @@ function parseAppPort(value: string | undefined): number {
     console.error(chalk.red(`Error: Invalid app port "${value}". Must be 1-65535.`));
     process.exit(1);
   }
+  if (isReservedAppPort(port)) {
+    console.error(chalk.red(`Error: Invalid app port "${value}". This app port is reserved.`));
+    console.error(
+      chalk.blue("Choose a different port, or omit --app-port for automatic assignment.")
+    );
+    process.exit(1);
+  }
   return port;
 }
 
@@ -572,6 +580,15 @@ function appPortFromEnv(): number | undefined {
   const port = parseInt(envVal, 10);
   if (isNaN(port) || port < 1 || port > 65535) {
     console.error(chalk.red(`Error: Invalid PORTLESS_APP_PORT="${envVal}". Must be 1-65535.`));
+    process.exit(1);
+  }
+  if (isReservedAppPort(port)) {
+    console.error(
+      chalk.red(`Error: Invalid PORTLESS_APP_PORT="${envVal}". This app port is reserved.`)
+    );
+    console.error(
+      chalk.blue("Set a different port, or unset PORTLESS_APP_PORT for auto-assignment.")
+    );
     process.exit(1);
   }
   return port;
@@ -605,6 +622,7 @@ ${chalk.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Override an existing route registered by another process
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+                          Must not be a reserved app port
   --help, -h             Show this help
 
 ${chalk.bold("Name inference (in order):")}
@@ -757,7 +775,7 @@ ${chalk.bold("In package.json:")}
 ${chalk.bold("How it works:")}
   1. Start the proxy once (listens on port 1355 by default, no sudo needed)
   2. Run your apps - they auto-start the proxy and register automatically
-     (apps get a random port in the 4000-4999 range via PORT)
+     (apps get a random port in the 4000-4999 range via PORT, excluding reserved app ports)
   3. Access via http://<name>.localhost:1355
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, Astro, React Router, Angular,
@@ -780,6 +798,7 @@ ${chalk.bold("Options:")}
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
+                                Must not be a reserved app port
   --force                       Override an existing route registered by another process
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -787,6 +806,7 @@ ${chalk.bold("Options:")}
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
+                                Must not be a reserved app port
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)

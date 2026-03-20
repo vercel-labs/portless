@@ -7,6 +7,7 @@ import * as path from "node:path";
 import {
   DEFAULT_PROXY_PORT,
   DEFAULT_TLD,
+  RESERVED_APP_PORTS,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
   SYSTEM_STATE_DIR,
@@ -59,6 +60,15 @@ describe("findFreePort", () => {
 
   it("throws when minPort > maxPort", async () => {
     await expect(findFreePort(5000, 4000)).rejects.toThrow("minPort");
+  });
+
+  it("skips reserved app ports", async () => {
+    expect(RESERVED_APP_PORTS.has(4045)).toBe(true);
+    await expect(findFreePort(4045, 4045)).rejects.toThrow("No free port found");
+    await expect(findFreePort(4190, 4190)).rejects.toThrow("No free port found");
+
+    const port = await findFreePort(4045, 4046);
+    expect(port).toBe(4046);
   });
 });
 

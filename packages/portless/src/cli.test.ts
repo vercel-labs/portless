@@ -286,6 +286,22 @@ describe("CLI", () => {
       expect(status).toBe(0);
       expect(stdout.trim()).toBe("ok");
     });
+
+    it("rejects reserved --app-port values", () => {
+      const { status, stderr } = run(["run", "--app-port", "4045", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("app port is reserved");
+    });
+
+    it("rejects reserved PORTLESS_APP_PORT values", () => {
+      const { status, stderr } = run(["run", "echo", "ok"], {
+        env: { PORTLESS: "0", PORTLESS_APP_PORT: "4045" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("app port is reserved");
+    });
   });
 
   describe("alias subcommand", () => {
