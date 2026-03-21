@@ -343,9 +343,16 @@ describe("trustCA", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns error when CA cert is missing", () => {
+  it("auto-generates CA cert when missing", () => {
     const result = trustCA(tmpDir);
-    expect(result.trusted).toBe(false);
-    expect(result.error).toContain("CA certificate not found");
+    // Should auto-generate and succeed (or fail on trust step in CI, but not with "not found")
+    if (result.trusted) {
+      expect(result.error).toBeUndefined();
+    } else {
+      // In CI/non-interactive environments, trust may fail but CA should be generated
+      expect(result.error).not.toContain("CA certificate not found");
+    }
+    // Verify CA was generated
+    expect(fs.existsSync(path.join(tmpDir, "ca.crt"))).toBe(true);
   });
 });
