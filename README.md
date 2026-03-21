@@ -29,7 +29,7 @@ portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
+The proxy auto-starts when you run an app. A random port (4000--4999, excluding reserved app ports) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
 
 ## Use in package.json
 
@@ -165,7 +165,7 @@ portless proxy stop              # Stop the proxy
 --no-tls                         Disable HTTPS (overrides PORTLESS_HTTPS)
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
---app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--app-port <number>              Use a fixed port for the app (skip auto-assignment; must not be a reserved app port)
 --force                          Override a route registered by another process
 --name <name>                    Use <name> as the app name
 ```
@@ -175,7 +175,7 @@ portless proxy stop              # Stop the proxy
 ```
 # Configuration
 PORTLESS_PORT=<number>           Override the default proxy port
-PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
+PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port; must not be a reserved app port)
 PORTLESS_HTTPS=1                 Always enable HTTPS
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
