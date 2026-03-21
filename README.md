@@ -248,6 +248,25 @@ pnpm typecheck        # Type-check all packages
 pnpm format           # Format all files with Prettier
 ```
 
+## Docs Chat LLM
+
+The documentation site at [portless.dev](https://portless.dev) includes an AI chatbot. By default it uses Anthropic Claude Haiku, but you can configure a different provider via environment variables when self-hosting:
+
+```
+DOCS_CHAT_MODEL=anthropic/claude-haiku-4.5    # Default (Anthropic)
+DOCS_CHAT_MODEL=openai/gpt-4o-mini            # OpenAI
+DOCS_CHAT_MODEL=minimax/MiniMax-M2.7          # MiniMax
+```
+
+For MiniMax, set the API key:
+
+```
+MINIMAX_API_KEY=<your-key>
+MINIMAX_BASE_URL=https://api.minimax.io/v1    # Default (global); use https://api.minimaxi.com/v1 for China
+```
+
+Available MiniMax models: `MiniMax-M2.7` (default, latest flagship with enhanced reasoning and coding), `MiniMax-M2.7-highspeed` (high-speed version for low-latency scenarios), `MiniMax-M2.5` (204K context), and `MiniMax-M2.5-highspeed` (faster).
+
 ## Requirements
 
 - Node.js 20+
