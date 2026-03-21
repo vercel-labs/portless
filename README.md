@@ -29,7 +29,7 @@ portless myapp next dev
 # -> http://myapp.localhost:1355
 ```
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
+The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable by default. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
 
 ## Use in package.json
 
@@ -166,6 +166,8 @@ portless proxy stop              # Stop the proxy
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--port-var <name>                Set custom child env var name for assigned app port (default: PORT)
+--host-var <name>                Set custom child env var name for assigned app host (default: HOST)
 --force                          Override a route registered by another process
 --name <name>                    Use <name> as the app name
 ```
@@ -176,14 +178,16 @@ portless proxy stop              # Stop the proxy
 # Configuration
 PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
+PORTLESS_PORT_VAR=<name>         Child env var name for assigned app port (default: PORT)
+PORTLESS_HOST_VAR=<name>         Child env var name for assigned app host (default: HOST)
 PORTLESS_HTTPS=1                 Always enable HTTPS
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
-PORT                             Ephemeral port the child should listen on
-HOST                             Always 127.0.0.1
+PORT or custom --port-var        Ephemeral port the child should listen on
+HOST or custom --host-var        Always 127.0.0.1
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
 ```
 
