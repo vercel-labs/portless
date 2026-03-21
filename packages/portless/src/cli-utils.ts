@@ -479,7 +479,23 @@ export function spawnCommand(
     onCleanup?: () => void;
   }
 ): void {
-  const env = { ...(options?.env ?? process.env), PATH: augmentedPath(options?.env) };
+  const env: Record<string, string | undefined> = {
+    ...(options?.env ?? process.env),
+    PATH: augmentedPath(options?.env),
+  };
+
+  // On Windows, process.env is a case-insensitive Proxy, but spreading it into
+  // a plain object creates case-sensitive keys. The path variable may exist as
+  // "Path" (Windows convention) alongside the "PATH" we just set above. cmd.exe
+  // may read the wrong key, causing tools like bun to be missing from the child
+  // process PATH. Delete any residual casing variants so only our "PATH" remains.
+  if (isWindows) {
+    for (const key of Object.keys(env)) {
+      if (key !== "PATH" && key.toUpperCase() === "PATH") {
+        delete env[key];
+      }
+    }
+  }
 
   const child = isWindows
     ? spawn(commandArgs[0], commandArgs.slice(1), {
