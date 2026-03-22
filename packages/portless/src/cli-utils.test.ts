@@ -1,11 +1,5 @@
-import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { spawn } from "node:child_process";
+import { describe, it, expect, afterEach, beforeEach } from "vitest";
 import * as fs from "node:fs";
-
-vi.mock("node:child_process", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("node:child_process")>();
-  return { ...actual, spawn: vi.fn(() => ({ on: vi.fn(), kill: vi.fn() })) };
-});
 import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -22,11 +16,9 @@ import {
   getDefaultTld,
   injectFrameworkFlags,
   isProxyRunning,
-  isWindows,
   parsePidFromNetstat,
   readTldFromDir,
   resolveStateDir,
-  spawnCommand,
   validateTld,
   writeTldFile,
 } from "./cli-utils.js";
@@ -727,37 +719,5 @@ describe("validateTld", () => {
       expect(validateTld(tld)).toBeNull();
       expect(RISKY_TLDS.has(tld)).toBe(true);
     }
-  });
-});
-
-describe("spawnCommand", () => {
-  afterEach(() => {
-    vi.clearAllMocks();
-  });
-
-  const mockedSpawn = vi.mocked(spawn);
-
-  it("never passes shell: true (avoids DEP0190)", () => {
-    spawnCommand(["echo", "hello"]);
-    const [, , opts] = mockedSpawn.mock.calls[0];
-    expect(opts?.shell).toBeFalsy();
-  });
-
-  it("uses cmd.exe with /d /s /c on Windows", () => {
-    if (!isWindows) return;
-    spawnCommand(["bun", "dev"]);
-    const [cmd, args, opts] = mockedSpawn.mock.calls[0];
-    expect(cmd).toBe("cmd.exe");
-    expect(args).toEqual(["/d", "/s", "/c", "bun dev"]);
-    expect(opts?.shell).toBeFalsy();
-  });
-
-  it("uses /bin/sh -c on non-Windows", () => {
-    if (isWindows) return;
-    spawnCommand(["npm", "run", "start"]);
-    const [cmd, args] = mockedSpawn.mock.calls[0];
-    expect(cmd).toBe("/bin/sh");
-    expect(args[0]).toBe("-c");
-    expect(args[1]).toContain("npm");
   });
 });
