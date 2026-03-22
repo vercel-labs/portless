@@ -507,10 +507,9 @@ export function spawnCommand(
   }
 
   const child = isWindows
-    ? spawn(commandArgs[0], commandArgs.slice(1), {
+    ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
         stdio: "inherit",
         env,
-        shell: true,
       })
     : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
         stdio: "inherit",
