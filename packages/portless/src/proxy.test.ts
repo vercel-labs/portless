@@ -6,7 +6,7 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createProxyServer, PORTLESS_HEADER } from "./proxy.js";
+import { createProxyServer, PORTLESS_HEADER, PORTLESS_LISTENER_PORT_HEADER } from "./proxy.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
@@ -396,9 +396,12 @@ describe("createProxyServer", () => {
         createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
       );
       await listen(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
 
       const res = await request(server, { host: "unknown.localhost" });
       expect(res.headers[PORTLESS_HEADER.toLowerCase()]).toBe("1");
+      expect(res.headers[PORTLESS_LISTENER_PORT_HEADER.toLowerCase()]).toBe(String(addr.port));
     });
 
     it("includes X-Portless header on 400 responses", async () => {
@@ -407,9 +410,12 @@ describe("createProxyServer", () => {
         createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
       );
       await listen(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
 
       const res = await request(server, { host: "" });
       expect(res.headers[PORTLESS_HEADER.toLowerCase()]).toBe("1");
+      expect(res.headers[PORTLESS_LISTENER_PORT_HEADER.toLowerCase()]).toBe(String(addr.port));
     });
   });
 
@@ -1050,9 +1056,12 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       })
     );
     await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
 
     const res = await httpsRequest(server, { host: "unknown.localhost" });
     expect(res.headers[PORTLESS_HEADER.toLowerCase()]).toBe("1");
+    expect(res.headers[PORTLESS_LISTENER_PORT_HEADER.toLowerCase()]).toBe(String(addr.port));
   });
 
   it("proxies HTTPS request to matching route", async () => {
