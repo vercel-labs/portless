@@ -369,7 +369,9 @@ async function runApp(
   tld: string,
   force: boolean,
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
-  desiredPort?: number
+  desiredPort?: number,
+  portVarName = "PORT",
+  hostVarName = "HOST"
 ) {
   const hostname = parseHostname(name, tld);
 
@@ -518,15 +520,15 @@ async function runApp(
   // Run the command
   console.log(
     chalk.gray(
-      `Running: PORT=${port} HOST=127.0.0.1 PORTLESS_URL=${finalUrl} ${commandArgs.join(" ")}\n`
+      `Running: ${portVarName}=${port} ${hostVarName}=127.0.0.1 PORTLESS_URL=${finalUrl} ${commandArgs.join(" ")}\n`
     )
   );
 
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
-      PORT: port.toString(),
-      HOST: "127.0.0.1",
+      [portVarName]: port.toString(),
+      [hostVarName]: "127.0.0.1",
       PORTLESS_URL: finalUrl,
       __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: `.${tld}`,
     },
@@ -548,6 +550,10 @@ interface ParsedRunArgs {
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
+  /** Environment variable name used for the assigned app port. */
+  portVarName: string;
+  /** Environment variable name used for the assigned app host. */
+  hostVarName: string;
   /** Override the inferred base name (from --name flag). */
   name?: string;
   /** The child command and its arguments, passed through untouched. */
@@ -558,6 +564,8 @@ interface ParsedAppArgs extends ParsedRunArgs {
   /** App name. */
   name: string;
 }
+
+const ENV_VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 function parseAppPort(value: string | undefined): number {
   if (!value || value.startsWith("--")) {
@@ -583,6 +591,56 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+function parseEnvVarName(flagName: string, value: string | undefined): string {
+  if (!value || value.startsWith("--")) {
+    console.error(chalk.red(`Error: ${flagName} requires an environment variable name.`));
+    process.exit(1);
+  }
+  if (!ENV_VAR_NAME_RE.test(value)) {
+    console.error(chalk.red(`Error: Invalid environment variable name "${value}".`));
+    console.error(
+      chalk.blue(
+        "Environment variable names must start with a letter or underscore, then use letters, digits, or underscores."
+      )
+    );
+    process.exit(1);
+  }
+  return value;
+}
+
+function envVarNameFromEnv(
+  envKey: "PORTLESS_PORT_VAR" | "PORTLESS_HOST_VAR",
+  fallback: string
+): string {
+  const value = process.env[envKey];
+  if (!value) return fallback;
+  if (!ENV_VAR_NAME_RE.test(value)) {
+    console.error(chalk.red(`Error: Invalid ${envKey}="${value}".`));
+    console.error(
+      chalk.blue(
+        "Environment variable names must start with a letter or underscore, then use letters, digits, or underscores."
+      )
+    );
+    process.exit(1);
+  }
+  return value;
+}
+
+function resolveChildEnvVarNames(
+  portVarOverride?: string,
+  hostVarOverride?: string
+): { portVarName: string; hostVarName: string } {
+  const portVarName = portVarOverride ?? envVarNameFromEnv("PORTLESS_PORT_VAR", "PORT");
+  const hostVarName = hostVarOverride ?? envVarNameFromEnv("PORTLESS_HOST_VAR", "HOST");
+  if (portVarName === hostVarName) {
+    console.error(
+      chalk.red(`Error: --port-var and --host-var cannot use the same name ("${portVarName}").`)
+    );
+    process.exit(1);
+  }
+  return { portVarName, hostVarName };
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -593,6 +651,8 @@ function appPortFromEnv(): number | undefined {
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
+  let portVarOverride: string | undefined;
+  let hostVarOverride: string | undefined;
   let name: string | undefined;
   let i = 0;
 
@@ -611,6 +671,8 @@ ${chalk.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Override an existing route registered by another process
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --port-var <name>      Set custom child env var name for the assigned port (default: PORT)
+  --host-var <name>      Set custom child env var name for the assigned host (default: HOST)
   --help, -h             Show this help
 
 ${chalk.bold("Name inference (in order):")}
@@ -634,6 +696,12 @@ ${chalk.bold("Examples:")}
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--port-var") {
+      i++;
+      portVarOverride = parseEnvVarName("--port-var", args[i]);
+    } else if (args[i] === "--host-var") {
+      i++;
+      hostVarOverride = parseEnvVarName("--host-var", args[i]);
     } else if (args[i] === "--name") {
       i++;
       if (!args[i] || args[i].startsWith("-")) {
@@ -644,15 +712,18 @@ ${chalk.bold("Examples:")}
       name = args[i];
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --name, --force, --app-port, --help"));
+      console.error(
+        chalk.blue("Known flags: --name, --force, --app-port, --port-var, --host-var, --help")
+      );
       process.exit(1);
     }
     i++;
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  const { portVarName, hostVarName } = resolveChildEnvVarNames(portVarOverride, hostVarOverride);
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, portVarName, hostVarName, name, commandArgs: args.slice(i) };
 }
 
 /**
@@ -665,6 +736,8 @@ ${chalk.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let portVarOverride: string | undefined;
+  let hostVarOverride: string | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -677,9 +750,15 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--port-var") {
+      i++;
+      portVarOverride = parseEnvVarName("--port-var", args[i]);
+    } else if (args[i] === "--host-var") {
+      i++;
+      hostVarOverride = parseEnvVarName("--host-var", args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --port-var, --host-var"));
       process.exit(1);
     }
     i++;
@@ -699,17 +778,24 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--port-var") {
+      i++;
+      portVarOverride = parseEnvVarName("--port-var", args[i]);
+    } else if (args[i] === "--host-var") {
+      i++;
+      hostVarOverride = parseEnvVarName("--host-var", args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --port-var, --host-var"));
       process.exit(1);
     }
     i++;
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  const { portVarName, hostVarName } = resolveChildEnvVarNames(portVarOverride, hostVarOverride);
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, portVarName, hostVarName, name, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -763,7 +849,7 @@ ${chalk.bold("In package.json:")}
 ${chalk.bold("How it works:")}
   1. Start the proxy once (listens on port 1355 by default, no sudo needed)
   2. Run your apps - they auto-start the proxy and register automatically
-     (apps get a random port in the 4000-4999 range via PORT)
+     (apps get a random port in the 4000-4999 range via PORT by default)
   3. Access via http://<name>.localhost:1355
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, Astro, React Router, Angular,
@@ -787,6 +873,8 @@ ${chalk.bold("Options:")}
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
+  --port-var <name>             Set custom child env var name for the assigned port (default: PORT)
+  --host-var <name>             Set custom child env var name for the assigned host (default: HOST)
   --force                       Override an existing route registered by another process
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -794,6 +882,8 @@ ${chalk.bold("Options:")}
 ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
+  PORTLESS_PORT_VAR=<name>      Child env var name for assigned app port (default: PORT)
+  PORTLESS_HOST_VAR=<name>      Child env var name for assigned app host (default: HOST)
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
@@ -802,8 +892,8 @@ ${chalk.bold("Environment variables:")}
   PORTLESS=0                    Run command directly without proxy
 
 ${chalk.bold("Child process environment:")}
-  PORT                          Ephemeral port the child should listen on
-  HOST                          Always 127.0.0.1
+  PORT / custom --port-var      Ephemeral port the child should listen on
+  HOST / custom --host-var      Always 127.0.0.1
   PORTLESS_URL                  Public URL of the app (e.g. http://myapp.localhost:1355)
 
 ${chalk.bold("Safari / DNS:")}
@@ -1394,7 +1484,9 @@ async function handleRunMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    parsed.appPort
+    parsed.appPort,
+    parsed.portVarName,
+    parsed.hostVarName
   );
 }
 
@@ -1430,7 +1522,9 @@ async function handleNamedMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     undefined,
-    parsed.appPort
+    parsed.appPort,
+    parsed.portVarName,
+    parsed.hostVarName
   );
 }
 

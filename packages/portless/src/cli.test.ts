@@ -44,6 +44,10 @@ describe("CLI", () => {
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
       expect(stdout).toContain("PORTLESS_STATE_DIR");
+      expect(stdout).toContain("--port-var");
+      expect(stdout).toContain("--host-var");
+      expect(stdout).toContain("PORTLESS_PORT_VAR");
+      expect(stdout).toContain("PORTLESS_HOST_VAR");
       expect(stdout).toContain("PORTLESS_URL");
     });
 
@@ -245,6 +249,8 @@ describe("CLI", () => {
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("--force");
       expect(stdout).toContain("--app-port");
+      expect(stdout).toContain("--port-var");
+      expect(stdout).toContain("--host-var");
     });
 
     it("prints run-specific help for run -h", () => {
@@ -285,6 +291,65 @@ describe("CLI", () => {
       });
       expect(status).toBe(0);
       expect(stdout.trim()).toBe("ok");
+    });
+  });
+
+  describe("--port-var / --host-var flags", () => {
+    it("accepts custom env var names in run mode (PORTLESS=0)", () => {
+      const { status, stdout } = run(
+        ["run", "--port-var", "APP_PORT", "--host-var", "APP_HOST", "echo", "ok"],
+        {
+          env: { PORTLESS: "0" },
+        }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("accepts custom env var names in named mode (PORTLESS=0)", () => {
+      const { status, stdout } = run(
+        ["myapp", "--port-var", "SERVER_PORT", "--host-var", "SERVER_HOST", "echo", "ok"],
+        {
+          env: { PORTLESS: "0" },
+        }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("rejects invalid --port-var name", () => {
+      const { status, stderr } = run(["run", "--port-var", "1BAD", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid environment variable name");
+    });
+
+    it("rejects invalid --host-var name", () => {
+      const { status, stderr } = run(["run", "--host-var", "BAD-NAME", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid environment variable name");
+    });
+
+    it("rejects when --port-var and --host-var are identical", () => {
+      const { status, stderr } = run(
+        ["run", "--port-var", "APP_ADDR", "--host-var", "APP_ADDR", "echo", "ok"],
+        {
+          env: { PORTLESS: "0" },
+        }
+      );
+      expect(status).toBe(1);
+      expect(stderr).toContain("cannot use the same name");
+    });
+
+    it("rejects invalid PORTLESS_PORT_VAR env value", () => {
+      const { status, stderr } = run(["run", "echo", "ok"], {
+        env: { PORTLESS: "0", PORTLESS_PORT_VAR: "BAD-NAME" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid PORTLESS_PORT_VAR");
     });
   });
 
