@@ -137,6 +137,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 portless run [--name <name>] <cmd> [args...]  # Infer name (or override with --name), run through proxy
 portless <name> <cmd> [args...]  # Run app at http://<name>.localhost:1355
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
+portless alias --tcp <name> <port>  # Register a TCP proxy route (e.g. PostgreSQL, Redis)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
@@ -169,6 +170,7 @@ portless proxy stop              # Stop the proxy
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --force                          Override a route registered by another process
+--tcp                            Register a TCP proxy instead of HTTP (for alias command)
 --name <name>                    Use <name> as the app name
 ```
 
@@ -236,6 +238,26 @@ devServer: {
 ```
 
 Portless detects this misconfiguration and responds with `508 Loop Detected` along with a message pointing to this fix.
+
+## TCP Proxy
+
+Use `portless alias --tcp` when the target speaks a raw TCP protocol instead of HTTP. Each TCP alias gets its own local listen port in the `5500-5999` range and forwards traffic to the target port on `127.0.0.1`.
+
+```bash
+portless alias --tcp my-postgres 5432
+# -> Connect to: 127.0.0.1:5500
+
+psql -h 127.0.0.1 -p 5500
+
+portless alias --tcp mysql 3306
+mysql -h 127.0.0.1 -P 5501
+
+portless alias --tcp redis 6379
+redis-cli -h 127.0.0.1 -p 5502
+```
+
+`portless list` shows TCP aliases with their real connect address, `127.0.0.1:<listenPort>`, and includes the friendly alias name in parentheses.
+`portless get <name>` also returns `127.0.0.1:<listenPort>` for TCP aliases, so scripts can discover the correct client endpoint without special casing.
 
 ## Development
 

@@ -149,8 +149,8 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)      |
 | `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies)   |
 | `portless <name> <cmd> [args...]`      | Run app at `http://<name>.localhost:1355` (auto-starts proxy) |
-| `portless get <name>`                  | Print URL for a service (for cross-service wiring)            |
-| `portless get <name> --no-worktree`    | Print URL without worktree prefix                             |
+| `portless get <name>`                  | Print a service endpoint (HTTP URL or TCP `127.0.0.1:<port>`) |
+| `portless get <name> --no-worktree`    | Print endpoint without worktree prefix                        |
 | `portless list`                        | Show active routes                                            |
 | `portless trust`                       | Add local CA to system trust store (for HTTPS)                |
 | `portless proxy start`                 | Start the proxy as a daemon (port 1355, no sudo)              |
@@ -161,6 +161,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route    |
 | `portless proxy stop`                  | Stop the proxy                                                |
 | `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)          |
+| `portless alias --tcp <name> <port>`   | Register a TCP proxy route (e.g. PostgreSQL, MySQL, Redis)    |
 | `portless alias <name> <port> --force` | Overwrite an existing route                                   |
 | `portless alias --remove <name>`       | Remove a static route                                         |
 | `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                       |
@@ -174,6 +175,20 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | `portless --version` / `-v`            | Show version                                                  |
 
 **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## TCP services
+
+Use `portless alias --tcp` for local services that speak raw TCP instead of HTTP. Portless assigns a listen port in the `5500-5999` range and forwards it to the target on `127.0.0.1`.
+
+```bash
+portless alias --tcp my-postgres 5432
+# -> Connect with: psql -h 127.0.0.1 -p 5500
+
+portless alias --tcp redis 6379
+# -> Connect with: redis-cli -h 127.0.0.1 -p 5501
+```
+
+`portless list` shows these entries with the real connect address, `127.0.0.1:<listenPort>`, and includes the alias name in parentheses.
 
 ## Troubleshooting
 
