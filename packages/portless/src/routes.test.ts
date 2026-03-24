@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
 import * as os from "node:os";
 import { RouteStore } from "./routes.js";
@@ -91,6 +92,23 @@ describe("RouteStore", () => {
       expect(loaded[0].port).toBe(4001);
     });
 
+    it("loads TCP routes with listen ports from file", () => {
+      const routes = [
+        {
+          hostname: "postgres.localhost",
+          port: 5432,
+          pid: 0,
+          type: "tcp",
+          listenPort: 5500,
+        },
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const loaded = store.loadRoutes();
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0]).toEqual(routes[0]);
+    });
+
     it("filters out routes with dead PIDs", () => {
       // Use a PID that is guaranteed not to exist
       const deadPid = 999999;
@@ -103,6 +121,15 @@ describe("RouteStore", () => {
       const loaded = store.loadRoutes();
       expect(loaded).toHaveLength(1);
       expect(loaded[0].hostname).toBe("alive.localhost");
+    });
+
+    it("keeps legacy routes without explicit type for backward compatibility", () => {
+      const routes = [{ hostname: "legacy.localhost", port: 4001, pid: process.pid }];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const loaded = store.loadRoutes();
+      expect(loaded).toHaveLength(1);
+      expect(loaded[0].type).toBeUndefined();
     });
 
     it("does not persist cleanup when persistCleanup is false (default)", () => {
@@ -167,6 +194,19 @@ describe("RouteStore", () => {
       });
     });
 
+    it("adds a TCP route with listen port metadata", () => {
+      store.addRoute("postgres.localhost", 5432, 0, false, { type: "tcp", listenPort: 5500 });
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0]).toEqual({
+        hostname: "postgres.localhost",
+        port: 5432,
+        pid: 0,
+        type: "tcp",
+        listenPort: 5500,
+      });
+    });
+
     it("replaces existing route with same hostname", () => {
       store.addRoute("myapp.localhost", 4001, process.pid);
       store.addRoute("myapp.localhost", 4002, process.pid);
@@ -182,6 +222,123 @@ describe("RouteStore", () => {
       expect(routes).toHaveLength(2);
       const hostnames = routes.map((r) => r.hostname).sort();
       expect(hostnames).toEqual(["app1.localhost", "app2.localhost"]);
+    });
+  });
+
+  describe("addTcpRoute", () => {
+    it("allocates distinct listen ports for distinct TCP aliases", async () => {
+      const first = await store.addTcpRoute("db1.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+      const second = await store.addTcpRoute("db2.localhost", 5433, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+
+      expect(first).not.toBe(second);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(2);
+      expect(routes[0].listenPort).not.toBe(routes[1].listenPort);
+    });
+
+    it("reuses the existing listen port when replacing a TCP alias", async () => {
+      const first = await store.addTcpRoute("db.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+      const second = await store.addTcpRoute("db.localhost", 5433, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+
+      expect(second).toBe(first);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].port).toBe(5433);
+      expect(routes[0].listenPort).toBe(first);
+    });
+
+    it("allocates a new listen port when the saved one is no longer bindable", async () => {
+      const first = await store.addTcpRoute("db.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+
+      const blocker = net.createServer();
+      await new Promise<void>((resolve, reject) => {
+        blocker.once("error", reject);
+        blocker.listen(first, "127.0.0.1", () => resolve());
+      });
+
+      try {
+        const second = await store.addTcpRoute("db.localhost", 5433, 0, false, {
+          minListenPort: 5500,
+          maxListenPort: 5510,
+        });
+
+        expect(second).not.toBe(first);
+        const routes = store.loadRoutes();
+        expect(routes).toHaveLength(1);
+        expect(routes[0].port).toBe(5433);
+        expect(routes[0].listenPort).toBe(second);
+      } finally {
+        await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      }
+    });
+
+    it("preserves the existing listen port while the proxy daemon is running", async () => {
+      const first = await store.addTcpRoute("db.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+
+      fs.writeFileSync(store.pidPath, process.pid.toString());
+      fs.writeFileSync(
+        store.tcpListenersPath,
+        JSON.stringify([{ hostname: "db.localhost", listenPort: first }], null, 2)
+      );
+
+      const second = await store.addTcpRoute("db.localhost", 5433, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+
+      expect(second).toBe(first);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].port).toBe(5433);
+      expect(routes[0].listenPort).toBe(first);
+    });
+
+    it("allocates a new listen port when the daemon is running but the listener is not active", async () => {
+      const first = await store.addTcpRoute("db.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5510,
+      });
+
+      fs.writeFileSync(store.pidPath, process.pid.toString());
+
+      const blocker = net.createServer();
+      await new Promise<void>((resolve, reject) => {
+        blocker.once("error", reject);
+        blocker.listen(first, "127.0.0.1", () => resolve());
+      });
+
+      try {
+        const second = await store.addTcpRoute("db.localhost", 5433, 0, false, {
+          minListenPort: 5500,
+          maxListenPort: 5510,
+        });
+
+        expect(second).not.toBe(first);
+        const routes = store.loadRoutes();
+        expect(routes).toHaveLength(1);
+        expect(routes[0].port).toBe(5433);
+        expect(routes[0].listenPort).toBe(second);
+      } finally {
+        await new Promise<void>((resolve) => blocker.close(() => resolve()));
+      }
     });
   });
 

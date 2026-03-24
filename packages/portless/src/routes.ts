@@ -1,8 +1,9 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
-import { fixOwnership, isErrnoException } from "./utils.js";
 import { SYSTEM_STATE_DIR } from "./cli-utils.js";
+import { fixOwnership, isErrnoException } from "./utils.js";
 
 /** How long (ms) before a lock directory is considered stale and forcibly removed. */
 const STALE_LOCK_THRESHOLD_MS = 10_000;
@@ -29,14 +30,34 @@ export interface RouteMapping extends RouteInfo {
   pid: number;
 }
 
+interface ActiveTcpListener {
+  hostname: string;
+  listenPort: number;
+  targetPort: number;
+  status: "active" | "closing";
+}
+
+async function canListenOnLocalhost(port: number): Promise<boolean> {
+  return await new Promise((resolve) => {
+    const server = net.createServer();
+    server.listen(port, "127.0.0.1", () => {
+      server.close(() => resolve(true));
+    });
+    server.on("error", () => resolve(false));
+  });
+}
+
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
+  const route = value as RouteMapping;
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as RouteMapping).hostname === "string" &&
-    typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
+    typeof route.hostname === "string" &&
+    typeof route.port === "number" &&
+    typeof route.pid === "number" &&
+    (route.type === undefined || route.type === "http" || route.type === "tcp") &&
+    (route.listenPort === undefined || typeof route.listenPort === "number")
   );
 }
 
@@ -70,6 +91,7 @@ export class RouteStore {
   private readonly lockPath: string;
   readonly pidPath: string;
   readonly portFilePath: string;
+  readonly tcpListenersPath: string;
   private readonly onWarning: ((message: string) => void) | undefined;
 
   constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
@@ -78,6 +100,7 @@ export class RouteStore {
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
     this.portFilePath = path.join(dir, "proxy.port");
+    this.tcpListenersPath = path.join(dir, "tcp-listeners.json");
     this.onWarning = options?.onWarning;
   }
 
@@ -161,8 +184,44 @@ export class RouteStore {
     try {
       process.kill(pid, 0);
       return true;
+    } catch (err: unknown) {
+      if (isErrnoException(err) && err.code === "EPERM") {
+        return true;
+      }
+      return false;
+    }
+  }
+
+  private isProxyDaemonAlive(): boolean {
+    try {
+      const pid = parseInt(fs.readFileSync(this.pidPath, "utf-8"), 10);
+      return !isNaN(pid) && this.isProcessAlive(pid);
     } catch {
       return false;
+    }
+  }
+
+  loadActiveTcpListeners(): ActiveTcpListener[] {
+    if (!this.isProxyDaemonAlive()) return [];
+    if (!fs.existsSync(this.tcpListenersPath)) return [];
+
+    try {
+      const raw = fs.readFileSync(this.tcpListenersPath, "utf-8");
+      const parsed: unknown = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+
+      return parsed.filter(
+        (listener): listener is ActiveTcpListener =>
+          typeof listener === "object" &&
+          listener !== null &&
+          typeof (listener as ActiveTcpListener).hostname === "string" &&
+          typeof (listener as ActiveTcpListener).listenPort === "number" &&
+          typeof (listener as ActiveTcpListener).targetPort === "number" &&
+          ((listener as ActiveTcpListener).status === "active" ||
+            (listener as ActiveTcpListener).status === "closing")
+      );
+    } catch {
+      return [];
     }
   }
 
@@ -214,7 +273,13 @@ export class RouteStore {
     fixOwnership(this.routesPath);
   }
 
-  addRoute(hostname: string, port: number, pid: number, force = false): void {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    extra?: { type?: "tcp"; listenPort?: number }
+  ): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -226,11 +291,137 @@ export class RouteStore {
         throw new RouteConflictError(hostname, existing.pid);
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);
-      filtered.push({ hostname, port, pid });
+      filtered.push({
+        hostname,
+        port,
+        pid,
+        type: extra?.type,
+        listenPort: extra?.listenPort,
+      });
       this.saveRoutes(filtered);
     } finally {
       this.releaseLock();
     }
+  }
+
+  async addTcpRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    options: { minListenPort: number; maxListenPort: number }
+  ): Promise<number> {
+    this.ensureDir();
+    for (let attempt = 0; attempt < 5; attempt++) {
+      let candidatePorts: number[] = [];
+
+      // We need one lock pass to derive candidate ports from the latest route
+      // table, then release it before async bind probes, and finally re-lock
+      // before saving to avoid holding the directory lock across async I/O.
+      if (!this.acquireLock()) {
+        throw new Error("Failed to acquire route lock");
+      }
+      try {
+        const routes = this.loadRoutes(true);
+        const existing = routes.find((r) => r.hostname === hostname);
+        if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid) && !force) {
+          throw new RouteConflictError(hostname, existing.pid);
+        }
+
+        const filtered = routes.filter((r) => r.hostname !== hostname);
+
+        if (existing?.type === "tcp" && existing.listenPort !== undefined) {
+          const activeListeners = this.loadActiveTcpListeners();
+          const existingListenerActive = activeListeners.some(
+            (listener) =>
+              listener.hostname === hostname && listener.listenPort === existing.listenPort
+          );
+
+          if (existingListenerActive) {
+            filtered.push({
+              hostname,
+              port,
+              pid,
+              type: "tcp",
+              listenPort: existing.listenPort,
+            });
+            this.saveRoutes(filtered);
+            return existing.listenPort;
+          }
+
+          candidatePorts.push(existing.listenPort);
+        }
+
+        const usedListenPorts = new Set(
+          filtered
+            .filter((route) => route.type === "tcp" && route.listenPort !== undefined)
+            .map((route) => route.listenPort as number)
+        );
+
+        candidatePorts = candidatePorts.filter((candidate) => !usedListenPorts.has(candidate));
+        for (
+          let candidate = options.minListenPort;
+          candidate <= options.maxListenPort;
+          candidate++
+        ) {
+          if (usedListenPorts.has(candidate) || candidatePorts.includes(candidate)) continue;
+          candidatePorts.push(candidate);
+        }
+      } finally {
+        this.releaseLock();
+      }
+
+      let selectedPort: number | null = null;
+      for (const candidate of candidatePorts) {
+        if (await canListenOnLocalhost(candidate)) {
+          selectedPort = candidate;
+          break;
+        }
+      }
+      if (selectedPort === null) {
+        throw new Error(
+          `No free TCP proxy port found in range ${options.minListenPort}-${options.maxListenPort}.`
+        );
+      }
+
+      if (!this.acquireLock()) {
+        throw new Error("Failed to acquire route lock");
+      }
+      try {
+        const routes = this.loadRoutes(true);
+        const existing = routes.find((r) => r.hostname === hostname);
+        if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid) && !force) {
+          throw new RouteConflictError(hostname, existing.pid);
+        }
+
+        const filtered = routes.filter((r) => r.hostname !== hostname);
+        const usedListenPorts = new Set(
+          filtered
+            .filter((route) => route.type === "tcp" && route.listenPort !== undefined)
+            .map((route) => route.listenPort as number)
+        );
+        // There is still a small TOCTOU window between the bind probe above and
+        // the daemon actually listening on the selected port. We re-check
+        // route-level ownership here to avoid duplicate assignments, and the
+        // daemon's EADDRINUSE handling covers the remaining race with external
+        // processes.
+        if (usedListenPorts.has(selectedPort)) continue;
+
+        filtered.push({
+          hostname,
+          port,
+          pid,
+          type: "tcp",
+          listenPort: selectedPort,
+        });
+        this.saveRoutes(filtered);
+        return selectedPort;
+      } finally {
+        this.releaseLock();
+      }
+    }
+
+    throw new Error("Failed to allocate TCP proxy port due to concurrent route updates.");
   }
 
   removeRoute(hostname: string): void {

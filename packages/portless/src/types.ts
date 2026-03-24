@@ -2,6 +2,8 @@
 export interface RouteInfo {
   hostname: string;
   port: number;
+  type?: "http" | "tcp";
+  listenPort?: number;
 }
 
 export interface ProxyServerOptions {
