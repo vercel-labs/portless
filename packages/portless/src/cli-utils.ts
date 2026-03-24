@@ -38,6 +38,12 @@ const MIN_APP_PORT = 4000;
 /** Maximum app port when finding a free port. */
 const MAX_APP_PORT = 4999;
 
+/** Minimum auto-assigned TCP proxy listen port. */
+export const MIN_TCP_PORT = 5500;
+
+/** Maximum auto-assigned TCP proxy listen port. */
+export const MAX_TCP_PORT = 5999;
+
 /** Number of random port attempts before sequential scan. */
 const RANDOM_PORT_ATTEMPTS = 50;
 

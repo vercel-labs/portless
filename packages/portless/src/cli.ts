@@ -4,18 +4,22 @@ declare const __VERSION__: string;
 
 import chalk from "chalk";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
+import { MAX_TCP_PORT, MIN_TCP_PORT } from "./cli-utils.js";
 import { createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import { FILE_MODE, RouteConflictError, RouteStore, SYSTEM_FILE_MODE } from "./routes.js";
+import { createTcpProxy } from "./tcp-proxy.js";
 import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
 import {
   DEFAULT_TLD,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
+  SYSTEM_STATE_DIR,
   discoverState,
   findFreePort,
   findPidOnPort,
@@ -59,6 +63,12 @@ const EXIT_TIMEOUT_MS = 2000;
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 
+/** Max time (ms) to wait for a TCP alias listener to become active. */
+const TCP_ALIAS_READY_TIMEOUT_MS = 1000;
+
+/** Poll interval (ms) while waiting for a TCP alias listener to become active. */
+const TCP_ALIAS_READY_POLL_MS = 100;
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -86,11 +96,177 @@ function startProxyServer(
   }
   fixOwnership(routesPath);
 
+  const filterHttpRoutes = <T extends { type?: "http" | "tcp" }>(routes: T[]): T[] =>
+    routes.filter((route) => route.type !== "tcp");
+
   // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes = store.loadRoutes();
+  let cachedRoutes = filterHttpRoutes(store.loadRoutes());
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
+  let exiting = false;
+  const tcpProxies = new Map<string, net.Server>();
+  const startingTcpProxies = new Map<string, net.Server>();
+  const tcpProxySockets = new Map<string, Set<net.Socket>>();
+  const tcpProxyConfigs = new Map<string, string>();
+  const closingTcpProxies = new Set<string>();
+  const closingTcpProxyConfigs = new Map<string, string>();
+  const pendingTcpRoutes = new Map<
+    string,
+    { hostname: string; listenPort: number; port: number }
+  >();
+
+  const startTcpProxy = (route: { hostname: string; listenPort: number; port: number }) => {
+    const config = `${route.listenPort}:${route.port}`;
+    if (
+      tcpProxies.has(route.hostname) ||
+      startingTcpProxies.has(route.hostname) ||
+      closingTcpProxies.has(route.hostname)
+    ) {
+      if (closingTcpProxies.has(route.hostname)) {
+        pendingTcpRoutes.set(route.hostname, route);
+      }
+      return;
+    }
+
+    const server = createTcpProxy({
+      listenPort: route.listenPort,
+      targetPort: route.port,
+      onError: (msg) => console.error(chalk.red(msg)),
+    });
+    const sockets = new Set<net.Socket>();
+
+    server.on("connection", (socket) => {
+      sockets.add(socket);
+      socket.on("close", () => {
+        sockets.delete(socket);
+      });
+    });
+
+    server.on("error", (err: NodeJS.ErrnoException) => {
+      startingTcpProxies.delete(route.hostname);
+      tcpProxies.delete(route.hostname);
+      tcpProxySockets.delete(route.hostname);
+      tcpProxyConfigs.delete(route.hostname);
+      closingTcpProxyConfigs.delete(route.hostname);
+      persistActiveTcpListeners();
+      if (err.code === "EADDRINUSE") {
+        console.error(chalk.yellow(`TCP port ${route.listenPort} in use for ${route.hostname}`));
+        void (async () => {
+          const currentRoute = store
+            .loadRoutes()
+            .find(
+              (candidate) =>
+                candidate.hostname === route.hostname &&
+                candidate.type === "tcp" &&
+                candidate.listenPort === route.listenPort &&
+                candidate.port === route.port
+            );
+          if (!currentRoute) return;
+
+          try {
+            const reassignedPort = await store.addTcpRoute(route.hostname, route.port, 0, true, {
+              minListenPort: MIN_TCP_PORT,
+              maxListenPort: MAX_TCP_PORT,
+            });
+            if (reassignedPort !== route.listenPort) {
+              console.error(
+                chalk.yellow(
+                  `Reassigned ${route.hostname} to TCP port ${reassignedPort} after bind conflict`
+                )
+              );
+            }
+          } catch (reassignErr) {
+            console.error(
+              chalk.red(
+                `Failed to reassign TCP alias ${route.hostname}: ${(reassignErr as Error).message}`
+              )
+            );
+          }
+        })();
+      } else {
+        console.error(chalk.red(`TCP proxy error for ${route.hostname}: ${err.message}`));
+      }
+    });
+
+    server.listen(route.listenPort, "127.0.0.1", () => {
+      startingTcpProxies.delete(route.hostname);
+      tcpProxies.set(route.hostname, server);
+      closingTcpProxyConfigs.delete(route.hostname);
+      persistActiveTcpListeners();
+      console.log(
+        chalk.green(
+          `TCP proxy: port ${route.listenPort} -> localhost:${route.port} (${route.hostname})`
+        )
+      );
+    });
+
+    startingTcpProxies.set(route.hostname, server);
+    tcpProxySockets.set(route.hostname, sockets);
+    tcpProxyConfigs.set(route.hostname, config);
+  };
+
+  const stopTcpProxy = (
+    hostname: string,
+    server: net.Server,
+    nextRoute?: { hostname: string; listenPort: number; port: number }
+  ) => {
+    closingTcpProxies.add(hostname);
+    if (nextRoute) {
+      pendingTcpRoutes.set(hostname, nextRoute);
+    } else {
+      pendingTcpRoutes.delete(hostname);
+    }
+    const config = tcpProxyConfigs.get(hostname);
+    if (config) {
+      closingTcpProxyConfigs.set(hostname, config);
+    }
+    persistActiveTcpListeners();
+    for (const socket of tcpProxySockets.get(hostname) ?? []) {
+      socket.destroy();
+    }
+    server.close(() => {
+      startingTcpProxies.delete(hostname);
+      tcpProxies.delete(hostname);
+      tcpProxySockets.delete(hostname);
+      tcpProxyConfigs.delete(hostname);
+      closingTcpProxyConfigs.delete(hostname);
+      closingTcpProxies.delete(hostname);
+      persistActiveTcpListeners();
+      const latestRoute = pendingTcpRoutes.get(hostname);
+      pendingTcpRoutes.delete(hostname);
+      if (!exiting && latestRoute) startTcpProxy(latestRoute);
+    });
+  };
+
+  const persistActiveTcpListeners = () => {
+    const parseListener = (
+      hostname: string,
+      config: string | undefined,
+      status: "active" | "closing"
+    ) => {
+      const [listenPortRaw, targetPortRaw] = config?.split(":") ?? [];
+      const listenPort = listenPortRaw ? parseInt(listenPortRaw, 10) : NaN;
+      const targetPort = targetPortRaw ? parseInt(targetPortRaw, 10) : NaN;
+      return { hostname, listenPort, targetPort, status };
+    };
+
+    const listeners = [
+      ...Array.from(tcpProxies.keys()).map((hostname) =>
+        parseListener(hostname, tcpProxyConfigs.get(hostname), "active")
+      ),
+      ...Array.from(closingTcpProxyConfigs.keys()).map((hostname) =>
+        parseListener(hostname, closingTcpProxyConfigs.get(hostname), "closing")
+      ),
+    ].filter(
+      (listener) => !Number.isNaN(listener.listenPort) && !Number.isNaN(listener.targetPort)
+    );
+
+    fs.writeFileSync(store.tcpListenersPath, JSON.stringify(listeners, null, 2), {
+      mode: store.dir === SYSTEM_STATE_DIR ? SYSTEM_FILE_MODE : FILE_MODE,
+    });
+    fixOwnership(store.tcpListenersPath);
+  };
 
   const syncVal = process.env.PORTLESS_SYNC_HOSTS;
   const autoSyncHosts =
@@ -100,7 +276,37 @@ function startProxyServer(
 
   const reloadRoutes = () => {
     try {
-      cachedRoutes = store.loadRoutes();
+      const routes = store.loadRoutes();
+      cachedRoutes = filterHttpRoutes(routes);
+
+      const tcpRoutes = routes.filter(
+        (route) => route.type === "tcp" && route.listenPort !== undefined
+      );
+      const activeTcpRoutes = new Map(
+        tcpRoutes.map((route) => [
+          route.hostname,
+          { hostname: route.hostname, listenPort: route.listenPort as number, port: route.port },
+        ])
+      );
+
+      const managedTcpServers = new Map([
+        ...Array.from(tcpProxies.entries()),
+        ...Array.from(startingTcpProxies.entries()),
+      ]);
+
+      for (const [hostname, server] of managedTcpServers) {
+        const nextRoute = activeTcpRoutes.get(hostname);
+        const nextConfig = nextRoute ? `${nextRoute.listenPort}:${nextRoute.port}` : null;
+        if (!nextConfig || tcpProxyConfigs.get(hostname) !== nextConfig) {
+          stopTcpProxy(hostname, server, nextRoute);
+        }
+      }
+
+      for (const route of tcpRoutes) {
+        if (route.listenPort === undefined) continue;
+        startTcpProxy({ hostname: route.hostname, listenPort: route.listenPort, port: route.port });
+      }
+
       if (autoSyncHosts) {
         syncHostsFile(cachedRoutes.map((r) => r.hostname));
       }
@@ -123,6 +329,7 @@ function startProxyServer(
   if (autoSyncHosts) {
     syncHostsFile(cachedRoutes.map((r) => r.hostname));
   }
+  reloadRoutes();
 
   const server = createProxyServer({
     getRoutes: () => cachedRoutes,
@@ -172,7 +379,6 @@ function startProxyServer(
   });
 
   // Cleanup on exit
-  let exiting = false;
   const cleanup = () => {
     if (exiting) return;
     exiting = true;
@@ -180,6 +386,28 @@ function startProxyServer(
     if (pollingInterval) clearInterval(pollingInterval);
     if (watcher) {
       watcher.close();
+    }
+    for (const [hostname, sockets] of tcpProxySockets) {
+      for (const socket of sockets) {
+        socket.destroy();
+      }
+      tcpProxySockets.set(hostname, new Set());
+    }
+    for (const [, tcpServer] of new Map([
+      ...Array.from(tcpProxies.entries()),
+      ...Array.from(startingTcpProxies.entries()),
+    ])) {
+      tcpServer.close();
+    }
+    startingTcpProxies.clear();
+    tcpProxies.clear();
+    tcpProxySockets.clear();
+    tcpProxyConfigs.clear();
+    closingTcpProxyConfigs.clear();
+    try {
+      fs.unlinkSync(store.tcpListenersPath);
+    } catch {
+      // Listener file may already be absent; non-fatal
     }
     try {
       fs.unlinkSync(store.pidPath);
@@ -350,8 +578,15 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
 
   console.log(chalk.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
-    const url = formatUrl(route.hostname, proxyPort, tls);
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
+    if (route.type === "tcp" && route.listenPort) {
+      console.log(
+        `  ${chalk.cyan(`127.0.0.1:${route.listenPort}`)}  ${chalk.gray(`(${route.hostname})`)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(label)}`
+      );
+      continue;
+    }
+
+    const url = formatUrl(route.hostname, proxyPort, tls);
     console.log(
       `  ${chalk.cyan(url)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(label)}`
     );
@@ -736,6 +971,7 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless run <cmd>")}               Infer name from project, run through proxy
   ${chalk.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${chalk.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
+  ${chalk.cyan("portless alias --tcp <name> <port>")} Register a TCP proxy route (e.g. for databases)
   ${chalk.cyan("portless alias --remove <name>")}   Remove a static route
   ${chalk.cyan("portless list")}                    Show active routes
   ${chalk.cyan("portless trust")}                   Add local CA to system trust store
@@ -750,7 +986,9 @@ ${chalk.bold("Examples:")}
   portless api.myapp pnpm start       # -> http://api.myapp.localhost:1355
   portless run next dev               # -> http://<project>.localhost:1355
   portless run next dev               # in worktree -> http://<worktree>.<project>.localhost:1355
-  portless get backend                 # -> http://backend.localhost:1355 (for cross-service refs)
+  portless get backend                # -> http://backend.localhost:1355 (for cross-service refs)
+  portless alias --tcp my-db 5432     # TCP proxy -> localhost:5432 (for psql, etc.)
+  portless list                       # TCP aliases show 127.0.0.1:<port> connect addresses
   # Wildcard subdomains: tenant.myapp.localhost also routes to myapp
 
 ${chalk.bold("In package.json:")}
@@ -788,6 +1026,7 @@ ${chalk.bold("Options:")}
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --force                       Override an existing route registered by another process
+  --tcp                         Register a TCP proxy instead of HTTP (for alias command)
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
 
@@ -831,6 +1070,47 @@ function printVersion(): void {
   process.exit(0);
 }
 
+async function waitForTcpAliasReady(
+  store: RouteStore,
+  hostname: string,
+  listenPort: number,
+  targetPort: number,
+  timeoutMs = TCP_ALIAS_READY_TIMEOUT_MS
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const active = store
+      .loadActiveTcpListeners()
+      .some(
+        (listener) =>
+          listener.hostname === hostname &&
+          listener.listenPort === listenPort &&
+          listener.targetPort === targetPort &&
+          listener.status === "active"
+      );
+    if (active) return true;
+    await new Promise((resolve) => setTimeout(resolve, TCP_ALIAS_READY_POLL_MS));
+  }
+  return false;
+}
+
+function findCurrentTcpRoute(
+  store: RouteStore,
+  hostname: string,
+  targetPort: number
+): { listenPort: number } | null {
+  const route = store
+    .loadRoutes()
+    .find(
+      (candidate) =>
+        candidate.hostname === hostname &&
+        candidate.type === "tcp" &&
+        candidate.port === targetPort &&
+        candidate.listenPort !== undefined
+    );
+  return route?.listenPort !== undefined ? { listenPort: route.listenPort } : null;
+}
+
 async function handleTrust(): Promise<void> {
   const { dir } = await discoverState();
   const result = trustCA(dir);
@@ -858,14 +1138,15 @@ async function handleList(): Promise<void> {
 async function handleGet(args: string[]): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
-${chalk.bold("portless get")} - Print the URL for a service.
+${chalk.bold("portless get")} - Print the connect endpoint for a service.
 
 ${chalk.bold("Usage:")}
   ${chalk.cyan("portless get <name>")}
 
-Constructs the URL using the same hostname and worktree logic as
-"portless run", then prints it to stdout. Useful for wiring services
-together:
+Constructs the endpoint using the same hostname and worktree logic as
+"portless run", then prints it to stdout. HTTP routes return a URL,
+while TCP aliases return 127.0.0.1:<listenPort>. Useful for wiring
+services together:
 
   BACKEND_URL=$(portless get backend)
 
@@ -877,6 +1158,7 @@ ${chalk.bold("Examples:")}
   portless get backend                  # -> http://backend.localhost:1355
   portless get backend                  # in worktree -> http://auth.backend.localhost:1355
   portless get backend --no-worktree    # -> http://backend.localhost:1355 (skip worktree)
+  portless get my-postgres              # -> 127.0.0.1:5500 (for TCP aliases)
 `);
     process.exit(0);
   }
@@ -909,10 +1191,24 @@ ${chalk.bold("Examples:")}
   const worktree = skipWorktree ? null : detectWorktreePrefix();
   const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
 
-  const { port, tls, tld } = await discoverState();
+  const { dir, port, tls, tld } = await discoverState();
   const hostname = parseHostname(effectiveName, tld);
+  const unprefixedHostname = worktree && !skipWorktree ? parseHostname(name, tld) : hostname;
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(chalk.yellow(msg)),
+  });
+  const routes = store.loadRoutes();
+  const route =
+    routes.find((entry) => entry.hostname === hostname) ??
+    routes.find((entry) => entry.type === "tcp" && entry.hostname === unprefixedHostname);
+
+  if (route?.type === "tcp" && route.listenPort) {
+    process.stdout.write(`127.0.0.1:${route.listenPort}\n`);
+    return;
+  }
+
   const url = formatUrl(hostname, port, tls);
-  // Print bare URL to stdout so it works in $(portless get <name>)
+  // Print bare endpoint to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
 
@@ -923,21 +1219,24 @@ ${chalk.bold("portless alias")} - Register a static route for services not manag
 
 ${chalk.bold("Usage:")}
   ${chalk.cyan("portless alias <name> <port>")}        Register a route
+  ${chalk.cyan("portless alias --tcp <name> <port>")}  Register a TCP proxy route
   ${chalk.cyan("portless alias --remove <name>")}      Remove a route
   ${chalk.cyan("portless alias <name> <port> --force")} Override existing route
 
 ${chalk.bold("Examples:")}
   portless alias my-postgres 5432     # -> http://my-postgres.localhost:1355
+  portless alias --tcp my-postgres 5432 # -> 127.0.0.1:5500
   portless alias redis 6379           # -> http://redis.localhost:1355
   portless alias --remove my-postgres # Remove the alias
 `);
     process.exit(0);
   }
 
-  const { dir, tld } = await discoverState();
+  const { dir, port: proxyPort, tls, tld } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
+  const proxyRunning = await isProxyRunning(proxyPort, tls);
 
   if (args[1] === "--remove") {
     const aliasName = args[2];
@@ -958,12 +1257,14 @@ ${chalk.bold("Examples:")}
     return;
   }
 
-  const aliasName = args[1];
-  const aliasPort = args[2];
+  const positional = args.slice(1).filter((arg) => arg !== "--tcp" && arg !== "--force");
+  const aliasName = positional[0];
+  const aliasPort = positional[1];
   if (!aliasName || !aliasPort) {
     console.error(chalk.red("Error: Missing arguments."));
     console.error(chalk.blue("Usage:"));
     console.error(chalk.cyan("  portless alias <name> <port>"));
+    console.error(chalk.cyan("  portless alias --tcp <name> <port>"));
     console.error(chalk.cyan("  portless alias --remove <name>"));
     console.error(chalk.blue("Example:"));
     console.error(chalk.cyan("  portless alias my-postgres 5432"));
@@ -978,6 +1279,50 @@ ${chalk.bold("Examples:")}
   }
 
   const force = args.includes("--force");
+  const isTcp = args.includes("--tcp");
+
+  if (isTcp) {
+    let listenPort: number;
+    try {
+      listenPort = await store.addTcpRoute(hostname, port, 0, force, {
+        minListenPort: MIN_TCP_PORT,
+        maxListenPort: MAX_TCP_PORT,
+      });
+    } catch (err) {
+      console.error(chalk.red(`Error: ${(err as Error).message}`));
+      process.exit(1);
+    }
+    console.log(
+      chalk.green(
+        `TCP alias registered: 127.0.0.1:${listenPort} (${hostname}) -> 127.0.0.1:${port}`
+      )
+    );
+    if (proxyRunning) {
+      if (await waitForTcpAliasReady(store, hostname, listenPort, port)) {
+        console.log(chalk.cyan(`Connect to: 127.0.0.1:${listenPort}`));
+      } else {
+        const currentRoute = findCurrentTcpRoute(store, hostname, port);
+        const currentListenPort = currentRoute?.listenPort ?? listenPort;
+        if (
+          currentListenPort !== listenPort &&
+          (await waitForTcpAliasReady(store, hostname, currentListenPort, port))
+        ) {
+          console.log(chalk.yellow(`TCP listener was reassigned by the proxy daemon.`));
+          console.log(chalk.cyan(`Connect to: 127.0.0.1:${currentListenPort}`));
+        } else {
+          console.log(chalk.yellow(`TCP listener is being activated by the proxy daemon.`));
+          console.log(
+            chalk.gray(`If connection is refused, retry 127.0.0.1:${currentListenPort} shortly.`)
+          );
+        }
+      }
+    } else {
+      console.log(chalk.yellow(`TCP listener will be available after starting the proxy daemon.`));
+      console.log(chalk.cyan("Start it with: portless proxy start"));
+    }
+    return;
+  }
+
   store.addRoute(hostname, port, 0, force);
   console.log(chalk.green(`Alias registered: ${hostname} -> 127.0.0.1:${port}`));
 }
@@ -1041,7 +1386,7 @@ ${chalk.bold("Usage: portless hosts <command>")}
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
 
-  const routes = store.loadRoutes();
+  const routes = store.loadRoutes().filter((route) => route.type !== "tcp");
   if (routes.length === 0) {
     console.log(chalk.yellow("No active routes to sync."));
     return;

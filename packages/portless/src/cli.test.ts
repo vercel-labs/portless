@@ -4,15 +4,17 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { RouteStore } from "./routes.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 
 /** Run the CLI with the given args and optional env overrides. */
-function run(args: string[], options?: { env?: Record<string, string | undefined> }) {
+function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
   const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf-8",
     timeout: 10_000,
+    cwd: options?.cwd,
     env: { ...process.env, ...options?.env, NO_COLOR: "1" },
   });
   return {
@@ -81,6 +83,32 @@ describe("CLI", () => {
       // it doesn't crash and returns 0.
       const { status } = run(["list"]);
       expect(status).toBe(0);
+    });
+
+    it("shows TCP aliases with tcp:// URLs and listen ports", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-list-test-"));
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "redis.localhost",
+              port: 6379,
+              pid: 0,
+              type: "tcp",
+              listenPort: 5501,
+            },
+          ])
+        );
+
+        const { status, stdout } = run(["list"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+        expect(status).toBe(0);
+        expect(stdout).toContain("127.0.0.1:5501");
+        expect(stdout).toContain("(redis.localhost)");
+        expect(stdout).toContain("localhost:6379");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -289,11 +317,24 @@ describe("CLI", () => {
   });
 
   describe("alias subcommand", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-alias-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    const getEnv = () => ({ PORTLESS_STATE_DIR: tmpDir });
+
     it("prints help with --help", () => {
       const { status, stdout } = run(["alias", "--help"]);
       expect(status).toBe(0);
       expect(stdout).toContain("portless alias");
       expect(stdout).toContain("--remove");
+      expect(stdout).toContain("--tcp");
     });
 
     it("prints help with -h", () => {
@@ -324,6 +365,55 @@ describe("CLI", () => {
       const { status, stderr } = run(["alias", "--remove"]);
       expect(status).toBe(1);
       expect(stderr).toContain("No alias name");
+    });
+
+    it("registers a TCP alias with a listen port", () => {
+      const { status, stdout } = run(["alias", "--tcp", "mydb", "5432"], { env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout).toContain("TCP alias registered");
+      expect(stdout).toContain("TCP listener will be available after starting the proxy daemon.");
+      expect(stdout).toContain("Start it with: portless proxy start");
+      expect(stdout).not.toContain("Connect to:");
+
+      const routesPath = path.join(tmpDir, "routes.json");
+      const routes = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+      expect(routes).toHaveLength(1);
+      expect(routes[0].hostname).toBe("mydb.localhost");
+      expect(routes[0].port).toBe(5432);
+      expect(routes[0].pid).toBe(0);
+      expect(routes[0].type).toBe("tcp");
+      expect(routes[0].listenPort).toBeGreaterThanOrEqual(5500);
+      expect(routes[0].listenPort).toBeLessThanOrEqual(5999);
+    });
+
+    it("does not reuse a stored TCP listen port when the proxy is stopped", () => {
+      const first = run(["alias", "--tcp", "db1", "5432"], { env: getEnv() });
+      const second = run(["alias", "--tcp", "db2", "5433"], { env: getEnv() });
+
+      expect(first.status).toBe(0);
+      expect(second.status).toBe(0);
+
+      const routesPath = path.join(tmpDir, "routes.json");
+      const routes = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+      expect(routes).toHaveLength(2);
+      expect(routes[0].listenPort).not.toBe(routes[1].listenPort);
+    });
+
+    it("reuses the existing listen port when replacing a TCP alias", () => {
+      const first = run(["alias", "--tcp", "db", "5432"], { env: getEnv() });
+      expect(first.status).toBe(0);
+
+      const routesPath = path.join(tmpDir, "routes.json");
+      const before = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+      const originalListenPort = before[0].listenPort;
+
+      const second = run(["alias", "--tcp", "db", "5433"], { env: getEnv() });
+      expect(second.status).toBe(0);
+
+      const after = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+      expect(after).toHaveLength(1);
+      expect(after[0].port).toBe(5433);
+      expect(after[0].listenPort).toBe(originalListenPort);
     });
   });
 
@@ -426,6 +516,57 @@ describe("CLI", () => {
       const { status, stdout } = run(["get", "api.backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/api\.backend\.localhost(:\d+)?$/);
+    });
+
+    it("prints the localhost endpoint for a TCP alias", async () => {
+      const store = new RouteStore(tmpDir);
+      await store.addTcpRoute("db.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5505,
+      });
+
+      const { status, stdout } = run(["get", "db"], { env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("127.0.0.1:5500");
+    });
+
+    it("falls back to the unprefixed TCP alias inside a git worktree", async () => {
+      const store = new RouteStore(tmpDir);
+      await store.addTcpRoute("db.localhost", 5432, 0, false, {
+        minListenPort: 5500,
+        maxListenPort: 5505,
+      });
+
+      const repoDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-get-worktree-repo-"));
+      const worktreeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-get-worktree-linked-"));
+
+      try {
+        const git = (gitArgs: string[], cwd: string) =>
+          spawnSync("git", gitArgs, {
+            cwd,
+            encoding: "utf-8",
+            env: { ...process.env, NO_COLOR: "1" },
+          });
+
+        fs.writeFileSync(path.join(repoDir, "package.json"), JSON.stringify({ name: "repo" }));
+        expect(git(["init", "-b", "main"], repoDir).status).toBe(0);
+        expect(git(["config", "user.name", "Test User"], repoDir).status).toBe(0);
+        expect(git(["config", "user.email", "test@example.com"], repoDir).status).toBe(0);
+        expect(git(["add", "package.json"], repoDir).status).toBe(0);
+        expect(git(["commit", "-m", "init"], repoDir).status).toBe(0);
+        expect(git(["branch", "feature/db"], repoDir).status).toBe(0);
+        expect(git(["worktree", "add", worktreeDir, "feature/db"], repoDir).status).toBe(0);
+
+        const { status, stdout } = run(["get", "db"], {
+          cwd: worktreeDir,
+          env: getEnv(),
+        });
+        expect(status).toBe(0);
+        expect(stdout.trim()).toBe("127.0.0.1:5500");
+      } finally {
+        fs.rmSync(worktreeDir, { recursive: true, force: true });
+        fs.rmSync(repoDir, { recursive: true, force: true });
+      }
     });
 
     it("rejects unknown flags", () => {
