@@ -87,6 +87,18 @@ portless run next dev   # -> http://fix-ui.myapp.localhost:1355
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+### Path-based routing
+
+Route multiple apps under one hostname by URL path:
+
+```bash
+portless myapp vite dev                      # serves /
+portless myapp --path /api pnpm start        # serves /api/*
+portless myapp --path /docs next dev         # serves /docs/*
+```
+
+The proxy uses longest-prefix matching. The full request path is forwarded unchanged. Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain. Also available as `PORTLESS_PATH=/api`.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -124,6 +136,7 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 | `PORTLESS_HTTPS`      | Set to `1` to always enable HTTPS/HTTP/2                           |
 | `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                  |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent |
+| `PORTLESS_PATH`       | Path prefix for path-based routing (e.g. /api)                     |
 | `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts (auto-enabled for custom TLDs)  |
 | `PORTLESS_STATE_DIR`  | Override the state directory                                       |
 | `PORTLESS=0`          | Bypass the proxy, run the command directly                         |
@@ -165,6 +178,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | `portless alias --remove <name>`       | Remove a static route                                         |
 | `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                       |
 | `portless hosts clean`                 | Remove portless entries from /etc/hosts                       |
+| `portless <name> --path /prefix <cmd>` | Route by URL path prefix (path-based routing)                 |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment       |
 | `portless <name> --force <cmd>`        | Override an existing route registered by another process      |
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)     |

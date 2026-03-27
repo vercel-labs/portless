@@ -41,15 +41,40 @@ export function escapeHtml(str: string): string {
 }
 
 /**
- * Format a URL for the given hostname. Omits the port when it matches the
- * protocol default (80 for HTTP, 443 for HTTPS).
+ * Normalize a path prefix for storage: ensure leading slash, strip trailing
+ * slash. Returns `undefined` for root path ("/") or empty input — callers
+ * should treat `undefined` as "match all paths" (root catch-all).
  */
-export function formatUrl(hostname: string, proxyPort: number, tls = false): string {
+export function normalizePathPrefix(input: string | undefined): string | undefined {
+  if (input === undefined || input === "" || input === "/") return undefined;
+  let p = input;
+  if (!p.startsWith("/")) p = "/" + p;
+  if (p.endsWith("/") && p.length > 1) p = p.slice(0, -1);
+  if (!/^\/[a-zA-Z0-9/._-]+$/.test(p)) {
+    throw new Error(
+      `Invalid path prefix "${input}": only letters, digits, hyphens, underscores, dots, and slashes are allowed`
+    );
+  }
+  return p;
+}
+
+/**
+ * Format a URL for the given hostname. Omits the port when it matches the
+ * protocol default (80 for HTTP, 443 for HTTPS). Appends path prefix when
+ * provided.
+ */
+export function formatUrl(
+  hostname: string,
+  proxyPort: number,
+  tls = false,
+  pathPrefix?: string
+): string {
   const proto = tls ? "https" : "http";
   const defaultPort = tls ? 443 : 80;
-  return proxyPort === defaultPort
-    ? `${proto}://${hostname}`
-    : `${proto}://${hostname}:${proxyPort}`;
+  const base =
+    proxyPort === defaultPort ? `${proto}://${hostname}` : `${proto}://${hostname}:${proxyPort}`;
+  if (!pathPrefix) return base;
+  return `${base}${pathPrefix}`;
 }
 
 /**
