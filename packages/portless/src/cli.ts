@@ -8,7 +8,13 @@ import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import { createProxyServer } from "./proxy.js";
-import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import {
+  fixOwnership,
+  formatUrl,
+  isErrnoException,
+  normalizePathPrefix,
+  parseHostname,
+} from "./utils.js";
 import { syncHostsFile, cleanHostsFile } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
@@ -350,7 +356,7 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
 
   console.log(chalk.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
-    const url = formatUrl(route.hostname, proxyPort, tls);
+    const url = formatUrl(route.hostname, proxyPort, tls, route.pathPrefix);
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
     console.log(
       `  ${chalk.cyan(url)}  ${chalk.gray("->")}  ${chalk.white(`localhost:${route.port}`)}  ${chalk.gray(label)}`
@@ -369,7 +375,8 @@ async function runApp(
   tld: string,
   force: boolean,
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
-  desiredPort?: number
+  desiredPort?: number,
+  pathPrefix?: string
 ) {
   const hostname = parseHostname(name, tld);
 
@@ -389,7 +396,8 @@ async function runApp(
   }
 
   console.log(chalk.blue.bold(`\nportless\n`));
-  console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
+  const displayHostname = pathPrefix ? `${hostname}${pathPrefix}` : hostname;
+  console.log(chalk.gray(`-- ${displayHostname} (auto-resolves to 127.0.0.1)`));
   if (autoInfo) {
     const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
     console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
@@ -397,12 +405,16 @@ async function runApp(
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
   }
+  if (pathPrefix) {
+    console.log(chalk.gray(`-- Path "${pathPrefix}"`));
+  }
 
   // Check if proxy is running, auto-start if possible
   if (!(await isProxyRunning(proxyPort, tls))) {
     const defaultPort = getDefaultPort();
     const needsSudo = !isWindows && defaultPort < PRIVILEGED_PORT_THRESHOLD;
     const wantHttps = isHttpsEnvEnabled();
+    const wantWildcard = isWildcardEnvEnabled();
 
     if (needsSudo) {
       // Privileged port requires sudo -- must prompt interactively
@@ -432,6 +444,7 @@ async function runApp(
       const startArgs = [process.execPath, process.argv[1], "proxy", "start"];
       if (wantHttps) startArgs.push("--https");
       if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
+      if (wantWildcard) startArgs.push("--wildcard");
       const result = spawnSync("sudo", startArgs, {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -452,6 +465,7 @@ async function runApp(
       const startArgs = [process.argv[1], "proxy", "start"];
       if (wantHttps) startArgs.push("--https");
       if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
+      if (wantWildcard) startArgs.push("--wildcard");
       const result = spawnSync(process.execPath, startArgs, {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -500,7 +514,7 @@ async function runApp(
 
   // Register route
   try {
-    store.addRoute(hostname, port, process.pid, force);
+    store.addRoute(hostname, port, process.pid, force, pathPrefix);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(chalk.red(`Error: ${err.message}`));
@@ -509,7 +523,7 @@ async function runApp(
     throw err;
   }
 
-  const finalUrl = formatUrl(hostname, proxyPort, tls);
+  const finalUrl = formatUrl(hostname, proxyPort, tls, pathPrefix);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
@@ -532,7 +546,7 @@ async function runApp(
     },
     onCleanup: () => {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, pathPrefix);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -550,6 +564,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** URL path prefix for path-based routing (e.g. "/api"). */
+  pathPrefix?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -583,6 +599,12 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+function pathPrefixFromEnv(): string | undefined {
+  const envVal = process.env.PORTLESS_PATH;
+  if (!envVal) return undefined;
+  return normalizePathPrefix(envVal);
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -594,6 +616,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let pathPrefix: string | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -611,6 +634,7 @@ ${chalk.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Override an existing route registered by another process
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --path <prefix>        URL path prefix for path-based routing (e.g. /api)
   --help, -h             Show this help
 
 ${chalk.bold("Name inference (in order):")}
@@ -642,17 +666,26 @@ ${chalk.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(chalk.red("Error: --path requires a path value."));
+        console.error(chalk.cyan("  portless run --path /api <command...>"));
+        process.exit(1);
+      }
+      pathPrefix = normalizePathPrefix(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --name, --force, --app-port, --help"));
+      console.error(chalk.blue("Known flags: --name, --force, --app-port, --path, --help"));
       process.exit(1);
     }
     i++;
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  if (!pathPrefix) pathPrefix = pathPrefixFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, pathPrefix, commandArgs: args.slice(i) };
 }
 
 /**
@@ -665,6 +698,7 @@ ${chalk.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let pathPrefix: string | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -677,9 +711,17 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(chalk.red("Error: --path requires a path value."));
+        console.error(chalk.cyan("  portless <name> --path /api <command...>"));
+        process.exit(1);
+      }
+      pathPrefix = normalizePathPrefix(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --path"));
       process.exit(1);
     }
     i++;
@@ -699,17 +741,26 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(chalk.red("Error: --path requires a path value."));
+        console.error(chalk.cyan("  portless <name> --path /api <command...>"));
+        process.exit(1);
+      }
+      pathPrefix = normalizePathPrefix(args[i]);
     } else {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --force, --app-port"));
+      console.error(chalk.blue("Known flags: --force, --app-port, --path"));
       process.exit(1);
     }
     i++;
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  if (!pathPrefix) pathPrefix = pathPrefixFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, pathPrefix, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -733,6 +784,7 @@ ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
+  ${chalk.cyan("portless <name> --path /prefix <cmd>")} Route by URL path prefix
   ${chalk.cyan("portless run <cmd>")}               Infer name from project, run through proxy
   ${chalk.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${chalk.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
@@ -751,7 +803,16 @@ ${chalk.bold("Examples:")}
   portless run next dev               # -> http://<project>.localhost:1355
   portless run next dev               # in worktree -> http://<worktree>.<project>.localhost:1355
   portless get backend                 # -> http://backend.localhost:1355 (for cross-service refs)
+  portless myapp --path /api pnpm start         # -> http://myapp.localhost:1355/api
+  portless myapp --path /docs next dev          # -> http://myapp.localhost:1355/docs
   # Wildcard subdomains: tenant.myapp.localhost also routes to myapp
+
+${chalk.bold("Path-based routing:")}
+  Route multiple apps under one hostname by URL path:
+    portless myapp vite dev                      # serves /
+    portless myapp --path /api pnpm start        # serves /api/*
+    portless myapp --path /docs next dev         # serves /docs/*
+  The proxy uses longest-prefix matching to dispatch requests.
 
 ${chalk.bold("In package.json:")}
   {
@@ -799,6 +860,7 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)
   PORTLESS_STATE_DIR=<path>     Override the state directory
+  PORTLESS_PATH=<path>          Path prefix for path-based routing (e.g. /api)
   PORTLESS=0                    Run command directly without proxy
 
 ${chalk.bold("Child process environment:")}
@@ -871,6 +933,7 @@ together:
 
 ${chalk.bold("Options:")}
   --no-worktree          Skip worktree prefix detection
+  --path <prefix>        Include a path prefix in the URL
   --help, -h             Show this help
 
 ${chalk.bold("Examples:")}
@@ -882,14 +945,22 @@ ${chalk.bold("Examples:")}
   }
 
   let skipWorktree = false;
+  let pathPrefix: string | undefined;
   const positional: string[] = [];
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--no-worktree") {
       skipWorktree = true;
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(chalk.red("Error: --path requires a path value."));
+        process.exit(1);
+      }
+      pathPrefix = normalizePathPrefix(args[i]);
     } else if (args[i].startsWith("-")) {
       console.error(chalk.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(chalk.blue("Known flags: --no-worktree, --help"));
+      console.error(chalk.blue("Known flags: --no-worktree, --path, --help"));
       process.exit(1);
     } else {
       positional.push(args[i]);
@@ -911,7 +982,7 @@ ${chalk.bold("Examples:")}
 
   const { port, tls, tld } = await discoverState();
   const hostname = parseHostname(effectiveName, tld);
-  const url = formatUrl(hostname, port, tls);
+  const url = formatUrl(hostname, port, tls, pathPrefix);
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
@@ -946,15 +1017,31 @@ ${chalk.bold("Examples:")}
       console.error(chalk.cyan("  portless alias --remove <name>"));
       process.exit(1);
     }
+    let removePathPrefix: string | undefined;
+    for (let i = 3; i < args.length; i++) {
+      if (args[i] === "--path") {
+        i++;
+        if (!args[i] || args[i].startsWith("-")) {
+          console.error(chalk.red("Error: --path requires a path value."));
+          process.exit(1);
+        }
+        removePathPrefix = normalizePathPrefix(args[i]);
+      }
+    }
     const hostname = parseHostname(aliasName, tld);
     const routes = store.loadRoutes();
-    const existing = routes.find((r) => r.hostname === hostname && r.pid === 0);
+    const existing = routes.find(
+      (r) =>
+        r.hostname === hostname &&
+        r.pid === 0 &&
+        (r.pathPrefix || undefined) === (removePathPrefix || undefined)
+    );
     if (!existing) {
-      console.error(chalk.red(`Error: No alias found for "${hostname}".`));
+      console.error(chalk.red(`Error: No alias found for "${hostname}${removePathPrefix || ""}".`));
       process.exit(1);
     }
-    store.removeRoute(hostname);
-    console.log(chalk.green(`Removed alias: ${hostname}`));
+    store.removeRoute(hostname, removePathPrefix);
+    console.log(chalk.green(`Removed alias: ${hostname}${removePathPrefix || ""}`));
     return;
   }
 
@@ -977,9 +1064,20 @@ ${chalk.bold("Examples:")}
     process.exit(1);
   }
 
+  let pathPrefix: string | undefined;
+  for (let i = 3; i < args.length; i++) {
+    if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(chalk.red("Error: --path requires a path value."));
+        process.exit(1);
+      }
+      pathPrefix = normalizePathPrefix(args[i]);
+    }
+  }
   const force = args.includes("--force");
-  store.addRoute(hostname, port, 0, force);
-  console.log(chalk.green(`Alias registered: ${hostname} -> 127.0.0.1:${port}`));
+  store.addRoute(hostname, port, 0, force, pathPrefix);
+  console.log(chalk.green(`Alias registered: ${hostname}${pathPrefix || ""} -> 127.0.0.1:${port}`));
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -1394,7 +1492,8 @@ async function handleRunMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    parsed.appPort
+    parsed.appPort,
+    parsed.pathPrefix
   );
 }
 
@@ -1430,7 +1529,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     undefined,
-    parsed.appPort
+    parsed.appPort,
+    parsed.pathPrefix
   );
 }
 
