@@ -110,6 +110,22 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("api.localhost");
     });
 
+    it("shows path prefixes in 404 page route list", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "app.localhost", port: 4001 },
+        { hostname: "app.localhost", port: 4002, pathPrefix: "/settings" },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("app.localhost");
+      expect(res.body).toContain("/settings");
+    });
+
     it("includes correct port in 404 page links", async () => {
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
       const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
@@ -338,6 +354,180 @@ describe("createProxyServer", () => {
       const parentRes = await request(server, { host: "myapp.localhost" });
       expect(parentRes.status).toBe(200);
       expect(parentRes.body).toBe("parent");
+    });
+
+    describe("path-based routing", () => {
+      it("routes to correct backend based on path prefix", async () => {
+        const rootBackend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("root");
+          })
+        );
+        await listen(rootBackend);
+        const rootAddr = rootBackend.address() as net.AddressInfo;
+
+        const settingsBackend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("settings");
+          })
+        );
+        await listen(settingsBackend);
+        const settingsAddr = settingsBackend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [
+          { hostname: "app.localhost", port: rootAddr.port },
+          { hostname: "app.localhost", port: settingsAddr.port, pathPrefix: "/settings" },
+        ];
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+        );
+        await listen(server);
+
+        const rootRes = await request(server, { host: "app.localhost", path: "/" });
+        expect(rootRes.body).toBe("root");
+
+        const settingsRes = await request(server, { host: "app.localhost", path: "/settings" });
+        expect(settingsRes.body).toBe("settings");
+
+        const settingsSubRes = await request(server, {
+          host: "app.localhost",
+          path: "/settings/profile",
+        });
+        expect(settingsSubRes.body).toBe("settings");
+      });
+
+      it("does not match path prefix at non-boundary", async () => {
+        const settingsBackend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("settings");
+          })
+        );
+        await listen(settingsBackend);
+        const settingsAddr = settingsBackend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [
+          { hostname: "app.localhost", port: settingsAddr.port, pathPrefix: "/settings" },
+        ];
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+        );
+        await listen(server);
+
+        // /settings-v2 should NOT match /settings
+        const res = await request(server, { host: "app.localhost", path: "/settings-v2" });
+        expect(res.status).toBe(404);
+      });
+
+      it("selects longest matching path prefix", async () => {
+        const settingsBackend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("settings");
+          })
+        );
+        await listen(settingsBackend);
+        const settingsAddr = settingsBackend.address() as net.AddressInfo;
+
+        const advancedBackend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("advanced");
+          })
+        );
+        await listen(advancedBackend);
+        const advancedAddr = advancedBackend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [
+          { hostname: "app.localhost", port: settingsAddr.port, pathPrefix: "/settings" },
+          { hostname: "app.localhost", port: advancedAddr.port, pathPrefix: "/settings/advanced" },
+        ];
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+        );
+        await listen(server);
+
+        const res = await request(server, {
+          host: "app.localhost",
+          path: "/settings/advanced/theme",
+        });
+        expect(res.body).toBe("advanced");
+      });
+
+      it("preserves full request path to backend", async () => {
+        let receivedPath = "";
+        const backend = trackServer(
+          http.createServer((req, res) => {
+            receivedPath = req.url || "";
+            res.writeHead(200);
+            res.end("ok");
+          })
+        );
+        await listen(backend);
+        const addr = backend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [
+          { hostname: "app.localhost", port: addr.port, pathPrefix: "/settings" },
+        ];
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+        );
+        await listen(server);
+
+        await request(server, { host: "app.localhost", path: "/settings/profile?tab=general" });
+        expect(receivedPath).toBe("/settings/profile?tab=general");
+      });
+
+      it("falls back to root route when no path prefix matches", async () => {
+        const rootBackend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("root");
+          })
+        );
+        await listen(rootBackend);
+        const rootAddr = rootBackend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [
+          { hostname: "app.localhost", port: rootAddr.port },
+          { hostname: "app.localhost", port: 9999, pathPrefix: "/settings" },
+        ];
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+        );
+        await listen(server);
+
+        const res = await request(server, { host: "app.localhost", path: "/unknown" });
+        expect(res.body).toBe("root");
+      });
+
+      it("works with wildcard subdomain + path prefix", async () => {
+        const backend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("wildcard-path");
+          })
+        );
+        await listen(backend);
+        const addr = backend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [
+          { hostname: "app.localhost", port: addr.port, pathPrefix: "/settings" },
+        ];
+        const server = trackServer(
+          createProxyServer({
+            getRoutes: () => routes,
+            proxyPort: TEST_PROXY_PORT,
+            strict: false,
+          })
+        );
+        await listen(server);
+
+        const res = await request(server, { host: "tenant.app.localhost", path: "/settings/foo" });
+        expect(res.body).toBe("wildcard-path");
+      });
     });
   });
 

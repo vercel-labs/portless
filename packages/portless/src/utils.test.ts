@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { escapeHtml, formatUrl, isErrnoException, parseHostname } from "./utils.js";
+import {
+  escapeHtml,
+  formatUrl,
+  isErrnoException,
+  normalizePathPrefix,
+  parseHostname,
+} from "./utils.js";
 
 describe("escapeHtml", () => {
   it("escapes angle brackets", () => {
@@ -57,6 +63,44 @@ describe("isErrnoException", () => {
   });
 });
 
+describe("normalizePathPrefix", () => {
+  it("returns undefined for undefined input", () => {
+    expect(normalizePathPrefix(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined for '/'", () => {
+    expect(normalizePathPrefix("/")).toBeUndefined();
+  });
+
+  it("returns undefined for empty string", () => {
+    expect(normalizePathPrefix("")).toBeUndefined();
+  });
+
+  it("adds leading slash if missing", () => {
+    expect(normalizePathPrefix("settings")).toBe("/settings");
+  });
+
+  it("strips trailing slash", () => {
+    expect(normalizePathPrefix("/settings/")).toBe("/settings");
+  });
+
+  it("preserves valid path", () => {
+    expect(normalizePathPrefix("/settings")).toBe("/settings");
+  });
+
+  it("handles nested paths", () => {
+    expect(normalizePathPrefix("/app/settings")).toBe("/app/settings");
+  });
+
+  it("allows dots in paths", () => {
+    expect(normalizePathPrefix("/api/v2.0")).toBe("/api/v2.0");
+  });
+
+  it("throws for paths with invalid characters", () => {
+    expect(() => normalizePathPrefix("/set tings")).toThrow("Invalid path prefix");
+  });
+});
+
 describe("formatUrl", () => {
   it("omits port for standard HTTP port (80)", () => {
     expect(formatUrl("myapp.localhost", 80)).toBe("http://myapp.localhost");
@@ -66,6 +110,22 @@ describe("formatUrl", () => {
     expect(formatUrl("myapp.localhost", 1355)).toBe("http://myapp.localhost:1355");
     expect(formatUrl("myapp.localhost", 8080)).toBe("http://myapp.localhost:8080");
     expect(formatUrl("myapp.localhost", 3000)).toBe("http://myapp.localhost:3000");
+  });
+
+  it("appends path prefix to URL", () => {
+    expect(formatUrl("myapp.localhost", 1355, false, "/settings")).toBe(
+      "http://myapp.localhost:1355/settings"
+    );
+  });
+
+  it("appends path prefix with HTTPS", () => {
+    expect(formatUrl("myapp.localhost", 443, true, "/metrics")).toBe(
+      "https://myapp.localhost/metrics"
+    );
+  });
+
+  it("ignores undefined path prefix", () => {
+    expect(formatUrl("myapp.localhost", 1355, false)).toBe("http://myapp.localhost:1355");
   });
 });
 
