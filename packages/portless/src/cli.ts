@@ -21,6 +21,7 @@ import {
   findPidOnPort,
   getDefaultPort,
   getDefaultTld,
+  hasPlaceholders,
   injectFrameworkFlags,
   isHttpsEnvEnabled,
   isWildcardEnvEnabled,
@@ -28,6 +29,7 @@ import {
   isWindows,
   prompt,
   readTldFromDir,
+  replacePlaceholders,
   readTlsMarker,
   resolveStateDir,
   spawnCommand,
@@ -512,8 +514,19 @@ async function runApp(
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
 
-  // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
-  injectFrameworkFlags(commandArgs, port);
+  // Replace {PORT}, {HOST}, {PORTLESS_URL} placeholders in command args
+  const usedPlaceholders = hasPlaceholders(commandArgs);
+  replacePlaceholders(commandArgs, {
+    PORT: port.toString(),
+    HOST: "127.0.0.1",
+    PORTLESS_URL: finalUrl,
+  });
+
+  // Inject --port for frameworks that ignore the PORT env var (e.g. Vite).
+  // Skip when the user explicitly used placeholders.
+  if (!usedPlaceholders) {
+    injectFrameworkFlags(commandArgs, port);
+  }
 
   // Run the command
   console.log(
@@ -800,6 +813,14 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
+
+${chalk.bold("Placeholders:")}
+  Use {PORT}, {HOST}, or {PORTLESS_URL} in command args to pass the
+  assigned values directly. Useful for tools that ignore the PORT env
+  var:
+    portless run my-server --port {PORT}
+    portless run my-server --port {PORT} --host {HOST}
+  When placeholders are used, automatic --port/--host injection is skipped.
 
 ${chalk.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on

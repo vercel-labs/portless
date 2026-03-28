@@ -31,6 +31,14 @@ portless myapp next dev
 
 The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
 
+For tools not covered by auto-injection, use `{PORT}`, `{HOST}`, or `{PORTLESS_URL}` placeholders in your command args:
+
+```bash
+portless run my-server --port {PORT} --host {HOST}
+```
+
+Placeholders are replaced with the assigned values before the command runs. When placeholders are present, automatic `--port`/`--host` injection is skipped.
+
 ## Use in package.json
 
 ```json

@@ -655,6 +655,42 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   }
 }
 
+// ---------------------------------------------------------------------------
+// Placeholder substitution
+// ---------------------------------------------------------------------------
+
+/** Recognized placeholder tokens. */
+const PLACEHOLDERS = ["{PORT}", "{HOST}", "{PORTLESS_URL}"] as const;
+
+/**
+ * Check if any element in `commandArgs` is a recognized placeholder.
+ */
+export function hasPlaceholders(commandArgs: string[]): boolean {
+  return commandArgs.some((arg) => (PLACEHOLDERS as readonly string[]).includes(arg));
+}
+
+/**
+ * Replace placeholder tokens in `commandArgs` in-place.
+ * Only exact-match arguments are replaced (e.g. `{PORT}` but not
+ * `http://localhost:{PORT}`).
+ */
+export function replacePlaceholders(
+  commandArgs: string[],
+  vars: { PORT: string; HOST: string; PORTLESS_URL: string }
+): void {
+  const map: Record<string, string> = {
+    "{PORT}": vars.PORT,
+    "{HOST}": vars.HOST,
+    "{PORTLESS_URL}": vars.PORTLESS_URL,
+  };
+  for (let i = 0; i < commandArgs.length; i++) {
+    const replacement = map[commandArgs[i]];
+    if (replacement !== undefined) {
+      commandArgs[i] = replacement;
+    }
+  }
+}
+
 /**
  * Prompt the user for input via readline. Returns empty string if stdin closes.
  */

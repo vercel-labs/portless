@@ -14,8 +14,10 @@ import {
   findFreePort,
   getDefaultPort,
   getDefaultTld,
+  hasPlaceholders,
   injectFrameworkFlags,
   isProxyRunning,
+  replacePlaceholders,
   parsePidFromNetstat,
   readTldFromDir,
   resolveStateDir,
@@ -719,5 +721,93 @@ describe("validateTld", () => {
       expect(validateTld(tld)).toBeNull();
       expect(RISKY_TLDS.has(tld)).toBe(true);
     }
+  });
+});
+
+describe("hasPlaceholders", () => {
+  it("returns true when {PORT} is present", () => {
+    expect(hasPlaceholders(["my-server", "--port", "{PORT}"])).toBe(true);
+  });
+
+  it("returns true when {HOST} is present", () => {
+    expect(hasPlaceholders(["server", "--host", "{HOST}"])).toBe(true);
+  });
+
+  it("returns true when {PORTLESS_URL} is present", () => {
+    expect(hasPlaceholders(["server", "--url", "{PORTLESS_URL}"])).toBe(true);
+  });
+
+  it("returns false when no placeholders are present", () => {
+    expect(hasPlaceholders(["next", "dev"])).toBe(false);
+  });
+
+  it("returns false for empty args", () => {
+    expect(hasPlaceholders([])).toBe(false);
+  });
+
+  it("returns false for partial matches", () => {
+    expect(hasPlaceholders(["http://localhost:{PORT}"])).toBe(false);
+  });
+
+  it("returns false for lowercase variants", () => {
+    expect(hasPlaceholders(["{port}"])).toBe(false);
+  });
+});
+
+describe("replacePlaceholders", () => {
+  const vars = { PORT: "4567", HOST: "127.0.0.1", PORTLESS_URL: "http://myapp.localhost:1355" };
+
+  it("replaces {PORT}", () => {
+    const args = ["my-server", "--port", "{PORT}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["my-server", "--port", "4567"]);
+  });
+
+  it("replaces {HOST}", () => {
+    const args = ["server", "--host", "{HOST}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["server", "--host", "127.0.0.1"]);
+  });
+
+  it("replaces {PORTLESS_URL}", () => {
+    const args = ["server", "--url", "{PORTLESS_URL}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["server", "--url", "http://myapp.localhost:1355"]);
+  });
+
+  it("replaces multiple placeholders", () => {
+    const args = ["server", "--host", "{HOST}", "--port", "{PORT}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["server", "--host", "127.0.0.1", "--port", "4567"]);
+  });
+
+  it("does not replace partial matches", () => {
+    const args = ["--url", "http://localhost:{PORT}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["--url", "http://localhost:{PORT}"]);
+  });
+
+  it("does not replace lowercase variants", () => {
+    const args = ["{port}", "{host}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["{port}", "{host}"]);
+  });
+
+  it("does not replace unknown placeholders", () => {
+    const args = ["{FOO}", "{BAR}"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["{FOO}", "{BAR}"]);
+  });
+
+  it("does nothing for empty args", () => {
+    const args: string[] = [];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual([]);
+  });
+
+  it("leaves non-placeholder args untouched", () => {
+    const args = ["next", "dev", "--port", "3000"];
+    replacePlaceholders(args, vars);
+    expect(args).toEqual(["next", "dev", "--port", "3000"]);
   });
 });
