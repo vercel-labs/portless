@@ -105,6 +105,14 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` and `--host` CLI flags.
 
+For tools not covered by auto-injection, use `{PORT}`, `{HOST}`, or `{PORTLESS_URL}` placeholders in command args:
+
+```bash
+portless run my-server --port {PORT} --host {HOST}
+```
+
+Placeholders are replaced with the assigned values before the command runs. When placeholders are present, automatic `--port`/`--host` injection is skipped.
+
 ### State directory
 
 Portless stores its state (routes, PID file, port file) in a directory that depends on the proxy port:
@@ -197,10 +205,13 @@ portless proxy start -p 8080
 
 Portless auto-injects `--port` and `--host` flags for frameworks that ignore the `PORT` env var: **Vite**, **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically.
 
-For other frameworks that don't read `PORT`, pass the port manually:
+For other tools not covered by auto-injection, use placeholders:
 
-- **Webpack Dev Server**: use `--port $PORT`
-- **Custom servers**: read `process.env.PORT` and listen on it
+```bash
+portless run my-server --port {PORT} --host {HOST}
+```
+
+For custom servers, read `process.env.PORT` and listen on it.
 
 ### Permission errors
 
