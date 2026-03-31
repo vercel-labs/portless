@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.7.2
+
+### Bug Fixes
+
+- **`--port` injection for package runners** -- Fixed `--port` injection for commands run via package runners like `npx`, `pnpm dlx`, etc. (#150)
+- **TLS cert generation** -- Fixed TLS cert generation for long hostnames and proxy startup races (#149)
+- **Proxy crash on ECONNRESET** -- Handle `ECONNRESET` errors on TLS wrapper sockets to prevent proxy crash (#127)
+- **Windows `node not recognized`** -- Resolved `node not recognized` error on Windows when running `portless run` (#126)
+
+### Documentation
+
+- Added Windows to docs requirements section (#122)
+
+### Improvements
+
+- Added GitHub Action for automated npm publishing (#130)
+
+## 0.7.1
+
+### Documentation
+
+- Updated docs site header (#118)
+
 ## 0.7.0
 
 ### Features

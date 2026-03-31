@@ -28,9 +28,6 @@ jobs:
 
       - run: pnpm install --frozen-lockfile
 
-      - run: pnpm changeset status --since=origin/main
-        if: github.event_name == 'pull_request'
-
       - run: pnpm format:check
 
       - run: pnpm lint
