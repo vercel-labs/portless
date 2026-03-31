@@ -131,6 +131,31 @@ sudo portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
 
+## LAN mode
+
+```bash
+portless proxy start --lan
+portless proxy start --lan --https
+portless proxy start --lan --ip 192.168.1.42
+```
+
+`--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
+
+LAN mode depends on the system mDNS tools that portless already spawns: macOS ships with `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s equivalent). If the command is missing or your network isn’t reachable, `portless proxy start --lan` prints the relevant error and exits.
+
+### Framework notes
+
+- **Next.js** restricts development-mode origins to the hostname you started the server with (usually `localhost`). Add the `.local` URLs you need to `allowedDevOrigins` in `next.config.js` so LAN mode requests succeed:
+
+  ```js
+  // next.config.js
+  module.exports = {
+    allowedDevOrigins: ["https://myapp.localhost:1355", "https://api.myapp.localhost:1355"],
+  };
+  ```
+
+- **Expo** exposes the same dev server on your network when you run `npx expo start --lan` (alias for `--host lan`). Use that flag when testing from Expo Go or development builds on real devices so the QR code points to the LAN IP rather than a localhost-only address.
+
 ## Commands
 
 ```bash
@@ -150,6 +175,7 @@ PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 # Proxy control
 portless proxy start             # Start the proxy (port 1355, daemon)
 portless proxy start --https     # Start with HTTP/2 + TLS
+portless proxy start --lan       # Start with LAN mode (mDNS .local for devices)
 portless proxy start -p 80       # Start on port 80 (requires sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
@@ -161,6 +187,8 @@ portless proxy stop              # Stop the proxy
 ```
 -p, --port <number>              Port for the proxy (default: 1355)
 --https                          Enable HTTP/2 + TLS with auto-generated certs
+--lan                            Enable LAN mode (mDNS .local for real devices)
+--ip <address>                   Override auto-detected LAN IP (use with --lan)
 --cert <path>                    Use a custom TLS certificate (implies --https)
 --key <path>                     Use a custom TLS private key (implies --https)
 --no-tls                         Disable HTTPS (overrides PORTLESS_HTTPS)
@@ -179,6 +207,7 @@ portless proxy stop              # Stop the proxy
 PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=1                 Always enable HTTPS
+PORTLESS_LAN=1                   Always enable LAN mode (auto-detects LAN IP)
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
