@@ -24,18 +24,28 @@ import {
   injectFrameworkFlags,
   isHttpsEnvEnabled,
   isWildcardEnvEnabled,
+  isLanEnvEnabled,
   isProxyRunning,
   isWindows,
   prompt,
+  readLanMarker,
   readTldFromDir,
   readTlsMarker,
   resolveStateDir,
   spawnCommand,
   validateTld,
   waitForProxy,
+  writeLanMarker,
   writeTldFile,
   writeTlsMarker,
 } from "./cli-utils.js";
+import {
+  getLocalNetworkIp,
+  isMdnsSupported,
+  publish,
+  unpublish,
+  cleanupAll as cleanupMdns,
+} from "./mdns.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -68,11 +78,18 @@ function startProxyServer(
   proxyPort: number,
   tld: string,
   tlsOptions?: { cert: Buffer; key: Buffer },
+  lanIp?: string | null,
   strict?: boolean
 ): void {
   store.ensureDir();
 
   const isTls = !!tlsOptions;
+  const mdnsSupport = isMdnsSupported();
+  const activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
+  if (lanIp && !mdnsSupport.supported) {
+    const reason = mdnsSupport.reason ?? "mDNS publishing is not supported on this platform.";
+    console.warn(chalk.yellow(`LAN mode disabled: ${reason}`));
+  }
 
   // Create empty routes file if it doesn't exist
   const routesPath = store.getRoutesPath();
@@ -96,13 +113,34 @@ function startProxyServer(
   const autoSyncHosts =
     syncVal === "1" ||
     syncVal === "true" ||
-    (tld !== DEFAULT_TLD && syncVal !== "0" && syncVal !== "false");
+    (tld !== DEFAULT_TLD && !activeLanIp && syncVal !== "0" && syncVal !== "false");
+
+  const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
   const reloadRoutes = () => {
     try {
+      const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
       if (autoSyncHosts) {
         syncHostsFile(cachedRoutes.map((r) => r.hostname));
+      }
+      // Sync mDNS records with current routes
+      if (activeLanIp) {
+        const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
+        for (const route of cachedRoutes) {
+          const previousPort = previousRoutes.get(route.hostname);
+          if (previousPort === undefined) {
+            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+          } else if (previousPort !== route.port) {
+            unpublish(route.hostname);
+            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+          }
+        }
+        for (const hostname of previousRoutes.keys()) {
+          if (!currentRoutes.has(hostname)) {
+            unpublish(hostname);
+          }
+        }
       }
     } catch {
       // File may be mid-write; keep existing cached routes
@@ -122,6 +160,13 @@ function startProxyServer(
 
   if (autoSyncHosts) {
     syncHostsFile(cachedRoutes.map((r) => r.hostname));
+  }
+
+  // Publish mDNS for routes that already exist at startup
+  if (activeLanIp) {
+    for (const route of cachedRoutes) {
+      publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+    }
   }
 
   const server = createProxyServer({
@@ -162,6 +207,7 @@ function startProxyServer(
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     writeTlsMarker(store.dir, isTls);
     writeTldFile(store.dir, tld);
+    writeLanMarker(store.dir, activeLanIp);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
     const proto = isTls ? "HTTPS/2" : "HTTP";
     const tldLabel = tld !== DEFAULT_TLD ? ` (TLD: .${tld})` : "";
@@ -169,6 +215,14 @@ function startProxyServer(
     console.log(
       chalk.green(`${proto} proxy listening on port ${proxyPort}${tldLabel}${modeLabel}`)
     );
+    if (activeLanIp) {
+      console.log(chalk.green(`LAN mode: ${activeLanIp}`));
+      console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
+      if (isTls) {
+        console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
+        console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
+      }
+    }
   });
 
   // Cleanup on exit
@@ -181,6 +235,7 @@ function startProxyServer(
     if (watcher) {
       watcher.close();
     }
+    if (activeLanIp) cleanupMdns();
     try {
       fs.unlinkSync(store.pidPath);
     } catch {
@@ -193,6 +248,7 @@ function startProxyServer(
     }
     writeTlsMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
+    writeLanMarker(store.dir, null);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
@@ -369,40 +425,17 @@ async function runApp(
   tld: string,
   force: boolean,
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
-  desiredPort?: number
+  desiredPort?: number,
+  lanIp?: string | null
 ) {
-  const hostname = parseHostname(name, tld);
-
-  let envTld: string;
-  try {
-    envTld = getDefaultTld();
-  } catch (err) {
-    console.error(chalk.red(`Error: ${(err as Error).message}`));
-    process.exit(1);
-  }
-  if (envTld !== DEFAULT_TLD && envTld !== tld) {
-    console.warn(
-      chalk.yellow(
-        `Warning: PORTLESS_TLD=${envTld} but the running proxy uses .${tld}. Using .${tld}.`
-      )
-    );
-  }
-
   console.log(chalk.blue.bold(`\nportless\n`));
-  console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
-  if (autoInfo) {
-    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
-    console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
-    if (autoInfo.prefix) {
-      console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
-    }
-  }
 
   // Check if proxy is running, auto-start if possible
   if (!(await isProxyRunning(proxyPort, tls))) {
     const defaultPort = getDefaultPort();
     const needsSudo = !isWindows && defaultPort < PRIVILEGED_PORT_THRESHOLD;
     const wantHttps = isHttpsEnvEnabled();
+    const wantLan = isLanEnvEnabled();
 
     if (needsSudo) {
       // Privileged port requires sudo -- must prompt interactively
@@ -431,7 +464,8 @@ async function runApp(
       console.log(chalk.yellow("Starting proxy (requires sudo)..."));
       const startArgs = [process.execPath, process.argv[1], "proxy", "start"];
       if (wantHttps) startArgs.push("--https");
-      if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
+      if (wantLan) startArgs.push("--lan");
+      if (tld !== DEFAULT_TLD && !wantLan) startArgs.push("--tld", tld);
       const result = spawnSync("sudo", startArgs, {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -451,7 +485,8 @@ async function runApp(
       console.log(chalk.yellow("Starting proxy..."));
       const startArgs = [process.argv[1], "proxy", "start"];
       if (wantHttps) startArgs.push("--https");
-      if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
+      if (wantLan) startArgs.push("--lan");
+      if (tld !== DEFAULT_TLD && !wantLan) startArgs.push("--tld", tld);
       const result = spawnSync(process.execPath, startArgs, {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -468,9 +503,10 @@ async function runApp(
       }
     }
 
-    // Re-read TLS/TLD state after auto-start
+    // Re-read TLS/TLD/LAN state after auto-start
     const autoTls = readTlsMarker(stateDir);
     tld = readTldFromDir(stateDir);
+    lanIp = readLanMarker(stateDir);
 
     // Wait for proxy to be ready
     if (!(await waitForProxy(defaultPort, undefined, undefined, autoTls))) {
@@ -489,6 +525,38 @@ async function runApp(
     console.log(chalk.green("Proxy started in background"));
   } else {
     console.log(chalk.gray("-- Proxy is running"));
+  }
+
+  // Compute hostname after auto-start so tld reflects the running proxy
+  // (e.g. --lan changes tld from "localhost" to "local")
+  const hostname = parseHostname(name, tld);
+
+  let envTld: string;
+  try {
+    envTld = getDefaultTld();
+  } catch (err) {
+    console.error(chalk.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
+  if (envTld !== DEFAULT_TLD && envTld !== tld) {
+    console.warn(
+      chalk.yellow(
+        `Warning: PORTLESS_TLD=${envTld} but the running proxy uses .${tld}. Using .${tld}.`
+      )
+    );
+  }
+
+  if (lanIp) {
+    console.log(chalk.gray(`-- ${hostname} (LAN: ${lanIp})`));
+  } else {
+    console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
+  }
+  if (autoInfo) {
+    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
+    console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
+    if (autoInfo.prefix) {
+      console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+    }
   }
 
   const port = desiredPort ?? (await findFreePort());
@@ -511,14 +579,32 @@ async function runApp(
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+  if (lanIp) {
+    console.log(chalk.green(`  LAN -> ${finalUrl}`));
+    console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+  }
+
+  // Child servers always bind to localhost; the proxy handles cross-device LAN access.
+  const hostBind = "127.0.0.1";
+
+  // Ensure PORTLESS_LAN is set before framework flag injection so that
+  // injectFrameworkFlags can detect LAN mode (e.g. Expo uses --host lan).
+  // This covers the case where the proxy was started with --lan separately
+  // and lanIp was discovered from the state marker, not from the env var.
+  if (lanIp && !process.env.PORTLESS_LAN) {
+    process.env.PORTLESS_LAN = "1";
+  }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
   injectFrameworkFlags(commandArgs, port);
 
+  const basename = path.basename(commandArgs[0]);
+  const isExpo = basename === "expo";
+
   // Run the command
   console.log(
     chalk.gray(
-      `Running: PORT=${port} HOST=127.0.0.1 PORTLESS_URL=${finalUrl} ${commandArgs.join(" ")}\n`
+      `Running: PORT=${port} HOST=${hostBind} PORTLESS_URL=${finalUrl} ${isExpo ? `EXPO_PACKAGER_PROXY_URL=${finalUrl}` : ""} ${commandArgs.join(" ")}\n`
     )
   );
 
@@ -526,9 +612,12 @@ async function runApp(
     env: {
       ...process.env,
       PORT: port.toString(),
-      HOST: "127.0.0.1",
+      HOST: hostBind,
       PORTLESS_URL: finalUrl,
       __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: `.${tld}`,
+      // In order to keep the finalUrl saved in the Expo Development Client we need to set this env variable
+      ...(isExpo ? { EXPO_PACKAGER_PROXY_URL: finalUrl } : {}),
+      ...(lanIp ? { PORTLESS_LAN: "1" } : {}),
     },
     onCleanup: () => {
       try {
@@ -730,6 +819,7 @@ ${chalk.bold("Install:")}
 ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start")}             Start the proxy (background daemon)
   ${chalk.cyan("portless proxy start --https")}     Start with HTTP/2 + TLS (auto-generates certs)
+  ${chalk.cyan("portless proxy start --lan")}       Start with LAN mode (mDNS for real device testing)
   ${chalk.cyan("portless proxy start -p 80")}       Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy stop")}              Stop the proxy
   ${chalk.cyan("portless <name> <cmd>")}            Run your app through the proxy
@@ -774,12 +864,22 @@ ${chalk.bold("HTTP/2 + HTTPS:")}
   On first use, portless generates a local CA and adds it to your
   system trust store. No browser warnings. No sudo required on macOS.
 
+${chalk.bold("LAN mode:")}
+  Use --lan to make services accessible from other devices (phones,
+  tablets) on the same WiFi network via mDNS (.local domains).
+  Useful for testing React Native / Expo apps on real devices.
+    ${chalk.cyan("portless proxy start --lan")}
+    ${chalk.cyan("portless proxy start --lan --https")}
+    ${chalk.cyan("portless proxy start --lan --ip 192.168.1.42")}
+
 ${chalk.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
   -p, --port <number>           Port for the proxy to listen on (default: 1355)
                                 Ports < 1024 require sudo
   --https                       Enable HTTP/2 + TLS with auto-generated certs
+  --lan                         Enable LAN mode (mDNS .local, for real device testing)
+  --ip <address>                Override auto-detected LAN IP (use with --lan)
   --cert <path>                 Use a custom TLS certificate (implies --https)
   --key <path>                  Use a custom TLS private key (implies --https)
   --no-tls                      Disable HTTPS (overrides PORTLESS_HTTPS)
@@ -795,6 +895,7 @@ ${chalk.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=1              Always enable HTTPS (set in .bashrc / .zshrc)
+  PORTLESS_LAN=1                Always enable LAN mode (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)
@@ -805,6 +906,7 @@ ${chalk.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
   HOST                          Always 127.0.0.1
   PORTLESS_URL                  Public URL of the app (e.g. http://myapp.localhost:1355)
+  PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
 
 ${chalk.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
@@ -1081,11 +1183,17 @@ ${chalk.bold("portless proxy")} - Manage the portless proxy server.
 ${chalk.bold("Usage:")}
   ${chalk.cyan("portless proxy start")}                Start the proxy (daemon)
   ${chalk.cyan("portless proxy start --https")}        Start with HTTP/2 + TLS
+  ${chalk.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${chalk.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${chalk.cyan("portless proxy start -p 80")}          Start on port 80 (requires sudo)
   ${chalk.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${chalk.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${chalk.cyan("portless proxy stop")}                 Stop the proxy
+
+${chalk.bold("LAN mode (--lan):")}
+  Makes services accessible from other devices on the same WiFi network
+  via mDNS (.local domains). Useful for testing on real mobile devices.
+  Auto-detects your LAN IP, or use --ip to specify one.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
@@ -1163,14 +1271,46 @@ ${chalk.bold("Usage:")}
       process.exit(1);
     }
   }
+  // LAN mode (--lan flag or PORTLESS_LAN=1 env var, parsed globally in main())
+  const lanMode = isLanEnvEnabled();
+  const mdnsSupport = isMdnsSupported();
+  let lanIp: string | null = null;
+
+  if (lanMode) {
+    if (!mdnsSupport.supported) {
+      console.error(
+        chalk.red(
+          "Error: LAN mode requires mDNS publishing, which is not supported on this platform."
+        )
+      );
+      if (mdnsSupport.reason) {
+        console.error(chalk.gray(mdnsSupport.reason));
+      }
+      process.exit(1);
+    }
+
+    // --lan forces .local TLD (mDNS requires it per RFC 6762)
+    tld = "local";
+
+    // Use --ip override if provided, otherwise auto-detect
+    lanIp = process.env.PORTLESS_LAN_IP || getLocalNetworkIp();
+
+    if (!lanIp) {
+      console.error(chalk.red("Error: Could not detect LAN IP. Are you connected to a network?"));
+      console.error(chalk.blue("Specify manually:"));
+      console.error(chalk.cyan("  portless proxy start --lan --ip 192.168.1.42"));
+      process.exit(1);
+    }
+  }
+
   const riskyReason = RISKY_TLDS.get(tld);
-  if (riskyReason) {
+  if (riskyReason && !lanMode) {
     console.warn(chalk.yellow(`Warning: .${tld} -- ${riskyReason}`));
   }
 
   const syncDisabled =
     process.env.PORTLESS_SYNC_HOSTS === "0" || process.env.PORTLESS_SYNC_HOSTS === "false";
-  if (tld !== DEFAULT_TLD && syncDisabled) {
+  if (tld !== DEFAULT_TLD && !lanMode && syncDisabled) {
     console.warn(
       chalk.yellow(
         `Warning: .${tld} domains require ${HOSTS_DISPLAY} entries to resolve to 127.0.0.1.`
@@ -1287,7 +1427,7 @@ ${chalk.bold("Usage:")}
   // Foreground mode: run the proxy directly in this process
   if (isForeground) {
     console.log(chalk.blue.bold("\nportless proxy\n"));
-    startProxyServer(store, proxyPort, tld, tlsOptions, useWildcard ? false : undefined);
+    startProxyServer(store, proxyPort, tld, tlsOptions, lanIp, useWildcard ? false : undefined);
     return;
   }
 
@@ -1314,7 +1454,9 @@ ${chalk.bold("Usage:")}
         daemonArgs.push("--https");
       }
     }
-    if (tld !== DEFAULT_TLD) {
+    if (lanMode && lanIp) {
+      daemonArgs.push("--lan", "--ip", lanIp);
+    } else if (tld !== DEFAULT_TLD) {
       daemonArgs.push("--tld", tld);
     }
     if (useWildcard) {
@@ -1346,6 +1488,10 @@ ${chalk.bold("Usage:")}
 
   const proto = useHttps ? "HTTPS/2" : "HTTP";
   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
+  if (lanMode && lanIp) {
+    console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
+    console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
+  }
 }
 
 async function handleRunMode(args: string[]): Promise<void> {
@@ -1380,7 +1526,7 @@ async function handleRunMode(args: string[]): Promise<void> {
   const worktree = detectWorktreePrefix();
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
-  const { dir, port, tls, tld } = await discoverState();
+  const { dir, port, tls, tld, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
@@ -1394,7 +1540,8 @@ async function handleRunMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    parsed.appPort
+    parsed.appPort,
+    lanIp
   );
 }
 
@@ -1416,7 +1563,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     .map((label) => truncateLabel(label))
     .join(".");
 
-  const { dir, port, tls, tld } = await discoverState();
+  const { dir, port, tls, tld, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(chalk.yellow(msg)),
   });
@@ -1430,7 +1577,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     tld,
     parsed.force,
     undefined,
-    parsed.appPort
+    parsed.appPort,
+    lanIp
   );
 }
 
@@ -1461,6 +1609,38 @@ async function main() {
     console.error(chalk.blue("Install globally instead:"));
     console.error(chalk.cyan("  npm install -g portless"));
     process.exit(1);
+  }
+
+  // --lan / --ip: global flags that enable LAN mode. Strip from args and
+  // convert to env vars so all downstream code paths see them regardless
+  // of where the user placed them (e.g. `portless --lan run ...`,
+  // `portless proxy start --lan`, `portless --lan myapp ...`).
+  // Only scan before the `--` separator to avoid consuming flags meant
+  // for the child command (e.g. `portless run tool -- --ip 0.0.0.0`).
+  const separatorIdx = args.indexOf("--");
+  const globalEnd = separatorIdx === -1 ? args.length : separatorIdx;
+
+  const lanIdx = args.indexOf("--lan");
+  if (lanIdx !== -1 && lanIdx < globalEnd) {
+    args.splice(lanIdx, 1);
+    process.env.PORTLESS_LAN = "1";
+  }
+  // Re-check separator position after possible splice
+  const separatorIdx2 = args.indexOf("--");
+  const globalEnd2 = separatorIdx2 === -1 ? args.length : separatorIdx2;
+
+  const ipIdx = args.indexOf("--ip");
+  if (ipIdx !== -1 && ipIdx < globalEnd2) {
+    const ipValue = args[ipIdx + 1];
+    if (ipValue && !ipValue.startsWith("-")) {
+      process.env.PORTLESS_LAN_IP = ipValue;
+      args.splice(ipIdx, 2);
+    } else {
+      console.error(chalk.red("Error: --ip requires an IP address."));
+      console.error(chalk.cyan("  portless --lan --ip 192.168.1.42 run <command>"));
+      process.exit(1);
+    }
+    process.env.PORTLESS_LAN = "1";
   }
 
   // --name flag: treat the next arg as an explicit app name, bypassing

@@ -134,6 +134,33 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/** Name of the marker file that stores the LAN IP when --lan is active. */
+const LAN_MARKER_FILE = "proxy.lan";
+
+/** Read the LAN marker from a state directory. Returns the IP or null. */
+export function readLanMarker(dir: string): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(dir, LAN_MARKER_FILE), "utf-8").trim();
+    return raw || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write or remove the LAN marker in the state directory. */
+export function writeLanMarker(dir: string, ip: string | null): void {
+  const markerPath = path.join(dir, LAN_MARKER_FILE);
+  if (!ip) {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  } else {
+    fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+  }
+}
+
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
 
@@ -221,7 +248,15 @@ export function isWildcardEnvEnabled(): boolean {
 }
 
 /**
- * Discover the active proxy's state directory, port, TLS mode, and TLD.
+ * Return whether LAN mode is requested via the PORTLESS_LAN env var.
+ */
+export function isLanEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_LAN;
+  return val === "1" || val === "true";
+}
+
+/**
+ * Discover the active proxy's state directory, port, TLS mode, TLD, and LAN IP.
  * Checks the user-level dir first, then the system-level dir.
  * Falls back to the system dir with the default port if nothing is running.
  */
@@ -230,6 +265,7 @@ export async function discoverState(): Promise<{
   port: number;
   tls: boolean;
   tld: string;
+  lanIp: string | null;
 }> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
@@ -237,7 +273,8 @@ export async function discoverState(): Promise<{
     const port = readPortFromDir(dir) ?? getDefaultPort();
     const tls = readTlsMarker(dir);
     const tld = readTldFromDir(dir);
-    return { dir, port, tls, tld };
+    const lanIp = readLanMarker(dir);
+    return { dir, port, tls, tld, lanIp };
   }
 
   // Check user-level state first (~/.portless)
@@ -249,7 +286,8 @@ export async function discoverState(): Promise<{
     if (await isProxyRunning(userPort)) {
       const tls = readTlsMarker(USER_STATE_DIR);
       const tld = readTldFromDir(USER_STATE_DIR);
-      return { dir: USER_STATE_DIR, port: userPort, tls, tld };
+      const lanIp = readLanMarker(USER_STATE_DIR);
+      return { dir: USER_STATE_DIR, port: userPort, tls, tld, lanIp };
     }
   }
 
@@ -259,7 +297,8 @@ export async function discoverState(): Promise<{
     if (await isProxyRunning(systemPort)) {
       const tls = readTlsMarker(SYSTEM_STATE_DIR);
       const tld = readTldFromDir(SYSTEM_STATE_DIR);
-      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls, tld };
+      const lanIp = readLanMarker(SYSTEM_STATE_DIR);
+      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls, tld, lanIp };
     }
   }
 
@@ -273,11 +312,18 @@ export async function discoverState(): Promise<{
       const dir = resolveStateDir(port);
       const tls = readTlsMarker(dir);
       const tld = readTldFromDir(dir);
-      return { dir, port, tls, tld };
+      const lanIp = readLanMarker(dir);
+      return { dir, port, tls, tld, lanIp };
     }
   }
 
-  return { dir: resolveStateDir(defaultPort), port: defaultPort, tls: false, tld: getDefaultTld() };
+  return {
+    dir: resolveStateDir(defaultPort),
+    port: defaultPort,
+    tls: false,
+    tld: getDefaultTld(),
+    lanIp: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -635,6 +681,11 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  *
  * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ *
+ * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
+ * lan|tunnel|localhost). Defaulting to localhost keeps the dev server local unless
+ * LAN mode is explicitly requested (PORTLESS_LAN=1), in which case we revert to lan
+ * so device discovery still works.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
   const basename = findFrameworkBasename(commandArgs);
@@ -650,7 +701,8 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   }
 
   if (!commandArgs.includes("--host")) {
-    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
+    const expoLanMode = basename === "expo" && isLanEnvEnabled();
+    const hostValue = basename === "expo" ? (expoLanMode ? "lan" : "localhost") : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
 }

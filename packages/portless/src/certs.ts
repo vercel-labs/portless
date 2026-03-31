@@ -59,6 +59,20 @@ function isCertValid(certPath: string): boolean {
 }
 
 /**
+ * Check whether a certificate includes all expected SANs (*.local).
+ * Returns false if the cert is missing SANs that were added in later versions,
+ * triggering regeneration so existing users get .local coverage.
+ */
+function isCertSansComplete(certPath: string): boolean {
+  try {
+    const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
+    return text.includes("*.local");
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Check whether a certificate uses a strong signature algorithm.
  * Reject SHA-1 signatures to avoid OpenSSL "ca md too weak" failures.
  *
@@ -168,7 +182,7 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
 
 /**
  * Generate a server certificate signed by the local CA.
- * Covers localhost and *.localhost via Subject Alternative Names.
+ * Covers localhost, *.localhost, and *.local via Subject Alternative Names.
  */
 function generateServerCert(stateDir: string): { certPath: string; keyPath: string } {
   const caKeyPath = path.join(stateDir, CA_KEY_FILE);
@@ -185,6 +199,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
 
   // Write extension config for SANs
+  const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
   fs.writeFileSync(
     extPath,
     [
@@ -192,7 +207,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
       "basicConstraints=CA:FALSE",
       "keyUsage=digitalSignature,keyEncipherment",
       "extendedKeyUsage=serverAuth",
-      "subjectAltName=DNS:localhost,DNS:*.localhost",
+      `subjectAltName=${sans.join(",")}`,
     ].join("\n") + "\n"
   );
 
@@ -284,7 +299,8 @@ export function ensureCerts(stateDir: string): {
     !fileExists(serverCertPath) ||
     !fileExists(serverKeyPath) ||
     !isCertValid(serverCertPath) ||
-    !isCertSignatureStrong(serverCertPath)
+    !isCertSignatureStrong(serverCertPath) ||
+    !isCertSansComplete(serverCertPath)
   ) {
     generateServerCert(stateDir);
   }
@@ -531,7 +547,6 @@ async function generateHostCertAsync(
     // Add a wildcard for sibling subdomains at the same level
     sans.push(`DNS:*.${parts.slice(1).join(".")}`);
   }
-
   await fs.promises.writeFile(
     extPath,
     [

@@ -325,10 +325,23 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["react-native", "start", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
-  it("injects for expo without --strictPort", () => {
+  it("injects for expo without --strictPort (defaults to localhost)", () => {
     const args = ["expo", "start"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
+  });
+
+  it("injects --host lan for expo when PORTLESS_LAN is set", () => {
+    const prev = process.env.PORTLESS_LAN;
+    process.env.PORTLESS_LAN = "1";
+    try {
+      const args = ["expo", "start"];
+      injectFrameworkFlags(args, 4567);
+      expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "lan"]);
+    } finally {
+      if (prev === undefined) delete process.env.PORTLESS_LAN;
+      else process.env.PORTLESS_LAN = prev;
+    }
   });
 
   it("does not inject for frameworks that read PORT", () => {
