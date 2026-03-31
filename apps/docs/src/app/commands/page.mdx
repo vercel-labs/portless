@@ -83,7 +83,7 @@ Shows active routes and their assigned ports.
 ## Trust the CA
 
 ```bash
-sudo portless trust
+portless trust
 ```
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
@@ -144,8 +144,8 @@ portless proxy stop
 ## Hosts
 
 ```bash
-sudo portless hosts sync     # add current routes to /etc/hosts
-sudo portless hosts clean    # remove portless entries from /etc/hosts
+portless hosts sync     # add current routes to /etc/hosts
+portless hosts clean    # remove portless entries from /etc/hosts
 ```
 
 Auto-enabled for custom TLDs. For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable.

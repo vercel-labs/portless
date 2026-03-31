@@ -73,12 +73,12 @@ portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
 
 ```bash
-sudo portless proxy start --tld test
+portless proxy start --tld test
 portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for custom TLDs when started with sudo, so `.test` domains resolve correctly.
+The proxy auto-syncs `/etc/hosts` for custom TLDs, so `.test` domains resolve correctly.
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 

@@ -270,7 +270,7 @@ function sudoStopOrHint(port: number): void {
     if (!sudoStop(port)) {
       console.error(colors.red("Failed to stop proxy with sudo."));
       console.error(colors.blue("Try manually:"));
-      console.error(colors.cyan(`  sudo portless proxy stop -p ${port}`));
+      console.error(colors.cyan(`  portless proxy stop -p ${port}`));
     }
   } else {
     console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
@@ -462,9 +462,9 @@ async function runApp(
 
     if (needsSudo && !process.stdin.isTTY) {
       console.error(colors.red("Proxy is not running."));
-      console.error(colors.blue(`Start the proxy first (requires sudo for port ${defaultPort}):`));
-      console.error(colors.cyan("  sudo portless proxy start"));
-      console.error(colors.blue("Or use an unprivileged port (no sudo):"));
+      console.error(colors.blue("Start the proxy first:"));
+      console.error(colors.cyan("  portless proxy start"));
+      console.error(colors.blue("Or use an unprivileged port (no sudo prompt):"));
       console.error(colors.cyan("  portless proxy start -p 1355"));
       process.exit(1);
     }
@@ -514,7 +514,7 @@ async function runApp(
       const fallbackDir = resolveStateDir(getDefaultPort(wantTls));
       const logPath = path.join(fallbackDir, "proxy.log");
       console.error(colors.blue("Try starting it manually:"));
-      console.error(colors.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
+      console.error(colors.cyan("  portless proxy start"));
       if (fs.existsSync(logPath)) {
         console.error(colors.gray(`Logs: ${logPath}`));
       }
@@ -1294,14 +1294,10 @@ ${colors.bold("Usage:")}
     if (isForeground) {
       return;
     }
-    const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
-    const sudoPrefix = needsSudo ? "sudo " : "";
     const portFlag = proxyPort !== getProtocolPort(useHttps) ? ` -p ${proxyPort}` : "";
     console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
     console.log(
-      colors.blue(
-        `To restart: ${sudoPrefix}portless proxy stop${portFlag} && ${sudoPrefix}portless proxy start${portFlag}`
-      )
+      colors.blue(`To restart: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
     );
     return;
   }
@@ -1358,8 +1354,10 @@ ${colors.bold("Usage:")}
     if (!hasExplicitPort) {
       proxyPort = FALLBACK_PROXY_PORT;
       console.log(colors.yellow(`Falling back to port ${proxyPort}.`));
-      console.log(colors.blue(`For clean URLs without port numbers, run:`));
-      console.log(colors.cyan(`  sudo portless proxy start${extraFlags}`));
+      console.log(
+        colors.blue(`For clean URLs without port numbers, re-run and accept the sudo prompt:`)
+      );
+      console.log(colors.cyan(`  portless proxy start${extraFlags}`));
 
       if (await isProxyRunning(proxyPort)) {
         console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
@@ -1374,9 +1372,11 @@ ${colors.bold("Usage:")}
       });
     } else {
       // Explicit port was requested but sudo failed -- error out.
-      console.error(colors.red(`Error: Port ${proxyPort} requires sudo and elevation failed.`));
-      console.error(colors.blue("Run with sudo:"));
-      console.error(colors.cyan(`  sudo portless proxy start -p ${proxyPort}${extraFlags}`));
+      console.error(
+        colors.red(`Error: Port ${proxyPort} requires elevated privileges and sudo failed.`)
+      );
+      console.error(colors.blue("Try again (portless will prompt for sudo):"));
+      console.error(colors.cyan(`  portless proxy start -p ${proxyPort}${extraFlags}`));
       process.exit(1);
     }
   }
@@ -1505,8 +1505,7 @@ ${colors.bold("Usage:")}
   if (!(await waitForProxy(proxyPort, undefined, undefined, useHttps))) {
     console.error(colors.red("Proxy failed to start (timed out waiting for it to listen)."));
     console.error(colors.blue("Try starting the proxy in the foreground to see the error:"));
-    const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
-    console.error(colors.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start --foreground`));
+    console.error(colors.cyan("  portless proxy start --foreground"));
     if (fs.existsSync(logPath)) {
       console.error(colors.gray(`Logs: ${logPath}`));
     }

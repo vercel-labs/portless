@@ -98,7 +98,7 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `https://<name>.localhost`; the proxy forwards to the app's assigned port
 
-`.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `sudo portless hosts sync` to add entries to `/etc/hosts` if needed.
+`.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `portless hosts sync` to add entries to `/etc/hosts` if needed.
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` and `--host` CLI flags.
 
@@ -132,7 +132,7 @@ HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with 
 ```bash
 portless proxy start --cert ./c.pem --key ./k.pem  # Use custom certs
 portless proxy start --no-tls                       # Disable HTTPS (plain HTTP)
-sudo portless trust                                 # Add CA to trust store later
+portless trust                                      # Add CA to trust store later
 ```
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
@@ -214,8 +214,8 @@ Safari relies on the system DNS resolver for `.localhost` subdomains, which may 
 Fix:
 
 ```bash
-sudo portless hosts sync    # Adds current routes to /etc/hosts
-sudo portless hosts clean   # Remove entries later
+portless hosts sync    # Adds current routes to /etc/hosts
+portless hosts clean   # Remove entries later
 ```
 
 Auto-syncs `/etc/hosts` for custom TLDs (e.g. `--tld test`). For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable.
@@ -225,7 +225,7 @@ Auto-syncs `/etc/hosts` for custom TLDs (e.g. `--tld test`). For `.localhost`, s
 The local CA may not be trusted yet. Run:
 
 ```bash
-sudo portless trust
+portless trust
 ```
 
 This adds the portless local CA to your system trust store. After that, restart the browser.

@@ -16,7 +16,7 @@ Plain `localhost` works because Google hardcodes it in a whitelist, but subdomai
 Any TLD in the Public Suffix List works. portless lets you set a custom TLD with `--tld`:
 
 ```bash
-sudo portless proxy start --https -p 443 --tld dev
+portless proxy start --tld dev
 portless oauth-test next dev
 # -> https://oauth-test.dev
 ```
@@ -28,7 +28,7 @@ portless oauth-test next dev
 Using a bare TLD like `.dev` means your local domain (`oauth-test.dev`) could collide with a real domain someone else owns. For safer local development, use a subdomain of a domain you control:
 
 ```bash
-sudo portless proxy start --https -p 443 --tld dev
+portless proxy start --tld dev
 portless oauth-test.local.ctate next dev
 # -> https://oauth-test.local.ctate.dev
 ```
@@ -46,10 +46,10 @@ npm install -g portless
 ### 2. Start the proxy
 
 ```bash
-sudo portless proxy start --https -p 443 --tld dev
+portless proxy start --tld dev
 ```
 
-Port 443 is the standard HTTPS port, so URLs don't need a port number.
+Portless defaults to HTTPS on port 443 (auto-elevates with sudo), so URLs don't need a port number.
 
 ### 3. Create a Google OAuth client
 

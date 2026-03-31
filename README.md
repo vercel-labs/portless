@@ -75,12 +75,12 @@ Put `portless run` in your `package.json` once and it works everywhere -- the ma
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
 
 ```bash
-sudo portless proxy start --https --tld test
+portless proxy start --tld test
 portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for custom TLDs when started with sudo, so `.test` domains resolve correctly.
+The proxy auto-syncs `/etc/hosts` for custom TLDs, so `.test` domains resolve correctly.
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
@@ -115,8 +115,8 @@ portless proxy start --cert ./cert.pem --key ./key.pem
 # Disable HTTPS (plain HTTP on port 80)
 portless proxy start --no-tls
 
-# If you skipped sudo on first run, trust the CA later
-sudo portless trust
+# If you skipped the trust prompt on first run, trust the CA later
+portless trust
 ```
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
@@ -189,8 +189,8 @@ PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
 If Safari can't find your `.localhost` URL:
 
 ```bash
-sudo portless hosts sync    # Add current routes to /etc/hosts
-sudo portless hosts clean   # Clean up later
+portless hosts sync    # Add current routes to /etc/hosts
+portless hosts clean   # Clean up later
 ```
 
 Auto-syncs `/etc/hosts` for custom TLDs (e.g. `--tld test`). For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable. Disable with `PORTLESS_SYNC_HOSTS=0`.

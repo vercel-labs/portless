@@ -760,7 +760,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
     ) {
       return {
         trusted: false,
-        error: "Permission denied. Try: sudo portless trust",
+        error: "Permission denied. Try: portless trust",
       };
     }
     return { trusted: false, error: message };
