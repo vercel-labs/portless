@@ -17,11 +17,14 @@ import {
   FALLBACK_PROXY_PORT,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
+  WAIT_FOR_PROXY_INTERVAL_MS,
+  WAIT_FOR_PROXY_MAX_ATTEMPTS,
   discoverState,
   findFreePort,
   findPidOnPort,
   getDefaultPort,
   getDefaultTld,
+  getProtocolPort,
   injectFrameworkFlags,
   isHttpsEnvDisabled,
   isWildcardEnvEnabled,
@@ -72,8 +75,8 @@ function collectPortlessEnvArgs(): string[] {
 /**
  * Re-run `portless proxy stop` under sudo. Returns true if sudo succeeded.
  */
-function sudoStop(): boolean {
-  const stopArgs = [process.execPath, process.argv[1], "proxy", "stop"];
+function sudoStop(port: number): boolean {
+  const stopArgs = [process.execPath, process.argv[1], "proxy", "stop", "-p", String(port)];
   console.log(chalk.yellow("Elevating with sudo to stop the proxy..."));
   const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...stopArgs], {
     stdio: "inherit",
@@ -231,12 +234,12 @@ function startProxyServer(
 // Commands
 // ---------------------------------------------------------------------------
 
-function sudoStopOrHint(): void {
+function sudoStopOrHint(port: number): void {
   if (!isWindows) {
-    if (!sudoStop()) {
+    if (!sudoStop(port)) {
       console.error(chalk.red("Failed to stop proxy with sudo."));
       console.error(chalk.blue("Try manually:"));
-      console.error(chalk.cyan("  sudo portless proxy stop"));
+      console.error(chalk.cyan(`  sudo portless proxy stop -p ${port}`));
     }
   } else {
     console.error(chalk.red("Permission denied. The proxy was started with elevated privileges."));
@@ -266,7 +269,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           console.log(chalk.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
-            sudoStopOrHint();
+            sudoStopOrHint(proxyPort);
           } else {
             const message = err instanceof Error ? err.message : String(err);
             console.error(chalk.red(`Failed to stop proxy: ${message}`));
@@ -279,7 +282,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           }
         }
       } else if (!isWindows && process.getuid?.() !== 0) {
-        sudoStopOrHint();
+        sudoStopOrHint(proxyPort);
       } else {
         console.error(chalk.red(`Could not identify the process on port ${proxyPort}.`));
         console.error(chalk.blue("Try manually:"));
@@ -308,7 +311,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       process.kill(pid, 0);
     } catch (err: unknown) {
       if (isErrnoException(err) && err.code === "EPERM") {
-        sudoStopOrHint();
+        sudoStopOrHint(proxyPort);
         return;
       }
       console.log(chalk.yellow("Proxy process is no longer running. Cleaning up stale files."));
@@ -345,7 +348,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     console.log(chalk.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      sudoStopOrHint();
+      sudoStopOrHint(proxyPort);
     } else {
       const message = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Failed to stop proxy: ${message}`));
@@ -452,9 +455,8 @@ async function runApp(
     }
 
     console.log(chalk.yellow("Starting proxy..."));
-    // TLS mode is inherited by the child via PORTLESS_HTTPS in process.env.
-    // No explicit --https / --no-tls flag needed here.
     const startArgs = [process.argv[1], "proxy", "start"];
+    if (!wantTls) startArgs.push("--no-tls");
     if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
 
     const result = spawnSync(process.execPath, startArgs, {
@@ -462,18 +464,25 @@ async function runApp(
       timeout: SUDO_SPAWN_TIMEOUT_MS,
     });
 
-    // Give the daemon a moment to write state files, then discover which
-    // port it actually bound (could be 443, 1355, or other fallback).
-    // Using discoverState directly (instead of waitForProxy on a single
-    // port) avoids a ~5 s timeout when the proxy falls back to 1355.
+    // Poll discoverState + isProxyRunning until the daemon is reachable.
+    // The proxy may bind 443, fall back to 1355, or use another port, so we
+    // re-discover on each attempt instead of waiting on a single port.
+    let discovered: Awaited<ReturnType<typeof discoverState>> | null = null;
     if (result.status === 0) {
-      await new Promise((r) => setTimeout(r, 500));
+      for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
+        await new Promise((r) => setTimeout(r, WAIT_FOR_PROXY_INTERVAL_MS));
+        const state = await discoverState();
+        if (await isProxyRunning(state.port)) {
+          discovered = state;
+          break;
+        }
+      }
     }
 
-    const discovered = await discoverState();
-    if (!(await isProxyRunning(discovered.port))) {
+    if (!discovered) {
       console.error(chalk.red("Failed to start proxy."));
-      const logPath = path.join(discovered.dir, "proxy.log");
+      const fallbackDir = resolveStateDir(getDefaultPort(wantTls));
+      const logPath = path.join(fallbackDir, "proxy.log");
       console.error(chalk.blue("Try starting it manually:"));
       console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
       if (fs.existsSync(logPath)) {
@@ -1235,7 +1244,7 @@ ${chalk.bold("Usage:")}
     }
     const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
     const sudoPrefix = needsSudo ? "sudo " : "";
-    const portFlag = hasExplicitPort ? ` -p ${proxyPort}` : "";
+    const portFlag = proxyPort !== getProtocolPort(useHttps) ? ` -p ${proxyPort}` : "";
     console.log(chalk.yellow(`Proxy is already running on port ${proxyPort}.`));
     console.log(
       chalk.blue(
@@ -1267,8 +1276,16 @@ ${chalk.bold("Usage:")}
     });
 
     if (result.status === 0) {
-      if (!isForeground && (await waitForProxy(proxyPort))) {
-        console.log(chalk.green(`Proxy started on port ${proxyPort}.`));
+      if (!isForeground) {
+        if (await waitForProxy(proxyPort)) {
+          console.log(chalk.green(`Proxy started on port ${proxyPort}.`));
+        } else {
+          console.error(chalk.red("Proxy process started but is not responding."));
+          const logPath = path.join(resolveStateDir(proxyPort), "proxy.log");
+          if (fs.existsSync(logPath)) {
+            console.error(chalk.gray(`Logs: ${logPath}`));
+          }
+        }
       }
       return;
     }
