@@ -641,7 +641,7 @@ describe("CLI", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it("stops a root-owned proxy by auto-elevating with sudo", async () => {
+    it("stops a root-owned proxy by auto-elevating with sudo", { timeout: 30_000 }, async () => {
       // Start the proxy as root in the background
       bgProc = spawn("sudo", [process.execPath, CLI_PATH, "proxy", "start", "--foreground"], {
         stdio: "ignore",
@@ -654,8 +654,8 @@ describe("CLI", () => {
         },
       });
 
-      // Wait for the proxy to be listening
-      await waitForListen(TEST_PORT);
+      // Wait for the proxy to be listening (sudo + startup can be slow on CI)
+      await waitForListen(TEST_PORT, 15_000);
 
       // Stop as non-root -- should auto-elevate with sudo
       const stop = run(["proxy", "stop"], {
