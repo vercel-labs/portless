@@ -81,7 +81,7 @@ const MAX_PROXY_HOPS = 5;
  * falls back to wildcard subdomain matching (e.g. tenant.myapp.localhost
  * matches a route registered for myapp.localhost).
  *
- * When `strict` is true, only exact matches are returned -- unregistered
+ * When `strict` is true, only exact matches are returned; unregistered
  * subdomain prefixes will not fall back to the base service.
  */
 function findRoute(
@@ -376,7 +376,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     plainServer.on("upgrade", (req: http.IncomingMessage, socket: net.Socket) => {
       const host = getRequestHost(req);
       console.warn(
-        `[portless] Dropped plain-HTTP WebSocket upgrade for ${host} -- use wss:// instead`
+        `[portless] Dropped plain-HTTP WebSocket upgrade for ${host}; use wss:// instead`
       );
       socket.destroy();
     });

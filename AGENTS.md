@@ -14,6 +14,10 @@ Always check for the latest npm version when adding dependencies. Use `pnpm add 
 
 Do not use emojis anywhere in this repository (code, comments, output, docs).
 
+## Dashes
+
+Never use `--` as a dash in prose, comments, or user-facing output. Use an em dash (\u2014) when a dash is needed, but prefer rephrasing to avoid dashes entirely. The only exception is CLI flags (e.g. `--port`).
+
 ## Boolean Environment Variables
 
 Document boolean env vars using only `0` and `1` in CLI help, SKILL.md, docs pages, and README. Code accepts `true`/`false` as well (and `skip` for `PORTLESS`), but these alternatives are not documented.
@@ -22,9 +26,9 @@ Document boolean env vars using only `0` and `1` in CLI help, SKILL.md, docs pag
 
 When a change affects how humans or agents use portless (new/changed/removed commands, flags, behavior, or config), update all of these:
 
-1. `README.md` -- user-facing documentation
-2. `skills/portless/SKILL.md` -- agent skill for using portless
-3. `packages/portless/src/cli.ts` -- `--help` output
+1. `README.md` (user-facing documentation)
+2. `skills/portless/SKILL.md` (agent skill for using portless)
+3. `packages/portless/src/cli.ts` (`--help` output)
 
 ## Releasing
 

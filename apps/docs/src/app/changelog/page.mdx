@@ -4,32 +4,32 @@
 
 ### Breaking Changes
 
-- **Strict subdomain routing is now the default** -- Subdomains no longer automatically match parent hostnames (e.g. `api.myapp.localhost` no longer routes to `myapp.localhost`). Use the `--wildcard` flag or `PORTLESS_WILDCARD=1` env var to restore the previous behavior
+- **Strict subdomain routing is now the default**: Subdomains no longer automatically match parent hostnames (e.g. `api.myapp.localhost` no longer routes to `myapp.localhost`). Use the `--wildcard` flag or `PORTLESS_WILDCARD=1` env var to restore the previous behavior
 
 ### New Features
 
-- **`--wildcard` flag** -- Opt in to wildcard subdomain routing where subdomains match registered parent hostnames. Configurable via `PORTLESS_WILDCARD` env var
+- **`--wildcard` flag**: Opt in to wildcard subdomain routing where subdomains match registered parent hostnames. Configurable via `PORTLESS_WILDCARD` env var
 
 ### Bug Fixes
 
-- **Cert generation with dots in `$HOME`** -- Fix TLS certificate generation failing when the home directory path contains dots
-- **DNS label limit for `--name` flag** -- Fix regression where long `--name` values could exceed the 63-character DNS label limit
-- **Windows `DEP0190` deprecation warning** -- Silence Node.js deprecation warning on Windows by replacing `shell: true` with explicit `cmd.exe /d /s /c` spawning
-- **Windows duplicate `PATH` entries** -- Deduplicate `PATH` environment variables in child process spawn on Windows
+- **Cert generation with dots in `$HOME`**: Fix TLS certificate generation failing when the home directory path contains dots
+- **DNS label limit for `--name` flag**: Fix regression where long `--name` values could exceed the 63-character DNS label limit
+- **Windows `DEP0190` deprecation warning**: Silence Node.js deprecation warning on Windows by replacing `shell: true` with explicit `cmd.exe /d /s /c` spawning
+- **Windows duplicate `PATH` entries**: Deduplicate `PATH` environment variables in child process spawn on Windows
 
 ### Improvements
 
-- **Removed chalk dependency** -- Replaced chalk with lightweight ANSI color utilities to reduce install size
-- **Automated release process** -- Added CI workflow for automated npm publishing and GitHub releases
+- **Removed chalk dependency**: Replaced chalk with lightweight ANSI color utilities to reduce install size
+- **Automated release process**: Added CI workflow for automated npm publishing and GitHub releases
 
 ## 0.7.2
 
 ### Bug Fixes
 
-- **`--port` injection for package runners** -- Fix `--port` injection for commands run via package runners like `npx`, `pnpm dlx`, etc. (#150)
-- **TLS cert generation** -- Fix TLS cert generation for long hostnames and proxy startup races (#149)
-- **Proxy crash on ECONNRESET** -- Handle `ECONNRESET` errors on TLS wrapper sockets to prevent proxy crash (#127)
-- **Windows `node not recognized`** -- Resolve `node not recognized` error on Windows when running `portless run` (#126)
+- **`--port` injection for package runners**: Fix `--port` injection for commands run via package runners like `npx`, `pnpm dlx`, etc. (#150)
+- **TLS cert generation**: Fix TLS cert generation for long hostnames and proxy startup races (#149)
+- **Proxy crash on ECONNRESET**: Handle `ECONNRESET` errors on TLS wrapper sockets to prevent proxy crash (#127)
+- **Windows `node not recognized`**: Resolve `node not recognized` error on Windows when running `portless run` (#126)
 
 ### Documentation
 
@@ -49,26 +49,26 @@
 
 ### Features
 
-- **Windows support** -- Full cross-platform support for Windows. Uses `os.tmpdir()` for state directory, `netstat` for port detection, `certutil` for CA trust, and platform-aware command spawning. Includes Windows CI
+- **Windows support**: Full cross-platform support for Windows. Uses `os.tmpdir()` for state directory, `netstat` for port detection, `certutil` for CA trust, and platform-aware command spawning. Includes Windows CI
 
 ### Bug Fixes
 
-- **`--name` sanitization in `portless run`** -- Stop replacing dots with hyphens in `--name` values. Dots are valid and intentional in hostnames like `local.metaview`
-- **Worktree prefix only for linked worktrees** -- Only prepend the branch name for linked worktrees, not the root worktree. Previously any non-main branch got a prefix when multiple worktrees existed
-- **Windows hosts file paths** -- Use platform-aware hosts file path and error messages (Administrator vs sudo)
+- **`--name` sanitization in `portless run`**: Stop replacing dots with hyphens in `--name` values. Dots are valid and intentional in hostnames like `local.metaview`
+- **Worktree prefix only for linked worktrees**: Only prepend the branch name for linked worktrees, not the root worktree. Previously any non-main branch got a prefix when multiple worktrees existed
+- **Windows hosts file paths**: Use platform-aware hosts file path and error messages (Administrator vs sudo)
 
 ## 0.6.0
 
 ### Features
 
-- **Custom TLD** -- Use `--tld` to set a custom TLD (e.g. `.test`) instead of `.localhost`. Configurable via `PORTLESS_TLD` env var. Auto-syncs `/etc/hosts` for custom TLDs when started with sudo. Warns about risky TLDs like `.local` and `.dev`. Recommended: `.test` (IANA-reserved, no collision risk)
-- **`portless get` command** -- Print the URL for a service, useful for wiring services together (e.g. `BACKEND_URL=$(portless get backend)`). Applies worktree prefix by default; use `--no-worktree` to skip
-- **`--name` flag for `portless run`** -- Override the inferred base name while preserving the worktree prefix (e.g. `portless run --name myapp next dev` in a worktree produces `fix-ui.myapp.localhost`)
+- **Custom TLD**: Use `--tld` to set a custom TLD (e.g. `.test`) instead of `.localhost`. Configurable via `PORTLESS_TLD` env var. Auto-syncs `/etc/hosts` for custom TLDs when started with sudo. Warns about risky TLDs like `.local` and `.dev`. Recommended: `.test` (IANA-reserved, no collision risk)
+- **`portless get` command**: Print the URL for a service, useful for wiring services together (e.g. `BACKEND_URL=$(portless get backend)`). Applies worktree prefix by default; use `--no-worktree` to skip
+- **`--name` flag for `portless run`**: Override the inferred base name while preserving the worktree prefix (e.g. `portless run --name myapp next dev` in a worktree produces `fix-ui.myapp.localhost`)
 
 ### Bug Fixes
 
-- **HTTPS proxy trust and stop on macOS with sudo** -- Fix CA trust check and `proxy stop` when the proxy was started with sudo on macOS
-- **DNS label length for worktree hostnames** -- Truncate worktree-prefixed hostnames to respect the 63-character DNS label limit
+- **HTTPS proxy trust and stop on macOS with sudo**: Fix CA trust check and `proxy stop` when the proxy was started with sudo on macOS
+- **DNS label length for worktree hostnames**: Truncate worktree-prefixed hostnames to respect the 63-character DNS label limit
 
 ## 0.5.2
 
@@ -80,26 +80,26 @@
 
 ### Bug Fixes
 
-- **npm README** -- Copy root `README.md` into the package at publish time so it appears on npmjs.com
-- **homepage** -- Point npm homepage to https://port1355.dev
+- **npm README**: Copy root `README.md` into the package at publish time so it appears on npmjs.com
+- **homepage**: Point npm homepage to https://port1355.dev
 
 ## 0.5.0
 
 ### Features
 
-- **`portless run` subcommand** -- Automatically infer the project name from `package.json`, git root, or directory name instead of specifying it manually. In git worktrees, the branch name is prepended as a subdomain prefix (e.g. `fix-ui.myapp.localhost`) so each worktree gets a unique URL with no config changes
-- **`portless alias` command** -- Register routes for services not spawned by portless (e.g. Docker containers with published ports)
-- **`PORTLESS_URL` env var** -- Child processes receive `PORTLESS_URL` containing the public `.localhost` URL so apps can self-reference their own URL
-- **`--app-port` flag** -- Specify a fixed port for the app instead of automatic assignment, also configurable via `PORTLESS_APP_PORT` env var
-- **Wildcard subdomain routing** -- Subdomains now match registered hostnames (e.g. `tenant.myapp.localhost` routes to `myapp.localhost`). Exact matches take priority
-- **`/etc/hosts` sync** -- Automatically sync `.localhost` hostnames to `/etc/hosts` for environments where `.localhost` does not resolve to `127.0.0.1`
-- **Multi-distro Linux CA trust** -- `portless trust` now supports Arch, Fedora/RHEL/CentOS, and openSUSE in addition to Debian/Ubuntu
-- **Expo and React Native support** -- Auto-inject `--port` and `--host` flags for `expo start` and `react-native start`
-- **Branded error and status pages** -- The proxy renders styled HTML pages for 404, 502, 508, and other status codes
+- **`portless run` subcommand**: Automatically infer the project name from `package.json`, git root, or directory name instead of specifying it manually. In git worktrees, the branch name is prepended as a subdomain prefix (e.g. `fix-ui.myapp.localhost`) so each worktree gets a unique URL with no config changes
+- **`portless alias` command**: Register routes for services not spawned by portless (e.g. Docker containers with published ports)
+- **`PORTLESS_URL` env var**: Child processes receive `PORTLESS_URL` containing the public `.localhost` URL so apps can self-reference their own URL
+- **`--app-port` flag**: Specify a fixed port for the app instead of automatic assignment, also configurable via `PORTLESS_APP_PORT` env var
+- **Wildcard subdomain routing**: Subdomains now match registered hostnames (e.g. `tenant.myapp.localhost` routes to `myapp.localhost`). Exact matches take priority
+- **`/etc/hosts` sync**: Automatically sync `.localhost` hostnames to `/etc/hosts` for environments where `.localhost` does not resolve to `127.0.0.1`
+- **Multi-distro Linux CA trust**: `portless trust` now supports Arch, Fedora/RHEL/CentOS, and openSUSE in addition to Debian/Ubuntu
+- **Expo and React Native support**: Auto-inject `--port` and `--host` flags for `expo start` and `react-native start`
+- **Branded error and status pages**: The proxy renders styled HTML pages for 404, 502, 508, and other status codes
 
 ### Bug Fixes
 
-- **Stream errors** -- Handle proxy stream errors gracefully to prevent unhandled exceptions from crashing the proxy
+- **Stream errors**: Handle proxy stream errors gracefully to prevent unhandled exceptions from crashing the proxy
 
 ## 0.4.2
 

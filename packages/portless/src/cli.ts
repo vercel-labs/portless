@@ -283,7 +283,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   const pidPath = store.pidPath;
 
   if (!fs.existsSync(pidPath)) {
-    // PID file is missing -- check whether something is still listening.
+    // PID file is missing; check whether something is still listening.
     // Use plain HTTP: the TLS proxy accepts it via byte-peeking, and this
     // avoids false negatives from TLS handshake timeouts.
     if (await isProxyRunning(proxyPort)) {
@@ -462,13 +462,11 @@ async function runApp(
 
     if (needsSudo && !process.stdin.isTTY) {
       console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
-      console.error(
-        colors.blue("Option 1 -- start the proxy in a terminal (will prompt for sudo):")
-      );
+      console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
       console.error(colors.cyan("  portless proxy start"));
       console.error(
         colors.blue(
-          `Option 2 -- use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
+          `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
         )
       );
       console.error(colors.cyan(`  portless proxy start -p ${FALLBACK_PROXY_PORT}`));
@@ -1276,7 +1274,7 @@ ${colors.bold("Usage:")}
   }
   const riskyReason = RISKY_TLDS.get(tld);
   if (riskyReason) {
-    console.warn(colors.yellow(`Warning: .${tld} -- ${riskyReason}`));
+    console.warn(colors.yellow(`Warning: .${tld}: ${riskyReason}`));
   }
 
   const syncDisabled =
@@ -1370,7 +1368,7 @@ ${colors.bold("Usage:")}
       process.exit(1);
     }
 
-    // sudo failed -- fall back to the unprivileged port if the user didn't
+    // sudo failed: fall back to the unprivileged port if the user didn't
     // explicitly request a privileged one.
     if (!hasExplicitPort) {
       proxyPort = FALLBACK_PROXY_PORT;
@@ -1392,7 +1390,7 @@ ${colors.bold("Usage:")}
         onWarning: (msg: string) => console.warn(colors.yellow(msg)),
       });
     } else {
-      // Explicit port was requested but sudo failed -- error out.
+      // Explicit port was requested but sudo failed; error out.
       console.error(
         colors.red(`Error: Port ${proxyPort} requires elevated privileges and sudo failed.`)
       );
@@ -1640,7 +1638,7 @@ async function main() {
 
   const args = process.argv.slice(2);
 
-  // Block npx / pnpm dlx -- portless should be installed globally, not run
+  // Block npx / pnpm dlx: portless should be installed globally, not run
   // via npx. Running "sudo npx" is unsafe because it performs package
   // resolution and downloads as root.
   const isNpx = process.env.npm_command === "exec" && !process.env.npm_lifecycle_event;

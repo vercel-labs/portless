@@ -533,11 +533,11 @@ describe("createProxyServer", () => {
       );
       await listen(server);
 
-      // Request with no existing hops header -- should be set to 1
+      // Request with no existing hops header; should be set to 1
       await request(server, { host: "myapp.localhost" });
       expect(receivedHops).toBe("1");
 
-      // Request with existing hops -- should be incremented
+      // Request with existing hops; should be incremented
       const addr = server.address();
       if (!addr || typeof addr === "string") throw new Error("no addr");
 
@@ -630,7 +630,7 @@ describe("createProxyServer", () => {
       if (!proxyAddr || typeof proxyAddr === "string") throw new Error("no addr");
 
       // Backend that proxies /api requests back through portless with the
-      // same Host header -- simulates Vite without changeOrigin: true
+      // same Host header (simulates Vite without changeOrigin: true)
       const loopingBackend = trackServer(
         http.createServer((req, res) => {
           if (req.url?.startsWith("/api")) {
@@ -1331,7 +1331,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     const addr = server.address();
     if (!addr || typeof addr === "string") throw new Error("no addr");
 
-    // Use HTTP/2 client -- hop-by-hop headers must be stripped for HTTP/2
+    // Use HTTP/2 client; hop-by-hop headers must be stripped for HTTP/2
     const result = await new Promise<{
       status: number;
       headers: Record<string, string>;

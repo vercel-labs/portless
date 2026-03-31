@@ -200,7 +200,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   // Use -CAserial with an explicit path instead of -CAcreateserial.
   // -CAcreateserial derives the .srl path by stripping the CA cert's file
   // extension, but some OpenSSL/LibreSSL versions use the *last dot in the
-  // full path* -- so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
+  // full path*, so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
   // to write "/Users/ashish.srl" instead of the intended location.
   const srlPath = path.join(stateDir, "ca.srl");
   if (!fileExists(srlPath)) {
@@ -484,7 +484,7 @@ function sanitizeHostForFilename(hostname: string): string {
 /**
  * Maximum length of the X.509 Common Name (CN) field, per RFC 5280 §4.1.2.6.
  * Modern TLS uses Subject Alternative Names (SAN) for hostname matching, so
- * truncating the CN is safe -- SANs always take precedence.
+ * truncating the CN is safe because SANs always take precedence.
  */
 const MAX_CN_LENGTH = 64;
 
@@ -518,7 +518,7 @@ async function generateHostCertAsync(
   await opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
 
   // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
-  // Truncate when necessary -- TLS validation uses SANs, not CN, so this is safe.
+  // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
   const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
   // Generate CSR
   await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
@@ -656,7 +656,7 @@ export function createSNICallback(
         cb(null, ctx);
         return;
       } catch {
-        // Permission error reading cached cert -- regenerate below
+        // Permission error reading cached cert; regenerate below
       }
     }
 
@@ -696,7 +696,7 @@ export function createSNICallback(
 /**
  * Add the portless CA to the system trust store.
  *
- * On macOS, adds to the login keychain (no sudo required -- the OS shows a
+ * On macOS, adds to the login keychain (no sudo required; the OS shows a
  * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
  * CA directory and runs the appropriate update command (requires sudo).
  *

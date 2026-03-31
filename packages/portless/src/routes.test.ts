@@ -115,7 +115,7 @@ describe("RouteStore", () => {
       fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
       store.loadRoutes();
 
-      // Re-read the file directly -- stale entries should still be on disk
+      // Re-read the file directly; stale entries should still be on disk
       const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(raw).toHaveLength(2);
     });

@@ -55,7 +55,7 @@ By default, only explicitly registered subdomains are routed (strict mode). Use 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
 
 ```bash
-# Main worktree -- no prefix
+# Main worktree (no prefix)
 portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
@@ -68,7 +68,7 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
-Put `portless run` in your `package.json` once and it works everywhere -- the main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
 ## Custom TLD
 
@@ -98,9 +98,9 @@ flowchart TD
     Proxy --> App2
 ```
 
-1. **Start the proxy** -- auto-starts when you run an app, or start explicitly with `portless proxy start`
-2. **Run apps** -- `portless <name> <command>` assigns a free port and registers with the proxy
-3. **Access via URL** -- `https://<name>.localhost` routes through the proxy to your app
+1. **Start the proxy**: auto-starts when you run an app, or start explicitly with `portless proxy start`
+2. **Run apps**: `portless <name> <command>` assigns a free port and registers with the proxy
+3. **Access via URL**: `https://<name>.localhost` routes through the proxy to your app
 
 ## HTTP/2 + HTTPS
 

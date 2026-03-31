@@ -109,7 +109,8 @@ export class RouteStore {
     return this.routesPath;
   }
 
-  // -- Locking ---------------------------------------------------------------
+  // Locking
+  // ---------------------------------------------------------------------------
 
   private static readonly sleepBuffer = new Int32Array(new SharedArrayBuffer(4));
 
@@ -155,7 +156,8 @@ export class RouteStore {
     }
   }
 
-  // -- Route I/O -------------------------------------------------------------
+  // Route I/O
+  // ---------------------------------------------------------------------------
 
   private isProcessAlive(pid: number): boolean {
     try {

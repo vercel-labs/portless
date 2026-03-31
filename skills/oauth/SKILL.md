@@ -137,7 +137,7 @@ The redirect URI sent during the OAuth flow doesn't match what's registered with
 
 ### Provider requires HTTPS
 
-`.dev` and `.app` TLDs are HSTS-preloaded -- browsers force HTTPS. Start the proxy with `--https`:
+`.dev` and `.app` TLDs are HSTS-preloaded, so browsers force HTTPS. Start the proxy:
 
 ```bash
 portless proxy start --tld dev

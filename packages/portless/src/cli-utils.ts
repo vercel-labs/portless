@@ -31,7 +31,7 @@ export const PRIVILEGED_PORT_THRESHOLD = 1024;
  * System-wide state directory (used when proxy needs sudo on Unix).
  * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
  * a per-user dir from os.tmpdir() (/var/folders/...) while sudo (root)
- * gets /tmp -- causing the proxy writer and client reader to disagree.
+ * gets /tmp, causing the proxy writer and client reader to disagree.
  */
 export const SYSTEM_STATE_DIR = isWindows ? path.join(os.tmpdir(), "portless") : "/tmp/portless";
 
@@ -157,15 +157,15 @@ export const DEFAULT_TLD = "localhost";
 export const RISKY_TLDS = new Map<string, string>([
   ["local", "conflicts with mDNS/Bonjour on macOS"],
   ["dev", "Google-owned; browsers force HTTPS via preloaded HSTS"],
-  ["com", "public TLD -- DNS requests will leak to the internet"],
-  ["org", "public TLD -- DNS requests will leak to the internet"],
-  ["net", "public TLD -- DNS requests will leak to the internet"],
-  ["io", "public TLD -- DNS requests will leak to the internet"],
-  ["app", "public TLD -- DNS requests will leak to the internet"],
-  ["edu", "public TLD -- DNS requests will leak to the internet"],
-  ["gov", "public TLD -- DNS requests will leak to the internet"],
-  ["mil", "public TLD -- DNS requests will leak to the internet"],
-  ["int", "public TLD -- DNS requests will leak to the internet"],
+  ["com", "public TLD; DNS requests will leak to the internet"],
+  ["org", "public TLD; DNS requests will leak to the internet"],
+  ["net", "public TLD; DNS requests will leak to the internet"],
+  ["io", "public TLD; DNS requests will leak to the internet"],
+  ["app", "public TLD; DNS requests will leak to the internet"],
+  ["edu", "public TLD; DNS requests will leak to the internet"],
+  ["gov", "public TLD; DNS requests will leak to the internet"],
+  ["mil", "public TLD; DNS requests will leak to the internet"],
+  ["int", "public TLD; DNS requests will leak to the internet"],
 ]);
 
 /**

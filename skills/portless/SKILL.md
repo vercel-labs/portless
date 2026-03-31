@@ -9,15 +9,15 @@ Replace port numbers with stable, named .localhost URLs. For humans and agents.
 
 ## Why portless
 
-- **Port conflicts** -- `EADDRINUSE` when two projects default to the same port
-- **Memorizing ports** -- which app is on 3001 vs 8080?
-- **Refreshing shows the wrong app** -- stop one server, start another on the same port, stale tab shows wrong content
-- **Monorepo multiplier** -- every problem scales with each service in the repo
-- **Agents test the wrong port** -- AI agents guess or hardcode the wrong port
-- **Cookie/storage clashes** -- cookies on `localhost` bleed across apps; localStorage lost when ports shift
-- **Hardcoded ports in config** -- CORS allowlists, OAuth redirects, `.env` files break when ports change
-- **Sharing URLs with teammates** -- "what port is that on?" becomes a Slack question
-- **Browser history is useless** -- `localhost:3000` history is a mix of unrelated projects
+- **Port conflicts**: `EADDRINUSE` when two projects default to the same port
+- **Memorizing ports**: which app is on 3001 vs 8080?
+- **Refreshing shows the wrong app**: stop one server, start another on the same port, stale tab shows wrong content
+- **Monorepo multiplier**: every problem scales with each service in the repo
+- **Agents test the wrong port**: AI agents guess or hardcode the wrong port
+- **Cookie/storage clashes**: cookies on `localhost` bleed across apps; localStorage lost when ports shift
+- **Hardcoded ports in config**: CORS allowlists, OAuth redirects, `.env` files break when ports change
+- **Sharing URLs with teammates**: "what port is that on?" becomes a Slack question
+- **Browser history is useless**: `localhost:3000` history is a mix of unrelated projects
 
 ## Installation
 
@@ -75,7 +75,7 @@ By default, only explicitly registered subdomains are routed (strict mode). Star
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain prefix so each worktree gets a unique URL:
 
 ```bash
-# Main worktree -- no prefix
+# Main worktree (no prefix)
 portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"

@@ -6,23 +6,23 @@
 
 ### Breaking Changes
 
-- **Strict subdomain routing is now the default** -- Subdomains no longer automatically match parent hostnames (e.g. `api.myapp.localhost` no longer routes to `myapp.localhost`). Use the `--wildcard` flag or `PORTLESS_WILDCARD=1` env var to restore the previous behavior. (#158)
+- **Strict subdomain routing is now the default**: Subdomains no longer automatically match parent hostnames (e.g. `api.myapp.localhost` no longer routes to `myapp.localhost`). Use the `--wildcard` flag or `PORTLESS_WILDCARD=1` env var to restore the previous behavior. (#158)
 
 ### New Features
 
-- **`--wildcard` flag** -- Opt in to wildcard subdomain routing where subdomains match registered parent hostnames. Configurable via `PORTLESS_WILDCARD` env var. (#158)
+- **`--wildcard` flag**: Opt in to wildcard subdomain routing where subdomains match registered parent hostnames. Configurable via `PORTLESS_WILDCARD` env var. (#158)
 
 ### Bug Fixes
 
-- **Cert generation with dots in `$HOME`** -- Fix TLS certificate generation failing when the home directory path contains dots (#157)
-- **DNS label limit for `--name` flag** -- Fix regression where long `--name` values could exceed the 63-character DNS label limit (#144)
-- **Windows `DEP0190` deprecation warning** -- Silence Node.js deprecation warning on Windows by replacing `shell: true` with explicit `cmd.exe /d /s /c` spawning (#160)
-- **Windows duplicate `PATH` entries** -- Deduplicate `PATH` environment variables in child process spawn on Windows (#155)
+- **Cert generation with dots in `$HOME`**: Fix TLS certificate generation failing when the home directory path contains dots (#157)
+- **DNS label limit for `--name` flag**: Fix regression where long `--name` values could exceed the 63-character DNS label limit (#144)
+- **Windows `DEP0190` deprecation warning**: Silence Node.js deprecation warning on Windows by replacing `shell: true` with explicit `cmd.exe /d /s /c` spawning (#160)
+- **Windows duplicate `PATH` entries**: Deduplicate `PATH` environment variables in child process spawn on Windows (#155)
 
 ### Improvements
 
-- **Removed chalk dependency** -- Replaced chalk with lightweight ANSI color utilities to reduce install size (#170)
-- **Automated release process** -- Added CI workflow for automated npm publishing and GitHub releases (#169)
+- **Removed chalk dependency**: Replaced chalk with lightweight ANSI color utilities to reduce install size (#170)
+- **Automated release process**: Added CI workflow for automated npm publishing and GitHub releases (#169)
 
 ### Contributors
 
@@ -34,10 +34,10 @@
 
 ### Bug Fixes
 
-- **`--port` injection for package runners** -- Fixed `--port` injection for commands run via package runners like `npx`, `pnpm dlx`, etc. (#150)
-- **TLS cert generation** -- Fixed TLS cert generation for long hostnames and proxy startup races (#149)
-- **Proxy crash on ECONNRESET** -- Handle `ECONNRESET` errors on TLS wrapper sockets to prevent proxy crash (#127)
-- **Windows `node not recognized`** -- Resolved `node not recognized` error on Windows when running `portless run` (#126)
+- **`--port` injection for package runners**: Fixed `--port` injection for commands run via package runners like `npx`, `pnpm dlx`, etc. (#150)
+- **TLS cert generation**: Fixed TLS cert generation for long hostnames and proxy startup races (#149)
+- **Proxy crash on ECONNRESET**: Handle `ECONNRESET` errors on TLS wrapper sockets to prevent proxy crash (#127)
+- **Windows `node not recognized`**: Resolved `node not recognized` error on Windows when running `portless run` (#126)
 
 ### Documentation
 

@@ -415,7 +415,7 @@ describe("injectFrameworkFlags", () => {
 
   // Package runner support (issue #146: bunx --bun vite dev gives 502)
 
-  // -- Simple runners (npx, bunx, pnpx) --
+  // Simple runners (npx, bunx, pnpx)
 
   it("injects flags for bunx vite dev", () => {
     const args = ["bunx", "vite", "dev"];
@@ -494,7 +494,7 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
-  // -- Subcommand runners (yarn dlx/exec, pnpm dlx/exec) --
+  // Subcommand runners (yarn dlx/exec, pnpm dlx/exec)
 
   it("injects flags for yarn dlx vite dev", () => {
     const args = ["yarn", "dlx", "vite", "dev"];
@@ -550,7 +550,7 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
-  // -- Implicit bin (yarn <framework>) --
+  // Implicit bin (yarn <framework>)
 
   it("injects flags for yarn vite (implicit bin)", () => {
     const args = ["yarn", "vite", "dev"];
@@ -567,7 +567,7 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
-  // -- Runner with multiple flags --
+  // Runner with multiple flags
 
   it("skips multiple runner flags before framework", () => {
     const args = ["npx", "--yes", "--quiet", "vite", "dev"];
@@ -586,7 +586,7 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
-  // -- Runner + --port / --host already present --
+  // Runner + --port / --host already present
 
   it("skips --port when already present via runner", () => {
     const args = ["bunx", "vite", "dev", "--port", "3000"];
@@ -616,7 +616,7 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
   });
 
-  // -- Negative cases: runner with non-framework commands --
+  // Negative cases: runner with non-framework commands
 
   it("does not inject for bunx with non-framework command", () => {
     const args = ["bunx", "--bun", "next", "dev"];
@@ -642,7 +642,7 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["pnpm", "run", "vite", "dev"]);
   });
 
-  // -- Edge cases --
+  // Edge cases
 
   it("does not inject when runner has only flags and no command", () => {
     const args = ["bunx", "--bun"];

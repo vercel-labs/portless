@@ -33,7 +33,7 @@ portless oauth-test.local.ctate next dev
 # -> https://oauth-test.local.ctate.dev
 ```
 
-Since you own `ctate.dev`, nothing under `local.ctate.dev` will conflict with real internet traffic. This works for teams too -- set a wildcard DNS record (`*.local.yourcompany.dev -> 127.0.0.1`) so every developer gets local resolution without `/etc/hosts`.
+Since you own `ctate.dev`, nothing under `local.ctate.dev` will conflict with real internet traffic. This works for teams too: set a wildcard DNS record (`*.local.yourcompany.dev -> 127.0.0.1`) so every developer gets local resolution without `/etc/hosts`.
 
 ## Setup
 
