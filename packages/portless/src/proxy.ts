@@ -33,6 +33,14 @@ function getRequestHost(req: http.IncomingMessage): string {
 }
 
 /**
+ * Detect whether a request arrived over an encrypted (TLS) connection.
+ * Works for both native TLS sockets and HTTP/2 streams.
+ */
+function isEncrypted(req: http.IncomingMessage): boolean {
+  return !!(req.socket as net.Socket & { encrypted?: boolean }).encrypted;
+}
+
+/**
  * Build X-Forwarded-* headers for a proxied request.
  */
 function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<string, string> {
@@ -112,9 +120,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   } = options;
   const tldSuffix = `.${tld}`;
 
-  const isTls = !!tls;
-
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const reqTls = isEncrypted(req);
     res.setHeader(PORTLESS_HEADER, "1");
 
     const routes = getRoutes();
@@ -157,7 +164,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       const safeSuggestion = escapeHtml(strippedHost);
       const routesList =
         routes.length > 0
-          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, isTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
+          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
           : '<p class="empty">No apps running.</p>';
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(
@@ -170,7 +177,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const forwardedHeaders = buildForwardedHeaders(req, isTls);
+    const forwardedHeaders = buildForwardedHeaders(req, reqTls);
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
@@ -193,7 +200,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       },
       (proxyRes) => {
         const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
-        if (isTls) {
+        if (reqTls) {
           for (const h of HOP_BY_HOP_HEADERS) {
             delete responseHeaders[h];
           }
@@ -273,7 +280,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const forwardedHeaders = buildForwardedHeaders(req, isTls);
+    const forwardedHeaders = buildForwardedHeaders(req, isEncrypted(req));
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
@@ -357,9 +364,16 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       handleUpgrade(req, socket, head);
     });
 
-    // Plain HTTP server using the same proxy handlers (no TLS, no redirect)
-    const plainServer = http.createServer(handleRequest);
-    plainServer.on("upgrade", handleUpgrade);
+    // Plain HTTP on a TLS-enabled port -> redirect to HTTPS
+    const plainServer = http.createServer((req, res) => {
+      const host = getRequestHost(req).split(":")[0] || "localhost";
+      const location = `https://${host}${proxyPort === 443 ? "" : `:${proxyPort}`}${req.url || "/"}`;
+      res.writeHead(301, { Location: location });
+      res.end();
+    });
+    plainServer.on("upgrade", (_req: http.IncomingMessage, socket: net.Socket) => {
+      socket.destroy();
+    });
 
     // Wrap both in a net.Server that peeks at the first byte to decide
     // whether the connection is TLS (0x16 = ClientHello) or plain HTTP.

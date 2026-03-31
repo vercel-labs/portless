@@ -1154,6 +1154,27 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(res.body).toContain("https://myapp.localhost:1355");
   });
 
+  it("sets x-forwarded-proto to http for plain HTTP requests on non-TLS proxy", async () => {
+    let receivedProto = "";
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        receivedProto = req.headers["x-forwarded-proto"] as string;
+        res.writeHead(200);
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 80 }));
+    await listen(server);
+
+    await request(server, { host: "myapp.localhost" });
+    expect(receivedProto).toBe("http");
+  });
+
   it("sets x-forwarded-proto to https when proxying", async () => {
     let receivedProto = "";
     const backend = trackServer(
@@ -1233,7 +1254,23 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(upgraded).toBe(true);
   });
 
-  it("accepts plain HTTP on the TLS-enabled port", async () => {
+  it("redirects plain HTTP to HTTPS on the TLS-enabled port", async () => {
+    const routes: RouteInfo[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: 443,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "myapp.localhost", path: "/dashboard" });
+    expect(res.status).toBe(301);
+    expect(res.headers.location).toBe("https://myapp.localhost/dashboard");
+  });
+
+  it("includes port in redirect Location when proxy is not on 443", async () => {
     const routes: RouteInfo[] = [];
     const server = trackServer(
       createProxyServer({
@@ -1244,10 +1281,9 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     );
     await listen(server);
 
-    // Plain HTTP request (not TLS) -- exercises the buf[0] !== 0x16 branch
-    const res = await request(server, { host: "test.localhost" });
-    expect(res.status).toBe(404);
-    expect(res.body).toContain("Not Found");
+    const res = await request(server, { host: "myapp.localhost" });
+    expect(res.status).toBe(301);
+    expect(res.headers.location).toBe(`https://myapp.localhost:${TEST_PROXY_PORT}/`);
   });
 
   it("strips hop-by-hop headers from proxied TLS responses (HTTP/2 client)", async () => {
