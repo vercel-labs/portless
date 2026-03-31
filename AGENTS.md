@@ -4,7 +4,7 @@
 
 Use `pnpm` for all package management commands (not npm or yarn).
 
-Exception: Global install instructions for end users should use `npm install -g` since it's universal.
+Exception: End-user install instructions should use `npm install -g` (global) or `npm install -D` (project dev dependency) since npm is universal.
 
 ## Dependencies
 
