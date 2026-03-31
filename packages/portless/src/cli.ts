@@ -2,7 +2,7 @@
 
 declare const __VERSION__: string;
 
-import chalk from "chalk";
+import chalk from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";

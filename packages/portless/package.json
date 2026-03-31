@@ -52,9 +52,6 @@
   "bugs": {
     "url": "https://github.com/vercel-labs/portless/issues"
   },
-  "dependencies": {
-    "chalk": "^5.3.0"
-  },
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@vitest/coverage-v8": "^4.0.18",

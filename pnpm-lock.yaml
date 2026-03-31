@@ -174,10 +174,6 @@ importers:
         version: 5.9.3
 
   packages/portless:
-    dependencies:
-      chalk:
-        specifier: ^5.3.0
-        version: 5.6.2
     devDependencies:
       '@types/node':
         specifier: ^20.11.0
