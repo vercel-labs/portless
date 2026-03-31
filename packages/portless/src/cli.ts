@@ -231,10 +231,22 @@ function startProxyServer(
 // Commands
 // ---------------------------------------------------------------------------
 
+function sudoStopOrHint(): void {
+  if (!isWindows) {
+    if (!sudoStop()) {
+      console.error(chalk.red("Failed to stop proxy with sudo."));
+      console.error(chalk.blue("Try manually:"));
+      console.error(chalk.cyan("  sudo portless proxy stop"));
+    }
+  } else {
+    console.error(chalk.red("Permission denied. The proxy was started with elevated privileges."));
+    console.error(chalk.blue("Stop it with:"));
+    console.error(chalk.cyan("  Run portless proxy stop as Administrator"));
+  }
+}
+
 async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
-  const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
-  const sudoHint = needsSudo ? "sudo " : "";
 
   if (!fs.existsSync(pidPath)) {
     // PID file is missing -- check whether something is still listening.
@@ -254,19 +266,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           console.log(chalk.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
-            if (!isWindows) {
-              if (!sudoStop()) {
-                console.error(chalk.red("Failed to stop proxy with sudo."));
-                console.error(chalk.blue("Try manually:"));
-                console.error(chalk.cyan("  sudo portless proxy stop"));
-              }
-            } else {
-              console.error(
-                chalk.red("Permission denied. The proxy was started with elevated privileges.")
-              );
-              console.error(chalk.blue("Stop it with:"));
-              console.error(chalk.cyan("  Run portless proxy stop as Administrator"));
-            }
+            sudoStopOrHint();
           } else {
             const message = err instanceof Error ? err.message : String(err);
             console.error(chalk.red(`Failed to stop proxy: ${message}`));
@@ -279,11 +279,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           }
         }
       } else if (!isWindows && process.getuid?.() !== 0) {
-        if (!sudoStop()) {
-          console.error(chalk.red("Failed to stop proxy with sudo."));
-          console.error(chalk.blue("Try manually:"));
-          console.error(chalk.cyan("  sudo portless proxy stop"));
-        }
+        sudoStopOrHint();
       } else {
         console.error(chalk.red(`Could not identify the process on port ${proxyPort}.`));
         console.error(chalk.blue("Try manually:"));
@@ -312,13 +308,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       process.kill(pid, 0);
     } catch (err: unknown) {
       if (isErrnoException(err) && err.code === "EPERM") {
-        // Process exists but is owned by root -- auto-elevate to stop it
-        if (!isWindows) {
-          if (sudoStop()) return;
-          console.error(chalk.red("Failed to stop proxy with sudo."));
-          console.error(chalk.blue("Try manually:"));
-          console.error(chalk.cyan("  sudo portless proxy stop"));
-        }
+        sudoStopOrHint();
         return;
       }
       console.log(chalk.yellow("Proxy process is no longer running. Cleaning up stale files."));
@@ -355,19 +345,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     console.log(chalk.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      if (!isWindows) {
-        if (!sudoStop()) {
-          console.error(chalk.red("Failed to stop proxy with sudo."));
-          console.error(chalk.blue("Try manually:"));
-          console.error(chalk.cyan("  sudo portless proxy stop"));
-        }
-      } else {
-        console.error(
-          chalk.red("Permission denied. The proxy was started with elevated privileges.")
-        );
-        console.error(chalk.blue("Stop it with:"));
-        console.error(chalk.cyan(`  ${sudoHint}portless proxy stop`));
-      }
+      sudoStopOrHint();
     } else {
       const message = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Failed to stop proxy: ${message}`));
@@ -484,42 +462,32 @@ async function runApp(
       timeout: SUDO_SPAWN_TIMEOUT_MS,
     });
 
-    // Wait for the proxy to be ready before discovering state. The daemon
-    // may not have written its state files yet, so calling discoverState
-    // too early could resolve to the wrong port.
-    if (result.status === 0 && (await waitForProxy(defaultPort))) {
-      // Proxy appeared on the expected port -- discover full state now
-      // that the daemon is alive and state files exist.
-      const discovered = await discoverState();
-      proxyPort = discovered.port;
-      stateDir = discovered.dir;
-      tld = discovered.tld;
-      tls = discovered.tls;
-      store = new RouteStore(stateDir, {
-        onWarning: (msg: string) => console.warn(chalk.yellow(msg)),
-      });
-    } else {
-      // Proxy didn't appear on the expected port -- it may have fallen
-      // back to a different port, or a concurrent run started it.
-      const discovered = await discoverState();
-      if (!(await isProxyRunning(discovered.port))) {
-        console.error(chalk.red("Failed to start proxy."));
-        const logPath = path.join(discovered.dir, "proxy.log");
-        console.error(chalk.blue("Try starting it manually:"));
-        console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
-        if (fs.existsSync(logPath)) {
-          console.error(chalk.gray(`Logs: ${logPath}`));
-        }
-        process.exit(1);
-      }
-      proxyPort = discovered.port;
-      stateDir = discovered.dir;
-      tld = discovered.tld;
-      tls = discovered.tls;
-      store = new RouteStore(stateDir, {
-        onWarning: (msg: string) => console.warn(chalk.yellow(msg)),
-      });
+    // Give the daemon a moment to write state files, then discover which
+    // port it actually bound (could be 443, 1355, or other fallback).
+    // Using discoverState directly (instead of waitForProxy on a single
+    // port) avoids a ~5 s timeout when the proxy falls back to 1355.
+    if (result.status === 0) {
+      await new Promise((r) => setTimeout(r, 500));
     }
+
+    const discovered = await discoverState();
+    if (!(await isProxyRunning(discovered.port))) {
+      console.error(chalk.red("Failed to start proxy."));
+      const logPath = path.join(discovered.dir, "proxy.log");
+      console.error(chalk.blue("Try starting it manually:"));
+      console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
+      if (fs.existsSync(logPath)) {
+        console.error(chalk.gray(`Logs: ${logPath}`));
+      }
+      process.exit(1);
+    }
+    proxyPort = discovered.port;
+    stateDir = discovered.dir;
+    tld = discovered.tld;
+    tls = discovered.tls;
+    store = new RouteStore(stateDir, {
+      onWarning: (msg: string) => console.warn(chalk.yellow(msg)),
+    });
     console.log(chalk.green("Proxy started in background"));
   } else {
     console.log(chalk.gray("-- Proxy is running"));
@@ -1280,25 +1248,17 @@ ${chalk.bold("Usage:")}
   // Privileged ports require root on Unix. Auto-elevate with sudo when
   // possible, falling back to the unprivileged port when sudo is unavailable.
   if (!isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
-    const startArgs = [
-      process.execPath,
-      process.argv[1],
-      "proxy",
-      "start",
-      "-p",
-      String(proxyPort),
-    ];
-    if (hasNoTls) startArgs.push("--no-tls");
-    if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
-    if (useWildcard) startArgs.push("--wildcard");
-    if (isForeground) startArgs.push("--foreground");
+    const baseArgs = [process.execPath, process.argv[1], "proxy", "start", "-p", String(proxyPort)];
+    const optionalFlags: string[] = [];
+    if (hasNoTls) optionalFlags.push("--no-tls");
+    if (tld !== DEFAULT_TLD) optionalFlags.push("--tld", tld);
+    if (useWildcard) optionalFlags.push("--wildcard");
+    if (isForeground) optionalFlags.push("--foreground");
     if (customCertPath && customKeyPath)
-      startArgs.push("--cert", customCertPath, "--key", customKeyPath);
+      optionalFlags.push("--cert", customCertPath, "--key", customKeyPath);
 
-    const extraFlags = startArgs
-      .slice(6)
-      .map((a) => ` ${a}`)
-      .join("");
+    const startArgs = [...baseArgs, ...optionalFlags];
+    const extraFlags = optionalFlags.map((a) => ` ${a}`).join("");
 
     console.log(chalk.yellow(`Port ${proxyPort} requires elevated privileges.`));
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
