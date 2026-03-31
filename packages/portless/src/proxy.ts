@@ -364,7 +364,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       handleUpgrade(req, socket, head);
     });
 
-    // Plain HTTP on a TLS-enabled port -> redirect to HTTPS
+    // Plain HTTP on a TLS-enabled port -> 302 redirect to HTTPS.
+    // The redirect targets the same port because the wrapper net.Server
+    // demuxes TLS and plain HTTP on a single listener (peek at first byte).
     const plainServer = http.createServer((req, res) => {
       const host = getRequestHost(req).split(":")[0] || "localhost";
       const location = `https://${host}${proxyPort === 443 ? "" : `:${proxyPort}`}${req.url || "/"}`;

@@ -60,8 +60,14 @@ const SUDO_SPAWN_TIMEOUT_MS = 30_000;
  */
 function sudoStop(): boolean {
   const stopArgs = [process.execPath, process.argv[1], "proxy", "stop"];
+  const envArgs: string[] = [];
+  for (const key of Object.keys(process.env)) {
+    if (key.startsWith("PORTLESS_") && process.env[key]) {
+      envArgs.push(`${key}=${process.env[key]}`);
+    }
+  }
   console.log(chalk.yellow("Elevating with sudo to stop the proxy..."));
-  const result = spawnSync("sudo", stopArgs, {
+  const result = spawnSync("sudo", [...envArgs, ...stopArgs], {
     stdio: "inherit",
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
@@ -241,7 +247,11 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
             if (!isWindows) {
-              sudoStop();
+              if (!sudoStop()) {
+                console.error(chalk.red("Failed to stop proxy with sudo."));
+                console.error(chalk.blue("Try manually:"));
+                console.error(chalk.cyan("  sudo portless proxy stop"));
+              }
             } else {
               console.error(
                 chalk.red("Permission denied. The proxy was started with elevated privileges.")
@@ -261,7 +271,11 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           }
         }
       } else if (!isWindows && process.getuid?.() !== 0) {
-        sudoStop();
+        if (!sudoStop()) {
+          console.error(chalk.red("Failed to stop proxy with sudo."));
+          console.error(chalk.blue("Try manually:"));
+          console.error(chalk.cyan("  sudo portless proxy stop"));
+        }
       } else {
         console.error(chalk.red(`Could not identify the process on port ${proxyPort}.`));
         console.error(chalk.blue("Try manually:"));
@@ -292,8 +306,10 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       if (isErrnoException(err) && err.code === "EPERM") {
         // Process exists but is owned by root -- auto-elevate to stop it
         if (!isWindows) {
-          sudoStop();
-          return;
+          if (sudoStop()) return;
+          console.error(chalk.red("Failed to stop proxy with sudo."));
+          console.error(chalk.blue("Try manually:"));
+          console.error(chalk.cyan("  sudo portless proxy stop"));
         }
       }
       console.log(chalk.yellow("Proxy process is no longer running. Cleaning up stale files."));
@@ -331,7 +347,11 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
       if (!isWindows) {
-        sudoStop();
+        if (!sudoStop()) {
+          console.error(chalk.red("Failed to stop proxy with sudo."));
+          console.error(chalk.blue("Try manually:"));
+          console.error(chalk.cyan("  sudo portless proxy stop"));
+        }
       } else {
         console.error(
           chalk.red("Permission denied. The proxy was started with elevated privileges.")
