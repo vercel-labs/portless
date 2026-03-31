@@ -59,6 +59,18 @@ const EXIT_TIMEOUT_MS = 2000;
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 
 /**
+ * Return the path to the portless entry script. Guards against the
+ * (unlikely) case where process.argv[1] is undefined.
+ */
+function getEntryScript(): string {
+  const script = process.argv[1];
+  if (!script) {
+    throw new Error("Cannot determine portless entry script (process.argv[1] is undefined)");
+  }
+  return script;
+}
+
+/**
  * Collect PORTLESS_* env vars as KEY=VALUE strings suitable for
  * `sudo env KEY=VAL ...` invocations (sudo may strip the environment).
  */
@@ -76,7 +88,7 @@ function collectPortlessEnvArgs(): string[] {
  * Re-run `portless proxy stop` under sudo. Returns true if sudo succeeded.
  */
 function sudoStop(port: number): boolean {
-  const stopArgs = [process.execPath, process.argv[1], "proxy", "stop", "-p", String(port)];
+  const stopArgs = [process.execPath, getEntryScript(), "proxy", "stop", "-p", String(port)];
   console.log(colors.yellow("Elevating with sudo to stop the proxy..."));
   const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...stopArgs], {
     stdio: "inherit",
@@ -177,6 +189,7 @@ function startProxyServer(
     } else {
       console.error(colors.red(`Proxy error: ${err.message}`));
     }
+    if (redirectServer) redirectServer.close();
     process.exit(1);
   });
 
@@ -413,7 +426,6 @@ async function runApp(
   desiredPort?: number
 ) {
   let store = initialStore;
-  const hostname = parseHostname(name, tld);
 
   let envTld: string;
   try {
@@ -431,7 +443,7 @@ async function runApp(
   }
 
   console.log(colors.blue.bold(`\nportless\n`));
-  console.log(colors.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
+  console.log(colors.gray(`-- ${parseHostname(name, tld)} (auto-resolves to 127.0.0.1)`));
   if (autoInfo) {
     const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
     console.log(colors.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
@@ -473,7 +485,7 @@ async function runApp(
     }
 
     console.log(colors.yellow("Starting proxy..."));
-    const startArgs = [process.argv[1], "proxy", "start"];
+    const startArgs = [getEntryScript(), "proxy", "start"];
     if (!wantTls) startArgs.push("--no-tls");
     if (tld !== DEFAULT_TLD) startArgs.push("--tld", tld);
 
@@ -521,6 +533,7 @@ async function runApp(
     console.log(colors.gray("-- Proxy is running"));
   }
 
+  const hostname = parseHostname(name, tld);
   const port = desiredPort ?? (await findFreePort());
   if (desiredPort) {
     console.log(colors.green(`-- Using port ${port} (fixed)`));
@@ -824,7 +837,7 @@ ${colors.bold("Options:")}
 ${colors.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
-  PORTLESS_HTTPS=1              Enable HTTPS (default; set to 0 to disable, same as --no-tls)
+  PORTLESS_HTTPS                HTTPS on by default; set to 0 to disable (same as --no-tls)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)
@@ -876,7 +889,7 @@ async function handleTrust(): Promise<void> {
     result.error?.includes("Permission denied") || result.error?.includes("EACCES");
   if (isPermissionError && !isWindows && process.getuid?.() !== 0) {
     console.log(colors.yellow("Elevating with sudo to trust the CA..."));
-    const sudoResult = spawnSync("sudo", [process.execPath, process.argv[1], "trust"], {
+    const sudoResult = spawnSync("sudo", [process.execPath, getEntryScript(), "trust"], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
     });
@@ -1052,7 +1065,7 @@ ${colors.bold("Auto-sync:")}
       console.log(colors.yellow("Elevating with sudo to update hosts file..."));
       const result = spawnSync(
         "sudo",
-        ["env", ...collectPortlessEnvArgs(), process.execPath, process.argv[1], "hosts", "clean"],
+        ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
         {
           stdio: "inherit",
           timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -1109,7 +1122,7 @@ ${colors.bold("Usage: portless hosts <command>")}
     console.log(colors.yellow("Elevating with sudo to update hosts file..."));
     const result = spawnSync(
       "sudo",
-      ["env", ...collectPortlessEnvArgs(), process.execPath, process.argv[1], "hosts", "sync"],
+      ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "sync"],
       {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -1276,7 +1289,14 @@ ${colors.bold("Usage:")}
   // Privileged ports require root on Unix. Auto-elevate with sudo when
   // possible, falling back to the unprivileged port when sudo is unavailable.
   if (!isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
-    const baseArgs = [process.execPath, process.argv[1], "proxy", "start", "-p", String(proxyPort)];
+    const baseArgs = [
+      process.execPath,
+      getEntryScript(),
+      "proxy",
+      "start",
+      "-p",
+      String(proxyPort),
+    ];
     const optionalFlags: string[] = [];
     if (hasNoTls) optionalFlags.push("--no-tls");
     if (tld !== DEFAULT_TLD) optionalFlags.push("--tld", tld);
@@ -1427,7 +1447,7 @@ ${colors.bold("Usage:")}
     fixOwnership(logPath);
 
     const daemonArgs = [
-      process.argv[1],
+      getEntryScript(),
       "proxy",
       "start",
       "--foreground",
