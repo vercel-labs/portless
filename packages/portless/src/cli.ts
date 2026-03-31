@@ -43,9 +43,6 @@ import {
 /** Display-friendly hosts file path. */
 const HOSTS_DISPLAY = isWindows ? "hosts file" : "/etc/hosts";
 
-/** Prefix for commands that need elevated privileges. */
-const SUDO_PREFIX = isWindows ? "" : "sudo ";
-
 /** Debounce delay (ms) for reloading routes after a file change. */
 const DEBOUNCE_MS = 100;
 
@@ -57,6 +54,20 @@ const EXIT_TIMEOUT_MS = 2000;
 
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
+
+/**
+ * Re-run `portless proxy stop` under sudo. Returns true if sudo succeeded.
+ */
+function sudoStop(proxyPort: number): boolean {
+  const stopArgs = [process.execPath, process.argv[1], "proxy", "stop"];
+  if (proxyPort !== getDefaultPort()) stopArgs.push("-p", String(proxyPort));
+  console.log(chalk.yellow("Elevating with sudo to stop the proxy..."));
+  const result = spawnSync("sudo", stopArgs, {
+    stdio: "inherit",
+    timeout: SUDO_SPAWN_TIMEOUT_MS,
+  });
+  return result.status === 0;
+}
 
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
@@ -145,10 +156,8 @@ function startProxyServer(
       );
     } else if (err.code === "EACCES") {
       console.error(chalk.red(`Permission denied for port ${proxyPort}.`));
-      console.error(chalk.blue("Either run with sudo:"));
-      console.error(chalk.cyan("  sudo portless proxy start -p 80"));
-      console.error(chalk.blue("Or use a non-privileged port (no sudo needed):"));
-      console.error(chalk.cyan("  portless proxy start"));
+      console.error(chalk.blue("Use an unprivileged port (no sudo needed):"));
+      console.error(chalk.cyan("  portless proxy start -p 1355"));
     } else {
       console.error(chalk.red(`Proxy error: ${err.message}`));
     }
@@ -232,17 +241,15 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           console.log(chalk.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
-            console.error(
-              chalk.red("Permission denied. The proxy was started with elevated privileges.")
-            );
-            console.error(chalk.blue("Stop it with:"));
-            console.error(
-              chalk.cyan(
-                isWindows
-                  ? "  Run portless proxy stop as Administrator"
-                  : "  sudo portless proxy stop"
-              )
-            );
+            if (!isWindows) {
+              sudoStop(proxyPort);
+            } else {
+              console.error(
+                chalk.red("Permission denied. The proxy was started with elevated privileges.")
+              );
+              console.error(chalk.blue("Stop it with:"));
+              console.error(chalk.cyan("  Run portless proxy stop as Administrator"));
+            }
           } else {
             const message = err instanceof Error ? err.message : String(err);
             console.error(chalk.red(`Failed to stop proxy: ${message}`));
@@ -255,10 +262,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           }
         }
       } else if (!isWindows && process.getuid?.() !== 0) {
-        // Not running as root -- lsof likely cannot see root-owned processes
-        console.error(chalk.red("Cannot identify the process. It may be running as root."));
-        console.error(chalk.blue("Try stopping with sudo:"));
-        console.error(chalk.cyan("  sudo portless proxy stop"));
+        sudoStop(proxyPort);
       } else {
         console.error(chalk.red(`Could not identify the process on port ${proxyPort}.`));
         console.error(chalk.blue("Try manually:"));
@@ -285,7 +289,14 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     // Check if the process is still alive before trying to kill it
     try {
       process.kill(pid, 0);
-    } catch {
+    } catch (err: unknown) {
+      if (isErrnoException(err) && err.code === "EPERM") {
+        // Process exists but is owned by root -- auto-elevate to stop it
+        if (!isWindows) {
+          sudoStop(proxyPort);
+          return;
+        }
+      }
       console.log(chalk.yellow("Proxy process is no longer running. Cleaning up stale files."));
       fs.unlinkSync(pidPath);
       try {
@@ -320,11 +331,15 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     console.log(chalk.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      console.error(
-        chalk.red("Permission denied. The proxy was started with elevated privileges.")
-      );
-      console.error(chalk.blue("Stop it with:"));
-      console.error(chalk.cyan(`  ${sudoHint}portless proxy stop`));
+      if (!isWindows) {
+        sudoStop(proxyPort);
+      } else {
+        console.error(
+          chalk.red("Permission denied. The proxy was started with elevated privileges.")
+        );
+        console.error(chalk.blue("Stop it with:"));
+        console.error(chalk.cyan(`  ${sudoHint}portless proxy stop`));
+      }
     } else {
       const message = err instanceof Error ? err.message : String(err);
       console.error(chalk.red(`Failed to stop proxy: ${message}`));
@@ -795,9 +810,9 @@ ${chalk.bold("Safari / DNS:")}
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for custom TLDs (e.g. --tld test). For .localhost,
   set PORTLESS_SYNC_HOSTS=1 to enable. To manually sync:
-    ${chalk.cyan(`${SUDO_PREFIX}portless hosts sync`)}
+    ${chalk.cyan("portless hosts sync")}
   Clean up later with:
-    ${chalk.cyan(`${SUDO_PREFIX}portless hosts clean`)}
+    ${chalk.cyan("portless hosts clean")}
 
 ${chalk.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
@@ -821,14 +836,21 @@ async function handleTrust(): Promise<void> {
   if (result.trusted) {
     console.log(chalk.green("Local CA added to system trust store."));
     console.log(chalk.gray("Browsers will now trust portless HTTPS certificates."));
-  } else {
-    console.error(chalk.red(`Failed to trust CA: ${result.error}`));
-    if (result.error?.includes("sudo")) {
-      console.error(chalk.blue("Run with sudo:"));
-      console.error(chalk.cyan("  sudo portless trust"));
-    }
-    process.exit(1);
+    return;
   }
+
+  // Auto-elevate with sudo on macOS/Linux
+  if (!isWindows && process.getuid?.() !== 0) {
+    console.log(chalk.yellow("Elevating with sudo to trust the CA..."));
+    const sudoResult = spawnSync("sudo", [process.execPath, process.argv[1], "trust"], {
+      stdio: "inherit",
+      timeout: SUDO_SPAWN_TIMEOUT_MS,
+    });
+    if (sudoResult.status === 0) return;
+  }
+
+  console.error(chalk.red(`Failed to trust CA: ${result.error}`));
+  process.exit(1);
 }
 
 async function handleList(): Promise<void> {
@@ -975,8 +997,8 @@ Safari relies on the system DNS resolver, which may not handle .localhost
 subdomains. This command adds entries to ${HOSTS_DISPLAY} as a workaround.
 
 ${chalk.bold("Usage:")}
-  ${chalk.cyan(`${SUDO_PREFIX}portless hosts sync`)}    Add current routes to ${HOSTS_DISPLAY}
-  ${chalk.cyan(`${SUDO_PREFIX}portless hosts clean`)}   Remove portless entries from ${HOSTS_DISPLAY}
+  ${chalk.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${chalk.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 
 ${chalk.bold("Auto-sync:")}
   Auto-enabled for custom TLDs (e.g. --tld test). For .localhost, set
@@ -988,15 +1010,22 @@ ${chalk.bold("Auto-sync:")}
   if (args[1] === "clean") {
     if (cleanHostsFile()) {
       console.log(chalk.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
-    } else {
-      console.error(
-        chalk.red(
-          `Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : " (requires sudo)."}`
-        )
-      );
-      console.error(chalk.cyan(`  ${SUDO_PREFIX}portless hosts clean`));
-      process.exit(1);
+      return;
     }
+
+    if (!isWindows && process.getuid?.() !== 0) {
+      console.log(chalk.yellow("Elevating with sudo to update hosts file..."));
+      const result = spawnSync("sudo", [process.execPath, process.argv[1], "hosts", "clean"], {
+        stdio: "inherit",
+        timeout: SUDO_SPAWN_TIMEOUT_MS,
+      });
+      if (result.status === 0) return;
+    }
+
+    console.error(
+      chalk.red(`Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`)
+    );
+    process.exit(1);
     return;
   }
 
@@ -1004,8 +1033,8 @@ ${chalk.bold("Auto-sync:")}
     console.log(`
 ${chalk.bold("Usage: portless hosts <command>")}
 
-  ${chalk.cyan(`${SUDO_PREFIX}portless hosts sync`)}    Add current routes to ${HOSTS_DISPLAY}
-  ${chalk.cyan(`${SUDO_PREFIX}portless hosts clean`)}   Remove portless entries from ${HOSTS_DISPLAY}
+  ${chalk.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${chalk.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 `);
     process.exit(0);
   }
@@ -1013,10 +1042,8 @@ ${chalk.bold("Usage: portless hosts <command>")}
   if (args[1] !== "sync") {
     console.error(chalk.red(`Error: Unknown hosts subcommand "${args[1]}".`));
     console.error(chalk.blue("Usage:"));
-    console.error(
-      chalk.cyan(`  ${SUDO_PREFIX}portless hosts sync    # Add routes to ${HOSTS_DISPLAY}`)
-    );
-    console.error(chalk.cyan(`  ${SUDO_PREFIX}portless hosts clean   # Remove portless entries`));
+    console.error(chalk.cyan(`  portless hosts sync    # Add routes to ${HOSTS_DISPLAY}`));
+    console.error(chalk.cyan("  portless hosts clean   # Remove portless entries"));
     process.exit(1);
   }
 
@@ -1036,15 +1063,22 @@ ${chalk.bold("Usage: portless hosts <command>")}
     for (const h of hostnames) {
       console.log(chalk.cyan(`  127.0.0.1 ${h}`));
     }
-  } else {
-    console.error(
-      chalk.red(
-        `Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : " (requires sudo)."}`
-      )
-    );
-    console.error(chalk.cyan(`  ${SUDO_PREFIX}portless hosts sync`));
-    process.exit(1);
+    return;
   }
+
+  if (!isWindows && process.getuid?.() !== 0) {
+    console.log(chalk.yellow("Elevating with sudo to update hosts file..."));
+    const result = spawnSync("sudo", [process.execPath, process.argv[1], "hosts", "sync"], {
+      stdio: "inherit",
+      timeout: SUDO_SPAWN_TIMEOUT_MS,
+    });
+    if (result.status === 0) return;
+  }
+
+  console.error(
+    chalk.red(`Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`)
+  );
+  process.exit(1);
 }
 
 async function handleProxy(args: string[]): Promise<void> {
@@ -1166,7 +1200,7 @@ ${chalk.bold("Usage:")}
       )
     );
     console.warn(chalk.yellow("Hosts sync is disabled. To add entries manually, run:"));
-    console.warn(chalk.cyan(`  ${SUDO_PREFIX}portless hosts sync`));
+    console.warn(chalk.cyan("  portless hosts sync"));
   }
 
   // Parse --wildcard flag (disables the default strict subdomain matching)

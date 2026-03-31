@@ -368,7 +368,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const plainServer = http.createServer((req, res) => {
       const host = getRequestHost(req).split(":")[0] || "localhost";
       const location = `https://${host}${proxyPort === 443 ? "" : `:${proxyPort}`}${req.url || "/"}`;
-      res.writeHead(302, { Location: location });
+      res.writeHead(302, { Location: location, [PORTLESS_HEADER]: "1" });
       res.end();
     });
     plainServer.on("upgrade", (_req: http.IncomingMessage, socket: net.Socket) => {
@@ -395,7 +395,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           // TLS handshake -> HTTP/2 secure server
           h2Server.emit("connection", socket);
         } else {
-          // Plain HTTP -> proxy normally over HTTP/1.1
+          // Plain HTTP -> redirect to HTTPS
           plainServer.emit("connection", socket);
         }
       });
