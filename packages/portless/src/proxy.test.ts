@@ -1286,6 +1286,21 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(res.headers.location).toBe(`https://myapp.localhost:${TEST_PROXY_PORT}/`);
   });
 
+  it("includes X-Portless header in HTTP-to-HTTPS redirect", async () => {
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [],
+        proxyPort: 443,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "myapp.localhost" });
+    expect(res.status).toBe(302);
+    expect(res.headers["x-portless"]).toBe("1");
+  });
+
   it("strips hop-by-hop headers from proxied TLS responses (HTTP/2 client)", async () => {
     const backend = trackServer(
       http.createServer((_req, res) => {

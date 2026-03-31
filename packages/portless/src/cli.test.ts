@@ -1,5 +1,6 @@
-import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { spawnSync } from "node:child_process";
+import { describe, it, expect, beforeAll, beforeEach, afterEach, afterAll } from "vitest";
+import { spawn, spawnSync } from "node:child_process";
+import * as http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -518,6 +519,154 @@ describe("CLI", () => {
       });
       expect(status).toBe(0);
       expect(stdout.trim()).toBe("--name foo");
+    });
+  });
+
+  describe("proxy start/stop lifecycle", () => {
+    const TEST_PORT = 18355;
+    let tmpDir: string;
+
+    const proxyEnv = () => ({
+      PORTLESS_PORT: String(TEST_PORT),
+      PORTLESS_HTTPS: "0",
+      PORTLESS_STATE_DIR: tmpDir,
+    });
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-lifecycle-"));
+    });
+
+    afterEach(() => {
+      // Ensure proxy is stopped even if a test fails
+      run(["proxy", "stop"], { env: proxyEnv() });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("starts the proxy and stops it cleanly", () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain(`proxy started on port ${TEST_PORT}`);
+
+      const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      expect(stop.stdout).toContain("Proxy stopped");
+    });
+
+    it("reports not running when stopped twice", () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+
+      const stop1 = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop1.status).toBe(0);
+
+      const stop2 = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop2.stdout).toContain("not running");
+    });
+
+    it("detects an already-running proxy on start", () => {
+      const start1 = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start1.status).toBe(0);
+
+      const start2 = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start2.stdout).toContain("already running");
+    });
+  });
+
+  const hasSudoNoPasswd = (() => {
+    if (process.platform === "win32" || process.getuid?.() === 0) return false;
+    const result = spawnSync("sudo", ["-n", "true"], { timeout: 3000 });
+    return result.status === 0;
+  })();
+
+  describe.skipIf(!hasSudoNoPasswd)("proxy stop auto-elevates with sudo (EPERM)", () => {
+    const TEST_PORT = 18356;
+    let tmpDir: string;
+    let bgProc: ReturnType<typeof spawn> | null = null;
+
+    function waitForListen(port: number, timeoutMs = 5000): Promise<void> {
+      const start = Date.now();
+      return new Promise((resolve, reject) => {
+        const check = () => {
+          const req = http.request(
+            { hostname: "127.0.0.1", port, method: "HEAD", timeout: 500 },
+            (res) => {
+              res.resume();
+              resolve();
+            }
+          );
+          req.on("error", () => {
+            if (Date.now() - start > timeoutMs) {
+              reject(new Error(`Port ${port} not listening after ${timeoutMs}ms`));
+            } else {
+              setTimeout(check, 200);
+            }
+          });
+          req.on("timeout", () => {
+            req.destroy();
+            if (Date.now() - start > timeoutMs) {
+              reject(new Error(`Port ${port} not listening after ${timeoutMs}ms`));
+            } else {
+              setTimeout(check, 200);
+            }
+          });
+          req.end();
+        };
+        check();
+      });
+    }
+
+    beforeAll(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-eperm-"));
+    });
+
+    afterAll(() => {
+      if (bgProc && bgProc.exitCode === null) {
+        try {
+          process.kill(bgProc.pid!, "SIGKILL");
+        } catch {
+          /* already dead */
+        }
+      }
+      // Clean up via sudo in case the proxy is still running
+      spawnSync("sudo", [process.execPath, CLI_PATH, "proxy", "stop"], {
+        env: {
+          ...process.env,
+          PORTLESS_PORT: String(TEST_PORT),
+          PORTLESS_HTTPS: "0",
+          PORTLESS_STATE_DIR: tmpDir,
+          NO_COLOR: "1",
+        },
+        timeout: 10_000,
+      });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("stops a root-owned proxy by auto-elevating with sudo", async () => {
+      // Start the proxy as root in the background
+      bgProc = spawn("sudo", [process.execPath, CLI_PATH, "proxy", "start", "--foreground"], {
+        stdio: "ignore",
+        env: {
+          ...process.env,
+          PORTLESS_PORT: String(TEST_PORT),
+          PORTLESS_HTTPS: "0",
+          PORTLESS_STATE_DIR: tmpDir,
+          NO_COLOR: "1",
+        },
+      });
+
+      // Wait for the proxy to be listening
+      await waitForListen(TEST_PORT);
+
+      // Stop as non-root -- should auto-elevate with sudo
+      const stop = run(["proxy", "stop"], {
+        env: {
+          PORTLESS_PORT: String(TEST_PORT),
+          PORTLESS_HTTPS: "0",
+          PORTLESS_STATE_DIR: tmpDir,
+        },
+      });
+
+      expect(stop.stdout).toContain("Proxy stopped");
     });
   });
 });
