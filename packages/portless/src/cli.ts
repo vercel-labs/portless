@@ -67,7 +67,7 @@ function sudoStop(): boolean {
     }
   }
   console.log(chalk.yellow("Elevating with sudo to stop the proxy..."));
-  const result = spawnSync("sudo", [...envArgs, ...stopArgs], {
+  const result = spawnSync("sudo", ["env", ...envArgs, ...stopArgs], {
     stdio: "inherit",
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
@@ -311,6 +311,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           console.error(chalk.blue("Try manually:"));
           console.error(chalk.cyan("  sudo portless proxy stop"));
         }
+        return;
       }
       console.log(chalk.yellow("Proxy process is no longer running. Cleaning up stale files."));
       fs.unlinkSync(pidPath);
@@ -869,6 +870,7 @@ async function handleTrust(): Promise<void> {
       timeout: SUDO_SPAWN_TIMEOUT_MS,
     });
     if (sudoResult.status === 0) return;
+    console.error(chalk.red("sudo elevation also failed."));
   }
 
   console.error(chalk.red(`Failed to trust CA: ${result.error}`));

@@ -247,7 +247,7 @@ proxy: {
 }
 ```
 
-If your tooling doesn't trust the portless CA, point Node.js at it: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem` (or `/tmp/portless/ca.pem` when the proxy runs on a privileged port). Alternatively, use `--no-tls` for plain HTTP.
+If your tooling doesn't trust the portless CA, point Node.js at it: `NODE_EXTRA_CA_CERTS=/tmp/portless/ca.pem` (or `~/.portless/ca.pem` when the proxy runs on a non-privileged port like 1355). Alternatively, use `--no-tls` for plain HTTP.
 
 ### Requirements
 
