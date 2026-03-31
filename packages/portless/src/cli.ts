@@ -483,36 +483,43 @@ async function runApp(
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
     });
-    // Re-discover state: the proxy may have started on the standard port
-    // (443/80), the fallback (1355), or a user-configured port.
-    const discovered = await discoverState();
-    if (result.status !== 0) {
+
+    // Wait for the proxy to be ready before discovering state. The daemon
+    // may not have written its state files yet, so calling discoverState
+    // too early could resolve to the wrong port.
+    if (result.status === 0 && (await waitForProxy(defaultPort))) {
+      // Proxy appeared on the expected port -- discover full state now
+      // that the daemon is alive and state files exist.
+      const discovered = await discoverState();
+      proxyPort = discovered.port;
+      stateDir = discovered.dir;
+      tld = discovered.tld;
+      tls = discovered.tls;
+      store = new RouteStore(stateDir, {
+        onWarning: (msg: string) => console.warn(chalk.yellow(msg)),
+      });
+    } else {
+      // Proxy didn't appear on the expected port -- it may have fallen
+      // back to a different port, or a concurrent run started it.
+      const discovered = await discoverState();
       if (!(await isProxyRunning(discovered.port))) {
         console.error(chalk.red("Failed to start proxy."));
+        const logPath = path.join(discovered.dir, "proxy.log");
         console.error(chalk.blue("Try starting it manually:"));
         console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
+        if (fs.existsSync(logPath)) {
+          console.error(chalk.gray(`Logs: ${logPath}`));
+        }
         process.exit(1);
       }
+      proxyPort = discovered.port;
+      stateDir = discovered.dir;
+      tld = discovered.tld;
+      tls = discovered.tls;
+      store = new RouteStore(stateDir, {
+        onWarning: (msg: string) => console.warn(chalk.yellow(msg)),
+      });
     }
-    proxyPort = discovered.port;
-    stateDir = discovered.dir;
-    tld = discovered.tld;
-    store = new RouteStore(stateDir, {
-      onWarning: (msg: string) => console.warn(chalk.yellow(msg)),
-    });
-
-    if (!(await waitForProxy(proxyPort, undefined, undefined, discovered.tls))) {
-      console.error(chalk.red("Proxy failed to start (timed out waiting for it to listen)."));
-      const logPath = path.join(stateDir, "proxy.log");
-      console.error(chalk.blue("Try starting the proxy manually to see the error:"));
-      console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy start`));
-      if (fs.existsSync(logPath)) {
-        console.error(chalk.gray(`Logs: ${logPath}`));
-      }
-      process.exit(1);
-    }
-
-    tls = discovered.tls;
     console.log(chalk.green("Proxy started in background"));
   } else {
     console.log(chalk.gray("-- Proxy is running"));
@@ -1047,10 +1054,14 @@ ${chalk.bold("Auto-sync:")}
 
     if (!isWindows && process.getuid?.() !== 0) {
       console.log(chalk.yellow("Elevating with sudo to update hosts file..."));
-      const result = spawnSync("sudo", [process.execPath, process.argv[1], "hosts", "clean"], {
-        stdio: "inherit",
-        timeout: SUDO_SPAWN_TIMEOUT_MS,
-      });
+      const result = spawnSync(
+        "sudo",
+        ["env", ...collectPortlessEnvArgs(), process.execPath, process.argv[1], "hosts", "clean"],
+        {
+          stdio: "inherit",
+          timeout: SUDO_SPAWN_TIMEOUT_MS,
+        }
+      );
       if (result.status === 0) return;
     }
 
@@ -1100,10 +1111,14 @@ ${chalk.bold("Usage: portless hosts <command>")}
 
   if (!isWindows && process.getuid?.() !== 0) {
     console.log(chalk.yellow("Elevating with sudo to update hosts file..."));
-    const result = spawnSync("sudo", [process.execPath, process.argv[1], "hosts", "sync"], {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    });
+    const result = spawnSync(
+      "sudo",
+      ["env", ...collectPortlessEnvArgs(), process.execPath, process.argv[1], "hosts", "sync"],
+      {
+        stdio: "inherit",
+        timeout: SUDO_SPAWN_TIMEOUT_MS,
+      }
+    );
     if (result.status === 0) return;
   }
 

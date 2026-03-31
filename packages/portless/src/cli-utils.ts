@@ -220,7 +220,8 @@ export function getDefaultTld(): string {
 }
 
 /**
- * Return whether HTTPS mode is requested via the PORTLESS_HTTPS env var.
+ * @deprecated Use isHttpsEnvDisabled instead. HTTPS is now enabled by default;
+ * check whether it is disabled rather than enabled.
  */
 export function isHttpsEnvEnabled(): boolean {
   const val = process.env.PORTLESS_HTTPS;
