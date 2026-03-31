@@ -880,6 +880,13 @@ function printVersion(): void {
 
 async function handleTrust(): Promise<void> {
   const { dir } = await discoverState();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const { caGenerated } = ensureCerts(dir);
+  if (caGenerated) {
+    console.log(colors.gray("Generated local CA certificate."));
+  }
   const result = trustCA(dir);
   if (result.trusted) {
     console.log(colors.green("Local CA added to system trust store."));
