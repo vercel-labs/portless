@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.1
+
+### New Features
+
+- **Project dev dependency install**: portless can now be installed as a project dev dependency (`npm install -D portless`) in addition to the global install. The `npx`/`dlx` guard now only blocks one-off downloads, not locally installed packages
+
+### Bug Fixes
+
+- **`portless trust` on fresh install**: Fix `portless trust` failing on a fresh install when no CA certificate exists yet. The command now generates the CA and server certificates automatically before trusting
+
 ## 0.9.0
 
 ### Breaking Changes
