@@ -366,5 +366,6 @@ describe("trustCA", () => {
     const result = trustCA(tmpDir);
     expect(result.trusted).toBe(false);
     expect(result.error).toContain("CA certificate not found");
+    expect(result.error).toContain("portless trust");
   });
 });
