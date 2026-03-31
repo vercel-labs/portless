@@ -1426,16 +1426,22 @@ ${colors.bold("Usage:")}
     }
     fixOwnership(logPath);
 
-    const daemonArgs = [process.argv[1], "proxy", "start", "--foreground"];
-    if (portFlagIndex !== -1) {
-      daemonArgs.push("--port", proxyPort.toString());
-    }
+    const daemonArgs = [
+      process.argv[1],
+      "proxy",
+      "start",
+      "--foreground",
+      "--port",
+      proxyPort.toString(),
+    ];
     if (useHttps) {
       if (customCertPath && customKeyPath) {
         daemonArgs.push("--cert", customCertPath, "--key", customKeyPath);
       } else {
         daemonArgs.push("--https");
       }
+    } else {
+      daemonArgs.push("--no-tls");
     }
     if (tld !== DEFAULT_TLD) {
       daemonArgs.push("--tld", tld);
