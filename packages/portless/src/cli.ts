@@ -920,7 +920,14 @@ async function handleTrust(): Promise<void> {
     console.log(colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo..."));
     const sudoResult = spawnSync(
       "sudo",
-      ["env", ...collectPortlessEnvArgs(), `PORTLESS_STATE_DIR=${dir}`, process.execPath, getEntryScript(), "trust"],
+      [
+        "env",
+        ...collectPortlessEnvArgs(),
+        `PORTLESS_STATE_DIR=${dir}`,
+        process.execPath,
+        getEntryScript(),
+        "trust",
+      ],
       {
         stdio: "inherit",
         timeout: SUDO_SPAWN_TIMEOUT_MS,
