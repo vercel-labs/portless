@@ -257,4 +257,4 @@ If your tooling doesn't trust the portless CA, point Node.js at it: `NODE_EXTRA_
 
 - Node.js 20+
 - macOS, Linux, or Windows
-- `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions)
+- `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions; on Windows, install via `winget install -e --id ShiningLight.OpenSSL.Dev` or use the copy bundled with Git for Windows)
