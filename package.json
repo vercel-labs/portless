@@ -14,7 +14,7 @@
     "test:e2e": "turbo test:e2e",
     "test:coverage": "turbo test:coverage",
     "test:watch": "turbo test:watch",
-    "typecheck": "turbo typecheck",
+    "type-check": "turbo type-check",
     "prepare": "husky"
   },
   "devDependencies": {

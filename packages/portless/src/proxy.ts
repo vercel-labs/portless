@@ -62,6 +62,45 @@ function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<
 }
 
 /**
+ * Rewrite Origin and Referer headers so the backend sees the request as
+ * coming from localhost. Frameworks like Next.js block cross-origin
+ * requests to dev endpoints (e.g. `/_next/webpack-hmr`) when the Origin
+ * doesn't match their allowlist. Since portless is a trusted local proxy,
+ * rewriting these headers is safe; the original host is already preserved
+ * in X-Forwarded-Host.
+ */
+function rewriteOriginHeaders(
+  headers: http.OutgoingHttpHeaders,
+  targetPort: number,
+  tldSuffix: string,
+  tld: string
+): void {
+  const localOrigin = `http://localhost:${targetPort}`;
+  if (typeof headers.origin === "string") {
+    try {
+      const parsed = new URL(headers.origin);
+      if (parsed.hostname === tld || parsed.hostname.endsWith(tldSuffix)) {
+        headers.origin = localOrigin;
+      }
+    } catch {
+      // Malformed Origin value; leave as-is
+    }
+  }
+  if (typeof headers.referer === "string") {
+    try {
+      const parsed = new URL(headers.referer);
+      if (parsed.hostname === tld || parsed.hostname.endsWith(tldSuffix)) {
+        parsed.protocol = "http:";
+        parsed.host = `localhost:${targetPort}`;
+        headers.referer = parsed.toString();
+      }
+    } catch {
+      // Malformed Referer value; leave as-is
+    }
+  }
+}
+
+/**
  * Request header tracking how many times a request has passed through a
  * portless proxy. Used to detect forwarding loops (e.g. a frontend dev
  * server proxying back through portless without rewriting the Host header).
@@ -190,6 +229,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       }
     }
 
+    rewriteOriginHeaders(proxyReqHeaders, route.port, tldSuffix, tld);
+
     const proxyReq = http.request(
       {
         hostname: "127.0.0.1",
@@ -292,6 +333,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         delete proxyReqHeaders[key];
       }
     }
+
+    rewriteOriginHeaders(proxyReqHeaders, route.port, tldSuffix, tld);
 
     const proxyReq = http.request({
       hostname: "127.0.0.1",

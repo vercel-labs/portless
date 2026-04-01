@@ -694,6 +694,292 @@ describe("createProxyServer", () => {
     });
   });
 
+  describe("origin header rewriting", () => {
+    it("rewrites Origin to localhost when hostname matches TLD", async () => {
+      let receivedOrigin = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          receivedOrigin = req.headers.origin as string;
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/",
+            method: "GET",
+            headers: {
+              host: "myapp.localhost",
+              origin: "https://myapp.localhost",
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve());
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+      expect(receivedOrigin).toBe(`http://localhost:${backendAddr.port}`);
+    });
+
+    it("rewrites Origin for multi-level subdomains", async () => {
+      let receivedOrigin = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          receivedOrigin = req.headers.origin as string;
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "admin.cmd.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/_next/webpack-hmr",
+            method: "GET",
+            headers: {
+              host: "admin.cmd.localhost",
+              origin: "https://admin.cmd.localhost",
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve());
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+      expect(receivedOrigin).toBe(`http://localhost:${backendAddr.port}`);
+    });
+
+    it("preserves Origin from non-TLD hosts", async () => {
+      let receivedOrigin = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          receivedOrigin = req.headers.origin as string;
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/",
+            method: "GET",
+            headers: {
+              host: "myapp.localhost",
+              origin: "https://external.com",
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve());
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+      expect(receivedOrigin).toBe("https://external.com");
+    });
+
+    it("rewrites Referer to localhost when hostname matches TLD", async () => {
+      let receivedReferer = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          receivedReferer = req.headers.referer as string;
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/styles.css",
+            method: "GET",
+            headers: {
+              host: "myapp.localhost",
+              referer: "https://myapp.localhost/dashboard",
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve());
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+      expect(receivedReferer).toBe(`http://localhost:${backendAddr.port}/dashboard`);
+    });
+
+    it("rewrites Origin on WebSocket upgrades", async () => {
+      let receivedOrigin = "";
+      const backend = trackServer(http.createServer());
+      backend.on("upgrade", (req, socket) => {
+        receivedOrigin = req.headers.origin as string;
+        socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "\r\n"
+        );
+        socket.end();
+      });
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<boolean>((resolve) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/_next/webpack-hmr",
+          headers: {
+            host: "ws.localhost",
+            origin: "https://ws.localhost",
+            connection: "Upgrade",
+            upgrade: "websocket",
+          },
+        });
+        req.on("error", () => resolve(false));
+        req.on("upgrade", () => resolve(true));
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve(false);
+        });
+        req.end();
+      });
+
+      expect(receivedOrigin).toBe(`http://localhost:${backendAddr.port}`);
+    });
+
+    it("rewrites Origin with custom TLD", async () => {
+      let receivedOrigin = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          receivedOrigin = req.headers.origin as string;
+          res.writeHead(200);
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.test", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+        })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      await new Promise<void>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            path: "/",
+            method: "GET",
+            headers: {
+              host: "myapp.test",
+              origin: "https://myapp.test",
+            },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve());
+          }
+        );
+        req.on("error", reject);
+        req.end();
+      });
+
+      expect(receivedOrigin).toBe(`http://localhost:${backendAddr.port}`);
+    });
+  });
+
   describe("custom TLD", () => {
     it("uses custom TLD in 404 page suggested command", async () => {
       const routes: RouteInfo[] = [];
@@ -974,7 +1260,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     const certs = ensureCerts(certDir);
     tlsCert = fs.readFileSync(certs.certPath);
     tlsKey = fs.readFileSync(certs.keyPath);
-  });
+  }, 30_000);
 
   afterAll(() => {
     fs.rmSync(certDir, { recursive: true, force: true });

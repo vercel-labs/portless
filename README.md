@@ -247,7 +247,7 @@ pnpm build            # Build all packages
 pnpm test             # Run tests
 pnpm test:coverage    # Run tests with coverage
 pnpm lint             # Lint all packages
-pnpm typecheck        # Type-check all packages
+pnpm type-check       # Type-check all packages
 pnpm format           # Format all files with Prettier
 ```
 
