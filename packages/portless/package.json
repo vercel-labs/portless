@@ -1,6 +1,6 @@
 {
   "name": "portless",
-  "version": "0.9.0",
+  "version": "0.9.4",
   "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
   "type": "module",
   "main": "./dist/index.js",
@@ -34,7 +34,7 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "type-check": "tsc --noEmit"
   },
   "keywords": [
     "local",
@@ -48,7 +48,7 @@
     "type": "git",
     "url": "https://github.com/vercel-labs/portless.git"
   },
-  "homepage": "https://port1355.dev",
+  "homepage": "https://portless.sh",
   "bugs": {
     "url": "https://github.com/vercel-labs/portless/issues"
   },

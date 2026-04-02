@@ -974,7 +974,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     const certs = ensureCerts(certDir);
     tlsCert = fs.readFileSync(certs.certPath);
     tlsKey = fs.readFileSync(certs.keyPath);
-  });
+  }, 30_000);
 
   afterAll(() => {
     fs.rmSync(certDir, { recursive: true, force: true });

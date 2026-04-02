@@ -43,6 +43,63 @@ function fileExists(filePath: string): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Windows OpenSSL configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Some Windows OpenSSL builds (e.g. ShiningLight.OpenSSL.Dev) compile in a
+ * bogus OPENSSLDIR such as `Z:/extlib/_5040__/ssl`, which causes every
+ * `openssl req` invocation to fail with "Can't open openssl.cnf". We detect
+ * the problem at startup and resolve it by finding the real openssl.cnf and
+ * injecting OPENSSL_CONF into the child-process environment.
+ */
+let _opensslEnv: Record<string, string> | undefined;
+
+function getOpensslEnv(): Record<string, string> | undefined {
+  if (process.platform !== "win32") return undefined;
+  if (_opensslEnv !== undefined) return _opensslEnv;
+
+  // If the user already set OPENSSL_CONF, respect it.
+  if (process.env.OPENSSL_CONF && fileExists(process.env.OPENSSL_CONF)) {
+    _opensslEnv = {};
+    return _opensslEnv;
+  }
+
+  const candidates = [
+    // Git-for-Windows bundles OpenSSL here
+    path.join("C:", "Program Files", "Git", "mingw64", "etc", "ssl", "openssl.cnf"),
+    path.join("C:", "Program Files", "Git", "usr", "ssl", "openssl.cnf"),
+    // Standalone OpenSSL installers
+    path.join("C:", "Program Files", "OpenSSL-Win64", "bin", "cnf", "openssl.cnf"),
+    path.join("C:", "Program Files", "OpenSSL-Win64", "openssl.cnf"),
+    path.join("C:", "Program Files (x86)", "OpenSSL-Win32", "bin", "cnf", "openssl.cnf"),
+    // Common winget/chocolatey install paths
+    path.join("C:", "Program Files", "OpenSSL", "bin", "cnf", "openssl.cnf"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fileExists(candidate)) {
+      _opensslEnv = { OPENSSL_CONF: candidate };
+      return _opensslEnv;
+    }
+  }
+
+  _opensslEnv = {};
+  return _opensslEnv;
+}
+
+function opensslErrorMessage(): string {
+  if (process.platform === "win32") {
+    return (
+      "Make sure openssl is installed and working.\n" +
+      "Install via: winget install -e --id ShiningLight.OpenSSL.Dev\n" +
+      "If already installed, set OPENSSL_CONF to the path of your openssl.cnf file."
+    );
+  }
+  return "Make sure openssl is installed (ships with macOS and most Linux distributions).";
+}
+
 /**
  * Check whether a PEM certificate file has expired or will expire soon.
  * Returns true if the cert is still valid, false if it needs regeneration.
@@ -98,17 +155,19 @@ function isCertSignatureStrong(certPath: string): boolean {
  */
 function openssl(args: string[], options?: { input?: string }): string {
   try {
+    const extraEnv = getOpensslEnv();
     return execFileSync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
       input: options?.input,
       stdio: ["pipe", "pipe", "pipe"],
+      ...(extraEnv && Object.keys(extraEnv).length > 0
+        ? { env: { ...process.env, ...extraEnv } }
+        : {}),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions).`
-    );
+    throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
 }
 
@@ -121,16 +180,18 @@ const execFileAsync = promisify(execFileCb);
  */
 async function opensslAsync(args: string[]): Promise<string> {
   try {
+    const extraEnv = getOpensslEnv();
     const { stdout } = await execFileAsync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
+      ...(extraEnv && Object.keys(extraEnv).length > 0
+        ? { env: { ...process.env, ...extraEnv } }
+        : {}),
     });
     return stdout;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions).`
-    );
+    throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
 }
 
@@ -721,7 +782,10 @@ export function createSNICallback(
 export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) {
-    return { trusted: false, error: "CA certificate not found. Run with --https first." };
+    return {
+      trusted: false,
+      error: "CA certificate not found. Run portless trust to generate it.",
+    };
   }
 
   try {

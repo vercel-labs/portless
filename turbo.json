@@ -24,7 +24,7 @@
       "cache": false,
       "persistent": true
     },
-    "typecheck": {},
+    "type-check": {},
     "lint": {},
     "lint:fix": {
       "cache": false

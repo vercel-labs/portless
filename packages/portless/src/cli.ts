@@ -289,6 +289,24 @@ function getEntryScript(): string {
 }
 
 /**
+ * Check whether portless is installed as a project dependency by walking
+ * up from cwd looking for node_modules/portless. Used to distinguish a
+ * local `npx portless` (allowed) from a one-off download (blocked).
+ */
+function isLocallyInstalled(): boolean {
+  let dir = process.cwd();
+  for (;;) {
+    if (fs.existsSync(path.join(dir, "node_modules", "portless", "package.json"))) {
+      return true;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return false;
+}
+
+/**
  * Collect PORTLESS_* env vars as KEY=VALUE strings suitable for
  * `sudo env KEY=VAL ...` invocations (sudo may strip the environment).
  */
@@ -1151,8 +1169,8 @@ Eliminates port conflicts, memorizing port numbers, and cookie/storage
 clashes by giving each dev server a stable .localhost URL.
 
 ${colors.bold("Install:")}
-  ${colors.cyan("npm install -g portless")}
-  Do NOT add portless as a project dependency.
+  ${colors.cyan("npm install -g portless")}          Global (recommended)
+  ${colors.cyan("npm install -D portless")}          Project dev dependency
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
@@ -1281,6 +1299,13 @@ function printVersion(): void {
 
 async function handleTrust(): Promise<void> {
   const { dir } = await discoverState();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  const { caGenerated } = ensureCerts(dir);
+  if (caGenerated) {
+    console.log(colors.gray("Generated local CA certificate."));
+  }
   const result = trustCA(dir);
   if (result.trusted) {
     console.log(colors.green("Local CA added to system trust store."));
@@ -1294,10 +1319,21 @@ async function handleTrust(): Promise<void> {
     result.error?.includes("Permission denied") || result.error?.includes("EACCES");
   if (isPermissionError && !isWindows && process.getuid?.() !== 0) {
     console.log(colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo..."));
-    const sudoResult = spawnSync("sudo", [process.execPath, getEntryScript(), "trust"], {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    });
+    const sudoResult = spawnSync(
+      "sudo",
+      [
+        "env",
+        ...collectPortlessEnvArgs(),
+        `PORTLESS_STATE_DIR=${dir}`,
+        process.execPath,
+        getEntryScript(),
+        "trust",
+      ],
+      {
+        stdio: "inherit",
+        timeout: SUDO_SPAWN_TIMEOUT_MS,
+      }
+    );
     if (sudoResult.status === 0) return;
     console.error(colors.red("sudo elevation also failed."));
   }
@@ -2167,15 +2203,17 @@ async function main() {
 
   const args = process.argv.slice(2);
 
-  // Block npx / pnpm dlx: portless should be installed globally, not run
-  // via npx. Running "sudo npx" is unsafe because it performs package
-  // resolution and downloads as root.
+  // Block one-off npx / pnpm dlx downloads. Running "sudo npx" is unsafe
+  // because it performs package resolution and downloads as root. When
+  // portless is installed as a project dependency the env vars still fire,
+  // so skip the block if we can find a local installation.
   const isNpx = process.env.npm_command === "exec" && !process.env.npm_lifecycle_event;
   const isPnpmDlx = !!process.env.PNPM_SCRIPT_SRC_DIR && !process.env.npm_lifecycle_event;
-  if (isNpx || isPnpmDlx) {
+  if ((isNpx || isPnpmDlx) && !isLocallyInstalled()) {
     console.error(colors.red("Error: portless should not be run via npx or pnpm dlx."));
-    console.error(colors.blue("Install globally instead:"));
+    console.error(colors.blue("Install globally or as a project dependency:"));
     console.error(colors.cyan("  npm install -g portless"));
+    console.error(colors.cyan("  npm install -D portless"));
     process.exit(1);
   }
 

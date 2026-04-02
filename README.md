@@ -9,11 +9,19 @@ Replace port numbers with stable, named .localhost URLs for local development. F
 
 ## Install
 
+**Global (recommended):**
+
 ```bash
 npm install -g portless
 ```
 
-> Install globally. Do not add as a project dependency or run via npx.
+**Or as a project dev dependency:**
+
+```bash
+npm install -D portless
+```
+
+> portless is pre-1.0. When installed per-project, different contributors may run different versions. The state directory format may change between releases, which can require re-running `portless trust`.
 
 ## Run your app
 
@@ -270,7 +278,7 @@ pnpm build            # Build all packages
 pnpm test             # Run tests
 pnpm test:coverage    # Run tests with coverage
 pnpm lint             # Lint all packages
-pnpm typecheck        # Type-check all packages
+pnpm type-check       # Type-check all packages
 pnpm format           # Format all files with Prettier
 ```
 
