@@ -1,8 +1,19 @@
 # Changelog
 
-## 0.9.3
+## 0.9.4
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **README missing from npm package**: The published npm package now includes its README. Previously `.gitignore` excluded the copied README during packing; an `.npmignore` override fixes this. (#197)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.9.3
 
 ### Breaking Changes
 
@@ -11,7 +22,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.9.2
 
