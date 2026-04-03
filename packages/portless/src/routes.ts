@@ -31,12 +31,14 @@ export interface RouteMapping extends RouteInfo {
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
+  const r = value as RouteMapping;
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as RouteMapping).hostname === "string" &&
-    typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
+    typeof r.hostname === "string" &&
+    typeof r.port === "number" &&
+    typeof r.pid === "number" &&
+    (r.pathPrefix === undefined || typeof r.pathPrefix === "string")
   );
 }
 
@@ -156,6 +158,10 @@ export class RouteStore {
     }
   }
 
+  private matchesRoute(r: RouteMapping, hostname: string, pathPrefix?: string): boolean {
+    return r.hostname === hostname && r.pathPrefix === pathPrefix;
+  }
+
   // Route I/O
   // ---------------------------------------------------------------------------
 
@@ -216,32 +222,36 @@ export class RouteStore {
     fixOwnership(this.routesPath);
   }
 
-  addRoute(hostname: string, port: number, pid: number, force = false): void {
+  addRoute(hostname: string, port: number, pid: number, force = false, pathPrefix?: string): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
       const routes = this.loadRoutes(true);
-      const existing = routes.find((r) => r.hostname === hostname);
+      const existing = routes.find((r) => this.matchesRoute(r, hostname, pathPrefix));
       if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid) && !force) {
         throw new RouteConflictError(hostname, existing.pid);
       }
-      const filtered = routes.filter((r) => r.hostname !== hostname);
-      filtered.push({ hostname, port, pid });
+      const filtered = routes.filter((r) => !this.matchesRoute(r, hostname, pathPrefix));
+      const entry: RouteMapping = { hostname, port, pid };
+      if (pathPrefix) entry.pathPrefix = pathPrefix;
+      filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {
       this.releaseLock();
     }
   }
 
-  removeRoute(hostname: string): void {
+  removeRoute(hostname: string, pathPrefix?: string): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
-      const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
+      const routes = this.loadRoutes(true).filter(
+        (r) => !this.matchesRoute(r, hostname, pathPrefix)
+      );
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

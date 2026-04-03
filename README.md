@@ -78,6 +78,20 @@ portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
+## Path-based routing
+
+Route multiple apps under one hostname by URL path:
+
+```bash
+portless myapp vite dev                  # serves /
+portless myapp --path /api pnpm start    # serves /api/*
+portless myapp --path /docs next dev     # serves /docs/*
+```
+
+The proxy uses longest-prefix matching to dispatch requests. The full request path is forwarded to the backend unchanged. Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain and route by path.
+
+Also available via environment variable: `PORTLESS_PATH=/api`.
+
 ## Custom TLD
 
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
@@ -132,8 +146,8 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 ## Commands
 
 ```bash
-portless run [--name <name>] <cmd> [args...]  # Infer name (or override with --name), run through proxy
-portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
+portless run [--name <name>] [--path <prefix>] <cmd> [args...]  # Infer name, run through proxy
+portless <name> [--path <prefix>] <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
@@ -166,6 +180,7 @@ portless proxy stop              # Stop the proxy
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--path <prefix>                  URL path prefix for path-based routing (e.g. /api)
 --force                          Override a route registered by another process
 --name <name>                    Use <name> as the app name
 ```
@@ -180,6 +195,7 @@ PORTLESS_HTTPS                   HTTPS on by default; set to 0 to disable (same 
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
+PORTLESS_PATH=<path>             Path prefix for path-based routing (e.g. /api)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
