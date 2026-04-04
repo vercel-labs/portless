@@ -349,7 +349,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   if (tls) {
     const h2Server = http2.createSecureServer({
-      cert: tls.cert,
+      cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
       ...(tls.SNICallback ? { SNICallback: tls.SNICallback } : {}),

@@ -670,13 +670,18 @@ export function createSNICallback(
   stateDir: string,
   defaultCert: Buffer,
   defaultKey: Buffer,
-  tld = "localhost"
+  tld = "localhost",
+  caCert?: Buffer
 ): (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void {
   const cache = new Map<string, tls.SecureContext>();
   const pending = new Map<string, Promise<tls.SecureContext>>();
 
-  // Pre-cache the default context for the bare TLD itself
-  const defaultCtx = tls.createSecureContext({ cert: defaultCert, key: defaultKey });
+  // Pre-cache the default context for the bare TLD itself.
+  // Include the CA certificate so clients receive the full chain.
+  const defaultCtx = tls.createSecureContext({
+    cert: caCert ? Buffer.concat([defaultCert, caCert]) : defaultCert,
+    key: defaultKey,
+  });
 
   return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
     // The bare TLD (e.g. "localhost" or "test") uses the default cert.
@@ -709,8 +714,9 @@ export function createSNICallback(
       isCertSignatureStrong(certPath)
     ) {
       try {
+        const hostCert = fs.readFileSync(certPath);
         const ctx = tls.createSecureContext({
-          cert: fs.readFileSync(certPath),
+          cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
           key: fs.readFileSync(keyPath),
         });
         cache.set(servername, ctx);
@@ -732,11 +738,14 @@ export function createSNICallback(
 
     // Generate a new cert for this hostname asynchronously
     const promise = generateHostCertAsync(stateDir, servername).then(async (generated) => {
-      const [cert, key] = await Promise.all([
+      const [hostCert, key] = await Promise.all([
         fs.promises.readFile(generated.certPath),
         fs.promises.readFile(generated.keyPath),
       ]);
-      return tls.createSecureContext({ cert, key });
+      return tls.createSecureContext({
+        cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
+        key,
+      });
     });
 
     pending.set(servername, promise);
