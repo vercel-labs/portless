@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.9.5
+
+<!-- release:start -->
+
+### Bug Fixes
+
+- **`--force` kills existing process**: `--force` now terminates the process that owns the conflicting route before registering a new one, instead of only removing the stale route entry (#204)
+- **CA certificate included in TLS chain**: The proxy now sends the CA certificate as part of the TLS chain, fixing `UNABLE_TO_VERIFY_LEAF_SIGNATURE` errors in clients that do not have the portless CA in their trust store (#203)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
 ## 0.9.4
 
 <!-- release:start -->
