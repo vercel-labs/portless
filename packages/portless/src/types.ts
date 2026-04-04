@@ -23,6 +23,8 @@ export interface ProxyServerOptions {
   tls?: {
     cert: Buffer;
     key: Buffer;
+    /** CA certificate to include in the chain so clients can verify the leaf. */
+    ca?: Buffer;
     /** SNI callback for per-hostname certificate selection. */
     SNICallback?: (
       servername: string,

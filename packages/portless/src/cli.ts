@@ -1494,10 +1494,12 @@ ${colors.bold("Usage:")}
 
       const cert = fs.readFileSync(certs.certPath);
       const key = fs.readFileSync(certs.keyPath);
+      const ca = fs.readFileSync(certs.caPath);
       tlsOptions = {
         cert,
         key,
-        SNICallback: createSNICallback(stateDir, cert, key, tld),
+        ca,
+        SNICallback: createSNICallback(stateDir, cert, key, tld, ca),
       };
     }
   }
