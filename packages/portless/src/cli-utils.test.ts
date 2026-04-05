@@ -25,6 +25,7 @@ import {
   validateTld,
   writeTldFile,
 } from "./cli-utils.js";
+import { PORTLESS_HEADER, PORTLESS_LISTENER_PORT_HEADER } from "./proxy.js";
 
 describe("findFreePort", () => {
   it("returns a port in the default range", async () => {
@@ -92,13 +93,15 @@ describe("isProxyRunning", () => {
   });
 
   it("returns true when a portless proxy is listening", async () => {
+    let listenerPort = 0;
     const server = http.createServer((_req, res) => {
-      res.setHeader("X-Portless", "1");
+      res.setHeader(PORTLESS_HEADER, "1");
+      res.setHeader(PORTLESS_LISTENER_PORT_HEADER, String(listenerPort));
       res.end("ok");
     });
     servers.push(server);
 
-    const port = await new Promise<number>((resolve) => {
+    listenerPort = await new Promise<number>((resolve) => {
       server.listen(0, "127.0.0.1", () => {
         const addr = server.address();
         if (addr && typeof addr !== "string") {
@@ -107,7 +110,7 @@ describe("isProxyRunning", () => {
       });
     });
 
-    const result = await isProxyRunning(port);
+    const result = await isProxyRunning(listenerPort);
     expect(result).toBe(true);
   });
 
@@ -127,6 +130,28 @@ describe("isProxyRunning", () => {
     });
 
     const result = await isProxyRunning(port);
+    expect(result).toBe(false);
+  });
+
+  it("returns false when a portless response reports a different listener port", async () => {
+    let listenerPort = 0;
+    const server = http.createServer((_req, res) => {
+      res.setHeader(PORTLESS_HEADER, "1");
+      res.setHeader(PORTLESS_LISTENER_PORT_HEADER, String(listenerPort + 1));
+      res.end("redirected");
+    });
+    servers.push(server);
+
+    listenerPort = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          resolve(addr.port);
+        }
+      });
+    });
+
+    const result = await isProxyRunning(listenerPort);
     expect(result).toBe(false);
   });
 });
