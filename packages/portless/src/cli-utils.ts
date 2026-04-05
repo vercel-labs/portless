@@ -27,6 +27,12 @@ export const DEFAULT_PROXY_PORT = FALLBACK_PROXY_PORT;
 /** Ports below this threshold require root/sudo to bind (Unix only). */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
 
+/** Internal env var used to preserve an auto-detected LAN IP across daemonization. */
+export const INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP";
+
+/** Internal-only flag used to pass an auto-detected LAN IP through re-exec. */
+export const INTERNAL_LAN_IP_FLAG = "--lan-ip-auto";
+
 /**
  * System-wide state directory (used when proxy needs sudo on Unix).
  * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
@@ -166,6 +172,36 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/**
+ * Name of the marker file that remembers LAN mode across proxy restarts.
+ * While the proxy is running, the file stores the last known LAN IP.
+ */
+const LAN_MARKER_FILE = "proxy.lan";
+
+/** Read the LAN marker from a state directory. Returns the last known IP or null. */
+export function readLanMarker(dir: string): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(dir, LAN_MARKER_FILE), "utf-8").trim();
+    return raw || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write or remove the LAN marker in the state directory. */
+export function writeLanMarker(dir: string, ip: string | null): void {
+  const markerPath = path.join(dir, LAN_MARKER_FILE);
+  if (!ip) {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  } else {
+    fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+  }
+}
+
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
 
@@ -263,7 +299,70 @@ export function isWildcardEnvEnabled(): boolean {
 }
 
 /**
- * Discover the active proxy's state directory, port, TLS mode, and TLD.
+ * Return whether LAN mode is requested via the PORTLESS_LAN env var.
+ */
+export function isLanEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_LAN;
+  return val === "1" || val === "true";
+}
+
+export function buildProxyStartConfig(options: {
+  useHttps: boolean;
+  customCertPath?: string | null;
+  customKeyPath?: string | null;
+  lanMode: boolean;
+  lanIp?: string | null;
+  lanIpExplicit?: boolean;
+  tld: string;
+  useWildcard?: boolean;
+  foreground?: boolean;
+  includePort?: boolean;
+  proxyPort?: number;
+}): { effectiveTld: string; args: string[] } {
+  const effectiveTld = options.lanMode ? "local" : options.tld;
+  const args: string[] = [];
+
+  if (options.foreground) {
+    args.push("--foreground");
+  }
+
+  if (options.includePort && options.proxyPort !== undefined) {
+    args.push("--port", options.proxyPort.toString());
+  }
+
+  if (options.useHttps) {
+    if (options.customCertPath && options.customKeyPath) {
+      args.push("--cert", options.customCertPath, "--key", options.customKeyPath);
+    } else {
+      args.push("--https");
+    }
+  } else {
+    args.push("--no-tls");
+  }
+
+  if (options.lanMode) {
+    args.push("--lan");
+    if (options.lanIp) {
+      if (options.lanIpExplicit) {
+        args.push("--ip", options.lanIp);
+      } else {
+        args.push(INTERNAL_LAN_IP_FLAG, options.lanIp);
+      }
+    }
+  } else if (effectiveTld !== DEFAULT_TLD) {
+    args.push("--tld", effectiveTld);
+  }
+
+  if (options.useWildcard) {
+    args.push("--wildcard");
+  }
+
+  return { effectiveTld, args };
+}
+
+/**
+ * Discover the active proxy's state directory, port, TLS mode, TLD, LAN mode,
+ * and current LAN IP when available.
  * Checks the user-level dir first, then the system-level dir.
  * Falls back to the system dir with the default port if nothing is running.
  */
@@ -272,14 +371,28 @@ export async function discoverState(): Promise<{
   port: number;
   tls: boolean;
   tld: string;
+  lanMode: boolean;
+  lanIp: string | null;
 }> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
     const port = readPortFromDir(dir) ?? getDefaultPort();
-    const tls = readTlsMarker(dir);
-    const tld = readTldFromDir(dir);
-    return { dir, port, tls, tld };
+    const lanIp = readLanMarker(dir);
+    if ((await isProxyRunning(port)) || (await isPortListening(port))) {
+      const tls = readTlsMarker(dir);
+      const tld = readTldFromDir(dir);
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
+    }
+
+    return {
+      dir,
+      port,
+      tls: readTlsMarker(dir),
+      tld: readTldFromDir(dir),
+      lanMode: lanIp !== null,
+      lanIp: null,
+    };
   }
 
   // Check user-level state first (~/.portless)
@@ -291,7 +404,15 @@ export async function discoverState(): Promise<{
     if (await isProxyRunning(userPort)) {
       const tls = readTlsMarker(USER_STATE_DIR);
       const tld = readTldFromDir(USER_STATE_DIR);
-      return { dir: USER_STATE_DIR, port: userPort, tls, tld };
+      const lanIp = readLanMarker(USER_STATE_DIR);
+      return {
+        dir: USER_STATE_DIR,
+        port: userPort,
+        tls,
+        tld,
+        lanMode: lanIp !== null || tld === "local",
+        lanIp,
+      };
     }
   }
 
@@ -301,7 +422,15 @@ export async function discoverState(): Promise<{
     if (await isProxyRunning(systemPort)) {
       const tls = readTlsMarker(SYSTEM_STATE_DIR);
       const tld = readTldFromDir(SYSTEM_STATE_DIR);
-      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls, tld };
+      const lanIp = readLanMarker(SYSTEM_STATE_DIR);
+      return {
+        dir: SYSTEM_STATE_DIR,
+        port: systemPort,
+        tls,
+        tld,
+        lanMode: lanIp !== null || tld === "local",
+        lanIp,
+      };
     }
   }
 
@@ -317,15 +446,19 @@ export async function discoverState(): Promise<{
       const dir = resolveStateDir(port);
       const tls = readTlsMarker(dir);
       const tld = readTldFromDir(dir);
-      return { dir, port, tls, tld };
+      const lanIp = readLanMarker(dir);
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
     }
   }
 
+  const dir = resolveStateDir(configuredPort);
   return {
-    dir: resolveStateDir(configuredPort),
+    dir,
     port: configuredPort,
     tls: false,
     tld: getDefaultTld(),
+    lanMode: readLanMarker(dir) !== null,
+    lanIp: null,
   };
 }
 
@@ -408,6 +541,26 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
       resolve(false);
     });
     req.end();
+  });
+}
+
+/** Check whether any process is listening on the given port at 127.0.0.1. */
+export function isPortListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setTimeout(SOCKET_TIMEOUT_MS);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
   });
 }
 
@@ -684,6 +837,12 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  *
  * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ *
+ * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
+ * lan|tunnel|localhost). In LAN mode we skip `--host` entirely — Expo defaults
+ * to LAN already and injecting the flag alongside HOST=127.0.0.1 causes Metro's
+ * HMR WebSocket to degrade. Outside LAN mode, `--host localhost` keeps the
+ * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
   const basename = findFrameworkBasename(commandArgs);
@@ -699,6 +858,10 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   }
 
   if (!commandArgs.includes("--host")) {
+    // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
+    // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
+    const isExpoLan = basename === "expo" && isLanEnvEnabled();
+    if (isExpoLan) return;
     const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
