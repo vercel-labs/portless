@@ -1,5 +1,85 @@
 # Changelog
 
+## 0.9.6
+
+<!-- release:start -->
+
+### Bug Fixes
+
+- **WebSocket proxy memory leak**: Add socket close/end handlers to prevent memory leaks in the WebSocket proxy (#208)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.9.5
+
+<!-- release:start -->
+
+### Bug Fixes
+
+- **`--force` kills existing process**: `--force` now terminates the process that owns the conflicting route before registering a new one, instead of only removing the stale route entry (#204)
+- **CA certificate included in TLS chain**: The proxy now sends the CA certificate as part of the TLS chain, fixing `UNABLE_TO_VERIFY_LEAF_SIGNATURE` errors in clients that do not have the portless CA in their trust store (#203)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.9.4
+
+<!-- release:start -->
+
+### Bug Fixes
+
+- **README missing from npm package**: The published npm package now includes its README. Previously `.gitignore` excluded the copied README during packing; an `.npmignore` override fixes this. (#197)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.9.3
+
+### Breaking Changes
+
+- **Origin/Referer header rewriting removed**: The proxy no longer rewrites `Origin` and `Referer` headers. The feature introduced in 0.9.2 caused issues with certain backend frameworks and has been removed. (#195)
+
+### Contributors
+
+- @ctate
+
+## 0.9.2
+
+### New Features
+
+- **Origin/Referer header rewriting**: The proxy now rewrites `Origin` and `Referer` headers for portless-managed hostnames so backend CSRF protections accept proxied requests (#189)
+
+### Bug Fixes
+
+- **Browser-blocked ports excluded from auto-selection**: Ports that browsers refuse to connect to (e.g. 6666, 6667) are now excluded from automatic port assignment (#192)
+- **State directory preserved during sudo elevation**: Fix `portless trust` losing the state directory when elevating to sudo (#187)
+- **Windows OpenSSL config detection**: Auto-detect `openssl.cnf` location on Windows when `OPENSSLDIR` points to a non-existent path (#183)
+
+### Contributors
+
+- @ctate
+
+## 0.9.1
+
+### New Features
+
+- **Project dev dependency install**: portless can now be installed as a project dev dependency (`npm install -D portless`) in addition to the global install. The `npx`/`dlx` guard now only blocks one-off downloads, not locally installed packages. (#179)
+
+### Bug Fixes
+
+- **`portless trust` on fresh install**: Fix `portless trust` failing on a fresh install when no CA certificate exists yet. The command now generates the CA and server certificates automatically before trusting. (#177)
+
+### Contributors
+
+- @ctate
+
 ## 0.9.0
 
 ### Breaking Changes

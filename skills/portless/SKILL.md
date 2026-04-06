@@ -21,18 +21,22 @@ Replace port numbers with stable, named .localhost URLs. For humans and agents.
 
 ## Installation
 
-portless is a global CLI tool. Do NOT add it as a project dependency (no `npm install portless` or `pnpm add portless` in a project). Do NOT use `npx` or `pnpm dlx`.
-
-Install globally:
+Install globally (recommended) or as a project dev dependency. Do NOT use `npx` or `pnpm dlx` for one-off execution.
 
 ```bash
+# Global (available everywhere)
 npm install -g portless
+
+# Or per-project dev dependency
+npm install -D portless
 ```
+
+When installed per-project, invoke via package.json scripts or `npx portless` (since the package is local, npx will not download anything).
 
 ## Quick Start
 
 ```bash
-# Install globally
+# Install globally (or add -D to a project)
 npm install -g portless
 
 # Run your app (auto-starts the HTTPS proxy on port 443)
@@ -175,7 +179,7 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 | `portless hosts clean`                 | Remove portless entries from /etc/hosts                     |
 | `portless <name> --path /prefix <cmd>` | Route by URL path prefix (path-based routing)               |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment     |
-| `portless <name> --force <cmd>`        | Override an existing route registered by another process    |
+| `portless <name> --force <cmd>`        | Kill the existing process and take over its route           |
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)   |
 | `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child |
 | `portless --help` / `-h`               | Show help                                                   |
@@ -267,4 +271,4 @@ If your tooling doesn't trust the portless CA, point Node.js at it: `NODE_EXTRA_
 
 - Node.js 20+
 - macOS, Linux, or Windows
-- `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions)
+- `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions; on Windows, install via `winget install -e --id ShiningLight.OpenSSL.Dev` or use the copy bundled with Git for Windows)

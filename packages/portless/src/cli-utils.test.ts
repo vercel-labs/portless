@@ -5,6 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  BLOCKED_PORTS,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   PRIVILEGED_PORT_THRESHOLD,
@@ -61,6 +62,17 @@ describe("findFreePort", () => {
 
   it("throws when minPort > maxPort", async () => {
     await expect(findFreePort(5000, 4000)).rejects.toThrow("minPort");
+  });
+
+  it("never returns a blocked port (WHATWG bad ports)", async () => {
+    for (let i = 0; i < 20; i++) {
+      const port = await findFreePort();
+      expect(BLOCKED_PORTS.has(port)).toBe(false);
+    }
+  });
+
+  it("skips a blocked port even when it is the only one in range", async () => {
+    await expect(findFreePort(4045, 4045)).rejects.toThrow("No free port found");
   });
 });
 

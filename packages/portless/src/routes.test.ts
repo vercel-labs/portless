@@ -2,7 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import { RouteStore } from "./routes.js";
+import { spawn } from "node:child_process";
+import { RouteStore, RouteConflictError } from "./routes.js";
 
 describe("RouteStore", () => {
   let tmpDir: string;
@@ -182,6 +183,83 @@ describe("RouteStore", () => {
       expect(routes).toHaveLength(2);
       const hostnames = routes.map((r) => r.hostname).sort();
       expect(hostnames).toEqual(["app1.localhost", "app2.localhost"]);
+    });
+  });
+
+  describe("addRoute with force", () => {
+    function spawnSleeper(): number {
+      const child = spawn("node", ["-e", "setTimeout(()=>{},60000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      return child.pid!;
+    }
+
+    function isAlive(pid: number): boolean {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+
+    it("throws RouteConflictError without --force when route is owned by another live process", () => {
+      const otherPid = spawnSleeper();
+      try {
+        store.addRoute("app.localhost", 4001, otherPid);
+        expect(() => store.addRoute("app.localhost", 4002, process.pid)).toThrow(
+          RouteConflictError
+        );
+      } finally {
+        try {
+          process.kill(otherPid, "SIGTERM");
+        } catch {
+          // already dead
+        }
+      }
+    });
+
+    it("kills the existing process and returns its PID when --force is used", async () => {
+      const otherPid = spawnSleeper();
+      try {
+        store.addRoute("app.localhost", 4001, otherPid);
+        const killedPid = store.addRoute("app.localhost", 4002, process.pid, true);
+        expect(killedPid).toBe(otherPid);
+        // Wait for signal delivery
+        await new Promise((r) => setTimeout(r, 200));
+        expect(isAlive(otherPid)).toBe(false);
+      } finally {
+        try {
+          process.kill(otherPid, "SIGTERM");
+        } catch {
+          // already dead
+        }
+      }
+    });
+
+    it("replaces the route when --force kills the existing process", () => {
+      const otherPid = spawnSleeper();
+      try {
+        store.addRoute("app.localhost", 4001, otherPid);
+        store.addRoute("app.localhost", 4002, process.pid, true);
+        const routes = store.loadRoutes();
+        expect(routes).toHaveLength(1);
+        expect(routes[0].port).toBe(4002);
+        expect(routes[0].pid).toBe(process.pid);
+      } finally {
+        try {
+          process.kill(otherPid, "SIGTERM");
+        } catch {
+          // already dead
+        }
+      }
+    });
+
+    it("returns undefined when no conflicting process exists", () => {
+      const killedPid = store.addRoute("app.localhost", 4001, process.pid, true);
+      expect(killedPid).toBeUndefined();
     });
   });
 

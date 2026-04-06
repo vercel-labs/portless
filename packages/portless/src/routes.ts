@@ -43,8 +43,8 @@ function isValidRoute(value: unknown): value is RouteMapping {
 }
 
 /**
- * Thrown when a route is already registered by a live process and --force
- * was not specified.
+ * Thrown when a route is already registered by a live process and --force was
+ * not specified. With --force, the existing process is killed instead.
  */
 export class RouteConflictError extends Error {
   readonly hostname: string;
@@ -222,16 +222,38 @@ export class RouteStore {
     fixOwnership(this.routesPath);
   }
 
-  addRoute(hostname: string, port: number, pid: number, force = false, pathPrefix?: string): void {
+  /**
+   * Register a route. When `force` is true and the hostname is already claimed
+   * by another live process, that process is sent SIGTERM before the route is
+   * replaced. Returns the PID of the killed process (if any) so the caller can
+   * log it.
+   */
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    pathPrefix?: string
+  ): number | undefined {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
+    let killedPid: number | undefined;
     try {
       const routes = this.loadRoutes(true);
       const existing = routes.find((r) => this.matchesRoute(r, hostname, pathPrefix));
-      if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid) && !force) {
-        throw new RouteConflictError(hostname, existing.pid);
+      if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
+        if (!force) {
+          throw new RouteConflictError(hostname, existing.pid);
+        }
+        // --force: kill the existing process before taking over
+        try {
+          process.kill(existing.pid, "SIGTERM");
+          killedPid = existing.pid;
+        } catch {
+          // Process may have exited between the check and the kill; non-fatal
+        }
       }
       const filtered = routes.filter((r) => !this.matchesRoute(r, hostname, pathPrefix));
       const entry: RouteMapping = { hostname, port, pid };
@@ -241,6 +263,7 @@ export class RouteStore {
     } finally {
       this.releaseLock();
     }
+    return killedPid;
   }
 
   removeRoute(hostname: string, pathPrefix?: string): void {

@@ -9,11 +9,19 @@ Replace port numbers with stable, named .localhost URLs for local development. F
 
 ## Install
 
+**Global (recommended):**
+
 ```bash
 npm install -g portless
 ```
 
-> Install globally. Do not add as a project dependency or run via npx.
+**Or as a project dev dependency:**
+
+```bash
+npm install -D portless
+```
+
+> portless is pre-1.0. When installed per-project, different contributors may run different versions. The state directory format may change between releases, which can require re-running `portless trust`.
 
 ## Run your app
 
@@ -173,7 +181,7 @@ portless proxy stop              # Stop the proxy
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --path <prefix>                  URL path prefix for path-based routing (e.g. /api)
---force                          Override a route registered by another process
+--force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
 
@@ -255,7 +263,7 @@ pnpm build            # Build all packages
 pnpm test             # Run tests
 pnpm test:coverage    # Run tests with coverage
 pnpm lint             # Lint all packages
-pnpm typecheck        # Type-check all packages
+pnpm type-check       # Type-check all packages
 pnpm format           # Format all files with Prettier
 ```
 

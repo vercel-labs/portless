@@ -350,8 +350,18 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxySocket.pipe(socket);
       socket.pipe(proxySocket);
 
-      proxySocket.on("error", () => socket.destroy());
-      socket.on("error", () => proxySocket.destroy());
+      // Tear down both sockets when either side disconnects. destroy() is
+      // idempotent, so duplicate calls from multiple events are harmless.
+      const cleanup = () => {
+        proxySocket.destroy();
+        socket.destroy();
+      };
+      proxySocket.on("error", cleanup);
+      socket.on("error", cleanup);
+      proxySocket.on("close", cleanup);
+      socket.on("close", cleanup);
+      proxySocket.on("end", cleanup);
+      socket.on("end", cleanup);
     });
 
     proxyReq.on("error", (err) => {
@@ -382,7 +392,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   if (tls) {
     const h2Server = http2.createSecureServer({
-      cert: tls.cert,
+      cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
       ...(tls.SNICallback ? { SNICallback: tls.SNICallback } : {}),

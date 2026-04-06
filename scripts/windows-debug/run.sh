@@ -29,7 +29,7 @@ trap "rm -f $PARAMS_FILE" EXIT
 
 python3 -c '
 import json, sys
-path_setup = "$env:PATH = \"C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Program Files\\OpenSSL-Win64\\bin;$env:PATH\""
+path_setup = "$env:PATH = \"C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\OpenSSL-Win64\\bin;$env:PATH\""
 cmd = path_setup + "\n" + sys.argv[1]
 json.dump({"commands": [cmd]}, open(sys.argv[2], "w"))
 ' "$COMMAND" "$PARAMS_FILE"
