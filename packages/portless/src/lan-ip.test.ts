@@ -4,7 +4,7 @@ import type { NetworkInterfaceInfo } from "node:os";
 const hoisted = vi.hoisted(() => ({
   probeAddress: "192.168.1.10",
   socketFail: false,
-  interfaces: {} as NodeJS.Dict<NetworkInterfaceInfo[] | undefined>,
+  interfaces: {} as NodeJS.Dict<NetworkInterfaceInfo[]>,
 }));
 
 vi.mock("node:dgram", () => ({
@@ -79,7 +79,7 @@ describe("getLocalNetworkIp", () => {
           internal: false,
           cidr: "10.0.0.5/8",
           scopeid: undefined,
-        },
+        } as unknown as NetworkInterfaceInfo,
       ],
     };
     hoisted.probeAddress = "10.0.0.5";
