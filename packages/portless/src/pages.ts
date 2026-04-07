@@ -3,6 +3,9 @@ import { GEIST_SANS_400, GEIST_SANS_500, GEIST_MONO_400, GEIST_PIXEL } from "./f
 export const ARROW_SVG =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+const COPY_SVG =
+  '<svg width="14" height="14" viewBox="0 0 14 14" fill="none"><rect x="2" y="2" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/><rect x="4" y="4" width="8" height="8" rx="1.5" stroke="currentColor" stroke-width="1.5"/></svg>';
+
 const PAGE_STYLES = `
   @font-face {
     font-family: 'Geist';
@@ -186,6 +189,142 @@ const PAGE_STYLES = `
     font-family: var(--font-mono);
     letter-spacing: 0.08em;
   }
+  .dashboard-page {
+    min-height: 100vh;
+    padding: 32px 24px;
+  }
+  .dashboard-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    max-width: 720px;
+    margin: 0 auto 32px;
+  }
+  .dashboard-header .brand {
+    font-family: 'Geist Pixel', var(--font-mono);
+    font-size: 18px;
+    font-weight: 400;
+    color: var(--fg);
+  }
+  .dashboard-header .version {
+    font-size: 11px;
+    color: var(--text-3);
+    font-family: var(--font-mono);
+  }
+  .dashboard-content {
+    max-width: 720px;
+    margin: 0 auto;
+  }
+  .status-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--text-2);
+    margin-bottom: 32px;
+    flex-wrap: wrap;
+  }
+  .status-bar .dot {
+    width: 8px;
+    height: 8px;
+    background: #10b981;
+    border-radius: 50%;
+  }
+  .status-bar .separator {
+    color: var(--border);
+  }
+  .route-count {
+    color: var(--text-3);
+  }
+  .dashboard-section {
+    margin-bottom: 32px;
+  }
+  .route-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border-bottom: 1px solid var(--border);
+    gap: 16px;
+  }
+  .route-item:last-child {
+    border-bottom: none;
+  }
+  .route-info {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex: 1;
+    min-width: 0;
+  }
+  .route-hostname {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--fg);
+    font-family: var(--font-sans);
+    white-space: nowrap;
+  }
+  .route-meta {
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+  }
+  .route-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .icon-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-3);
+    cursor: pointer;
+    transition: all 0.15s ease;
+  }
+  .icon-btn:hover {
+    background: var(--surface);
+    color: var(--text-2);
+    border-color: var(--text-3);
+  }
+  .icon-btn.copied {
+    color: #10b981;
+    border-color: #10b981;
+  }
+  .open-link {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--text-3);
+    text-decoration: none;
+    transition: all 0.15s ease;
+  }
+  .open-link:hover {
+    background: var(--surface);
+    color: var(--accent);
+    border-color: var(--accent);
+    transform: translateX(1px);
+  }
+  .empty-state {
+    text-align: center;
+    padding: 48px 24px;
+    color: var(--text-3);
+  }
+  .empty-state p {
+    font-size: 14px;
+    margin-bottom: 16px;
+  }
 `;
 
 export function renderPage(status: number, statusText: string, body: string): string {
@@ -204,6 +343,106 @@ export function renderPage(status: number, statusText: string, body: string): st
 ${body}
 <p class="footer">portless</p>
 </div>
+</body>
+</html>`;
+}
+
+export interface RouteInfo {
+  hostname: string;
+  port: number;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, "\u0026amp;")
+    .replace(/</g, "\u0026lt;")
+    .replace(/>/g, "\u0026gt;")
+    .replace(/"/g, "\u0026quot;")
+    .replace(/'/g, "\u0026#39;");
+}
+
+function formatUrl(hostname: string, port: number, tls: boolean): string {
+  const defaultPort = tls ? 443 : 80;
+  const portSuffix = port === defaultPort ? "" : `:${port}`;
+  return `${tls ? "https" : "http"}://${hostname}${portSuffix}`;
+}
+
+export function renderDashboardPage(
+  routes: RouteInfo[],
+  proxyPort: number,
+  tls: boolean,
+  tld: string
+): string {
+  const proto = tls ? "https" : "http";
+  const protocolLabel = tls ? "HTTPS" : "HTTP";
+  const portLabel = proxyPort === 443 || proxyPort === 80 ? "" : `:${proxyPort}`;
+  const tldDisplay = tld === "localhost" ? ".localhost" : `.${tld}`;
+
+  const routeCountText = routes.length === 0
+    ? "No active routes"
+    : routes.length === 1
+    ? "1 active route"
+    : `${routes.length} active routes`;
+
+  const routesList = routes.length > 0
+    ? `<ul class="card">${routes.map((r) => {
+        const url = formatUrl(r.hostname, proxyPort, tls);
+        const escapedHostname = escapeHtml(r.hostname);
+        const escapedPort = escapeHtml(String(r.port));
+        const escapedUrl = escapeHtml(url);
+        return `<li class="route-item">
+  <div class="route-info">
+    <span class="route-hostname">${escapedHostname}</span>
+    <span class="route-meta">127.0.0.1:${escapedPort}</span>
+  </div>
+  <div class="route-actions">
+    <button class="icon-btn" onclick="copyToClipboard('${escapedUrl}', this)" title="Copy URL">${COPY_SVG}</button>
+    <a href="${escapedUrl}" class="open-link" target="_blank" title="Open">${ARROW_SVG}</a>
+  </div>
+</li>`;
+      }).join("")}</ul>`
+    : `<div class="card empty-state"><p>No apps running.</p><div class="terminal"><span class="prompt">$ </span>portless myapp your-command</div></div>`;
+
+  const body = `<div class="dashboard-content">
+<div class="status-bar">
+  <span class="dot"></span>
+  <span>${protocolLabel} on port ${proxyPort}</span>
+  <span class="separator">|</span>
+  <span>TLD: ${escapeHtml(tldDisplay)}</span>
+  <span class="separator">|</span>
+  <span class="route-count">${routeCountText}</span>
+</div>
+<div class="dashboard-section">
+  <p class="label">Active Apps</p>
+  ${routesList}
+</div>
+</div>`;
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>portless dashboard</title>
+<style>${PAGE_STYLES}</style>
+</head>
+<body>
+<div class="dashboard-page">
+<div class="dashboard-header">
+  <span class="brand">portless</span>
+  <span class="version">v0.10.0</span>
+</div>
+${body}
+</div>
+<script>
+function copyToClipboard(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.classList.add('copied');
+    setTimeout(() => btn.classList.remove('copied'), 1500);
+  });
+}
+</script>
 </body>
 </html>`;
 }
