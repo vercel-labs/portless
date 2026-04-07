@@ -1,5 +1,7 @@
 import { GEIST_SANS_400, GEIST_SANS_500, GEIST_MONO_400, GEIST_PIXEL } from "./fonts.js";
 
+declare const __VERSION__: string;
+
 export const ARROW_SVG =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
@@ -431,7 +433,7 @@ export function renderDashboardPage(
 <div class="dashboard-page">
 <div class="dashboard-header">
   <span class="brand">portless</span>
-  <span class="version">v0.10.0</span>
+  <span class="version">v${__VERSION__}</span>
 </div>
 ${body}
 </div>
