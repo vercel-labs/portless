@@ -1,8 +1,23 @@
 # Changelog
 
-## 0.10.0
+## 0.10.1
 
 <!-- release:start -->
+
+### New Features
+
+- **`portless clean`**: New command stops the proxy if it is running, removes the local CA from the OS trust store when it was installed by portless, deletes allowlisted files under known state directories, and removes the portless-managed block from the hosts file. Custom `--cert` and `--key` paths are never removed. (#213)
+
+### Improvements
+
+- **Hosts file sync by default**: The proxy now keeps the hosts file in sync with active routes automatically (improves Safari and other setups where `.localhost` subdomains do not resolve to loopback). Set `PORTLESS_SYNC_HOSTS=0` to opt out. The managed block is removed from the hosts file when the proxy exits. (#213)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.10.0
 
 ### New Features
 
@@ -13,7 +28,6 @@
 
 - @gabimoncha
 - @carderne
-<!-- release:end -->
 
 ## 0.9.6
 
