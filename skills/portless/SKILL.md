@@ -116,7 +116,7 @@ PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 
 `.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `portless hosts sync` to add entries to `/etc/hosts` if needed.
 
-Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` and `--host` CLI flags.
+Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag.
 
 ### State directory
 
@@ -135,6 +135,7 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 | `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without) |
 | `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                   |
 | `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)       |
+| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)            |
 | `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                     |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent    |
 | `PORTLESS_PATH`       | Path prefix for path-based routing (e.g. /api)                        |
@@ -154,37 +155,63 @@ portless trust                                      # Add CA to trust store late
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
 
+### LAN mode
+
+```bash
+portless proxy start --lan
+portless proxy start --lan --https
+portless proxy start --lan --ip 192.168.1.42
+```
+
+`--lan` advertises `<name>.local` hostnames over mDNS so any device on the same Wi-Fi can reach your apps. Portless auto-detects your LAN IP and follows network changes automatically, but you can pin a specific address with `--ip <address>` or the `PORTLESS_LAN_IP` environment variable. Set `PORTLESS_LAN=1` to default to LAN mode every time the proxy starts.
+
+Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start again, it stays in LAN mode. Other proxy settings still follow the current flags and env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+
+LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling).
+
+- **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
+
+  ```js
+  // next.config.js
+  module.exports = {
+    allowedDevOrigins: ["myapp.local", "*.myapp.local"],
+  };
+  ```
+
+- **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
+
 ## CLI Reference
 
-| Command                                | Description                                                 |
-| -------------------------------------- | ----------------------------------------------------------- |
-| `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)    |
-| `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies) |
-| `portless <name> <cmd> [args...]`      | Run app at `https://<name>.localhost` (auto-starts proxy)   |
-| `portless get <name>`                  | Print URL for a service (for cross-service wiring)          |
-| `portless get <name> --no-worktree`    | Print URL without worktree prefix                           |
-| `portless list`                        | Show active routes                                          |
-| `portless trust`                       | Add local CA to system trust store (for HTTPS)              |
-| `portless proxy start`                 | Start HTTPS proxy as a daemon (port 443, auto-elevates)     |
-| `portless proxy start --no-tls`        | Start without HTTPS (plain HTTP on port 80)                 |
-| `portless proxy start -p <number>`     | Start the proxy on a custom port                            |
-| `portless proxy start --tld test`      | Use .test instead of .localhost (requires /etc/hosts sync)  |
-| `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)               |
-| `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route  |
-| `portless proxy stop`                  | Stop the proxy                                              |
-| `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)        |
-| `portless alias <name> <port> --force` | Overwrite an existing route                                 |
-| `portless alias --remove <name>`       | Remove a static route                                       |
-| `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                     |
-| `portless hosts clean`                 | Remove portless entries from /etc/hosts                     |
-| `portless <name> --path /prefix <cmd>` | Route by URL path prefix (path-based routing)               |
-| `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment     |
-| `portless <name> --force <cmd>`        | Kill the existing process and take over its route           |
-| `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)   |
-| `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child |
-| `portless --help` / `-h`               | Show help                                                   |
-| `portless run --help`                  | Show help for a subcommand (also: alias, hosts)             |
-| `portless --version` / `-v`            | Show version                                                |
+| Command                                | Description                                                    |
+| -------------------------------------- | -------------------------------------------------------------- |
+| `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)       |
+| `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies)    |
+| `portless <name> <cmd> [args...]`      | Run app at `https://<name>.localhost` (auto-starts proxy)      |
+| `portless get <name>`                  | Print URL for a service (for cross-service wiring)             |
+| `portless get <name> --no-worktree`    | Print URL without worktree prefix                              |
+| `portless list`                        | Show active routes                                             |
+| `portless trust`                       | Add local CA to system trust store (for HTTPS)                 |
+| `portless proxy start`                 | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
+| `portless proxy start --no-tls`        | Start without HTTPS (plain HTTP on port 80)                    |
+| `portless proxy start --lan`           | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
+| `portless proxy start -p <number>`     | Start the proxy on a custom port                               |
+| `portless proxy start --tld test`      | Use .test instead of .localhost (requires /etc/hosts sync)     |
+| `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                  |
+| `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
+| `portless proxy stop`                  | Stop the proxy                                                 |
+| `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)           |
+| `portless alias <name> <port> --force` | Overwrite an existing route                                    |
+| `portless alias --remove <name>`       | Remove a static route                                          |
+| `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                        |
+| `portless hosts clean`                 | Remove portless entries from /etc/hosts                        |
+| `portless <name> --path /prefix <cmd>` | Route by URL path prefix (path-based routing)                  |
+| `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment        |
+| `portless <name> --force <cmd>`        | Kill the existing process and take over its route              |
+| `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
+| `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |
+| `portless --help` / `-h`               | Show help                                                      |
+| `portless run --help`                  | Show help for a subcommand (also: alias, hosts)                |
+| `portless --version` / `-v`            | Show version                                                   |
 
 **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
@@ -208,7 +235,7 @@ portless proxy start -p 8080
 
 ### Framework not respecting PORT
 
-Portless auto-injects `--port` and `--host` flags for frameworks that ignore the `PORT` env var: **Vite**, **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically.
+Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically.
 
 For other frameworks that don't read `PORT`, pass the port manually:
 

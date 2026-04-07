@@ -1,8 +1,21 @@
 # Changelog
 
-## 0.9.6
+## 0.10.0
 
 <!-- release:start -->
+
+### New Features
+
+- **LAN mode**: New `--lan` flag exposes portless services to phones and other devices on the same network via mDNS `.local` hostnames. Auto-detects the active LAN IP, follows network changes, and supports `--ip` / `PORTLESS_LAN_IP` overrides for VPN or multi-interface setups. Publishes mDNS records with platform-native tools (`dns-sd` on macOS, `avahi-publish-address` on Linux). Adds `*.local` to generated certificate SANs so HTTPS works for LAN hostnames. (#168)
+- **VitePlus support**: Auto-inject `--port` for VitePlus (`vp`) dev server (#147)
+
+### Contributors
+
+- @gabimoncha
+- @carderne
+<!-- release:end -->
+
+## 0.9.6
 
 ### Bug Fixes
 
@@ -11,11 +24,8 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.9.5
-
-<!-- release:start -->
 
 ### Bug Fixes
 
@@ -25,11 +35,8 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.9.4
-
-<!-- release:start -->
 
 ### Bug Fixes
 
@@ -38,7 +45,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.9.3
 

@@ -121,6 +121,14 @@ portless proxy start
       <td>Enable HTTPS (default, accepted for compatibility)</td>
     </tr>
     <tr>
+      <td>`--lan`</td>
+      <td>Enable LAN mode (mDNS `.local` domains for real device testing)</td>
+    </tr>
+    <tr>
+      <td>`--ip <address>`</td>
+      <td>Override auto-detected LAN IP (use with `--lan`)</td>
+    </tr>
+    <tr>
       <td>`--tld <tld>`</td>
       <td>Use a custom TLD instead of `.localhost` (e.g. `test`). Auto-syncs `/etc/hosts` for custom TLDs.</td>
     </tr>
@@ -143,6 +151,40 @@ portless proxy start
 
 ```bash
 portless proxy stop
+```
+
+### LAN mode
+
+Access services from phones and other devices on the same WiFi via mDNS (`.local` domains):
+
+```bash
+portless proxy start --lan
+portless proxy start --lan --https
+portless proxy start --lan --ip 192.168.1.42   # manual IP override
+```
+
+Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
+
+Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-utils`). Not supported on Windows.
+
+**Framework notes:**
+
+- **Next.js**: Add `allowedDevOrigins: ['myapp.local', '*.myapp.local']` to `next.config.js` so LAN mode requests still work when portless adds a git worktree prefix.
+- **Vite / React Router / SvelteKit / Astro**: Handled automatically via `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`.
+- **Expo / React Native**: Add `NSAllowsLocalNetworking` to your `app.json` for iOS ATS (see [Getting Started](/) for the `.localhost` equivalent using `NSExceptionDomains`):
+
+```json
+{
+  "expo": {
+    "ios": {
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalNetworking": true
+        }
+      }
+    }
+  }
+}
 ```
 
 ## Hosts

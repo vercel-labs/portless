@@ -39,8 +39,9 @@ To prepare a release:
 1. Create a branch (e.g. `prepare-v1.2.0`)
 2. Bump the version in `packages/portless/package.json`
 3. Write the changelog entry in `CHANGELOG.md`, wrapped in `<!-- release:start -->` and `<!-- release:end -->` markers
-4. Add a matching entry to `apps/docs/src/app/changelog/page.mdx`
-5. Open a PR and merge to `main`
+4. Remove the `<!-- release:start -->` and `<!-- release:end -->` markers from the previous release entry (only the latest release should have markers)
+5. Add a matching entry to `apps/docs/src/app/changelog/page.mdx`
+6. Open a PR and merge to `main`
 
 CI compares the version in `packages/portless/package.json` to what's on npm. If it differs, it builds, publishes, and creates the GitHub release automatically. The release body is extracted from the content between the markers.
 
