@@ -9,3 +9,7 @@ coverage/
 next-env.d.ts
 .env*
 !.env.example
+scripts/windows-debug/.instance
+
+# opensrc - source code for packages
+opensrc/

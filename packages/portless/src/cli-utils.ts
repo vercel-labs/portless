@@ -15,17 +15,29 @@ import { PORTLESS_HEADER } from "./proxy.js";
 /** True when running on Windows. */
 export const isWindows = process.platform === "win32";
 
-/** Default proxy port. Uses an unprivileged port so sudo is not required. */
-export const DEFAULT_PROXY_PORT = 1355;
+/** Unprivileged fallback port used when standard ports are unavailable. */
+export const FALLBACK_PROXY_PORT = 1355;
+
+/**
+ * @deprecated Use FALLBACK_PROXY_PORT instead. Kept for backward compatibility
+ * with tests and external consumers.
+ */
+export const DEFAULT_PROXY_PORT = FALLBACK_PROXY_PORT;
 
 /** Ports below this threshold require root/sudo to bind (Unix only). */
 export const PRIVILEGED_PORT_THRESHOLD = 1024;
+
+/** Internal env var used to preserve an auto-detected LAN IP across daemonization. */
+export const INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP";
+
+/** Internal-only flag used to pass an auto-detected LAN IP through re-exec. */
+export const INTERNAL_LAN_IP_FLAG = "--lan-ip-auto";
 
 /**
  * System-wide state directory (used when proxy needs sudo on Unix).
  * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
  * a per-user dir from os.tmpdir() (/var/folders/...) while sudo (root)
- * gets /tmp -- causing the proxy writer and client reader to disagree.
+ * gets /tmp, causing the proxy writer and client reader to disagree.
  */
 export const SYSTEM_STATE_DIR = isWindows ? path.join(os.tmpdir(), "portless") : "/tmp/portless";
 
@@ -40,6 +52,22 @@ const MAX_APP_PORT = 4999;
 
 /** Number of random port attempts before sequential scan. */
 const RANDOM_PORT_ATTEMPTS = 50;
+
+/**
+ * Ports that browsers block for security reasons (WHATWG fetch spec "bad port"
+ * list). Frameworks like Next.js also reject these. We skip them when
+ * auto-selecting a port so the child process is never handed a port that the
+ * browser will refuse to connect to.
+ *
+ * @see https://fetch.spec.whatwg.org/#port-blocking
+ */
+export const BLOCKED_PORTS: ReadonlySet<number> = new Set([
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
+  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
+  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+  6669, 6679, 6697, 10080,
+]);
 
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
@@ -68,16 +96,26 @@ export const SIGNAL_CODES: Record<string, number> = {
 // ---------------------------------------------------------------------------
 
 /**
- * Return the effective default proxy port. Reads the PORTLESS_PORT env var
- * first, falling back to DEFAULT_PROXY_PORT (1355).
+ * Return the protocol-standard port for the given scheme.
+ * HTTPS -> 443, HTTP -> 80.
  */
-export function getDefaultPort(): number {
+export function getProtocolPort(tls: boolean): number {
+  return tls ? 443 : 80;
+}
+
+/**
+ * Return the effective default proxy port. Reads the PORTLESS_PORT env var
+ * first, then falls back to the protocol-standard port (443 for HTTPS,
+ * 80 for HTTP). When `tls` is undefined the legacy fallback (1355) is used
+ * so callers that don't yet know the protocol get backward-compatible behavior.
+ */
+export function getDefaultPort(tls?: boolean): number {
   const envPort = process.env.PORTLESS_PORT;
   if (envPort) {
     const port = parseInt(envPort, 10);
     if (!isNaN(port) && port >= 1 && port <= 65535) return port;
   }
-  return DEFAULT_PROXY_PORT;
+  return tls === undefined ? FALLBACK_PROXY_PORT : getProtocolPort(tls);
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +172,36 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/**
+ * Name of the marker file that remembers LAN mode across proxy restarts.
+ * While the proxy is running, the file stores the last known LAN IP.
+ */
+const LAN_MARKER_FILE = "proxy.lan";
+
+/** Read the LAN marker from a state directory. Returns the last known IP or null. */
+export function readLanMarker(dir: string): string | null {
+  try {
+    const raw = fs.readFileSync(path.join(dir, LAN_MARKER_FILE), "utf-8").trim();
+    return raw || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Write or remove the LAN marker in the state directory. */
+export function writeLanMarker(dir: string, ip: string | null): void {
+  const markerPath = path.join(dir, LAN_MARKER_FILE);
+  if (!ip) {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  } else {
+    fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+  }
+}
+
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
 
@@ -141,15 +209,15 @@ export const DEFAULT_TLD = "localhost";
 export const RISKY_TLDS = new Map<string, string>([
   ["local", "conflicts with mDNS/Bonjour on macOS"],
   ["dev", "Google-owned; browsers force HTTPS via preloaded HSTS"],
-  ["com", "public TLD -- DNS requests will leak to the internet"],
-  ["org", "public TLD -- DNS requests will leak to the internet"],
-  ["net", "public TLD -- DNS requests will leak to the internet"],
-  ["io", "public TLD -- DNS requests will leak to the internet"],
-  ["app", "public TLD -- DNS requests will leak to the internet"],
-  ["edu", "public TLD -- DNS requests will leak to the internet"],
-  ["gov", "public TLD -- DNS requests will leak to the internet"],
-  ["mil", "public TLD -- DNS requests will leak to the internet"],
-  ["int", "public TLD -- DNS requests will leak to the internet"],
+  ["com", "public TLD; DNS requests will leak to the internet"],
+  ["org", "public TLD; DNS requests will leak to the internet"],
+  ["net", "public TLD; DNS requests will leak to the internet"],
+  ["io", "public TLD; DNS requests will leak to the internet"],
+  ["app", "public TLD; DNS requests will leak to the internet"],
+  ["edu", "public TLD; DNS requests will leak to the internet"],
+  ["gov", "public TLD; DNS requests will leak to the internet"],
+  ["mil", "public TLD; DNS requests will leak to the internet"],
+  ["int", "public TLD; DNS requests will leak to the internet"],
 ]);
 
 /**
@@ -204,7 +272,8 @@ export function getDefaultTld(): string {
 }
 
 /**
- * Return whether HTTPS mode is requested via the PORTLESS_HTTPS env var.
+ * @deprecated Use isHttpsEnvDisabled instead. HTTPS is now enabled by default;
+ * check whether it is disabled rather than enabled.
  */
 export function isHttpsEnvEnabled(): boolean {
   const val = process.env.PORTLESS_HTTPS;
@@ -212,7 +281,88 @@ export function isHttpsEnvEnabled(): boolean {
 }
 
 /**
- * Discover the active proxy's state directory, port, TLS mode, and TLD.
+ * Return whether HTTPS is explicitly disabled via the PORTLESS_HTTPS env var.
+ * PORTLESS_HTTPS=0 is the env-var equivalent of --no-tls.
+ */
+export function isHttpsEnvDisabled(): boolean {
+  const val = process.env.PORTLESS_HTTPS;
+  return val === "0" || val === "false";
+}
+
+/**
+ * Return whether wildcard subdomain fallback is requested via the
+ * PORTLESS_WILDCARD env var.
+ */
+export function isWildcardEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_WILDCARD;
+  return val === "1" || val === "true";
+}
+
+/**
+ * Return whether LAN mode is requested via the PORTLESS_LAN env var.
+ */
+export function isLanEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_LAN;
+  return val === "1" || val === "true";
+}
+
+export function buildProxyStartConfig(options: {
+  useHttps: boolean;
+  customCertPath?: string | null;
+  customKeyPath?: string | null;
+  lanMode: boolean;
+  lanIp?: string | null;
+  lanIpExplicit?: boolean;
+  tld: string;
+  useWildcard?: boolean;
+  foreground?: boolean;
+  includePort?: boolean;
+  proxyPort?: number;
+}): { effectiveTld: string; args: string[] } {
+  const effectiveTld = options.lanMode ? "local" : options.tld;
+  const args: string[] = [];
+
+  if (options.foreground) {
+    args.push("--foreground");
+  }
+
+  if (options.includePort && options.proxyPort !== undefined) {
+    args.push("--port", options.proxyPort.toString());
+  }
+
+  if (options.useHttps) {
+    if (options.customCertPath && options.customKeyPath) {
+      args.push("--cert", options.customCertPath, "--key", options.customKeyPath);
+    } else {
+      args.push("--https");
+    }
+  } else {
+    args.push("--no-tls");
+  }
+
+  if (options.lanMode) {
+    args.push("--lan");
+    if (options.lanIp) {
+      if (options.lanIpExplicit) {
+        args.push("--ip", options.lanIp);
+      } else {
+        args.push(INTERNAL_LAN_IP_FLAG, options.lanIp);
+      }
+    }
+  } else if (effectiveTld !== DEFAULT_TLD) {
+    args.push("--tld", effectiveTld);
+  }
+
+  if (options.useWildcard) {
+    args.push("--wildcard");
+  }
+
+  return { effectiveTld, args };
+}
+
+/**
+ * Discover the active proxy's state directory, port, TLS mode, TLD, LAN mode,
+ * and current LAN IP when available.
  * Checks the user-level dir first, then the system-level dir.
  * Falls back to the system dir with the default port if nothing is running.
  */
@@ -221,14 +371,28 @@ export async function discoverState(): Promise<{
   port: number;
   tls: boolean;
   tld: string;
+  lanMode: boolean;
+  lanIp: string | null;
 }> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
     const port = readPortFromDir(dir) ?? getDefaultPort();
-    const tls = readTlsMarker(dir);
-    const tld = readTldFromDir(dir);
-    return { dir, port, tls, tld };
+    const lanIp = readLanMarker(dir);
+    if ((await isProxyRunning(port)) || (await isPortListening(port))) {
+      const tls = readTlsMarker(dir);
+      const tld = readTldFromDir(dir);
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
+    }
+
+    return {
+      dir,
+      port,
+      tls: readTlsMarker(dir),
+      tld: readTldFromDir(dir),
+      lanMode: lanIp !== null,
+      lanIp: null,
+    };
   }
 
   // Check user-level state first (~/.portless)
@@ -240,7 +404,15 @@ export async function discoverState(): Promise<{
     if (await isProxyRunning(userPort)) {
       const tls = readTlsMarker(USER_STATE_DIR);
       const tld = readTldFromDir(USER_STATE_DIR);
-      return { dir: USER_STATE_DIR, port: userPort, tls, tld };
+      const lanIp = readLanMarker(USER_STATE_DIR);
+      return {
+        dir: USER_STATE_DIR,
+        port: userPort,
+        tls,
+        tld,
+        lanMode: lanIp !== null || tld === "local",
+        lanIp,
+      };
     }
   }
 
@@ -250,25 +422,44 @@ export async function discoverState(): Promise<{
     if (await isProxyRunning(systemPort)) {
       const tls = readTlsMarker(SYSTEM_STATE_DIR);
       const tld = readTldFromDir(SYSTEM_STATE_DIR);
-      return { dir: SYSTEM_STATE_DIR, port: systemPort, tls, tld };
+      const lanIp = readLanMarker(SYSTEM_STATE_DIR);
+      return {
+        dir: SYSTEM_STATE_DIR,
+        port: systemPort,
+        tls,
+        tld,
+        lanMode: lanIp !== null || tld === "local",
+        lanIp,
+      };
     }
   }
 
   // State files didn't help. Probe well-known ports as a last resort --
   // privileged-port proxies store state in /tmp which macOS cleans on reboot,
   // so the daemon may still be alive after the port file is gone.
-  const defaultPort = getDefaultPort();
-  const probePorts = new Set([defaultPort, 443, 80]);
+  // Standard ports first (443, 80) since those are the new defaults, then the
+  // legacy fallback port, then any PORTLESS_PORT override.
+  const configuredPort = getDefaultPort();
+  const probePorts = new Set([443, 80, FALLBACK_PROXY_PORT, configuredPort]);
   for (const port of probePorts) {
     if (await isProxyRunning(port)) {
       const dir = resolveStateDir(port);
       const tls = readTlsMarker(dir);
       const tld = readTldFromDir(dir);
-      return { dir, port, tls, tld };
+      const lanIp = readLanMarker(dir);
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
     }
   }
 
-  return { dir: resolveStateDir(defaultPort), port: defaultPort, tls: false, tld: getDefaultTld() };
+  const dir = resolveStateDir(configuredPort);
+  return {
+    dir,
+    port: configuredPort,
+    tls: false,
+    tld: getDefaultTld(),
+    lanMode: readLanMarker(dir) !== null,
+    lanIp: null,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -304,14 +495,14 @@ export async function findFreePort(
   // Try random ports first
   for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
     const port = minPort + Math.floor(Math.random() * (maxPort - minPort + 1));
-    if (await tryPort(port)) {
+    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
       return port;
     }
   }
 
   // Fall back to sequential
   for (let port = minPort; port <= maxPort; port++) {
-    if (await tryPort(port)) {
+    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
       return port;
     }
   }
@@ -350,6 +541,26 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
       resolve(false);
     });
     req.end();
+  });
+}
+
+/** Check whether any process is listening on the given port at 127.0.0.1. */
+export function isPortListening(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+    let settled = false;
+
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(result);
+    };
+
+    socket.setTimeout(SOCKET_TIMEOUT_MS);
+    socket.once("connect", () => finish(true));
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
   });
 }
 
@@ -479,13 +690,28 @@ export function spawnCommand(
     onCleanup?: () => void;
   }
 ): void {
-  const env = { ...(options?.env ?? process.env), PATH: augmentedPath(options?.env) };
+  const env: Record<string, string | undefined> = {
+    ...(options?.env ?? process.env),
+    PATH: augmentedPath(options?.env),
+  };
+
+  // On Windows, process.env is a case-insensitive Proxy, but spreading it into
+  // a plain object creates case-sensitive keys. The path variable may exist as
+  // "Path" (Windows convention) alongside the "PATH" we just set above. cmd.exe
+  // may read the wrong key, causing tools like bun to be missing from the child
+  // process PATH. Delete any residual casing variants so only our "PATH" remains.
+  if (isWindows) {
+    for (const key of Object.keys(env)) {
+      if (key !== "PATH" && key.toUpperCase() === "PATH") {
+        delete env[key];
+      }
+    }
+  }
 
   const child = isWindows
-    ? spawn(commandArgs[0], commandArgs.slice(1), {
+    ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
         stdio: "inherit",
         env,
-        shell: true,
       })
     : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
         stdio: "inherit",
@@ -558,21 +784,72 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   expo: { strictPort: false },
 };
 
+/** Known package runners. Values list subcommands that run a package. */
+const PACKAGE_RUNNERS: Record<string, string[]> = {
+  npx: [],
+  bunx: [],
+  pnpx: [],
+  yarn: ["dlx", "exec"],
+  pnpm: ["dlx", "exec"],
+};
+
+/**
+ * Find the basename of the framework command inside `commandArgs`, looking
+ * past known package runners (npx, bunx, yarn dlx, …) and their flags.
+ */
+function findFrameworkBasename(commandArgs: string[]): string | null {
+  if (commandArgs.length === 0) return null;
+
+  const first = path.basename(commandArgs[0]);
+  if (FRAMEWORKS_NEEDING_PORT[first]) return first;
+
+  const subcommands = PACKAGE_RUNNERS[first];
+  if (!subcommands) return null;
+
+  let i = 1;
+
+  if (subcommands.length > 0) {
+    // Skip flags before the subcommand
+    while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
+    if (i >= commandArgs.length) return null;
+    if (!subcommands.includes(commandArgs[i])) {
+      // Not a recognized subcommand — might be an implicit bin (e.g. `yarn vite`)
+      const name = path.basename(commandArgs[i]);
+      return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+    }
+    i++;
+  }
+
+  // Skip runner flags (e.g. `--bun`, `--yes`)
+  while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
+
+  if (i >= commandArgs.length) return null;
+  const name = path.basename(commandArgs[i]);
+  return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+}
+
 /**
  * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
  * mutate the array in-place to append the correct CLI flags so the app
  * listens on the expected port and address.
  *
+ * Handles both direct invocation (`vite dev`) and invocation via package
+ * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
+ *
  * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
  * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ *
+ * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
+ * lan|tunnel|localhost). In LAN mode we skip `--host` entirely — Expo defaults
+ * to LAN already and injecting the flag alongside HOST=127.0.0.1 causes Metro's
+ * HMR WebSocket to degrade. Outside LAN mode, `--host localhost` keeps the
+ * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
-  const cmd = commandArgs[0];
-  if (!cmd) return;
+  const basename = findFrameworkBasename(commandArgs);
+  if (!basename) return;
 
-  const basename = path.basename(cmd);
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
-  if (!framework) return;
 
   if (!commandArgs.includes("--port")) {
     commandArgs.push("--port", port.toString());
@@ -582,6 +859,10 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   }
 
   if (!commandArgs.includes("--host")) {
+    // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
+    // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
+    const isExpoLan = basename === "expo" && isLanEnvEnabled();
+    if (isExpoLan) return;
     const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }

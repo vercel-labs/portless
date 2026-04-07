@@ -16,11 +16,16 @@ Portless is configured through environment variables. No config files needed.
     <tr>
       <td>`PORTLESS_PORT`</td>
       <td>Proxy port</td>
-      <td>`1355`</td>
+      <td>`443` (HTTPS) / `80` (HTTP)</td>
     </tr>
     <tr>
       <td>`PORTLESS_HTTPS`</td>
-      <td>Set to `1` to always enable HTTPS</td>
+      <td>HTTPS on by default; set to `0` to disable (same as `--no-tls`)</td>
+      <td>on</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_LAN`</td>
+      <td>Set to `1` to always enable LAN mode (mDNS `.local` domains)</td>
       <td>off</td>
     </tr>
     <tr>
@@ -110,9 +115,13 @@ Override with `PORTLESS_STATE_DIR`.
       <td>`proxy.log`</td>
       <td>Proxy daemon log output</td>
     </tr>
+    <tr>
+      <td>`proxy.lan`</td>
+      <td>Remembers LAN mode and stores the last known LAN IP</td>
+    </tr>
   </tbody>
 </table>
 
 ## Port assignment
 
-Apps get a random port in the 4000--4999 range. Portless sets `PORT` and `HOST` before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
+Apps get a random port in the 4000--4999 range. Portless sets `PORT` and usually `HOST` before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.

@@ -5,21 +5,29 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
-  DEFAULT_PROXY_PORT,
+  buildProxyStartConfig,
+  BLOCKED_PORTS,
   DEFAULT_TLD,
+  FALLBACK_PROXY_PORT,
+  INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
   SYSTEM_STATE_DIR,
   USER_STATE_DIR,
+  discoverState,
   findFreePort,
   getDefaultPort,
   getDefaultTld,
+  getProtocolPort,
+  isHttpsEnvDisabled,
   injectFrameworkFlags,
   isProxyRunning,
   parsePidFromNetstat,
+  readLanMarker,
   readTldFromDir,
   resolveStateDir,
   validateTld,
+  writeLanMarker,
   writeTldFile,
 } from "./cli-utils.js";
 
@@ -59,6 +67,17 @@ describe("findFreePort", () => {
 
   it("throws when minPort > maxPort", async () => {
     await expect(findFreePort(5000, 4000)).rejects.toThrow("minPort");
+  });
+
+  it("never returns a blocked port (WHATWG bad ports)", async () => {
+    for (let i = 0; i < 20; i++) {
+      const port = await findFreePort();
+      expect(BLOCKED_PORTS.has(port)).toBe(false);
+    }
+  });
+
+  it("skips a blocked port even when it is the only one in range", async () => {
+    await expect(findFreePort(4045, 4045)).rejects.toThrow("No free port found");
   });
 });
 
@@ -132,8 +151,8 @@ describe("resolveStateDir", () => {
 });
 
 describe("constants", () => {
-  it("DEFAULT_PROXY_PORT is 1355", () => {
-    expect(DEFAULT_PROXY_PORT).toBe(1355);
+  it("FALLBACK_PROXY_PORT is 1355", () => {
+    expect(FALLBACK_PROXY_PORT).toBe(1355);
   });
 
   it("PRIVILEGED_PORT_THRESHOLD is 1024", () => {
@@ -210,6 +229,16 @@ describe("parsePidFromNetstat", () => {
   });
 });
 
+describe("getProtocolPort", () => {
+  it("returns 443 for TLS", () => {
+    expect(getProtocolPort(true)).toBe(443);
+  });
+
+  it("returns 80 for plain HTTP", () => {
+    expect(getProtocolPort(false)).toBe(80);
+  });
+});
+
 describe("getDefaultPort", () => {
   let originalEnv: string | undefined;
 
@@ -225,32 +254,82 @@ describe("getDefaultPort", () => {
     }
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is not set", () => {
+  it("returns FALLBACK_PROXY_PORT when called without tls argument", () => {
     delete process.env.PORTLESS_PORT;
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort()).toBe(FALLBACK_PROXY_PORT);
   });
 
-  it("returns PORTLESS_PORT when set to a valid port", () => {
+  it("returns 443 when tls is true", () => {
+    delete process.env.PORTLESS_PORT;
+    expect(getDefaultPort(true)).toBe(443);
+  });
+
+  it("returns 80 when tls is false", () => {
+    delete process.env.PORTLESS_PORT;
+    expect(getDefaultPort(false)).toBe(80);
+  });
+
+  it("returns PORTLESS_PORT when set, regardless of tls argument", () => {
     process.env.PORTLESS_PORT = "8080";
     expect(getDefaultPort()).toBe(8080);
+    expect(getDefaultPort(true)).toBe(8080);
+    expect(getDefaultPort(false)).toBe(8080);
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is invalid", () => {
+  it("returns protocol default when PORTLESS_PORT is invalid", () => {
     process.env.PORTLESS_PORT = "not-a-number";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort()).toBe(FALLBACK_PROXY_PORT);
+    expect(getDefaultPort(true)).toBe(443);
+    expect(getDefaultPort(false)).toBe(80);
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is out of range", () => {
+  it("returns protocol default when PORTLESS_PORT is out of range", () => {
     process.env.PORTLESS_PORT = "0";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort(true)).toBe(443);
 
     process.env.PORTLESS_PORT = "70000";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort(false)).toBe(80);
   });
 
-  it("returns DEFAULT_PROXY_PORT when PORTLESS_PORT is empty", () => {
+  it("returns FALLBACK_PROXY_PORT when PORTLESS_PORT is empty and tls is undefined", () => {
     process.env.PORTLESS_PORT = "";
-    expect(getDefaultPort()).toBe(DEFAULT_PROXY_PORT);
+    expect(getDefaultPort()).toBe(FALLBACK_PROXY_PORT);
+  });
+});
+
+describe("isHttpsEnvDisabled", () => {
+  let originalEnv: string | undefined;
+
+  beforeEach(() => {
+    originalEnv = process.env.PORTLESS_HTTPS;
+  });
+
+  afterEach(() => {
+    if (originalEnv === undefined) {
+      delete process.env.PORTLESS_HTTPS;
+    } else {
+      process.env.PORTLESS_HTTPS = originalEnv;
+    }
+  });
+
+  it("returns true when PORTLESS_HTTPS is '0'", () => {
+    process.env.PORTLESS_HTTPS = "0";
+    expect(isHttpsEnvDisabled()).toBe(true);
+  });
+
+  it("returns true when PORTLESS_HTTPS is 'false'", () => {
+    process.env.PORTLESS_HTTPS = "false";
+    expect(isHttpsEnvDisabled()).toBe(true);
+  });
+
+  it("returns false when PORTLESS_HTTPS is '1'", () => {
+    process.env.PORTLESS_HTTPS = "1";
+    expect(isHttpsEnvDisabled()).toBe(false);
+  });
+
+  it("returns false when PORTLESS_HTTPS is unset", () => {
+    delete process.env.PORTLESS_HTTPS;
+    expect(isHttpsEnvDisabled()).toBe(false);
   });
 });
 
@@ -331,10 +410,23 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["react-native", "start", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
-  it("injects for expo without --strictPort", () => {
+  it("injects for expo without --strictPort (defaults to localhost)", () => {
     const args = ["expo", "start"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
+  });
+
+  it("skips --host for expo in LAN mode (Metro defaults to LAN)", () => {
+    const prev = process.env.PORTLESS_LAN;
+    process.env.PORTLESS_LAN = "1";
+    try {
+      const args = ["expo", "start"];
+      injectFrameworkFlags(args, 4567);
+      expect(args).toEqual(["expo", "start", "--port", "4567"]);
+    } finally {
+      if (prev === undefined) delete process.env.PORTLESS_LAN;
+      else process.env.PORTLESS_LAN = prev;
+    }
   });
 
   it("does not inject for frameworks that read PORT", () => {
@@ -355,6 +447,261 @@ describe("injectFrameworkFlags", () => {
     const args: string[] = [];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual([]);
+  });
+
+  // Package runner support (issue #146: bunx --bun vite dev gives 502)
+
+  // Simple runners (npx, bunx, pnpx)
+
+  it("injects flags for bunx vite dev", () => {
+    const args = ["bunx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "bunx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for bunx --bun vite dev", () => {
+    const args = ["bunx", "--bun", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "bunx",
+      "--bun",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npx vite dev", () => {
+    const args = ["npx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npx with flags before framework", () => {
+    const args = ["npx", "--yes", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--yes",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for pnpx vite dev", () => {
+    const args = ["pnpx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "pnpx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // Subcommand runners (yarn dlx/exec, pnpm dlx/exec)
+
+  it("injects flags for yarn dlx vite dev", () => {
+    const args = ["yarn", "dlx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "yarn",
+      "dlx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for yarn exec vite dev", () => {
+    const args = ["yarn", "exec", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "yarn",
+      "exec",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for pnpm dlx vite dev", () => {
+    const args = ["pnpm", "dlx", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "pnpm",
+      "dlx",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for pnpm exec astro dev", () => {
+    const args = ["pnpm", "exec", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  // Implicit bin (yarn <framework>)
+
+  it("injects flags for yarn vite (implicit bin)", () => {
+    const args = ["yarn", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "yarn",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // Runner with multiple flags
+
+  it("skips multiple runner flags before framework", () => {
+    const args = ["npx", "--yes", "--quiet", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--yes",
+      "--quiet",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // Runner + --port / --host already present
+
+  it("skips --port when already present via runner", () => {
+    const args = ["bunx", "vite", "dev", "--port", "3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toContain("3000");
+    expect(args).not.toContain("4567");
+  });
+
+  it("skips --host when already present via runner", () => {
+    const args = ["npx", "vite", "dev", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "vite",
+      "dev",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "4567",
+      "--strictPort",
+    ]);
+  });
+
+  it("skips all injection when both --port and --host present via runner", () => {
+    const args = ["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
+  });
+
+  // Negative cases: runner with non-framework commands
+
+  it("does not inject for bunx with non-framework command", () => {
+    const args = ["bunx", "--bun", "next", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun", "next", "dev"]);
+  });
+
+  it("does not inject for npx with non-framework command", () => {
+    const args = ["npx", "next", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx", "next", "dev"]);
+  });
+
+  it("does not inject for yarn with unrecognized subcommand", () => {
+    const args = ["yarn", "run", "next", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["yarn", "run", "next", "dev"]);
+  });
+
+  it("does not inject for pnpm with unrecognized subcommand", () => {
+    const args = ["pnpm", "run", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["pnpm", "run", "vite", "dev"]);
+  });
+
+  // Edge cases
+
+  it("does not inject when runner has only flags and no command", () => {
+    const args = ["bunx", "--bun"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun"]);
+  });
+
+  it("does not inject for runner alone with no arguments", () => {
+    const args = ["npx"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx"]);
+  });
+
+  it("does not inject for yarn subcommand with no further arguments", () => {
+    const args = ["yarn", "dlx"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["yarn", "dlx"]);
+  });
+
+  it("does not inject for yarn with only flags and no subcommand", () => {
+    const args = ["yarn", "--silent"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["yarn", "--silent"]);
   });
 });
 
@@ -402,6 +749,114 @@ describe("getDefaultTld", () => {
   it("returns DEFAULT_TLD when PORTLESS_TLD is empty", () => {
     process.env.PORTLESS_TLD = "";
     expect(getDefaultTld()).toBe(DEFAULT_TLD);
+  });
+});
+
+describe("buildProxyStartConfig", () => {
+  it("forces .local and keeps explicit --ip in LAN mode", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: true,
+        lanMode: true,
+        lanIp: "192.168.1.42",
+        lanIpExplicit: true,
+        tld: "test",
+        useWildcard: true,
+        foreground: true,
+        includePort: true,
+        proxyPort: 8080,
+      })
+    ).toEqual({
+      effectiveTld: "local",
+      args: [
+        "--foreground",
+        "--port",
+        "8080",
+        "--https",
+        "--lan",
+        "--ip",
+        "192.168.1.42",
+        "--wildcard",
+      ],
+    });
+  });
+
+  it("passes auto-detected LAN IP through an internal flag", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: true,
+        lanIp: "192.168.1.42",
+        lanIpExplicit: false,
+        tld: "localhost",
+      })
+    ).toEqual({
+      effectiveTld: "local",
+      args: ["--no-tls", "--lan", INTERNAL_LAN_IP_FLAG, "192.168.1.42"],
+    });
+  });
+
+  it("keeps custom TLDs outside LAN mode", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: false,
+        tld: "test",
+      })
+    ).toEqual({
+      effectiveTld: "test",
+      args: ["--no-tls", "--tld", "test"],
+    });
+  });
+});
+
+describe("readLanMarker / writeLanMarker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-lan-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("writes and reads a LAN IP", () => {
+    writeLanMarker(tmpDir, "192.168.1.42");
+    expect(readLanMarker(tmpDir)).toBe("192.168.1.42");
+  });
+
+  it("removes the file when writing null", () => {
+    writeLanMarker(tmpDir, "192.168.1.42");
+    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(true);
+
+    writeLanMarker(tmpDir, null);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
+    expect(readLanMarker(tmpDir)).toBeNull();
+  });
+
+  it("uses the LAN marker to remember LAN mode when the proxy is stopped", async () => {
+    const prevStateDir = process.env.PORTLESS_STATE_DIR;
+    try {
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+      writeTldFile(tmpDir, "local");
+      writeLanMarker(tmpDir, "192.168.1.42");
+      process.env.PORTLESS_STATE_DIR = tmpDir;
+
+      await expect(discoverState()).resolves.toMatchObject({
+        dir: tmpDir,
+        port: 1355,
+        tld: "local",
+        lanMode: true,
+        lanIp: null,
+      });
+    } finally {
+      if (prevStateDir === undefined) {
+        delete process.env.PORTLESS_STATE_DIR;
+      } else {
+        process.env.PORTLESS_STATE_DIR = prevStateDir;
+      }
+    }
   });
 });
 

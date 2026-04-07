@@ -26,7 +26,7 @@ Google and Apple are the strictest. Microsoft and GitHub are more lenient with l
 Use a valid TLD so the redirect URI passes provider validation:
 
 ```bash
-sudo portless proxy start --https -p 443 --tld dev
+portless proxy start --tld dev
 portless myapp next dev
 # -> https://myapp.dev
 ```
@@ -38,7 +38,7 @@ Any TLD in the Public Suffix List works: `.dev`, `.app`, `.com`, `.io`, etc.
 Bare TLDs like `.dev` mean `myapp.dev` could collide with a real domain. Use a subdomain of a domain you control:
 
 ```bash
-sudo portless proxy start --https -p 443 --tld dev
+portless proxy start --tld dev
 portless myapp.local.yourcompany next dev
 # -> https://myapp.local.yourcompany.dev
 ```
@@ -137,13 +137,13 @@ The redirect URI sent during the OAuth flow doesn't match what's registered with
 
 ### Provider requires HTTPS
 
-`.dev` and `.app` TLDs are HSTS-preloaded -- browsers force HTTPS. Start the proxy with `--https`:
+`.dev` and `.app` TLDs are HSTS-preloaded, so browsers force HTTPS. Start the proxy:
 
 ```bash
-sudo portless proxy start --https -p 443 --tld dev
+portless proxy start --tld dev
 ```
 
-Port 443 avoids needing a port number in URLs. Run `sudo portless trust` to add the local CA to your system trust store and eliminate browser warnings.
+Portless defaults to HTTPS on port 443 (auto-elevates with sudo). Run `portless trust` to add the local CA to your system trust store and eliminate browser warnings.
 
 ### Apple rejects the domain
 

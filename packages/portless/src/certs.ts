@@ -43,6 +43,63 @@ function fileExists(filePath: string): boolean {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Windows OpenSSL configuration
+// ---------------------------------------------------------------------------
+
+/**
+ * Some Windows OpenSSL builds (e.g. ShiningLight.OpenSSL.Dev) compile in a
+ * bogus OPENSSLDIR such as `Z:/extlib/_5040__/ssl`, which causes every
+ * `openssl req` invocation to fail with "Can't open openssl.cnf". We detect
+ * the problem at startup and resolve it by finding the real openssl.cnf and
+ * injecting OPENSSL_CONF into the child-process environment.
+ */
+let _opensslEnv: Record<string, string> | undefined;
+
+function getOpensslEnv(): Record<string, string> | undefined {
+  if (process.platform !== "win32") return undefined;
+  if (_opensslEnv !== undefined) return _opensslEnv;
+
+  // If the user already set OPENSSL_CONF, respect it.
+  if (process.env.OPENSSL_CONF && fileExists(process.env.OPENSSL_CONF)) {
+    _opensslEnv = {};
+    return _opensslEnv;
+  }
+
+  const candidates = [
+    // Git-for-Windows bundles OpenSSL here
+    path.join("C:", "Program Files", "Git", "mingw64", "etc", "ssl", "openssl.cnf"),
+    path.join("C:", "Program Files", "Git", "usr", "ssl", "openssl.cnf"),
+    // Standalone OpenSSL installers
+    path.join("C:", "Program Files", "OpenSSL-Win64", "bin", "cnf", "openssl.cnf"),
+    path.join("C:", "Program Files", "OpenSSL-Win64", "openssl.cnf"),
+    path.join("C:", "Program Files (x86)", "OpenSSL-Win32", "bin", "cnf", "openssl.cnf"),
+    // Common winget/chocolatey install paths
+    path.join("C:", "Program Files", "OpenSSL", "bin", "cnf", "openssl.cnf"),
+  ];
+
+  for (const candidate of candidates) {
+    if (fileExists(candidate)) {
+      _opensslEnv = { OPENSSL_CONF: candidate };
+      return _opensslEnv;
+    }
+  }
+
+  _opensslEnv = {};
+  return _opensslEnv;
+}
+
+function opensslErrorMessage(): string {
+  if (process.platform === "win32") {
+    return (
+      "Make sure openssl is installed and working.\n" +
+      "Install via: winget install -e --id ShiningLight.OpenSSL.Dev\n" +
+      "If already installed, set OPENSSL_CONF to the path of your openssl.cnf file."
+    );
+  }
+  return "Make sure openssl is installed (ships with macOS and most Linux distributions).";
+}
+
 /**
  * Check whether a PEM certificate file has expired or will expire soon.
  * Returns true if the cert is still valid, false if it needs regeneration.
@@ -53,6 +110,20 @@ function isCertValid(certPath: string): boolean {
     const cert = new crypto.X509Certificate(pem);
     const expiry = new Date(cert.validTo).getTime();
     return Date.now() + EXPIRY_BUFFER_MS < expiry;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Check whether a certificate includes all expected SANs (*.local).
+ * Returns false if the cert is missing SANs that were added in later versions,
+ * triggering regeneration so existing users get .local coverage.
+ */
+function isCertSansComplete(certPath: string): boolean {
+  try {
+    const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
+    return /DNS:\*\.local\b/.test(text);
   } catch {
     return false;
   }
@@ -84,17 +155,19 @@ function isCertSignatureStrong(certPath: string): boolean {
  */
 function openssl(args: string[], options?: { input?: string }): string {
   try {
+    const extraEnv = getOpensslEnv();
     return execFileSync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
       input: options?.input,
       stdio: ["pipe", "pipe", "pipe"],
+      ...(extraEnv && Object.keys(extraEnv).length > 0
+        ? { env: { ...process.env, ...extraEnv } }
+        : {}),
     });
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions).`
-    );
+    throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
 }
 
@@ -107,16 +180,18 @@ const execFileAsync = promisify(execFileCb);
  */
 async function opensslAsync(args: string[]): Promise<string> {
   try {
+    const extraEnv = getOpensslEnv();
     const { stdout } = await execFileAsync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
+      ...(extraEnv && Object.keys(extraEnv).length > 0
+        ? { env: { ...process.env, ...extraEnv } }
+        : {}),
     });
     return stdout;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
-    throw new Error(
-      `openssl failed: ${message}\n\nMake sure openssl is installed (ships with macOS and most Linux distributions).`
-    );
+    throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
 }
 
@@ -168,7 +243,7 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
 
 /**
  * Generate a server certificate signed by the local CA.
- * Covers localhost and *.localhost via Subject Alternative Names.
+ * Covers localhost, *.localhost, and *.local via Subject Alternative Names.
  */
 function generateServerCert(stateDir: string): { certPath: string; keyPath: string } {
   const caKeyPath = path.join(stateDir, CA_KEY_FILE);
@@ -185,6 +260,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
 
   // Write extension config for SANs
+  const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
   fs.writeFileSync(
     extPath,
     [
@@ -192,11 +268,23 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
       "basicConstraints=CA:FALSE",
       "keyUsage=digitalSignature,keyEncipherment",
       "extendedKeyUsage=serverAuth",
-      "subjectAltName=DNS:localhost,DNS:*.localhost",
+      `subjectAltName=${sans.join(",")}`,
     ].join("\n") + "\n"
   );
 
   // Sign with CA
+  // Use -CAserial with an explicit path instead of -CAcreateserial.
+  // -CAcreateserial derives the .srl path by stripping the CA cert's file
+  // extension, but some OpenSSL/LibreSSL versions use the *last dot in the
+  // full path*, so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
+  // to write "/Users/ashish.srl" instead of the intended location.
+  const srlPath = path.join(stateDir, "ca.srl");
+  if (!fileExists(srlPath)) {
+    fs.writeFileSync(
+      srlPath,
+      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+    );
+  }
   openssl([
     "x509",
     "-req",
@@ -207,7 +295,8 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
     caCertPath,
     "-CAkey",
     caKeyPath,
-    "-CAcreateserial",
+    "-CAserial",
+    srlPath,
     "-out",
     serverCertPath,
     "-days",
@@ -271,7 +360,8 @@ export function ensureCerts(stateDir: string): {
     !fileExists(serverCertPath) ||
     !fileExists(serverKeyPath) ||
     !isCertValid(serverCertPath) ||
-    !isCertSignatureStrong(serverCertPath)
+    !isCertSignatureStrong(serverCertPath) ||
+    !isCertSansComplete(serverCertPath)
   ) {
     generateServerCert(stateDir);
   }
@@ -469,6 +559,13 @@ function sanitizeHostForFilename(hostname: string): string {
 }
 
 /**
+ * Maximum length of the X.509 Common Name (CN) field, per RFC 5280 §4.1.2.6.
+ * Modern TLS uses Subject Alternative Names (SAN) for hostname matching, so
+ * truncating the CN is safe because SANs always take precedence.
+ */
+const MAX_CN_LENGTH = 64;
+
+/**
  * Generate a certificate for a specific hostname, signed by the local CA.
  * Certs are cached on disk in the host-certs subdirectory.
  *
@@ -497,8 +594,11 @@ async function generateHostCertAsync(
   // Generate key
   await opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
 
+  // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
+  // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
+  const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
   // Generate CSR
-  await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${hostname}`]);
+  await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
 
   // Build SAN list: include the exact hostname plus a wildcard at the same level
   // e.g., for "chat.json-render2.localhost" -> also add "*.json-render2.localhost"
@@ -520,6 +620,15 @@ async function generateHostCertAsync(
     ].join("\n") + "\n"
   );
 
+  // Use -CAserial with an explicit path instead of -CAcreateserial to avoid
+  // incorrect .srl path resolution when $HOME contains a dot (see #152).
+  const srlPath = path.join(stateDir, "ca.srl");
+  if (!fs.existsSync(srlPath)) {
+    await fs.promises.writeFile(
+      srlPath,
+      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+    );
+  }
   await opensslAsync([
     "x509",
     "-req",
@@ -530,7 +639,8 @@ async function generateHostCertAsync(
     caCertPath,
     "-CAkey",
     caKeyPath,
-    "-CAcreateserial",
+    "-CAserial",
+    srlPath,
     "-out",
     certPath,
     "-days",
@@ -576,13 +686,18 @@ export function createSNICallback(
   stateDir: string,
   defaultCert: Buffer,
   defaultKey: Buffer,
-  tld = "localhost"
+  tld = "localhost",
+  caCert?: Buffer
 ): (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void {
   const cache = new Map<string, tls.SecureContext>();
   const pending = new Map<string, Promise<tls.SecureContext>>();
 
-  // Pre-cache the default context for the bare TLD itself
-  const defaultCtx = tls.createSecureContext({ cert: defaultCert, key: defaultKey });
+  // Pre-cache the default context for the bare TLD itself.
+  // Include the CA certificate so clients receive the full chain.
+  const defaultCtx = tls.createSecureContext({
+    cert: caCert ? Buffer.concat([defaultCert, caCert]) : defaultCert,
+    key: defaultKey,
+  });
 
   return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
     // The bare TLD (e.g. "localhost" or "test") uses the default cert.
@@ -615,15 +730,16 @@ export function createSNICallback(
       isCertSignatureStrong(certPath)
     ) {
       try {
+        const hostCert = fs.readFileSync(certPath);
         const ctx = tls.createSecureContext({
-          cert: fs.readFileSync(certPath),
+          cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
           key: fs.readFileSync(keyPath),
         });
         cache.set(servername, ctx);
         cb(null, ctx);
         return;
       } catch {
-        // Permission error reading cached cert -- regenerate below
+        // Permission error reading cached cert; regenerate below
       }
     }
 
@@ -638,11 +754,14 @@ export function createSNICallback(
 
     // Generate a new cert for this hostname asynchronously
     const promise = generateHostCertAsync(stateDir, servername).then(async (generated) => {
-      const [cert, key] = await Promise.all([
+      const [hostCert, key] = await Promise.all([
         fs.promises.readFile(generated.certPath),
         fs.promises.readFile(generated.keyPath),
       ]);
-      return tls.createSecureContext({ cert, key });
+      return tls.createSecureContext({
+        cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
+        key,
+      });
     });
 
     pending.set(servername, promise);
@@ -663,7 +782,7 @@ export function createSNICallback(
 /**
  * Add the portless CA to the system trust store.
  *
- * On macOS, adds to the login keychain (no sudo required -- the OS shows a
+ * On macOS, adds to the login keychain (no sudo required; the OS shows a
  * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
  * CA directory and runs the appropriate update command (requires sudo).
  *
@@ -672,7 +791,10 @@ export function createSNICallback(
 export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) {
-    return { trusted: false, error: "CA certificate not found. Run with --https first." };
+    return {
+      trusted: false,
+      error: "CA certificate not found. Run portless trust to generate it.",
+    };
   }
 
   try {
@@ -727,7 +849,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
     ) {
       return {
         trusted: false,
-        error: "Permission denied. Try: sudo portless trust",
+        error: "Permission denied. Try: portless trust",
       };
     }
     return { trusted: false, error: message };

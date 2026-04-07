@@ -9,27 +9,30 @@ Portless replaces port numbers with stable, named `.localhost` URLs for local de
 
 ## Install
 
+**Global (recommended):**
+
 ```bash
 npm install -g portless
 ```
 
-> Install globally. Do not add as a project dependency or run via npx.
+**Or as a project dev dependency:**
+
+```bash
+npm install -D portless
+```
+
+> portless is pre-1.0. When installed per-project, different contributors may run different versions. The state directory format may change between releases, which can require re-running `portless trust`.
 
 ## Run your app
 
 ```bash
-# Enable HTTPS (one-time setup, auto-generates certs)
-portless proxy start --https
-
 portless myapp next dev
 # -> https://myapp.localhost
-
-# Without --https, runs on port 1355
-portless myapp next dev
-# -> http://myapp.localhost:1355
 ```
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
+HTTPS with HTTP/2 is enabled by default. On first run, portless generates a local CA, trusts it, and binds port 443 (auto-elevates with sudo on macOS/Linux). Use `--no-tls` for plain HTTP.
+
+The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
 
 ## Use in package.json
 
@@ -47,10 +50,10 @@ Organize services with subdomains:
 
 ```bash
 portless api.myapp pnpm start
-# -> http://api.myapp.localhost:1355
+# -> https://api.myapp.localhost
 
 portless docs.myapp next dev
-# -> http://docs.myapp.localhost:1355
+# -> https://docs.myapp.localhost
 ```
 
 ## Git Worktrees
@@ -58,19 +61,19 @@ portless docs.myapp next dev
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
 
 ```bash
-# Main worktree -- no prefix
-portless run next dev   # -> http://myapp.localhost:1355
+# Main worktree (no prefix)
+portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
-portless run next dev   # -> http://fix-ui.myapp.localhost:1355
+portless run next dev   # -> https://fix-ui.myapp.localhost
 ```
 
-Put `portless run` in your `package.json` once and it works everywhere -- the main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
 Use `--name` to override the inferred base name while keeping the worktree prefix:
 
 ```bash
-portless run --name myapp next dev   # -> http://fix-ui.myapp.localhost:1355
+portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
 ## Custom TLD
@@ -78,21 +81,21 @@ portless run --name myapp next dev   # -> http://fix-ui.myapp.localhost:1355
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
 
 ```bash
-sudo portless proxy start --https --tld test
+portless proxy start --tld test
 portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for custom TLDs when started with sudo, so `.test` domains resolve correctly.
+The proxy auto-syncs `/etc/hosts` for custom TLDs, so `.test` domains resolve correctly.
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
 ## How it works
 
-Portless runs a reverse proxy on port 1355. Each app registers a route mapping its hostname to an assigned port. Requests to `http://<name>.localhost:1355` are proxied to the app.
+Portless runs an HTTPS reverse proxy on port 443 by default. Each app registers a route mapping its hostname to an assigned port. Requests to `https://<name>.localhost` are proxied to the app.
 
 ```
-Browser (myapp.localhost:1355) -> proxy (port 1355) -> App (random port)
+Browser (myapp.localhost) -> proxy (port 443) -> App (random port)
 ```
 
 ## Requirements

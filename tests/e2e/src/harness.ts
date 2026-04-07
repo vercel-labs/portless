@@ -164,6 +164,7 @@ export async function startApp(opts: StartAppOptions): Promise<E2EContext> {
     env: {
       ...process.env,
       PORTLESS_PORT: proxyPort.toString(),
+      PORTLESS_HTTPS: "0",
       PORTLESS_STATE_DIR: stateDir,
       NODE_PATH: E2E_NODE_MODULES,
       NO_COLOR: "1",

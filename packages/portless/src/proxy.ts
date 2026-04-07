@@ -33,6 +33,14 @@ function getRequestHost(req: http.IncomingMessage): string {
 }
 
 /**
+ * Detect whether a request arrived over an encrypted (TLS) connection.
+ * Works for both native TLS sockets and HTTP/2 streams.
+ */
+function isEncrypted(req: http.IncomingMessage): boolean {
+  return !!(req.socket as net.Socket & { encrypted?: boolean }).encrypted;
+}
+
+/**
  * Build X-Forwarded-* headers for a proxied request.
  */
 function buildForwardedHeaders(req: http.IncomingMessage, tls: boolean): Record<string, string> {
@@ -72,13 +80,18 @@ const MAX_PROXY_HOPS = 5;
  * Find the route matching a given host. Matches exact hostname first, then
  * falls back to wildcard subdomain matching (e.g. tenant.myapp.localhost
  * matches a route registered for myapp.localhost).
+ *
+ * When `strict` is true, only exact matches are returned; unregistered
+ * subdomain prefixes will not fall back to the base service.
  */
 function findRoute(
   routes: { hostname: string; port: number }[],
-  host: string
+  host: string,
+  strict?: boolean
 ): { hostname: string; port: number } | undefined {
   return (
-    routes.find((r) => r.hostname === host) || routes.find((r) => host.endsWith("." + r.hostname))
+    routes.find((r) => r.hostname === host) ||
+    (strict ? undefined : routes.find((r) => host.endsWith("." + r.hostname)))
   );
 }
 
@@ -101,14 +114,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     getRoutes,
     proxyPort,
     tld = "localhost",
+    strict = true,
     onError = (msg: string) => console.error(msg),
     tls,
   } = options;
   const tldSuffix = `.${tld}`;
 
-  const isTls = !!tls;
-
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    const reqTls = isEncrypted(req);
     res.setHeader(PORTLESS_HEADER, "1");
 
     const routes = getRoutes();
@@ -134,7 +147,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           "Loop Detected",
           `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
   "/api": {
-    target: "http://&lt;backend&gt;${escapeHtml(tldSuffix)}:&lt;port&gt;",
+    target: "${reqTls ? "https" : "http"}://&lt;backend&gt;${escapeHtml(tldSuffix)}${reqTls ? "" : ":&lt;port&gt;"}",
     changeOrigin: true,
   },
 }</pre></div></div>`
@@ -143,7 +156,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, host);
+    const route = findRoute(routes, host, strict);
 
     if (!route) {
       const safeHost = escapeHtml(host);
@@ -151,7 +164,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       const safeSuggestion = escapeHtml(strippedHost);
       const routesList =
         routes.length > 0
-          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, isTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
+          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
           : '<p class="empty">No apps running.</p>';
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(
@@ -164,7 +177,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const forwardedHeaders = buildForwardedHeaders(req, isTls);
+    const forwardedHeaders = buildForwardedHeaders(req, reqTls);
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
@@ -187,7 +200,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       },
       (proxyRes) => {
         const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
-        if (isTls) {
+        if (reqTls) {
           for (const h of HOP_BY_HOP_HEADERS) {
             delete responseHeaders[h];
           }
@@ -260,14 +273,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const routes = getRoutes();
     const host = getRequestHost(req).split(":")[0];
-    const route = findRoute(routes, host);
+    const route = findRoute(routes, host, strict);
 
     if (!route) {
       socket.destroy();
       return;
     }
 
-    const forwardedHeaders = buildForwardedHeaders(req, isTls);
+    const forwardedHeaders = buildForwardedHeaders(req, isEncrypted(req));
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;
@@ -304,8 +317,18 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxySocket.pipe(socket);
       socket.pipe(proxySocket);
 
-      proxySocket.on("error", () => socket.destroy());
-      socket.on("error", () => proxySocket.destroy());
+      // Tear down both sockets when either side disconnects. destroy() is
+      // idempotent, so duplicate calls from multiple events are harmless.
+      const cleanup = () => {
+        proxySocket.destroy();
+        socket.destroy();
+      };
+      proxySocket.on("error", cleanup);
+      socket.on("error", cleanup);
+      proxySocket.on("close", cleanup);
+      socket.on("close", cleanup);
+      proxySocket.on("end", cleanup);
+      socket.on("end", cleanup);
     });
 
     proxyReq.on("error", (err) => {
@@ -336,7 +359,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   if (tls) {
     const h2Server = http2.createSecureServer({
-      cert: tls.cert,
+      cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
       ...(tls.SNICallback ? { SNICallback: tls.SNICallback } : {}),
@@ -351,9 +374,22 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       handleUpgrade(req, socket, head);
     });
 
-    // Plain HTTP server using the same proxy handlers (no TLS, no redirect)
-    const plainServer = http.createServer(handleRequest);
-    plainServer.on("upgrade", handleUpgrade);
+    // Plain HTTP on a TLS-enabled port -> 302 redirect to HTTPS.
+    // The redirect targets the same port because the wrapper net.Server
+    // demuxes TLS and plain HTTP on a single listener (peek at first byte).
+    const plainServer = http.createServer((req, res) => {
+      const host = getRequestHost(req).split(":")[0] || "localhost";
+      const location = `https://${host}${proxyPort === 443 ? "" : `:${proxyPort}`}${req.url || "/"}`;
+      res.writeHead(302, { Location: location, [PORTLESS_HEADER]: "1" });
+      res.end();
+    });
+    plainServer.on("upgrade", (req: http.IncomingMessage, socket: net.Socket) => {
+      const host = getRequestHost(req);
+      console.warn(
+        `[portless] Dropped plain-HTTP WebSocket upgrade for ${host}; use wss:// instead`
+      );
+      socket.destroy();
+    });
 
     // Wrap both in a net.Server that peeks at the first byte to decide
     // whether the connection is TLS (0x16 = ClientHello) or plain HTTP.
@@ -375,7 +411,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           // TLS handshake -> HTTP/2 secure server
           h2Server.emit("connection", socket);
         } else {
-          // Plain HTTP -> proxy normally over HTTP/1.1
+          // Plain HTTP -> redirect to HTTPS
           plainServer.emit("connection", socket);
         }
       });
@@ -396,4 +432,18 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   httpServer.on("upgrade", handleUpgrade);
 
   return httpServer;
+}
+
+/**
+ * Create a minimal HTTP server that 302-redirects every request to HTTPS.
+ * Meant to run on port 80 alongside an HTTPS proxy on port 443.
+ */
+export function createHttpRedirectServer(httpsPort: number): http.Server {
+  return http.createServer((req, res) => {
+    const host = (req.headers.host || "localhost").split(":")[0];
+    const portSuffix = httpsPort === 443 ? "" : `:${httpsPort}`;
+    const location = `https://${host}${portSuffix}${req.url || "/"}`;
+    res.writeHead(302, { Location: location, [PORTLESS_HEADER]: "1" });
+    res.end();
+  });
 }

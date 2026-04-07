@@ -300,6 +300,24 @@ describe("detectWorktreePrefix", () => {
     const result = detectWorktreePrefix(tmpDir);
     expect(result).toBeNull();
   });
+
+  it("truncates prefix from a branch name exceeding 63 characters", () => {
+    const longBranch = "ctd-1744-improve-visibility-of-later-and-undated-notifications-in";
+    expect(longBranch.length).toBeGreaterThan(63);
+    setupWorktree(tmpDir, longBranch);
+    const result = detectWorktreePrefix(tmpDir);
+    expect(result).not.toBeNull();
+    expect(result!.prefix.length).toBeLessThanOrEqual(63);
+    expect(result!.source).toBe("git branch");
+  });
+
+  it("produces a deterministic truncated prefix for a long branch name", () => {
+    const longBranch = "ctd-1744-improve-visibility-of-later-and-undated-notifications-in";
+    setupWorktree(tmpDir, longBranch);
+    const result1 = detectWorktreePrefix(tmpDir);
+    const result2 = detectWorktreePrefix(tmpDir);
+    expect(result1!.prefix).toBe(result2!.prefix);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -419,5 +437,22 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
 
     const result = detectWorktreePrefix(wtDir);
     expect(result).toEqual({ prefix: "main", source: "git branch" });
+  });
+
+  it("truncates prefix when branch name exceeds 63 characters", () => {
+    const repo = path.join(tmpDir, "repo");
+    initRepoWithCommit(repo);
+
+    const longBranch = "ctd-1744-improve-visibility-of-later-and-undated-notifications-in";
+    expect(longBranch.length).toBeGreaterThan(63);
+
+    runGit(repo, ["branch", longBranch]);
+    const wtDir = path.join(tmpDir, "wt-long");
+    runGit(repo, ["worktree", "add", wtDir, longBranch]);
+
+    const result = detectWorktreePrefix(wtDir);
+    expect(result).not.toBeNull();
+    expect(result!.prefix.length).toBeLessThanOrEqual(63);
+    expect(result!.source).toBe("git branch");
   });
 });
