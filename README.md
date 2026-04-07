@@ -32,7 +32,7 @@ portless myapp next dev
 
 HTTPS with HTTP/2 is enabled by default. On first run, portless generates a local CA, trusts it, and binds port 443 (auto-elevates with sudo on macOS/Linux). Use `--no-tls` for plain HTTP.
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects `--port` and `--host` flags.
+The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
 
 ## Use in package.json
 
@@ -129,6 +129,33 @@ portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
 
+## LAN mode
+
+```bash
+portless proxy start --lan
+portless proxy start --lan --https
+portless proxy start --lan --ip 192.168.1.42
+```
+
+`--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
+
+Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. Other proxy settings still follow the current flags and env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+
+LAN mode depends on the system mDNS tools that portless already spawns: macOS ships with `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s equivalent). If the command is missing or your network isn’t reachable, `portless proxy start --lan` prints the relevant error and exits.
+
+### Framework notes
+
+- **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
+
+  ```js
+  // next.config.js
+  module.exports = {
+    allowedDevOrigins: ["myapp.local", "*.myapp.local"],
+  };
+  ```
+
+- **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
+
 ## Commands
 
 ```bash
@@ -148,6 +175,7 @@ PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 # Proxy control
 portless proxy start             # Start the HTTPS proxy (port 443, daemon)
 portless proxy start --no-tls    # Start without HTTPS (port 80)
+portless proxy start --lan       # Start in LAN mode (mDNS .local for devices)
 portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
@@ -160,6 +188,8 @@ portless proxy stop              # Stop the proxy
 -p, --port <number>              Port for the proxy (default: 443, or 80 with --no-tls)
 --no-tls                         Disable HTTPS (use plain HTTP on port 80)
 --https                          Enable HTTPS (default, accepted for compatibility)
+--lan                            Enable LAN mode (mDNS .local for real devices)
+--ip <address>                   Pin a specific LAN IP (disables auto-follow; use with --lan)
 --cert <path>                    Use a custom TLS certificate
 --key <path>                     Use a custom TLS private key
 --foreground                     Run proxy in foreground instead of daemon
@@ -176,7 +206,8 @@ portless proxy stop              # Stop the proxy
 # Configuration
 PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
-PORTLESS_HTTPS                   HTTPS on by default; set to 0 to disable (same as --no-tls)
+PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
+PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
@@ -184,7 +215,7 @@ PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
 PORT                             Ephemeral port the child should listen on
-HOST                             Always 127.0.0.1
+HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode)
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
 ```
 
