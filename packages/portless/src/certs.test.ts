@@ -5,7 +5,7 @@ import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFileSync } from "node:child_process";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
+import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
 
 /**
  * Return the signature algorithm string for a PEM cert file using openssl.
@@ -367,5 +367,21 @@ describe("trustCA", () => {
     expect(result.trusted).toBe(false);
     expect(result.error).toContain("CA certificate not found");
     expect(result.error).toContain("portless trust");
+  });
+});
+
+describe("untrustCA", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-untrust-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns removed when ca.pem is missing", () => {
+    expect(untrustCA(tmpDir)).toEqual({ removed: true });
   });
 });

@@ -98,7 +98,7 @@ portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for custom TLDs, so `.test` domains resolve correctly.
+The proxy auto-syncs `/etc/hosts` for route hostnames, so `.test` and other dev hostnames resolve on your machine.
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 

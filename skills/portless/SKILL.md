@@ -139,7 +139,7 @@ Override with the `PORTLESS_STATE_DIR` environment variable.
 | `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                     |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent    |
 | `PORTLESS_PATH`       | Path prefix for path-based routing (e.g. /api)                        |
-| `PORTLESS_SYNC_HOSTS` | Set to `1` to auto-sync /etc/hosts (auto-enabled for custom TLDs)     |
+| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)         |
 | `PORTLESS_STATE_DIR`  | Override the state directory                                          |
 | `PORTLESS=0`          | Bypass the proxy, run the command directly                            |
 
@@ -191,11 +191,12 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 | `portless get <name> --no-worktree`    | Print URL without worktree prefix                              |
 | `portless list`                        | Show active routes                                             |
 | `portless trust`                       | Add local CA to system trust store (for HTTPS)                 |
+| `portless clean`                       | Remove state, CA trust entry, and /etc/hosts block             |
 | `portless proxy start`                 | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
 | `portless proxy start --no-tls`        | Start without HTTPS (plain HTTP on port 80)                    |
 | `portless proxy start --lan`           | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
 | `portless proxy start -p <number>`     | Start the proxy on a custom port                               |
-| `portless proxy start --tld test`      | Use .test instead of .localhost (requires /etc/hosts sync)     |
+| `portless proxy start --tld test`      | Use .test instead of .localhost                                |
 | `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                  |
 | `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
 | `portless proxy stop`                  | Stop the proxy                                                 |
@@ -210,10 +211,10 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |
 | `portless --help` / `-h`               | Show help                                                      |
-| `portless run --help`                  | Show help for a subcommand (also: alias, hosts)                |
+| `portless run --help`                  | Show help for a subcommand (also: alias, hosts, clean)         |
 | `portless --version` / `-v`            | Show version                                                   |
 
-**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Troubleshooting
 
@@ -263,7 +264,7 @@ portless hosts sync    # Adds current routes to /etc/hosts
 portless hosts clean   # Remove entries later
 ```
 
-Auto-syncs `/etc/hosts` for custom TLDs (e.g. `--tld test`). For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable.
+Auto-syncs `/etc/hosts` for route hostnames by default. Set `PORTLESS_SYNC_HOSTS=0` to disable.
 
 ### Browser shows certificate warning with --https
 
@@ -274,6 +275,14 @@ portless trust
 ```
 
 This adds the portless local CA to your system trust store. After that, restart the browser.
+
+### Remove portless from the machine
+
+```bash
+portless clean
+```
+
+Stops the proxy if needed, removes the portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. May require `sudo` on macOS/Linux.
 
 ### Proxy loop (508 Loop Detected)
 

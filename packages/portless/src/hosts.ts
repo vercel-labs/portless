@@ -61,6 +61,14 @@ export function buildBlock(hostnames: string[]): string {
 }
 
 /**
+ * Whether the proxy should write route hostnames to the hosts file.
+ * Disabled only when `PORTLESS_SYNC_HOSTS` is `0` or `false` (opt-out).
+ */
+export function shouldAutoSyncHosts(syncVal: string | undefined): boolean {
+  return syncVal !== "0" && syncVal !== "false";
+}
+
+/**
  * Sync /etc/hosts to include entries for all given hostnames.
  * Replaces any existing portless-managed block. Requires root access.
  * Returns true on success, false on failure.

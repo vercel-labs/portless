@@ -92,6 +92,14 @@ portless trust
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
 
+## Clean up
+
+```bash
+portless clean
+```
+
+Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed.
+
 ## Proxy control
 
 ### Start
@@ -130,7 +138,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--tld <tld>`</td>
-      <td>Use a custom TLD instead of `.localhost` (e.g. `test`). Auto-syncs `/etc/hosts` for custom TLDs.</td>
+      <td>Use a custom TLD instead of `.localhost` (e.g. `test`). Hostnames still sync to `/etc/hosts` by default.</td>
     </tr>
     <tr>
       <td>`--cert <path>`</td>
@@ -194,7 +202,7 @@ portless hosts sync     # add current routes to /etc/hosts
 portless hosts clean    # remove portless entries from /etc/hosts
 ```
 
-Auto-enabled for custom TLDs. For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable.
+Auto-sync is on by default. Set `PORTLESS_SYNC_HOSTS=0` to disable.
 
 ## Bypass portless
 

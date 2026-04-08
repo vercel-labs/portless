@@ -11,10 +11,20 @@ const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 
 /** Run the CLI with the given args and optional env overrides. */
 function run(args: string[], options?: { env?: Record<string, string | undefined> }) {
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    ...options?.env,
+    NO_COLOR: "1",
+  };
+  // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
+  delete env.PNPM_SCRIPT_SRC_DIR;
+  if (env.npm_command === "exec") {
+    delete env.npm_command;
+  }
   const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf-8",
     timeout: 10_000,
-    env: { ...process.env, ...options?.env, NO_COLOR: "1" },
+    env,
   });
   return {
     status: result.status,
@@ -96,6 +106,7 @@ describe("CLI", () => {
       expect(stdout).toContain("--foreground");
       expect(stdout).toContain("PORTLESS_STATE_DIR");
       expect(stdout).toContain("PORTLESS_URL");
+      expect(stdout).toContain("portless clean");
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -414,6 +425,45 @@ describe("CLI", () => {
     });
   });
 
+  describe("clean subcommand", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["clean", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("trust store");
+    });
+
+    it("prints help with -h", () => {
+      const { status, stdout } = run(["clean", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless clean");
+    });
+
+    it("rejects unknown arguments", () => {
+      const { status, stderr } = run(["clean", "typo"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown argument");
+    });
+
+    it("does not bypass when PORTLESS=0 is set", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-clean-"));
+      const { stderr } = run(["clean"], {
+        env: {
+          PORTLESS: "0",
+          PORTLESS_STATE_DIR: tmpDir,
+        },
+      });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      expect(stderr).not.toContain("ENOENT");
+    });
+
+    it("does not bypass clean with extra args when PORTLESS=0", () => {
+      const { status, stderr } = run(["clean", "typo"], { env: { PORTLESS: "0" } });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown argument");
+    });
+  });
+
   describe("proxy subcommand", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["proxy", "--help"]);
@@ -624,6 +674,7 @@ describe("CLI", () => {
             PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
           },
         });
 

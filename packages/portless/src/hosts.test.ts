@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { checkHostResolution, extractManagedBlock, removeBlock, buildBlock } from "./hosts.js";
+import {
+  checkHostResolution,
+  extractManagedBlock,
+  removeBlock,
+  buildBlock,
+  shouldAutoSyncHosts,
+} from "./hosts.js";
 
 // ---------------------------------------------------------------------------
 // extractManagedBlock
@@ -126,6 +132,31 @@ describe("buildBlock", () => {
     const block = buildBlock(hostnames);
     const extracted = extractManagedBlock(block);
     expect(extracted).toEqual(["127.0.0.1 a.localhost", "127.0.0.1 b.localhost"]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// shouldAutoSyncHosts
+// ---------------------------------------------------------------------------
+
+describe("shouldAutoSyncHosts", () => {
+  it("returns true when unset", () => {
+    expect(shouldAutoSyncHosts(undefined)).toBe(true);
+  });
+
+  it("returns false for 0 and false", () => {
+    expect(shouldAutoSyncHosts("0")).toBe(false);
+    expect(shouldAutoSyncHosts("false")).toBe(false);
+  });
+
+  it("returns true for 1 and true", () => {
+    expect(shouldAutoSyncHosts("1")).toBe(true);
+    expect(shouldAutoSyncHosts("true")).toBe(true);
+  });
+
+  it("returns true for other non-empty values", () => {
+    expect(shouldAutoSyncHosts("yes")).toBe(true);
+    expect(shouldAutoSyncHosts("")).toBe(true);
   });
 });
 

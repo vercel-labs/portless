@@ -102,7 +102,7 @@ portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for custom TLDs, so `.test` domains resolve correctly.
+The proxy auto-syncs `/etc/hosts` for route hostnames (including `.test`), so those domains resolve on your machine.
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
@@ -180,6 +180,7 @@ portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
+portless clean                   # Remove state, CA trust entry, and hosts block
 portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
 
@@ -225,7 +226,7 @@ PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
-PORTLESS_SYNC_HOSTS=1            Auto-sync /etc/hosts (auto-enabled for custom TLDs)
+PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_PATH=<path>             Path prefix for path-based routing (e.g. /api)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
@@ -235,7 +236,17 @@ HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
 ```
 
-> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## Uninstall / reset
+
+To remove portless data from your machine (proxy state under `~/.portless` and the system state directory, the local CA from the OS trust store when portless installed it, and the portless block in `/etc/hosts`):
+
+```bash
+portless clean
+```
+
+macOS/Linux may prompt for `sudo`. Custom certificate paths passed with `--cert` and `--key` are not deleted.
 
 ## Safari / DNS
 
@@ -248,7 +259,7 @@ portless hosts sync    # Add current routes to /etc/hosts
 portless hosts clean   # Clean up later
 ```
 
-Auto-syncs `/etc/hosts` for custom TLDs (e.g. `--tld test`). For `.localhost`, set `PORTLESS_SYNC_HOSTS=1` to enable. Disable with `PORTLESS_SYNC_HOSTS=0`.
+Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLDs, LAN `.local`). Set `PORTLESS_SYNC_HOSTS=0` to disable.
 
 ## Proxying Between Portless Apps
 

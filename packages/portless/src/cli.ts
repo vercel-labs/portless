@@ -6,7 +6,7 @@ import colors from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA } from "./certs.js";
+import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   fixOwnership,
@@ -15,7 +15,7 @@ import {
   normalizePathPrefix,
   parseHostname,
 } from "./utils.js";
-import { syncHostsFile, cleanHostsFile } from "./hosts.js";
+import { syncHostsFile, cleanHostsFile, shouldAutoSyncHosts } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
 import {
@@ -52,6 +52,7 @@ import {
   writeTldFile,
   writeTlsMarker,
 } from "./cli-utils.js";
+import { collectStateDirsForCleanup, removePortlessStateFiles } from "./clean-utils.js";
 import {
   getLocalNetworkIp,
   isMdnsSupported,
@@ -381,11 +382,7 @@ function startProxyServer(
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
-  const syncVal = process.env.PORTLESS_SYNC_HOSTS;
-  const autoSyncHosts =
-    syncVal === "1" ||
-    syncVal === "true" ||
-    (tld !== DEFAULT_TLD && !activeLanIp && syncVal !== "0" && syncVal !== "false");
+  const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
@@ -1237,6 +1234,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
   ${colors.cyan("portless list")}                    Show active routes
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
+  ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
   ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
@@ -1323,7 +1321,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
-  PORTLESS_SYNC_HOSTS=1         Auto-sync ${HOSTS_DISPLAY} (auto-enabled for custom TLDs)
+  PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS_PATH=<path>          Path prefix for path-based routing (e.g. /api)
   PORTLESS=0                    Run command directly without proxy
@@ -1337,8 +1335,8 @@ ${colors.bold("Child process environment:")}
 ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
-  Auto-syncs ${HOSTS_DISPLAY} for custom TLDs (e.g. --tld test). For .localhost,
-  set PORTLESS_SYNC_HOSTS=1 to enable. To manually sync:
+  Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
+  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. To manually sync:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
@@ -1347,7 +1345,7 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, trust, proxy are subcommands and cannot
+  run, get, alias, hosts, list, trust, clean, proxy are subcommands and cannot
   be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
@@ -1402,6 +1400,97 @@ async function handleTrust(): Promise<void> {
 
   console.error(colors.red(`Failed to trust CA: ${result.error}`));
   process.exit(1);
+}
+
+async function handleClean(args: string[]): Promise<void> {
+  if (args[1] === "--help" || args[1] === "-h") {
+    console.log(`
+${colors.bold("portless clean")} - Remove portless artifacts from this machine.
+
+Stops the proxy if it is running, removes the local CA from the OS trust store
+when it was installed by portless, deletes known files under state directories
+(~/.portless, the system state directory, and PORTLESS_STATE_DIR when set),
+and removes the portless block from ${HOSTS_DISPLAY}.
+
+Only allowlisted filenames under each state directory are deleted. Custom
+certificate paths from --cert and --key are never removed.
+
+macOS/Linux may prompt for sudo when the proxy, trust store, or ${HOSTS_DISPLAY}
+require elevated privileges. On Windows, run as Administrator if needed.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless clean")}
+
+${colors.bold("Options:")}
+  --help, -h             Show this help
+`);
+    process.exit(0);
+  }
+
+  if (args.length > 1) {
+    console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
+    console.error(colors.cyan("  portless clean --help"));
+    process.exit(1);
+  }
+
+  console.log(colors.cyan("Stopping proxy if it is running..."));
+  const { dir, port, tls } = await discoverState();
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(colors.yellow(msg)),
+  });
+  await stopProxy(store, port, tls);
+
+  const stateDirs = collectStateDirsForCleanup();
+  for (const stateDir of stateDirs) {
+    const caPath = path.join(stateDir, "ca.pem");
+    if (!fs.existsSync(caPath)) continue;
+    const wasTrusted = isCATrusted(stateDir);
+    if (!wasTrusted) continue;
+    const untrustResult = untrustCA(stateDir);
+    if (untrustResult.removed) {
+      console.log(colors.green("Removed local CA from the system trust store."));
+    } else if (untrustResult.error) {
+      console.warn(
+        colors.yellow(
+          `Could not remove CA from trust store: ${untrustResult.error}\n` +
+            `Try: sudo portless clean (Linux), or delete the certificate manually.`
+        )
+      );
+    }
+  }
+
+  for (const stateDir of stateDirs) {
+    removePortlessStateFiles(stateDir);
+  }
+  console.log(colors.green("Removed portless state files from known state directories."));
+
+  if (cleanHostsFile()) {
+    console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+  } else if (!isWindows && process.getuid?.() !== 0) {
+    console.log(
+      colors.yellow(`Updating ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
+    );
+    const result = spawnSync(
+      "sudo",
+      ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "clean"],
+      {
+        stdio: "inherit",
+        timeout: SUDO_SPAWN_TIMEOUT_MS,
+      }
+    );
+    if (result.status !== 0) {
+      console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
+      process.exit(1);
+    }
+  } else {
+    console.warn(
+      colors.yellow(
+        `Could not remove portless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
+      )
+    );
+  }
+
+  console.log(colors.green("Clean finished."));
 }
 
 async function handleList(): Promise<void> {
@@ -1592,8 +1681,8 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Auto-sync:")}
-  Auto-enabled for custom TLDs (e.g. --tld test). For .localhost, set
-  PORTLESS_SYNC_HOSTS=1 to enable. Disable with PORTLESS_SYNC_HOSTS=0.
+  The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
+  PORTLESS_SYNC_HOSTS=0.
 `);
     process.exit(0);
   }
@@ -2372,7 +2461,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, proxy).
+  // subcommand (run, alias, hosts, list, trust, clean, proxy).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
@@ -2407,7 +2496,10 @@ async function main() {
     process.env.PORTLESS === "0" ||
     process.env.PORTLESS === "false" ||
     process.env.PORTLESS === "skip";
-  if (skipPortless && (isRunCommand || (args.length >= 2 && args[0] !== "proxy"))) {
+  if (
+    skipPortless &&
+    (isRunCommand || (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean"))
+  ) {
     const { commandArgs } = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
     if (commandArgs.length === 0) {
       console.error(colors.red("Error: No command provided."));
@@ -2417,7 +2509,7 @@ async function main() {
     return;
   }
 
-  // Global dispatch: help, version, trust, list, alias, hosts, proxy
+  // Global dispatch: help, version, trust, clean, list, alias, hosts, proxy
   // When `run` is used, skip these so args like "list" or "--help" are treated
   // as child-command tokens, not portless subcommands.
   if (!isRunCommand) {
@@ -2431,6 +2523,10 @@ async function main() {
     }
     if (args[0] === "trust") {
       await handleTrust();
+      return;
+    }
+    if (args[0] === "clean") {
+      await handleClean(args);
       return;
     }
     if (args[0] === "list") {

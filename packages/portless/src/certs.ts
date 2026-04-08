@@ -855,3 +855,159 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
     return { trusted: false, error: message };
   }
 }
+
+/**
+ * Remove the portless CA from the system trust store (inverse of trustCA).
+ * No-op when the CA is not trusted or ca.pem is missing in stateDir.
+ */
+export function untrustCA(stateDir: string): { removed: boolean; error?: string } {
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  if (!fileExists(caCertPath)) {
+    return { removed: true };
+  }
+
+  if (!isCATrusted(stateDir)) {
+    return { removed: true };
+  }
+
+  try {
+    if (process.platform === "darwin") {
+      return untrustCAMacOS(caCertPath);
+    }
+    if (process.platform === "linux") {
+      return untrustCALinux(stateDir);
+    }
+    if (process.platform === "win32") {
+      return untrustCAWindows(caCertPath);
+    }
+    return { removed: false, error: `Unsupported platform: ${process.platform}` };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { removed: false, error: message };
+  }
+}
+
+function untrustCAMacOS(caCertPath: string): { removed: boolean; error?: string } {
+  const errors: string[] = [];
+
+  const tryExec = (args: string[]) => {
+    try {
+      execFileSync("security", args, { stdio: "pipe", timeout: 30_000 });
+      return true;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(message);
+      return false;
+    }
+  };
+
+  if (tryExec(["remove-trusted-cert", caCertPath])) {
+    return isCATrustedMacOSAfterAttempt(caCertPath)
+      ? { removed: false, error: errors.join("; ") || "Trust entry may still be present" }
+      : { removed: true };
+  }
+
+  const login = loginKeychainPath();
+  tryExec(["delete-certificate", "-c", CA_COMMON_NAME, login]);
+  tryExec(["delete-certificate", "-c", CA_COMMON_NAME, "/Library/Keychains/System.keychain"]);
+
+  return isCATrustedMacOSAfterAttempt(caCertPath)
+    ? { removed: false, error: errors.join("; ") || "Could not remove CA from keychain (try sudo)" }
+    : { removed: true };
+}
+
+/** Re-run verify-cert without throwing; returns true if still trusted for SSL. */
+function isCATrustedMacOSAfterAttempt(caCertPath: string): boolean {
+  try {
+    const isRoot = (process.getuid?.() ?? -1) === 0;
+    const sudoUser = process.env.SUDO_USER;
+    if (isRoot && sudoUser) {
+      execFileSync(
+        "sudo",
+        ["-u", sudoUser, "security", "verify-cert", "-c", caCertPath, "-L", "-p", "ssl"],
+        { stdio: "pipe", timeout: 5000 }
+      );
+    } else {
+      execFileSync("security", ["verify-cert", "-c", caCertPath, "-L", "-p", "ssl"], {
+        stdio: "pipe",
+        timeout: 5000,
+      });
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function untrustCALinux(stateDir: string): { removed: boolean; error?: string } {
+  const errors: string[] = [];
+  let deletedAny = false;
+
+  for (const config of Object.values(LINUX_CA_TRUST_CONFIGS)) {
+    const dest = path.join(config.certDir, "portless-ca.crt");
+    try {
+      if (fileExists(dest)) {
+        const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
+        const installed = fs.readFileSync(dest, "utf-8").trim();
+        if (ours === installed) {
+          fs.unlinkSync(dest);
+          deletedAny = true;
+        }
+      }
+    } catch (err: unknown) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (deletedAny) {
+    try {
+      const config = getLinuxCATrustConfig();
+      execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+    } catch (err: unknown) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  if (isCATrusted(stateDir)) {
+    return {
+      removed: false,
+      error:
+        errors.join("; ") ||
+        "CA still trusted (remove portless-ca.crt and run the distro CA update command, often with sudo)",
+    };
+  }
+  return { removed: true };
+}
+
+function untrustCAWindows(caCertPath: string): { removed: boolean; error?: string } {
+  try {
+    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
+      .trim()
+      .replace(/^.*=/, "")
+      .replace(/:/g, "")
+      .toLowerCase();
+
+    const storeListing = execFileSync("certutil", ["-store", "-user", "Root"], {
+      encoding: "utf-8",
+      timeout: 10_000,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+
+    const normalized = storeListing.replace(/\s/g, "").toLowerCase();
+    if (!normalized.includes(fingerprint)) {
+      return { removed: true };
+    }
+
+    execFileSync("certutil", ["-delstore", "-user", "Root", "portless Local CA"], {
+      stdio: "pipe",
+      timeout: 30_000,
+    });
+
+    if (isCATrustedWindows(caCertPath)) {
+      return { removed: false, error: "certutil could not remove the portless CA from Root" };
+    }
+    return { removed: true };
+  } catch (err: unknown) {
+    return { removed: false, error: err instanceof Error ? err.message : String(err) };
+  }
+}
