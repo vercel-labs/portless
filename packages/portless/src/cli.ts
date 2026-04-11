@@ -956,13 +956,6 @@ async function runApp(
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
   injectFrameworkFlags(commandArgs, port);
 
-  // Run the command
-  console.log(
-    chalk.gray(
-      `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl} ${commandArgs.join(" ")}\n`
-    )
-  );
-
   // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
   // Server Components) trust portless-proxied HTTPS services. Node.js does
   // not use the system trust store, so without this env var it rejects the
@@ -975,6 +968,16 @@ async function runApp(
       caEnv.NODE_EXTRA_CA_CERTS = caPath;
     }
   }
+
+  // Run the command
+  const caFragment = caEnv.NODE_EXTRA_CA_CERTS
+    ? ` NODE_EXTRA_CA_CERTS=${caEnv.NODE_EXTRA_CA_CERTS}`
+    : "";
+  console.log(
+    chalk.gray(
+      `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
+    )
+  );
 
   spawnCommand(commandArgs, {
     env: {
