@@ -2,8 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
-import { execFile as execFileCb, execFileSync } from "node:child_process";
-import { promisify } from "node:util";
+import { execFileSync } from "node:child_process";
 import { fixOwnership } from "./utils.js";
 
 /** How long the CA certificate is valid (10 years, in days). */
@@ -17,9 +16,6 @@ const EXPIRY_BUFFER_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 
 /** Common Name used for the portless local CA. */
 const CA_COMMON_NAME = "portless Local CA";
-
-/** openssl command timeout (ms). */
-const OPENSSL_TIMEOUT_MS = 15_000;
 
 // ---------------------------------------------------------------------------
 // File names
@@ -41,63 +37,6 @@ function fileExists(filePath: string): boolean {
   } catch {
     return false;
   }
-}
-
-// ---------------------------------------------------------------------------
-// Windows OpenSSL configuration
-// ---------------------------------------------------------------------------
-
-/**
- * Some Windows OpenSSL builds (e.g. ShiningLight.OpenSSL.Dev) compile in a
- * bogus OPENSSLDIR such as `Z:/extlib/_5040__/ssl`, which causes every
- * `openssl req` invocation to fail with "Can't open openssl.cnf". We detect
- * the problem at startup and resolve it by finding the real openssl.cnf and
- * injecting OPENSSL_CONF into the child-process environment.
- */
-let _opensslEnv: Record<string, string> | undefined;
-
-function getOpensslEnv(): Record<string, string> | undefined {
-  if (process.platform !== "win32") return undefined;
-  if (_opensslEnv !== undefined) return _opensslEnv;
-
-  // If the user already set OPENSSL_CONF, respect it.
-  if (process.env.OPENSSL_CONF && fileExists(process.env.OPENSSL_CONF)) {
-    _opensslEnv = {};
-    return _opensslEnv;
-  }
-
-  const candidates = [
-    // Git-for-Windows bundles OpenSSL here
-    path.join("C:", "Program Files", "Git", "mingw64", "etc", "ssl", "openssl.cnf"),
-    path.join("C:", "Program Files", "Git", "usr", "ssl", "openssl.cnf"),
-    // Standalone OpenSSL installers
-    path.join("C:", "Program Files", "OpenSSL-Win64", "bin", "cnf", "openssl.cnf"),
-    path.join("C:", "Program Files", "OpenSSL-Win64", "openssl.cnf"),
-    path.join("C:", "Program Files (x86)", "OpenSSL-Win32", "bin", "cnf", "openssl.cnf"),
-    // Common winget/chocolatey install paths
-    path.join("C:", "Program Files", "OpenSSL", "bin", "cnf", "openssl.cnf"),
-  ];
-
-  for (const candidate of candidates) {
-    if (fileExists(candidate)) {
-      _opensslEnv = { OPENSSL_CONF: candidate };
-      return _opensslEnv;
-    }
-  }
-
-  _opensslEnv = {};
-  return _opensslEnv;
-}
-
-function opensslErrorMessage(): string {
-  if (process.platform === "win32") {
-    return (
-      "Make sure openssl is installed and working.\n" +
-      "Install via: winget install -e --id ShiningLight.OpenSSL.Dev\n" +
-      "If already installed, set OPENSSL_CONF to the path of your openssl.cnf file."
-    );
-  }
-  return "Make sure openssl is installed (ships with macOS and most Linux distributions).";
 }
 
 /**
@@ -122,76 +61,255 @@ function isCertValid(certPath: string): boolean {
  */
 function isCertSansComplete(certPath: string): boolean {
   try {
-    const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
-    return /DNS:\*\.local\b/.test(text);
+    const pem = fs.readFileSync(certPath, "utf-8");
+    const cert = new crypto.X509Certificate(pem);
+    // Use word boundary to match "DNS:*.local" exactly, not "DNS:*.localhost"
+    return /DNS:\*\.local\b/.test(cert.subjectAltName ?? "");
   } catch {
     return false;
   }
 }
 
+// ---------------------------------------------------------------------------
+// DER helpers for pure-JS X.509 certificate generation
+// ---------------------------------------------------------------------------
+
+/** Encode a DER length field. */
+function derLen(n: number): Uint8Array {
+  if (n < 0x80) return new Uint8Array([n]);
+  if (n < 0x100) return new Uint8Array([0x81, n]);
+  return new Uint8Array([0x82, (n >> 8) & 0xff, n & 0xff]);
+}
+
+/** Concatenate Uint8Arrays. */
+function cat(...arrays: Uint8Array[]): Uint8Array {
+  const total = arrays.reduce((s, a) => s + a.length, 0);
+  const out = new Uint8Array(total);
+  let off = 0;
+  for (const a of arrays) {
+    out.set(a, off);
+    off += a.length;
+  }
+  return out;
+}
+
+/** Wrap content in a DER TLV. */
+function derTag(tag: number, content: Uint8Array): Uint8Array {
+  const l = derLen(content.length);
+  const out = new Uint8Array(1 + l.length + content.length);
+  out[0] = tag;
+  out.set(l, 1);
+  out.set(content, 1 + l.length);
+  return out;
+}
+
+const derSeq = (...items: Uint8Array[]) => derTag(0x30, cat(...items));
+const derSet = (...items: Uint8Array[]) => derTag(0x31, cat(...items));
+const derCtx = (n: number, content: Uint8Array) => derTag(0xa0 | n, content);
+const derOcts = (b: Uint8Array) => derTag(0x04, b);
+const derBool = (v: boolean) => new Uint8Array([0x01, 0x01, v ? 0xff : 0x00]);
+
+function derInt(bytes: Uint8Array): Uint8Array {
+  const b = bytes[0] & 0x80 ? cat(new Uint8Array([0]), bytes) : bytes;
+  return derTag(0x02, b);
+}
+
+function derOid(dotted: string): Uint8Array {
+  const parts = dotted.split(".").map(Number);
+  const bytes: number[] = [parts[0] * 40 + parts[1]];
+  for (let i = 2; i < parts.length; i++) {
+    let n = parts[i];
+    const chunk: number[] = [];
+    chunk.unshift(n & 0x7f);
+    n >>= 7;
+    while (n > 0) {
+      chunk.unshift((n & 0x7f) | 0x80);
+      n >>= 7;
+    }
+    bytes.push(...chunk);
+  }
+  return derTag(0x06, new Uint8Array(bytes));
+}
+
+function derUtf8(s: string): Uint8Array {
+  return derTag(0x0c, Buffer.from(s, "utf-8"));
+}
+
+function derBitStr(bytes: Uint8Array, unusedBits = 0): Uint8Array {
+  return derTag(0x03, cat(new Uint8Array([unusedBits]), bytes));
+}
+
+function derTime(d: Date): Uint8Array {
+  const p = (n: number) => String(n).padStart(2, "0");
+  const y = d.getUTCFullYear();
+  const s = `${p(y % 100)}${p(d.getUTCMonth() + 1)}${p(d.getUTCDate())}${p(d.getUTCHours())}${p(d.getUTCMinutes())}${p(d.getUTCSeconds())}Z`;
+  // UTCTime for years 1950-2049, GeneralizedTime otherwise
+  return y < 2050
+    ? derTag(0x17, Buffer.from(s, "ascii"))
+    : derTag(0x18, Buffer.from(`20${s}`, "ascii"));
+}
+
+/** Encode an X.509 Name with a single commonName attribute. */
+function derName(cn: string): Uint8Array {
+  return derSeq(derSet(derSeq(derOid("2.5.4.3"), derUtf8(cn))));
+}
+
+/** Encode a GeneralName dNSName. */
+function derDnsName(hostname: string): Uint8Array {
+  return derTag(0x82, Buffer.from(hostname, "ascii")); // [2] IMPLICIT IA5String
+}
+
 /**
- * Check whether a certificate uses a strong signature algorithm.
- * Reject SHA-1 signatures to avoid OpenSSL "ca md too weak" failures.
- *
- * Uses openssl rather than X509Certificate.signatureAlgorithm because that
- * property was only added in Node.js 24.9.0 and is undefined on older releases.
+ * Encode a KeyUsage BIT STRING per RFC 5280.
+ * Bit positions: 0=digitalSignature, 2=keyEncipherment, 5=keyCertSign, 6=cRLSign
+ */
+function derKeyUsage(usages: number[]): Uint8Array {
+  const maxBit = Math.max(...usages);
+  const numBytes = Math.ceil((maxBit + 1) / 8);
+  const data = new Uint8Array(numBytes);
+  for (const b of usages) {
+    data[Math.floor(b / 8)] |= 0x80 >> (b % 8);
+  }
+  return derBitStr(data, numBytes * 8 - maxBit - 1);
+}
+
+/** Encode an X.509v3 Extension. */
+function derExt(oid: string, critical: boolean, valueBytes: Uint8Array): Uint8Array {
+  return derSeq(derOid(oid), ...(critical ? [derBool(true)] : []), derOcts(valueBytes));
+}
+
+// OIDs used in certificate generation
+const CERT_OIDS = {
+  ecdsaWithSHA256: "1.2.840.10045.4.3.2",
+  subjectKeyId: "2.5.29.14",
+  subjectAltName: "2.5.29.17",
+  basicConstraints: "2.5.29.19",
+  keyUsage: "2.5.29.15",
+  extKeyUsage: "2.5.29.37",
+  authKeyId: "2.5.29.35",
+  serverAuth: "1.3.6.1.5.5.7.3.1",
+};
+
+/** SHA-1 of a SubjectPublicKeyInfo DER buffer, used as the subjectKeyIdentifier. */
+function spkiKeyId(spkiDer: Buffer): Uint8Array {
+  return new Uint8Array(crypto.createHash("sha1").update(spkiDer).digest());
+}
+
+/** Generate a random positive 8-byte serial number. */
+function randomSerial(): Buffer {
+  const s = crypto.randomBytes(8);
+  s[0] &= 0x7f; // ensure top bit is 0 (positive integer)
+  return s;
+}
+
+/** Convert a DER buffer to a PEM string. */
+function derToPem(der: Buffer, type: string): string {
+  const b64 = der.toString("base64");
+  const lines = b64.match(/.{1,64}/g)!.join("\n");
+  return `-----BEGIN ${type}-----\n${lines}\n-----END ${type}-----\n`;
+}
+
+/**
+ * Build and sign an X.509v3 DER certificate.
+ * Both the subject public key and the signer key are pure Node.js KeyObjects.
+ */
+function buildCertDer(opts: {
+  subject: string;
+  issuer: string;
+  serial: Buffer;
+  notBefore: Date;
+  notAfter: Date;
+  subjectSpki: Buffer;
+  extensions: Uint8Array[];
+  signerKey: crypto.KeyObject;
+}): Buffer {
+  const { subject, issuer, serial, notBefore, notAfter, subjectSpki, extensions, signerKey } = opts;
+
+  const tbs = derSeq(
+    derCtx(0, derInt(new Uint8Array([2]))), // version v3
+    derInt(serial),
+    derSeq(derOid(CERT_OIDS.ecdsaWithSHA256)), // signature algorithm
+    derName(issuer),
+    derSeq(derTime(notBefore), derTime(notAfter)), // validity
+    derName(subject),
+    subjectSpki, // SubjectPublicKeyInfo (already DER-encoded)
+    derCtx(3, derSeq(...extensions)) // extensions
+  );
+
+  const sign = crypto.createSign("SHA256");
+  sign.update(tbs);
+  const sigDer = sign.sign(signerKey);
+
+  return Buffer.from(
+    derSeq(tbs, derSeq(derOid(CERT_OIDS.ecdsaWithSHA256)), derBitStr(new Uint8Array(sigDer)))
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Signature-algorithm check (no subprocess needed)
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse the signature algorithm OID from a DER-encoded certificate buffer.
+ * The OID appears as the second SEQUENCE inside the outer Certificate SEQUENCE
+ * (after TBSCertificate).
+ */
+function certSigAlgOid(der: Buffer): string | null {
+  try {
+    let pos = 0;
+    // Read a DER length field; return { length, next } where next is the offset after the length.
+    const readLen = (p: number) => {
+      const first = der[p];
+      if (first < 0x80) return { length: first, next: p + 1 };
+      const n = first & 0x7f;
+      let len = 0;
+      for (let i = 0; i < n; i++) len = (len << 8) | der[p + 1 + i];
+      return { length: len, next: p + 1 + n };
+    };
+    // Skip a complete DER TLV; return offset of the next item.
+    const skipItem = (p: number) => {
+      const { length, next } = readLen(p + 1);
+      return next + length;
+    };
+    if (der[pos++] !== 0x30) return null; // outer SEQUENCE
+    pos = readLen(pos).next;
+    pos = skipItem(pos); // skip TBSCertificate
+    if (der[pos++] !== 0x30) return null; // AlgorithmIdentifier
+    pos = readLen(pos).next;
+    if (der[pos++] !== 0x06) return null; // OID tag
+    const { length: oidLen, next: oidStart } = readLen(pos);
+    const oidBytes = der.subarray(oidStart, oidStart + oidLen);
+    const parts: number[] = [Math.floor(oidBytes[0] / 40), oidBytes[0] % 40];
+    let cur = 0;
+    for (let i = 1; i < oidBytes.length; i++) {
+      cur = (cur << 7) | (oidBytes[i] & 0x7f);
+      if (!(oidBytes[i] & 0x80)) {
+        parts.push(cur);
+        cur = 0;
+      }
+    }
+    return parts.join(".");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Check whether a certificate uses a strong signature algorithm (SHA-256+).
+ * Rejects SHA-1 signatures without spawning any external process.
  */
 function isCertSignatureStrong(certPath: string): boolean {
   try {
-    const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
-    const match = text.match(/Signature Algorithm:\s*(\S+)/i);
-    if (!match) return false;
-    const algo = match[1].toLowerCase();
-    // SHA-1 variants: sha1WithRSAEncryption, ecdsa-with-SHA1, etc.
-    // SHA-256+ variants do not contain "sha1" as a substring.
-    return !algo.includes("sha1");
+    const pem = fs.readFileSync(certPath, "utf-8");
+    const cert = new crypto.X509Certificate(pem);
+    const oid = certSigAlgOid(Buffer.from(cert.raw));
+    // SHA-1 OIDs: ecdsa-with-SHA1 (1.2.840.10045.4.3.1),
+    //             sha1WithRSAEncryption (1.2.840.113549.1.1.5),
+    //             id-dsa-with-sha1 (1.2.840.10040.4.3)
+    const sha1Oids = ["1.2.840.10045.4.3.1", "1.2.840.113549.1.1.5", "1.2.840.10040.4.3"];
+    return oid !== null && !sha1Oids.includes(oid);
   } catch {
     return false;
-  }
-}
-
-/**
- * Run openssl and return stdout. Throws on non-zero exit.
- */
-function openssl(args: string[], options?: { input?: string }): string {
-  try {
-    const extraEnv = getOpensslEnv();
-    return execFileSync("openssl", args, {
-      encoding: "utf-8",
-      timeout: OPENSSL_TIMEOUT_MS,
-      input: options?.input,
-      stdio: ["pipe", "pipe", "pipe"],
-      ...(extraEnv && Object.keys(extraEnv).length > 0
-        ? { env: { ...process.env, ...extraEnv } }
-        : {}),
-    });
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
-  }
-}
-
-const execFileAsync = promisify(execFileCb);
-
-/**
- * Run openssl asynchronously and return stdout. Throws on non-zero exit.
- * Used for on-demand cert generation in the SNI callback to avoid blocking
- * the event loop.
- */
-async function opensslAsync(args: string[]): Promise<string> {
-  try {
-    const extraEnv = getOpensslEnv();
-    const { stdout } = await execFileAsync("openssl", args, {
-      encoding: "utf-8",
-      timeout: OPENSSL_TIMEOUT_MS,
-      ...(extraEnv && Object.keys(extraEnv).length > 0
-        ? { env: { ...process.env, ...extraEnv } }
-        : {}),
-    });
-    return stdout;
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
 }
 
@@ -200,38 +318,40 @@ async function opensslAsync(args: string[]): Promise<string> {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a local CA certificate and private key.
- * The CA is self-signed and used to sign server certificates.
+ * Generate a local CA certificate and private key using Node.js built-in crypto.
+ * No external processes are spawned.
  */
 function generateCA(stateDir: string): { certPath: string; keyPath: string } {
   const keyPath = path.join(stateDir, CA_KEY_FILE);
   const certPath = path.join(stateDir, CA_CERT_FILE);
 
-  // Generate EC private key
-  openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const spkiDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  const ski = spkiKeyId(spkiDer);
 
-  // Generate self-signed CA certificate
-  openssl([
-    "req",
-    "-new",
-    "-x509",
-    "-sha256",
-    "-key",
-    keyPath,
-    "-out",
-    certPath,
-    "-days",
-    CA_VALIDITY_DAYS.toString(),
-    "-subj",
-    `/CN=${CA_COMMON_NAME}`,
-    "-addext",
-    "basicConstraints=critical,CA:TRUE",
-    "-addext",
-    "keyUsage=critical,keyCertSign,cRLSign",
-  ]);
+  const now = new Date();
+  const notBefore = new Date(now.getTime() - 60_000);
+  const notAfter = new Date(now.getTime() + CA_VALIDITY_DAYS * 86_400_000);
 
-  fs.chmodSync(keyPath, 0o600);
-  fs.chmodSync(certPath, 0o644);
+  const certDer = buildCertDer({
+    subject: CA_COMMON_NAME,
+    issuer: CA_COMMON_NAME,
+    serial: randomSerial(),
+    notBefore,
+    notAfter,
+    subjectSpki: spkiDer,
+    extensions: [
+      derExt(CERT_OIDS.subjectKeyId, false, derOcts(ski)),
+      derExt(CERT_OIDS.basicConstraints, true, derSeq(derBool(true))),
+      derExt(CERT_OIDS.keyUsage, true, derKeyUsage([5, 6])), // keyCertSign, cRLSign
+    ],
+    signerKey: privateKey,
+  });
+
+  fs.writeFileSync(keyPath, privateKey.export({ type: "sec1", format: "pem" }) as string, {
+    mode: 0o600,
+  });
+  fs.writeFileSync(certPath, derToPem(certDer, "CERTIFICATE"), { mode: 0o644 });
   fixOwnership(keyPath, certPath);
 
   return { certPath, keyPath };
@@ -242,80 +362,54 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
 // ---------------------------------------------------------------------------
 
 /**
- * Generate a server certificate signed by the local CA.
+ * Generate a server certificate signed by the local CA using Node.js built-in crypto.
  * Covers localhost, *.localhost, and *.local via Subject Alternative Names.
+ * No external processes are spawned.
  */
 function generateServerCert(stateDir: string): { certPath: string; keyPath: string } {
-  const caKeyPath = path.join(stateDir, CA_KEY_FILE);
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
   const serverKeyPath = path.join(stateDir, SERVER_KEY_FILE);
   const serverCertPath = path.join(stateDir, SERVER_CERT_FILE);
-  const csrPath = path.join(stateDir, "server.csr");
-  const extPath = path.join(stateDir, "server-ext.cnf");
 
-  // Generate server private key
-  openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath]);
+  const caKeyPem = fs.readFileSync(path.join(stateDir, CA_KEY_FILE), "utf-8");
+  const caCertPem = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8");
+  const caPrivateKey = crypto.createPrivateKey(caKeyPem);
+  const caCert = new crypto.X509Certificate(caCertPem);
+  const caSpkiDer = Buffer.from(caCert.publicKey.export({ type: "spki", format: "der" }) as Buffer);
 
-  // Generate CSR
-  openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const spkiDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  const ski = spkiKeyId(spkiDer);
 
-  // Write extension config for SANs
-  const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
-  fs.writeFileSync(
-    extPath,
-    [
-      "authorityKeyIdentifier=keyid,issuer",
-      "basicConstraints=CA:FALSE",
-      "keyUsage=digitalSignature,keyEncipherment",
-      "extendedKeyUsage=serverAuth",
-      `subjectAltName=${sans.join(",")}`,
-    ].join("\n") + "\n"
-  );
+  const now = new Date();
+  const notBefore = new Date(now.getTime() - 60_000);
+  const notAfter = new Date(now.getTime() + SERVER_VALIDITY_DAYS * 86_400_000);
 
-  // Sign with CA
-  // Use -CAserial with an explicit path instead of -CAcreateserial.
-  // -CAcreateserial derives the .srl path by stripping the CA cert's file
-  // extension, but some OpenSSL/LibreSSL versions use the *last dot in the
-  // full path*, so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
-  // to write "/Users/ashish.srl" instead of the intended location.
-  const srlPath = path.join(stateDir, "ca.srl");
-  if (!fileExists(srlPath)) {
-    fs.writeFileSync(
-      srlPath,
-      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
-    );
-  }
-  openssl([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    serverCertPath,
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
+  const certDer = buildCertDer({
+    subject: "localhost",
+    issuer: CA_COMMON_NAME,
+    serial: randomSerial(),
+    notBefore,
+    notAfter,
+    subjectSpki: spkiDer,
+    extensions: [
+      derExt(CERT_OIDS.authKeyId, false, derSeq(derTag(0x80, spkiKeyId(caSpkiDer)))),
+      derExt(CERT_OIDS.subjectKeyId, false, derOcts(ski)),
+      derExt(CERT_OIDS.basicConstraints, true, derSeq()), // CA:FALSE (empty sequence)
+      derExt(CERT_OIDS.keyUsage, true, derKeyUsage([0, 2])), // digitalSignature, keyEncipherment
+      derExt(CERT_OIDS.extKeyUsage, false, derSeq(derOid(CERT_OIDS.serverAuth))),
+      derExt(
+        CERT_OIDS.subjectAltName,
+        false,
+        derSeq(derDnsName("localhost"), derDnsName("*.localhost"), derDnsName("*.local"))
+      ),
+    ],
+    signerKey: caPrivateKey,
+  });
 
-  // Clean up temporary files (keep ca.srl for serial number tracking)
-  for (const tmp of [csrPath, extPath]) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // Non-fatal
-    }
-  }
-
-  fs.chmodSync(serverKeyPath, 0o600);
-  fs.chmodSync(serverCertPath, 0o644);
+  fs.writeFileSync(serverKeyPath, privateKey.export({ type: "sec1", format: "pem" }) as string, {
+    mode: 0o600,
+  });
+  fs.writeFileSync(serverCertPath, derToPem(certDer, "CERTIFICATE"), { mode: 0o644 });
   fixOwnership(serverKeyPath, serverCertPath);
 
   return { certPath: serverCertPath, keyPath: serverKeyPath };
@@ -393,15 +487,14 @@ export function isCATrusted(stateDir: string): boolean {
 
 function isCATrustedWindows(caCertPath: string): boolean {
   try {
-    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
-      .trim()
-      .replace(/^.*=/, "")
+    const fingerprint = new crypto.X509Certificate(fs.readFileSync(caCertPath)).fingerprint
       .replace(/:/g, "")
       .toLowerCase();
     const result = execFileSync("certutil", ["-store", "-user", "Root"], {
       encoding: "utf-8",
       timeout: 10_000,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
     return result.replace(/\s/g, "").toLowerCase().includes(fingerprint);
   } catch {
@@ -569,15 +662,13 @@ const MAX_CN_LENGTH = 64;
  * Generate a certificate for a specific hostname, signed by the local CA.
  * Certs are cached on disk in the host-certs subdirectory.
  *
- * Uses async openssl calls to avoid blocking the event loop, since this
- * runs on demand inside the SNI callback during TLS handshakes.
+ * Uses Node.js built-in crypto — no external processes are spawned, so no
+ * console windows appear on Windows when a new domain is first accessed.
  */
 async function generateHostCertAsync(
   stateDir: string,
   hostname: string
 ): Promise<{ certPath: string; keyPath: string }> {
-  const caKeyPath = path.join(stateDir, CA_KEY_FILE);
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
   const hostDir = path.join(stateDir, HOST_CERTS_DIR);
 
   if (!fs.existsSync(hostDir)) {
@@ -588,78 +679,57 @@ async function generateHostCertAsync(
   const safeName = sanitizeHostForFilename(hostname);
   const keyPath = path.join(hostDir, `${safeName}-key.pem`);
   const certPath = path.join(hostDir, `${safeName}.pem`);
-  const csrPath = path.join(hostDir, `${safeName}.csr`);
-  const extPath = path.join(hostDir, `${safeName}-ext.cnf`);
 
-  // Generate key
-  await opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
+  const caKeyPem = await fs.promises.readFile(path.join(stateDir, CA_KEY_FILE), "utf-8");
+  const caCertPem = await fs.promises.readFile(path.join(stateDir, CA_CERT_FILE), "utf-8");
+  const caPrivateKey = crypto.createPrivateKey(caKeyPem);
+  const caCert = new crypto.X509Certificate(caCertPem);
+  const caSpkiDer = Buffer.from(caCert.publicKey.export({ type: "spki", format: "der" }) as Buffer);
+
+  // EC key generation is fast enough that the sync variant is fine here.
+  const { privateKey, publicKey } = crypto.generateKeyPairSync("ec", { namedCurve: "prime256v1" });
+  const spkiDer = publicKey.export({ type: "spki", format: "der" }) as Buffer;
+  const ski = spkiKeyId(spkiDer);
 
   // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
-  // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
   const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
-  // Generate CSR
-  await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
 
   // Build SAN list: include the exact hostname plus a wildcard at the same level
   // e.g., for "chat.json-render2.localhost" -> also add "*.json-render2.localhost"
-  const sans = [`DNS:${hostname}`];
   const parts = hostname.split(".");
+  const sanEntries: Uint8Array[] = [derDnsName(hostname)];
   if (parts.length >= 2) {
-    // Add a wildcard for sibling subdomains at the same level
-    sans.push(`DNS:*.${parts.slice(1).join(".")}`);
+    sanEntries.push(derDnsName(`*.${parts.slice(1).join(".")}`));
   }
+
+  const now = new Date();
+  const notBefore = new Date(now.getTime() - 60_000);
+  const notAfter = new Date(now.getTime() + SERVER_VALIDITY_DAYS * 86_400_000);
+
+  const certDer = buildCertDer({
+    subject: cn,
+    issuer: CA_COMMON_NAME,
+    serial: randomSerial(),
+    notBefore,
+    notAfter,
+    subjectSpki: spkiDer,
+    extensions: [
+      derExt(CERT_OIDS.authKeyId, false, derSeq(derTag(0x80, spkiKeyId(caSpkiDer)))),
+      derExt(CERT_OIDS.subjectKeyId, false, derOcts(ski)),
+      derExt(CERT_OIDS.basicConstraints, true, derSeq()), // CA:FALSE
+      derExt(CERT_OIDS.keyUsage, true, derKeyUsage([0, 2])), // digitalSignature, keyEncipherment
+      derExt(CERT_OIDS.extKeyUsage, false, derSeq(derOid(CERT_OIDS.serverAuth))),
+      derExt(CERT_OIDS.subjectAltName, false, derSeq(...sanEntries)),
+    ],
+    signerKey: caPrivateKey,
+  });
 
   await fs.promises.writeFile(
-    extPath,
-    [
-      "authorityKeyIdentifier=keyid,issuer",
-      "basicConstraints=CA:FALSE",
-      "keyUsage=digitalSignature,keyEncipherment",
-      "extendedKeyUsage=serverAuth",
-      `subjectAltName=${sans.join(",")}`,
-    ].join("\n") + "\n"
+    keyPath,
+    privateKey.export({ type: "sec1", format: "pem" }) as string,
+    { mode: 0o600 }
   );
-
-  // Use -CAserial with an explicit path instead of -CAcreateserial to avoid
-  // incorrect .srl path resolution when $HOME contains a dot (see #152).
-  const srlPath = path.join(stateDir, "ca.srl");
-  if (!fs.existsSync(srlPath)) {
-    await fs.promises.writeFile(
-      srlPath,
-      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
-    );
-  }
-  await opensslAsync([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    certPath,
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
-
-  // Clean up temporary files (keep ca.srl for serial number tracking)
-  for (const tmp of [csrPath, extPath]) {
-    try {
-      await fs.promises.unlink(tmp);
-    } catch {
-      // Non-fatal
-    }
-  }
-
-  await fs.promises.chmod(keyPath, 0o600);
-  await fs.promises.chmod(certPath, 0o644);
+  await fs.promises.writeFile(certPath, derToPem(certDer, "CERTIFICATE"), { mode: 0o644 });
   fixOwnership(keyPath, certPath);
 
   return { certPath, keyPath };
@@ -836,6 +906,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       execFileSync("certutil", ["-addstore", "-user", "Root", caCertPath], {
         stdio: "pipe",
         timeout: 30_000,
+        windowsHide: true,
       });
       return { trusted: true };
     }
@@ -981,9 +1052,7 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
 
 function untrustCAWindows(caCertPath: string): { removed: boolean; error?: string } {
   try {
-    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
-      .trim()
-      .replace(/^.*=/, "")
+    const fingerprint = new crypto.X509Certificate(fs.readFileSync(caCertPath)).fingerprint
       .replace(/:/g, "")
       .toLowerCase();
 
@@ -991,6 +1060,7 @@ function untrustCAWindows(caCertPath: string): { removed: boolean; error?: strin
       encoding: "utf-8",
       timeout: 10_000,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
     });
 
     const normalized = storeListing.replace(/\s/g, "").toLowerCase();
@@ -1001,6 +1071,7 @@ function untrustCAWindows(caCertPath: string): { removed: boolean; error?: strin
     execFileSync("certutil", ["-delstore", "-user", "Root", "portless Local CA"], {
       stdio: "pipe",
       timeout: 30_000,
+      windowsHide: true,
     });
 
     if (isCATrustedWindows(caCertPath)) {
