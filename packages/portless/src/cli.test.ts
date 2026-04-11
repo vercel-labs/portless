@@ -701,6 +701,106 @@ describe("CLI", () => {
     });
   });
 
+  describe("NODE_EXTRA_CA_CERTS injection", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ca-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    async function runWithMockProxy(opts: {
+      tls?: boolean;
+      writeCaPem?: boolean;
+      env?: Record<string, string | undefined>;
+    }): Promise<{ status: number | null; capture: Record<string, unknown> }> {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        if (opts.tls !== false) {
+          fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+        }
+        if (opts.writeCaPem !== false) {
+          fs.writeFileSync(path.join(tmpDir, "ca.pem"), "fake-ca-cert");
+        }
+
+        const capturePath = path.join(tmpDir, "capture.json");
+        const scriptPath = path.join(tmpDir, "capture-env.js");
+        fs.writeFileSync(
+          scriptPath,
+          [
+            'const fs = require("node:fs");',
+            `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+            "  NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS,",
+            "}));",
+          ].join("\n") + "\n"
+        );
+
+        const { status } = run(["run", "--name", "testapp", "node", scriptPath], {
+          env: { PORTLESS_STATE_DIR: tmpDir, ...opts.env },
+        });
+
+        const capture = fs.existsSync(capturePath)
+          ? JSON.parse(fs.readFileSync(capturePath, "utf-8"))
+          : {};
+        return { status, capture };
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+
+    it("sets NODE_EXTRA_CA_CERTS when TLS is active and ca.pem exists", async () => {
+      const { status, capture } = await runWithMockProxy({
+        env: { NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBe(path.join(tmpDir, "ca.pem"));
+    });
+
+    it("does not set NODE_EXTRA_CA_CERTS when TLS is disabled", async () => {
+      const { status, capture } = await runWithMockProxy({
+        tls: false,
+        env: { PORTLESS_HTTPS: "0", NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBeUndefined();
+    });
+
+    it("does not set NODE_EXTRA_CA_CERTS when ca.pem is missing", async () => {
+      const { status, capture } = await runWithMockProxy({
+        writeCaPem: false,
+        env: { NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBeUndefined();
+    });
+
+    it("does not override user-set NODE_EXTRA_CA_CERTS", async () => {
+      const userCaPath = "/custom/ca.pem";
+      const { status, capture } = await runWithMockProxy({
+        env: { NODE_EXTRA_CA_CERTS: userCaPath },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBe(userCaPath);
+    });
+  });
+
   describe("get subcommand", () => {
     let tmpDir: string;
 
