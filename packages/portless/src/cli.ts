@@ -960,7 +960,10 @@ async function runApp(
   // Server Components) trust portless-proxied HTTPS services. Node.js does
   // not use the system trust store, so without this env var it rejects the
   // portless CA as "self-signed certificate in certificate chain".
-  // Respect any value the user already set.
+  // Respect any value the user already set. Note: we check process.env here
+  // rather than the constructed child env because the child env inherits from
+  // process.env via spread. If a future code path injects NODE_EXTRA_CA_CERTS
+  // into the child env independently, this guard would need updating.
   const caEnv: Record<string, string> = {};
   if (tls && !process.env.NODE_EXTRA_CA_CERTS) {
     const caPath = path.join(stateDir, "ca.pem");
@@ -971,7 +974,7 @@ async function runApp(
 
   // Run the command
   const caFragment = caEnv.NODE_EXTRA_CA_CERTS
-    ? ` NODE_EXTRA_CA_CERTS=${caEnv.NODE_EXTRA_CA_CERTS}`
+    ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
     : "";
   console.log(
     chalk.gray(

@@ -714,6 +714,7 @@ describe("CLI", () => {
 
     async function runWithMockProxy(opts: {
       tls?: boolean;
+      writeCaPem?: boolean;
       env?: Record<string, string | undefined>;
     }): Promise<{ status: number | null; capture: Record<string, unknown> }> {
       const server = http.createServer((_req, res) => {
@@ -735,7 +736,9 @@ describe("CLI", () => {
         if (opts.tls !== false) {
           fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
         }
-        fs.writeFileSync(path.join(tmpDir, "ca.pem"), "fake-ca-cert");
+        if (opts.writeCaPem !== false) {
+          fs.writeFileSync(path.join(tmpDir, "ca.pem"), "fake-ca-cert");
+        }
 
         const capturePath = path.join(tmpDir, "capture.json");
         const scriptPath = path.join(tmpDir, "capture-env.js");
@@ -774,6 +777,15 @@ describe("CLI", () => {
       const { status, capture } = await runWithMockProxy({
         tls: false,
         env: { PORTLESS_HTTPS: "0", NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBeUndefined();
+    });
+
+    it("does not set NODE_EXTRA_CA_CERTS when ca.pem is missing", async () => {
+      const { status, capture } = await runWithMockProxy({
+        writeCaPem: false,
+        env: { NODE_EXTRA_CA_CERTS: undefined },
       });
       expect(status).toBe(0);
       expect(capture.NODE_EXTRA_CA_CERTS).toBeUndefined();
