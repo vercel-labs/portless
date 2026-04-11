@@ -834,6 +834,7 @@ async function runApp(
     const result = spawnSync(process.execPath, startArgs, {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
+      windowsHide: true,
     });
 
     // Poll discoverState + isProxyRunning until the daemon is reachable.

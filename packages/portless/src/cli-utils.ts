@@ -712,6 +712,7 @@ export function spawnCommand(
     ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
         stdio: "inherit",
         env,
+        windowsHide: true,
       })
     : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
         stdio: "inherit",
