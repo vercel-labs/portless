@@ -205,12 +205,20 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             delete responseHeaders[h];
           }
         }
-        res.writeHead(proxyRes.statusCode || 502, responseHeaders);
-        proxyRes.on("error", () => {
-          if (!res.headersSent) {
-            res.writeHead(502, { "Content-Type": "text/plain" });
+        try {
+          res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+        } catch {
+          proxyRes.resume();
+          return;
+        }
+        // destroy (RST_STREAM) rather than end() to avoid partial-body
+        // content-length mismatch killing the entire H2 session.
+        proxyRes.on("error", (err) => {
+          const code = (err as NodeJS.ErrnoException).code;
+          onError(`[portless] proxyRes error: ${code} ${err.message} — ${req.url}`);
+          if (!res.destroyed) {
+            res.destroy();
           }
-          res.end();
         });
         proxyRes.pipe(res);
       }
@@ -235,7 +243,6 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       }
     });
 
-    // Abort the outgoing request if the client disconnects
     res.on("close", () => {
       if (!proxyReq.destroyed) {
         proxyReq.destroy();
@@ -362,14 +369,48 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
+      settings: { maxConcurrentStreams: 1000 },
       ...(tls.SNICallback ? { SNICallback: tls.SNICallback } : {}),
     });
-    // With allowHTTP1, the 'request' event receives objects compatible with
-    // http.IncomingMessage / http.ServerResponse. Cast explicitly to satisfy TypeScript.
+    const h2Sessions = new Set<http2.ServerHttp2Session>();
+    h2Server.on("session", (session: http2.ServerHttp2Session) => {
+      h2Sessions.add(session);
+
+      // Recycle the session at 800 lifetime streams. Node.js's internal streams_
+      // map grows on every stream (GC removes entries, not close), so it can hit
+      // maxConcurrentStreams and cause GOAWAY INTERNAL_ERROR. Closing gracefully
+      // at 800 keeps the map below 1000; Chrome opens a fresh session silently.
+      let sessionStreamCount = 0;
+      session.on("stream", () => {
+        if (++sessionStreamCount >= 800 && !session.closed && !session.destroyed) {
+          session.close();
+        }
+      });
+
+      session.on("close", () => {
+        h2Sessions.delete(session);
+      });
+      session.on("error", () => {
+        session.close();
+        setTimeout(() => {
+          if (!session.destroyed) session.destroy();
+        }, 2000).unref();
+        h2Sessions.delete(session);
+      });
+    });
+    h2Server.on("error", () => {});
+    h2Server.on("unknownProtocol", (socket: net.Socket) => {
+      socket.destroy();
+    });
     h2Server.on("request", (req: http2.Http2ServerRequest, res: http2.Http2ServerResponse) => {
+      // Absorb RST_STREAM errors on the h2 stream — without this listener they
+      // propagate to the session and kill all concurrent streams.
+      // Do NOT call destroy() here: the browser already closed the stream.
+      if (req.stream) {
+        req.stream.once("error", () => {});
+      }
       handleRequest(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse);
     });
-    // WebSocket upgrades arrive over HTTP/1.1 connections (allowHTTP1)
     h2Server.on("upgrade", (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
       handleUpgrade(req, socket, head);
     });
@@ -420,6 +461,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     // Proxy close() through to inner servers so tests and cleanup work.
     const origClose = wrapper.close.bind(wrapper);
     wrapper.close = function (cb?: (err?: Error) => void) {
+      for (const session of h2Sessions) {
+        session.close();
+      }
       h2Server.close();
       plainServer.close();
       return origClose(cb);
