@@ -24,11 +24,13 @@ import {
   isProxyRunning,
   parsePidFromNetstat,
   readLanMarker,
+  readPersistedProxyState,
   readTldFromDir,
   resolveStateDir,
   validateTld,
   writeLanMarker,
   writeTldFile,
+  writeTlsMarker,
 } from "./cli-utils.js";
 
 describe("findFreePort", () => {
@@ -925,5 +927,74 @@ describe("validateTld", () => {
       expect(validateTld(tld)).toBeNull();
       expect(RISKY_TLDS.has(tld)).toBe(true);
     }
+  });
+});
+
+describe("readPersistedProxyState", () => {
+  let tmpDir: string;
+  let prevStateDir: string | undefined;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-persist-test-"));
+    prevStateDir = process.env.PORTLESS_STATE_DIR;
+    process.env.PORTLESS_STATE_DIR = tmpDir;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (prevStateDir === undefined) {
+      delete process.env.PORTLESS_STATE_DIR;
+    } else {
+      process.env.PORTLESS_STATE_DIR = prevStateDir;
+    }
+  });
+
+  it("returns null when no state files exist", () => {
+    expect(readPersistedProxyState()).toBeNull();
+  });
+
+  it("reads port from persisted state", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    const state = readPersistedProxyState();
+    expect(state).not.toBeNull();
+    expect(state!.port).toBe(1355);
+  });
+
+  it("reads TLS marker from persisted state", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
+    writeTlsMarker(tmpDir, true);
+    const state = readPersistedProxyState();
+    expect(state).not.toBeNull();
+    expect(state!.tls).toBe(true);
+  });
+
+  it("reads TLD from persisted state", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    writeTldFile(tmpDir, "test");
+    const state = readPersistedProxyState();
+    expect(state).not.toBeNull();
+    expect(state!.tld).toBe("test");
+  });
+
+  it("reads LAN mode from persisted state", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    writeLanMarker(tmpDir, "192.168.1.10");
+    const state = readPersistedProxyState();
+    expect(state).not.toBeNull();
+    expect(state!.lanMode).toBe(true);
+  });
+
+  it("returns full previous config for a custom proxy setup", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    writeTlsMarker(tmpDir, true);
+    writeTldFile(tmpDir, "local");
+    writeLanMarker(tmpDir, "192.168.1.42");
+    const state = readPersistedProxyState();
+    expect(state).toEqual({
+      port: 1355,
+      tls: true,
+      tld: "local",
+      lanMode: true,
+    });
   });
 });
