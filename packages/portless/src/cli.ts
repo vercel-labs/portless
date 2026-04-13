@@ -36,6 +36,7 @@ import {
   isWindows,
   prompt,
   readLanMarker,
+  readPersistedProxyState,
   readTldFromDir,
   readTlsMarker,
   resolveStateDir,
@@ -785,25 +786,59 @@ async function runApp(
     !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
 
   if (!proxyResponsive && !proxyListeningFromStateDir) {
-    const defaultPort = getDefaultPort(desiredConfig.useHttps);
-    const needsSudo = !isWindows && defaultPort < PRIVILEGED_PORT_THRESHOLD;
-    const manualStartCommand = formatProxyStartCommand(defaultPort, desiredConfig);
-    const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, desiredConfig);
+    // Merge persisted state from a previous proxy run so auto-start reuses
+    // the same port/TLS/TLD instead of falling back to defaults (#225).
+    const persisted = readPersistedProxyState();
+    const startConfig = { ...desiredConfig };
+    let startPort: number | undefined;
 
-    if (needsSudo && !process.stdin.isTTY) {
-      console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
-      console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
-      console.error(colors.cyan(`  ${manualStartCommand}`));
-      console.error(
-        colors.blue(
-          `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
-        )
-      );
-      console.error(colors.cyan(`  ${fallbackStartCommand}`));
+    if (persisted) {
+      if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
+        startConfig.useHttps = persisted.tls;
+      }
+      if (!explicit.tld && persisted.tld !== desiredConfig.tld) {
+        startConfig.tld = persisted.tld;
+      }
+      if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
+        startConfig.lanMode = persisted.lanMode;
+      }
+      const envPort = getDefaultPort(startConfig.useHttps);
+      if (persisted.port !== envPort) {
+        startPort = persisted.port;
+      }
+    }
+
+    const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
+    const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
+    const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
+    const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
+
+    // Detect non-interactive environments: no TTY, CI runners, or task
+    // runners like turborepo that pipe stdin (#224).
+    const isInteractive = !!process.stdin.isTTY && !process.env.CI;
+
+    if (!isInteractive) {
+      if (needsSudo) {
+        console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
+        console.error(
+          colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):")
+        );
+        console.error(colors.cyan(`  ${manualStartCommand}`));
+        console.error(
+          colors.blue(
+            `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
+          )
+        );
+        console.error(colors.cyan(`  ${fallbackStartCommand}`));
+      } else {
+        console.error(colors.red("Proxy is not running."));
+        console.error(colors.blue("Start it first:"));
+        console.error(colors.cyan(`  ${manualStartCommand}`));
+      }
       process.exit(1);
     }
 
-    if (needsSudo && process.stdin.isTTY) {
+    if (needsSudo) {
       const answer = await prompt(colors.yellow("Proxy not running. Start it? [Y/n/skip] "));
 
       if (answer === "n" || answer === "no") {
@@ -818,16 +853,26 @@ async function runApp(
       }
     }
 
-    console.log(colors.yellow("Starting proxy..."));
+    if (persisted && startPort !== undefined) {
+      console.log(
+        colors.yellow(
+          `Starting proxy with previous configuration (port ${startPort}, ${startConfig.useHttps ? "HTTPS" : "HTTP"})...`
+        )
+      );
+    } else {
+      console.log(colors.yellow("Starting proxy..."));
+    }
     const proxyStartConfig = buildProxyStartConfig({
-      useHttps: desiredConfig.useHttps,
-      customCertPath: desiredConfig.customCertPath,
-      customKeyPath: desiredConfig.customKeyPath,
-      lanMode: desiredConfig.lanMode,
-      lanIp: desiredConfig.lanIpExplicit ? desiredConfig.lanIp : null,
-      lanIpExplicit: desiredConfig.lanIpExplicit,
-      tld: desiredConfig.tld,
-      useWildcard: desiredConfig.useWildcard,
+      useHttps: startConfig.useHttps,
+      customCertPath: startConfig.customCertPath,
+      customKeyPath: startConfig.customKeyPath,
+      lanMode: startConfig.lanMode,
+      lanIp: startConfig.lanIpExplicit ? startConfig.lanIp : null,
+      lanIpExplicit: startConfig.lanIpExplicit,
+      tld: startConfig.tld,
+      useWildcard: startConfig.useWildcard,
+      includePort: startPort !== undefined,
+      proxyPort: startPort,
     });
     const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
 
@@ -853,7 +898,7 @@ async function runApp(
 
     if (!discovered) {
       console.error(colors.red("Failed to start proxy."));
-      const fallbackDir = resolveStateDir(getDefaultPort(desiredConfig.useHttps));
+      const fallbackDir = resolveStateDir(effectivePort);
       const logPath = path.join(fallbackDir, "proxy.log");
       console.error(colors.blue("Try starting it manually:"));
       console.error(colors.cyan(`  ${manualStartCommand}`));
@@ -1249,7 +1294,8 @@ ${colors.bold("LAN mode:")}
   Expo keeps Metro's default LAN host behavior in this mode.
   Auto-detected LAN IPs follow network changes automatically.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  Other proxy settings still follow the current flags and env vars.
+  All proxy settings are persisted and reused on auto-start unless
+  overridden by explicit flags or env vars.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
   If a proxy is already running with different explicit LAN/TLS/TLD settings,
   stop it first.

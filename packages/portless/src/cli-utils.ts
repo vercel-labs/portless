@@ -306,6 +306,41 @@ export function isLanEnvEnabled(): boolean {
   return val === "1" || val === "true";
 }
 
+/**
+ * Read the last-known proxy configuration from state directories on disk.
+ * Unlike {@link discoverState}, this does not check whether the proxy is
+ * actually running. It simply reads whatever state files exist so a
+ * subsequent auto-start can reuse the previous settings.
+ *
+ * Checks USER_STATE_DIR first, then SYSTEM_STATE_DIR (or PORTLESS_STATE_DIR
+ * if set). Returns null when no prior state is found.
+ */
+export function readPersistedProxyState(): {
+  port: number;
+  tls: boolean;
+  tld: string;
+  lanMode: boolean;
+} | null {
+  const dirs: string[] = [];
+  if (process.env.PORTLESS_STATE_DIR) {
+    dirs.push(process.env.PORTLESS_STATE_DIR);
+  } else {
+    dirs.push(USER_STATE_DIR, SYSTEM_STATE_DIR);
+  }
+
+  for (const dir of dirs) {
+    const port = readPortFromDir(dir);
+    if (port !== null) {
+      const tls = readTlsMarker(dir);
+      const tld = readTldFromDir(dir);
+      const lanIp = readLanMarker(dir);
+      return { port, tls, tld, lanMode: lanIp !== null || tld === "local" };
+    }
+  }
+
+  return null;
+}
+
 export function buildProxyStartConfig(options: {
   useHttps: boolean;
   customCertPath?: string | null;
@@ -460,8 +495,8 @@ export async function discoverState(): Promise<{
   return {
     dir,
     port: configuredPort,
-    tls: false,
-    tld: getDefaultTld(),
+    tls: readTlsMarker(dir),
+    tld: readTldFromDir(dir),
     lanMode: readLanMarker(dir) !== null,
     lanIp: null,
   };
