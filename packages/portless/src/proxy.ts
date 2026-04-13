@@ -209,8 +209,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         proxyRes.on("error", () => {
           if (!res.headersSent) {
             res.writeHead(502, { "Content-Type": "text/plain" });
+            res.end();
+          } else {
+            // Headers already sent (mid-stream): destroy instead of end to
+            // send RST_STREAM. Calling res.end() here can cause a
+            // content-length mismatch that Chrome treats as a session error.
+            res.destroy();
           }
-          res.end();
         });
         proxyRes.pipe(res);
       }
@@ -362,11 +367,25 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
+      // Tolerate high rates of RST_STREAM from browsers during HMR and
+      // page navigations. Without this, Node sends GOAWAY INTERNAL_ERROR
+      // after ~1000 cumulative stream resets and kills the session,
+      // surfacing as ERR_HTTP2_PROTOCOL_ERROR in Chrome. Available in
+      // Node 22.11+; silently ignored on older versions.
+      ...({ streamResetBurst: 10000, streamResetRate: 100 } as Record<string, unknown>),
       ...(tls.SNICallback ? { SNICallback: tls.SNICallback } : {}),
     });
+
+    // Absorb session-level errors (connection resets, protocol errors from
+    // abrupt client disconnects) so they don't crash the proxy.
+    h2Server.on("sessionError", () => {});
+
     // With allowHTTP1, the 'request' event receives objects compatible with
     // http.IncomingMessage / http.ServerResponse. Cast explicitly to satisfy TypeScript.
     h2Server.on("request", (req: http2.Http2ServerRequest, res: http2.Http2ServerResponse) => {
+      // Absorb RST_STREAM errors from cancelled requests (browser navigation,
+      // HMR) so they don't propagate to the HTTP/2 session.
+      req.stream?.on("error", () => {});
       handleRequest(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse);
     });
     // WebSocket upgrades arrive over HTTP/1.1 connections (allowHTTP1)
