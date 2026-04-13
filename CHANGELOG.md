@@ -1,8 +1,26 @@
 # Changelog
 
-## 0.10.1
+## 0.10.2
 
 <!-- release:start -->
+
+### New Features
+
+- **Auto-inject `NODE_EXTRA_CA_CERTS`**: Child processes spawned by `portless run` now automatically receive `NODE_EXTRA_CA_CERTS` pointing to the portless CA certificate, so Node.js subprocesses trust the local CA without manual configuration (#220)
+
+### Bug Fixes
+
+- **Proxy startup on slow macOS `security` command**: Fix the proxy failing to start when the macOS `security` command takes longer than expected to verify CA trust (#229)
+- **Lock contention with parallel commands**: Fix lock contention that could cause failures when multiple `portless` commands run simultaneously (#230)
+- **`ERR_HTTP2_PROTOCOL_ERROR` during HMR**: Fix HTTP/2 stream reset flood during hot module replacement causing protocol errors (#231)
+- **Proxy auto-start in non-interactive terminals**: Fix auto-start failing in non-interactive terminals (e.g. IDE task runners) and when previous proxy config exists (#232)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.10.1
 
 ### New Features
 
@@ -15,7 +33,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.10.0
 
