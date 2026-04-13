@@ -817,24 +817,16 @@ async function runApp(
     // runners like turborepo that pipe stdin (#224).
     const isInteractive = !!process.stdin.isTTY && !process.env.CI;
 
-    if (!isInteractive) {
-      if (needsSudo) {
-        console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
-        console.error(
-          colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):")
-        );
-        console.error(colors.cyan(`  ${manualStartCommand}`));
-        console.error(
-          colors.blue(
-            `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
-          )
-        );
-        console.error(colors.cyan(`  ${fallbackStartCommand}`));
-      } else {
-        console.error(colors.red("Proxy is not running."));
-        console.error(colors.blue("Start it first:"));
-        console.error(colors.cyan(`  ${manualStartCommand}`));
-      }
+    if (needsSudo && !isInteractive) {
+      console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
+      console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
+      console.error(colors.cyan(`  ${manualStartCommand}`));
+      console.error(
+        colors.blue(
+          `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
+        )
+      );
+      console.error(colors.cyan(`  ${fallbackStartCommand}`));
       process.exit(1);
     }
 
