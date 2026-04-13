@@ -7,11 +7,14 @@ import { SYSTEM_STATE_DIR } from "./cli-utils.js";
 /** How long (ms) before a lock directory is considered stale and forcibly removed. */
 const STALE_LOCK_THRESHOLD_MS = 10_000;
 
-/** Default maximum number of retries when acquiring the file lock. */
-const LOCK_MAX_RETRIES = 20;
+/** Total time budget (ms) for acquiring the file lock before giving up. */
+const LOCK_TIMEOUT_MS = 5_000;
 
-/** Delay (ms) between lock acquisition retries. */
-const LOCK_RETRY_DELAY_MS = 50;
+/** Initial delay (ms) between lock acquisition retries (doubles each attempt). */
+const LOCK_RETRY_BASE_MS = 10;
+
+/** Maximum delay (ms) between lock acquisition retries. */
+const LOCK_RETRY_CAP_MS = 500;
 
 /** File permission mode for route and state files. */
 export const FILE_MODE = 0o644;
@@ -118,14 +121,16 @@ export class RouteStore {
     Atomics.wait(RouteStore.sleepBuffer, 0, 0, ms);
   }
 
-  private acquireLock(maxRetries = LOCK_MAX_RETRIES, retryDelayMs = LOCK_RETRY_DELAY_MS): boolean {
-    for (let i = 0; i < maxRetries; i++) {
+  private acquireLock(): boolean {
+    const deadline = Date.now() + LOCK_TIMEOUT_MS;
+    let delay = LOCK_RETRY_BASE_MS;
+
+    while (Date.now() < deadline) {
       try {
         fs.mkdirSync(this.lockPath);
         return true;
       } catch (err: unknown) {
         if (isErrnoException(err) && err.code === "EEXIST") {
-          // Check for stale lock
           try {
             const stat = fs.statSync(this.lockPath);
             if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
@@ -133,18 +138,16 @@ export class RouteStore {
               continue;
             }
           } catch {
-            // Lock dir gone already; retry
             continue;
           }
-          // Wait and retry
-          this.syncSleep(retryDelayMs);
+          const jitter = Math.floor(Math.random() * delay);
+          this.syncSleep(delay + jitter);
+          delay = Math.min(delay * 2, LOCK_RETRY_CAP_MS);
         } else {
-          // Unexpected error (e.g. missing parent dir); cannot acquire lock
           return false;
         }
       }
     }
-    // Timed out waiting for lock
     return false;
   }
 
