@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
+import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { RouteStore, RouteConflictError } from "./routes.js";
 
@@ -305,10 +306,11 @@ describe("RouteStore", () => {
       const count = 20;
       const scriptPath = path.join(tmpDir, "worker.mjs");
       const pkgDir = path.resolve(import.meta.dirname, "..");
+      const importUrl = pathToFileURL(path.join(pkgDir, "dist", "index.js")).href;
       fs.writeFileSync(
         scriptPath,
         [
-          `import { RouteStore } from ${JSON.stringify(pkgDir + "/dist/index.js")};`,
+          `import { RouteStore } from ${JSON.stringify(importUrl)};`,
           `const [dir, hostname, port] = process.argv.slice(2);`,
           `const store = new RouteStore(dir);`,
           `try { store.addRoute(hostname, Number(port), process.pid); console.log("ok"); }`,
@@ -343,13 +345,13 @@ describe("RouteStore", () => {
       const outcomes = await Promise.all(ready);
       const failures = outcomes.filter((o) => !o.stdout.startsWith("ok"));
 
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-
       for (const child of children) {
         child.stdin!.end();
       }
 
       expect(failures).toHaveLength(0);
+
+      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(raw).toHaveLength(count);
 
       const hostnames = raw.map((r: { hostname: string }) => r.hostname).sort();
