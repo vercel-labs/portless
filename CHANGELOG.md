@@ -1,8 +1,19 @@
 # Changelog
 
-## 0.10.2
+## 0.10.3
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Stale TLD persisting across proxy restart**: Fix the proxy reverting to a stale TLD (e.g. `.local`) after restart because transient state markers were not cleaned up on stop (#235)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.10.2
 
 ### New Features
 
@@ -18,7 +29,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.10.1
 
