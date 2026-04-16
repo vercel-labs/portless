@@ -110,6 +110,65 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("api.localhost");
     });
 
+    it("serves dashboard page for portless.localhost", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("text/html");
+      expect(res.body).toContain("portless");
+      expect(res.body).toContain("Active Apps");
+      expect(res.body).toContain("No apps running");
+    });
+
+    it("shows active routes in dashboard when routes exist", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "myapp.localhost", port: 4001 },
+        { hostname: "api.localhost", port: 4002 },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("myapp.localhost");
+      expect(res.body).toContain("api.localhost");
+      expect(res.body).toContain("127.0.0.1:4001");
+      expect(res.body).toContain("127.0.0.1:4002");
+      expect(res.body).toContain("2 active routes");
+    });
+
+    it("includes proxy status info in dashboard", async () => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: 8080 })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("HTTP on port 8080");
+      expect(res.body).toContain("TLD: .localhost");
+    });
+
+    it("shows correct TLD in dashboard for custom TLD", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, tld: "test" })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("TLD: .test");
+    });
+
     it("includes correct port in 404 page links", async () => {
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
       const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));

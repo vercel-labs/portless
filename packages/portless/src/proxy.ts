@@ -3,10 +3,13 @@ import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
 import { escapeHtml, formatUrl } from "./utils.js";
-import { ARROW_SVG, renderPage } from "./pages.js";
+import { ARROW_SVG, renderDashboardPage, renderPage } from "./pages.js";
 
 /** Response header used to identify a portless proxy (for health checks). */
 export const PORTLESS_HEADER = "X-Portless";
+
+/** Reserved hostname for the web dashboard. */
+const DASHBOARD_HOST = "portless.localhost";
 
 /**
  * HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2 responses.
@@ -130,6 +133,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     if (!host) {
       res.writeHead(400, { "Content-Type": "text/plain" });
       res.end("Missing Host header");
+      return;
+    }
+
+    // Serve dashboard for the reserved dashboard hostname
+    if (host === DASHBOARD_HOST) {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(renderDashboardPage(routes, proxyPort, reqTls, tld));
       return;
     }
 
