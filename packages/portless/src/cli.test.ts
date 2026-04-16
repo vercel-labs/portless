@@ -894,6 +894,32 @@ describe("CLI", () => {
     });
   });
 
+  describe("--path flag", () => {
+    it("shows --path in run --help output", () => {
+      const { status, stdout } = run(["run", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--path");
+    });
+
+    it("shows --path in main help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--path");
+    });
+
+    it("rejects --path without a value in named mode", () => {
+      const { status, stderr } = run(["myapp", "--path"]);
+      expect(status).not.toBe(0);
+      expect(stderr).toContain("--path requires a path value");
+    });
+
+    it("rejects --path without a value in run mode", () => {
+      const { status, stderr } = run(["run", "--path"]);
+      expect(status).not.toBe(0);
+      expect(stderr).toContain("--path requires a path value");
+    });
+  });
+
   describe("run --name flag", () => {
     it("shows --name in run help", () => {
       const { status, stdout } = run(["run", "--help"]);
