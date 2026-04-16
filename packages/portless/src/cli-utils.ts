@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
-import { PORTLESS_HEADER } from "./proxy.js";
+import { PORTLESS_HEADER, PORTLESS_LISTENER_PORT_HEADER } from "./proxy.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -553,7 +553,9 @@ export async function findFreePort(
 /**
  * Check if a portless proxy is listening on the given port at 127.0.0.1.
  * Makes an HTTP(S) request and verifies the X-Portless response header to
- * distinguish the portless proxy from unrelated services.
+ * distinguish the portless proxy from unrelated services. Also verifies the
+ * proxy reports that it is actually bound to the probed port, which avoids
+ * false positives when pf/NAT redirects a different local port here.
  *
  * When `tls` is true, uses HTTPS with certificate verification disabled
  * (the proxy may use a self-signed or locally-trusted CA cert).
@@ -572,7 +574,24 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
       },
       (res) => {
         res.resume();
-        resolve(res.headers[PORTLESS_HEADER.toLowerCase()] === "1");
+        if (res.headers[PORTLESS_HEADER.toLowerCase()] !== "1") {
+          resolve(false);
+          return;
+        }
+
+        const reportedPort = res.headers[PORTLESS_LISTENER_PORT_HEADER.toLowerCase()];
+        if (typeof reportedPort === "string") {
+          resolve(parseInt(reportedPort, 10) === port);
+          return;
+        }
+        if (Array.isArray(reportedPort) && reportedPort.length > 0) {
+          resolve(parseInt(reportedPort[0], 10) === port);
+          return;
+        }
+
+        // Older proxies do not report their listener port, so fall back to
+        // the legacy header-only check for compatibility.
+        resolve(true);
       }
     );
     req.on("error", () => resolve(false));
