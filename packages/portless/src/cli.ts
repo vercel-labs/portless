@@ -1324,7 +1324,7 @@ ${colors.bold("Options:")}
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
-  --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --wildcard                    Allow unregistered subdomains to fall back to parent route (local only, not LAN)
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
@@ -1336,7 +1336,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
+  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route (local only, not LAN)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
@@ -1793,7 +1793,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
-  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent (local only)
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("LAN mode (--lan):")}
@@ -1803,6 +1803,8 @@ ${colors.bold("LAN mode (--lan):")}
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+  Note: --wildcard is not supported in LAN mode. mDNS does not resolve
+  wildcard subdomains, so only explicitly registered routes work on other devices.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
@@ -1954,6 +1956,15 @@ ${colors.bold("LAN mode (--lan):")}
         )
       );
     }
+  }
+
+  if (lanMode && desiredWildcard) {
+    console.warn(
+      chalk.yellow(
+        "Warning: --wildcard has no effect in LAN mode. mDNS does not support wildcard records," +
+          " so only explicitly registered routes resolve on other devices."
+      )
+    );
   }
 
   const riskyReason = RISKY_TLDS.get(tld);

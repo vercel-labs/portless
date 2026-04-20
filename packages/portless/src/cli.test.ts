@@ -619,6 +619,31 @@ describe("CLI", () => {
     });
 
     it.skipIf(process.platform === "win32")(
+      "warns when --lan and --wildcard are both provided",
+      () => {
+        // Use an empty PATH so the mDNS check fails early, causing the
+        // process to exit without needing a running proxy server.
+        const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
+        try {
+          const { status, stderr } = run(
+            ["proxy", "start", "--lan", "--wildcard", "--ip", "192.168.1.42"],
+            {
+              env: {
+                PATH: emptyPath,
+                PORTLESS_STATE_DIR: tmpDir,
+                PORTLESS_PORT: "19876",
+              },
+            }
+          );
+          expect(status).toBe(1);
+          expect(stderr).toContain("--wildcard has no effect in LAN mode");
+        } finally {
+          fs.rmSync(emptyPath, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
       "fails early when the mDNS publisher binary is missing",
       () => {
         const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
