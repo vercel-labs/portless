@@ -2458,7 +2458,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, clean, proxy).
+  // subcommand (run, alias, hosts, list, trust, cert, clean, proxy).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
