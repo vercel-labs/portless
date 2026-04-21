@@ -464,6 +464,13 @@ function startProxyServer(
     strict,
     onError: (msg) => console.error(colors.red(msg)),
     tls: tlsOptions,
+    getCaCert: () => {
+      try {
+        return fs.readFileSync(path.join(store.dir, "ca.pem"));
+      } catch {
+        return null;
+      }
+    },
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
