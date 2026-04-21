@@ -207,3 +207,16 @@ ${body}
 </body>
 </html>`;
 }
+
+/**
+ * Detect the client OS from a User-Agent string.
+ * Returns "mac", "windows", "linux", or "unknown".
+ */
+export function detectOS(userAgent: string): "mac" | "windows" | "linux" | "unknown" {
+  const ua = userAgent.toLowerCase();
+  if (ua.includes("win") || ua.includes("windows")) return "windows";
+  if (ua.includes("mac") || ua.includes("darwin") || ua.includes("iphone") || ua.includes("ipad"))
+    return "mac";
+  if (ua.includes("linux") || ua.includes("android")) return "linux";
+  return "unknown";
+}
