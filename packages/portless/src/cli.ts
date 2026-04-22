@@ -11,6 +11,7 @@ import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile, shouldAutoSyncHosts } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import type { UpstreamProtocol } from "./types.js";
 import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
 import {
   buildProxyStartConfig,
@@ -757,7 +758,8 @@ async function runApp(
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  protocol?: UpstreamProtocol
 ) {
   let store = initialStore;
   console.log(chalk.blue.bold(`\nportless\n`));
@@ -972,7 +974,7 @@ async function runApp(
   // Register route (--force kills the existing owner if any)
   let killedPid: number | undefined;
   try {
-    killedPid = store.addRoute(hostname, port, process.pid, force);
+    killedPid = store.addRoute(hostname, port, process.pid, force, protocol);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -1068,6 +1070,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** Upstream protocol used to proxy to the backend. */
+  protocol?: UpstreamProtocol;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -1112,6 +1116,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let protocol: UpstreamProtocol | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -1129,6 +1134,7 @@ ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --h2c                  Speak HTTP/2 cleartext to the backend (required for gRPC)
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1152,6 +1158,8 @@ ${colors.bold("Examples:")}
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--h2c") {
+      protocol = "h2c";
     } else if (args[i] === "--name") {
       i++;
       if (!args[i] || args[i].startsWith("-")) {
@@ -1162,7 +1170,7 @@ ${colors.bold("Examples:")}
       name = args[i];
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --name, --force, --app-port, --help"));
+      console.error(colors.blue("Known flags: --name, --force, --app-port, --h2c, --help"));
       process.exit(1);
     }
     i++;
@@ -1170,7 +1178,7 @@ ${colors.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, protocol, name, commandArgs: args.slice(i) };
 }
 
 /**
@@ -1183,6 +1191,7 @@ ${colors.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let protocol: UpstreamProtocol | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -1195,9 +1204,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--h2c") {
+      protocol = "h2c";
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port"));
+      console.error(colors.blue("Known flags: --force, --app-port, --h2c"));
       process.exit(1);
     }
     i++;
@@ -1217,9 +1228,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--h2c") {
+      protocol = "h2c";
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port"));
+      console.error(colors.blue("Known flags: --force, --app-port, --h2c"));
       process.exit(1);
     }
     i++;
@@ -1227,7 +1240,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, protocol, name, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -2315,7 +2328,8 @@ async function handleRunMode(args: string[]): Promise<void> {
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    parsed.protocol
   );
 }
 
@@ -2353,7 +2367,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     undefined,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    parsed.protocol
   );
 }
 
