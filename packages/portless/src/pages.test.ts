@@ -53,6 +53,15 @@ describe("detectOS", () => {
   it("returns unknown for unrecognized User-Agent", () => {
     expect(detectOS("curl/8.1.2")).toBe("unknown");
   });
+
+  it("detects macOS from a User-Agent containing 'darwin' (not confused by 'win' substring)", () => {
+    expect(detectOS("SomeClient/darwin/23.0")).toBe("mac");
+  });
+
+  it("still detects Windows from win32 and win64", () => {
+    expect(detectOS("Mozilla/5.0 (Windows NT 10.0; Win64; x64)")).toBe("windows");
+    expect(detectOS("Mozilla/5.0 (Windows NT 10.0; Win32; x86)")).toBe("windows");
+  });
 });
 
 describe("renderCertPage", () => {

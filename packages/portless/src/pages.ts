@@ -214,9 +214,9 @@ ${body}
  */
 export function detectOS(userAgent: string): "mac" | "windows" | "linux" | "unknown" {
   const ua = userAgent.toLowerCase();
-  if (ua.includes("win") || ua.includes("windows")) return "windows";
   if (ua.includes("mac") || ua.includes("darwin") || ua.includes("iphone") || ua.includes("ipad"))
     return "mac";
+  if (ua.includes("windows") || ua.includes("win32") || ua.includes("win64")) return "windows";
   if (ua.includes("linux") || ua.includes("android")) return "linux";
   return "unknown";
 }
