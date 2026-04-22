@@ -98,6 +98,16 @@ Set `PORTLESS=0` to run the command directly without the proxy:
 PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
 ```
 
+### gRPC and HTTP/2 backends
+
+Pass `--h2c` when the backend only speaks HTTP/2 cleartext (gRPC servers built with `@grpc/grpc-js` or `nice-grpc`). The proxy switches from HTTP/1.1 to HTTP/2 cleartext on the upstream leg and preserves bidirectional streaming and response trailers:
+
+```bash
+portless grpc-svc --h2c tsx server.ts
+```
+
+Without `--h2c`, portless forwards over HTTP/1.1 and an HTTP/2-only backend will refuse the connection.
+
 ## How It Works
 
 1. `portless proxy start` starts an HTTPS reverse proxy on port 443 as a background daemon. Auto-elevates with sudo on macOS/Linux; falls back to port 1355 if sudo is unavailable. Use `--no-tls` for plain HTTP on port 80. Configurable with `-p` / `--port` or the `PORTLESS_PORT` env var. The proxy also auto-starts when you run an app.
@@ -196,6 +206,7 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 | `portless hosts clean`                 | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment        |
 | `portless <name> --force <cmd>`        | Kill the existing process and take over its route              |
+| `portless <name> --h2c <cmd>`          | Speak HTTP/2 cleartext to the backend (required for gRPC)      |
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |
 | `portless --help` / `-h`               | Show help                                                      |

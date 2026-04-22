@@ -133,6 +133,16 @@ portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
 
+## gRPC and HTTP/2 backends
+
+Some backends only speak HTTP/2 on their non-TLS listener, notably gRPC servers (e.g. built with `@grpc/grpc-js` or `nice-grpc`). Pass `--h2c` to proxy them over HTTP/2 cleartext instead of HTTP/1.1:
+
+```bash
+portless grpc-svc --h2c tsx server.ts
+```
+
+Bidirectional streaming, response trailers (`grpc-status`, `grpc-message`), and trailers-only responses are preserved end to end. Without `--h2c`, portless forwards over HTTP/1.1 and an HTTP/2-only backend will refuse the connection.
+
 ## LAN mode
 
 ```bash
@@ -203,6 +213,7 @@ portless proxy stop              # Stop the proxy
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
+--h2c                            Speak HTTP/2 cleartext to the backend (required for gRPC)
 ```
 
 ### Environment variables

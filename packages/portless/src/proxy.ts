@@ -1,7 +1,7 @@
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
-import type { ProxyServerOptions } from "./types.js";
+import type { ProxyServerOptions, RouteInfo } from "./types.js";
 import { escapeHtml, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
 
@@ -20,6 +20,13 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
+
+/**
+ * Headers that must not be forwarded to an HTTP/2 upstream. "host" is
+ * replaced by the :authority pseudo-header and the hop-by-hop headers
+ * are illegal in HTTP/2 framing.
+ */
+const H2_FORBIDDEN_UPSTREAM_HEADERS = new Set([...HOP_BY_HOP_HEADERS, "host"]);
 
 /**
  * Get the effective host value from a request.
@@ -84,15 +91,219 @@ const MAX_PROXY_HOPS = 5;
  * When `strict` is true, only exact matches are returned; unregistered
  * subdomain prefixes will not fall back to the base service.
  */
-function findRoute(
-  routes: { hostname: string; port: number }[],
-  host: string,
-  strict?: boolean
-): { hostname: string; port: number } | undefined {
+function findRoute(routes: RouteInfo[], host: string, strict?: boolean): RouteInfo | undefined {
   return (
     routes.find((r) => r.hostname === host) ||
     (strict ? undefined : routes.find((r) => host.endsWith("." + r.hostname)))
   );
+}
+
+/**
+ * Cache of h2c (cleartext HTTP/2) client sessions, keyed by "host:port".
+ * HTTP/2 multiplexes many streams over one connection, so we want to
+ * reuse the session for as long as the backend keeps it alive.
+ *
+ * The cache is module-scoped because proxy instances are long-lived and
+ * there's no meaningful per-instance isolation to protect.
+ */
+const h2cSessions = new Map<string, http2.ClientHttp2Session>();
+
+function getH2cSession(
+  host: string,
+  port: number,
+  onError: (message: string) => void
+): http2.ClientHttp2Session {
+  const key = `${host}:${port}`;
+  const existing = h2cSessions.get(key);
+  if (existing && !existing.closed && !existing.destroyed) {
+    return existing;
+  }
+
+  const session = http2.connect(`http://${host}:${port}`);
+  session.on("error", (err) => {
+    onError(`h2c session error to ${key}: ${err.message}`);
+    h2cSessions.delete(key);
+  });
+  session.on("close", () => {
+    if (h2cSessions.get(key) === session) h2cSessions.delete(key);
+  });
+  // Silently absorb session-level GOAWAY etc. so we can reconnect on the next request.
+  session.on("goaway", () => {
+    if (h2cSessions.get(key) === session) h2cSessions.delete(key);
+  });
+  h2cSessions.set(key, session);
+  return session;
+}
+
+/**
+ * Proxy a request to an h2c (HTTP/2 cleartext) backend. Required for
+ * gRPC and any backend that only speaks HTTP/2 on its non-TLS listener.
+ *
+ * Preserves bidirectional streaming, trailers (grpc-status/grpc-message),
+ * and backpressure, which are all essential for gRPC to work end-to-end.
+ */
+function proxyH2c(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  route: RouteInfo,
+  forwardedHeaders: Record<string, string>,
+  hops: number,
+  onError: (message: string) => void
+): void {
+  const session = getH2cSession("127.0.0.1", route.port, onError);
+
+  // Build HTTP/2 request headers: pseudo-headers + regular headers.
+  const h2Headers: http2.OutgoingHttpHeaders = {
+    ":method": req.method || "GET",
+    ":path": req.url || "/",
+    ":scheme": "http",
+    ":authority": `${route.hostname}:${route.port}`,
+  };
+
+  for (const [key, value] of Object.entries(req.headers)) {
+    if (value === undefined) continue;
+    const lower = key.toLowerCase();
+    if (lower.startsWith(":")) continue;
+    if (H2_FORBIDDEN_UPSTREAM_HEADERS.has(lower)) continue;
+    h2Headers[lower] = value;
+  }
+  for (const [key, value] of Object.entries(forwardedHeaders)) {
+    h2Headers[key] = value;
+  }
+  h2Headers[PORTLESS_HOPS_HEADER] = String(hops + 1);
+
+  const stream = session.request(h2Headers, { endStream: false });
+
+  // Trailers arrive as a separate event after the body; buffer them so we
+  // can call res.addTrailers() before res.end(). Required for gRPC, which
+  // carries grpc-status/grpc-message in trailers.
+  let pendingTrailers: Record<string, string | string[]> | undefined;
+  let pendingResponseHeaders: http2.IncomingHttpHeaders | undefined;
+  let headersWritten = false;
+
+  // Extract the downstream HTTP/2 server stream (only present when the
+  // client connection is HTTP/2). We need it to emit a "trailers-only"
+  // response — a single HEADERS frame with END_STREAM — which some gRPC
+  // clients require when grpc-status is carried in initial response
+  // headers rather than trailers. Node's res.writeHead() + res.end() with
+  // no body sends HEADERS then empty DATA+END_STREAM (two frames), which
+  // violates the gRPC trailers-only wire form.
+  const downstreamStream = (res as unknown as { stream?: http2.ServerHttp2Stream }).stream;
+
+  function copyBackendHeaders(source: http2.IncomingHttpHeaders): http.OutgoingHttpHeaders {
+    const out: http.OutgoingHttpHeaders = {};
+    for (const [key, value] of Object.entries(source)) {
+      if (key.startsWith(":")) continue;
+      if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) continue;
+      if (value === undefined) continue;
+      out[key] = value as string | string[];
+    }
+    return out;
+  }
+
+  function flushResponseHeaders(status: number): void {
+    if (headersWritten || !pendingResponseHeaders) return;
+    headersWritten = true;
+    const outHeaders = copyBackendHeaders(pendingResponseHeaders);
+    res.writeHead(status, outHeaders);
+  }
+
+  stream.on("response", (responseHeaders) => {
+    pendingResponseHeaders = responseHeaders;
+    // Deliberately do NOT write headers here: we need to see whether the
+    // backend sends any DATA before END_STREAM so we can distinguish a
+    // trailers-only response from a normal one.
+  });
+
+  stream.on("trailers", (trailers) => {
+    const trailerPairs: Record<string, string | string[]> = {};
+    for (const [key, value] of Object.entries(trailers)) {
+      if (key.startsWith(":")) continue;
+      if (value === undefined) continue;
+      trailerPairs[key] = value as string | string[];
+    }
+    if (Object.keys(trailerPairs).length > 0) {
+      pendingTrailers = trailerPairs;
+    }
+  });
+
+  stream.on("data", (chunk: Buffer) => {
+    if (!headersWritten && pendingResponseHeaders) {
+      const status =
+        typeof pendingResponseHeaders[":status"] === "number"
+          ? (pendingResponseHeaders[":status"] as number)
+          : 502;
+      flushResponseHeaders(status);
+    }
+    const keepGoing = res.write(chunk);
+    if (!keepGoing) {
+      stream.pause();
+      res.once("drain", () => stream.resume());
+    }
+  });
+
+  stream.on("end", () => {
+    // Trailers-only response: backend sent HEADERS+END_STREAM with no body.
+    // Forward as a single HEADERS frame with END_STREAM to preserve gRPC
+    // semantics when grpc-status is carried inline in the headers.
+    if (!headersWritten && pendingResponseHeaders && downstreamStream) {
+      headersWritten = true;
+      const outHeaders: http2.OutgoingHttpHeaders = {};
+      for (const [key, value] of Object.entries(pendingResponseHeaders)) {
+        if (key === ":status") {
+          outHeaders[":status"] = value as unknown as number;
+          continue;
+        }
+        if (key.startsWith(":")) continue;
+        if (HOP_BY_HOP_HEADERS.has(key.toLowerCase())) continue;
+        if (value === undefined) continue;
+        outHeaders[key] = value as string | string[];
+      }
+      try {
+        downstreamStream.respond(outHeaders, { endStream: true });
+      } catch {
+        // Stream may have been destroyed already; best-effort.
+      }
+      return;
+    }
+
+    if (!headersWritten && pendingResponseHeaders) {
+      const status =
+        typeof pendingResponseHeaders[":status"] === "number"
+          ? (pendingResponseHeaders[":status"] as number)
+          : 502;
+      flushResponseHeaders(status);
+    }
+
+    if (pendingTrailers) {
+      try {
+        res.addTrailers(pendingTrailers);
+      } catch {
+        // Trailers are best-effort; HTTP/1.1 clients may not support them.
+      }
+    }
+    res.end();
+  });
+
+  stream.on("error", (err) => {
+    onError(`h2c stream error for ${getRequestHost(req)}: ${err.message}`);
+    if (!res.headersSent) {
+      res.writeHead(502, { "Content-Type": "text/plain" });
+      res.end("h2c upstream error");
+    } else {
+      res.destroy();
+    }
+  });
+
+  req.on("error", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+
+  res.on("close", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+
+  req.pipe(stream);
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
@@ -178,6 +389,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
 
     const forwardedHeaders = buildForwardedHeaders(req, reqTls);
+
+    if (route.protocol === "h2c") {
+      proxyH2c(req, res, route, forwardedHeaders, hops, onError);
+      return;
+    }
+
     const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
     for (const [key, value] of Object.entries(forwardedHeaders)) {
       proxyReqHeaders[key] = value;

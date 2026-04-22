@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { RouteInfo } from "./types.js";
+import type { RouteInfo, UpstreamProtocol } from "./types.js";
 import { fixOwnership, isErrnoException } from "./utils.js";
 import { SYSTEM_STATE_DIR } from "./cli-utils.js";
 
@@ -34,13 +34,17 @@ export interface RouteMapping extends RouteInfo {
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    typeof (value as RouteMapping).hostname === "string" &&
-    typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
-  );
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof (value as RouteMapping).hostname !== "string" ||
+    typeof (value as RouteMapping).port !== "number" ||
+    typeof (value as RouteMapping).pid !== "number"
+  ) {
+    return false;
+  }
+  const protocol = (value as RouteMapping).protocol;
+  return protocol === undefined || protocol === "http" || protocol === "h2c";
 }
 
 /**
@@ -225,7 +229,13 @@ export class RouteStore {
    * replaced. Returns the PID of the killed process (if any) so the caller can
    * log it.
    */
-  addRoute(hostname: string, port: number, pid: number, force = false): number | undefined {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    protocol?: UpstreamProtocol
+  ): number | undefined {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -247,7 +257,9 @@ export class RouteStore {
         }
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);
-      filtered.push({ hostname, port, pid });
+      const mapping: RouteMapping = { hostname, port, pid };
+      if (protocol && protocol !== "http") mapping.protocol = protocol;
+      filtered.push(mapping);
       this.saveRoutes(filtered);
     } finally {
       this.releaseLock();

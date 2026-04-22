@@ -1470,3 +1470,593 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     15_000
   );
 });
+
+describe("createProxyServer with h2c upstream", () => {
+  const servers: AnyServer[] = [];
+  const h2cBackends: http2.Http2Server[] = [];
+
+  function trackServer<T extends AnyServer>(server: T): T {
+    servers.push(server);
+    return server;
+  }
+
+  function listenH2c(server: http2.Http2Server): Promise<number> {
+    return new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("no addr");
+        resolve(addr.port);
+      });
+    });
+  }
+
+  function createH2cBackend(
+    handler: (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => void
+  ): http2.Http2Server {
+    const backend = http2.createServer();
+    backend.on("stream", handler);
+    h2cBackends.push(backend);
+    return backend;
+  }
+
+  afterEach(async () => {
+    await Promise.all(
+      h2cBackends.map(
+        (b) =>
+          new Promise<void>((resolve) => {
+            b.close(() => resolve());
+            (b as http2.Http2Server & { closeAllConnections?: () => void }).closeAllConnections?.();
+            setTimeout(resolve, 500);
+          })
+      )
+    );
+    h2cBackends.length = 0;
+
+    await Promise.all(
+      servers.map(
+        (s) =>
+          new Promise<void>((resolve) => {
+            s.close(() => resolve());
+            setTimeout(resolve, 500);
+          })
+      )
+    );
+    servers.length = 0;
+  });
+
+  it("proxies a GET request to an h2c backend", async () => {
+    const backend = createH2cBackend((stream) => {
+      stream.respond({ ":status": 200, "content-type": "text/plain" });
+      stream.end("hello h2c");
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "grpc.localhost" });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe("hello h2c");
+  });
+
+  it("sets :authority to the route hostname:port when forwarding", async () => {
+    let capturedAuthority: string | undefined;
+    const backend = createH2cBackend((stream, headers) => {
+      capturedAuthority = headers[":authority"] as string | undefined;
+      stream.respond({ ":status": 200 });
+      stream.end();
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    await request(server, { host: "grpc.localhost" });
+    expect(capturedAuthority).toBe(`grpc.localhost:${backendPort}`);
+  });
+
+  it("does not forward the Host or Connection headers to the h2c upstream", async () => {
+    let capturedHeaders: http2.IncomingHttpHeaders | undefined;
+    const backend = createH2cBackend((stream, headers) => {
+      capturedHeaders = headers;
+      stream.respond({ ":status": 200 });
+      stream.end();
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    await new Promise<void>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/",
+          method: "GET",
+          headers: { host: "grpc.localhost", connection: "keep-alive" },
+        },
+        (res) => {
+          res.resume();
+          res.on("end", resolve);
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(capturedHeaders?.host).toBeUndefined();
+    expect(capturedHeaders?.connection).toBeUndefined();
+  });
+
+  it("forwards X-Forwarded-* headers to the h2c upstream", async () => {
+    let capturedHeaders: http2.IncomingHttpHeaders | undefined;
+    const backend = createH2cBackend((stream, headers) => {
+      capturedHeaders = headers;
+      stream.respond({ ":status": 200 });
+      stream.end();
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    await request(server, { host: "grpc.localhost" });
+
+    expect(capturedHeaders?.["x-forwarded-for"]).toBe("127.0.0.1");
+    expect(capturedHeaders?.["x-forwarded-proto"]).toBe("http");
+    expect(capturedHeaders?.["x-forwarded-host"]).toBe("grpc.localhost");
+  });
+
+  it("forwards a POST body to the h2c upstream", async () => {
+    const backend = createH2cBackend((stream) => {
+      const chunks: Buffer[] = [];
+      stream.on("data", (c: Buffer) => chunks.push(c));
+      stream.on("end", () => {
+        stream.respond({ ":status": 200, "content-type": "application/octet-stream" });
+        stream.end(Buffer.concat(chunks));
+      });
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const body = await new Promise<string>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/echo",
+          method: "POST",
+          headers: { host: "grpc.localhost", "content-type": "text/plain" },
+        },
+        (res) => {
+          let data = "";
+          res.on("data", (c) => (data += c));
+          res.on("end", () => resolve(data));
+        }
+      );
+      req.on("error", reject);
+      req.write("payload-for-h2c");
+      req.end();
+    });
+
+    expect(body).toBe("payload-for-h2c");
+  });
+
+  it("increments x-portless-hops on the request to the h2c upstream", async () => {
+    let capturedHops: string | undefined;
+    const backend = createH2cBackend((stream, headers) => {
+      capturedHops = headers["x-portless-hops"] as string | undefined;
+      stream.respond({ ":status": 200 });
+      stream.end();
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    await request(server, { host: "grpc.localhost" });
+    expect(capturedHops).toBe("1");
+  });
+
+  it("returns 502 when the h2c backend is unreachable", async () => {
+    const routes: RouteInfo[] = [{ hostname: "grpc.localhost", port: 1, protocol: "h2c" }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        onError: () => {},
+      })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "grpc.localhost" });
+    expect(res.status).toBe(502);
+  });
+
+  it("reuses the h2c session across multiple requests", async () => {
+    const sessions: http2.ServerHttp2Session[] = [];
+    const backend = createH2cBackend((stream) => {
+      sessions.push(stream.session as http2.ServerHttp2Session);
+      stream.respond({ ":status": 200 });
+      stream.end("ok");
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    await request(server, { host: "grpc.localhost" });
+    await request(server, { host: "grpc.localhost" });
+
+    expect(sessions.length).toBe(2);
+    expect(sessions[0]).toBe(sessions[1]);
+  });
+
+  it("routes http and h2c backends independently on the same proxy", async () => {
+    const h2cBackend = createH2cBackend((stream) => {
+      stream.respond({ ":status": 200 });
+      stream.end("from h2c");
+    });
+    const h2cPort = await listenH2c(h2cBackend);
+
+    const httpBackend = trackServer(
+      http.createServer((_req, res) => {
+        res.writeHead(200);
+        res.end("from http");
+      })
+    );
+    await listen(httpBackend);
+    const httpAddr = httpBackend.address();
+    if (!httpAddr || typeof httpAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: h2cPort, protocol: "h2c" },
+      { hostname: "api.localhost", port: httpAddr.port },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const h2cRes = await request(server, { host: "grpc.localhost" });
+    const httpRes = await request(server, { host: "api.localhost" });
+    expect(h2cRes.body).toBe("from h2c");
+    expect(httpRes.body).toBe("from http");
+  });
+
+  it("propagates non-200 status codes from the h2c backend", async () => {
+    const backend = createH2cBackend((stream) => {
+      stream.respond({ ":status": 418, "content-type": "text/plain" });
+      stream.end("teapot");
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "grpc.localhost" });
+    expect(res.status).toBe(418);
+    expect(res.body).toBe("teapot");
+  });
+
+  it("preserves a multi-chunk streamed response body from the h2c backend", async () => {
+    const backend = createH2cBackend((stream) => {
+      stream.respond({ ":status": 200, "content-type": "application/octet-stream" });
+      stream.write("chunk-1;");
+      setTimeout(() => {
+        stream.write("chunk-2;");
+        setTimeout(() => {
+          stream.end("chunk-3");
+        }, 10);
+      }, 10);
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "grpc.localhost" });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe("chunk-1;chunk-2;chunk-3");
+  });
+
+  it("reconnects with a fresh h2c session after the previous one closes", async () => {
+    let connCount = 0;
+    let closeAfterFirst = true;
+    let firstSessionClosedResolver: (() => void) | null = null;
+    const firstSessionClosed = new Promise<void>((r) => {
+      firstSessionClosedResolver = r;
+    });
+
+    const backend = createH2cBackend((stream) => {
+      stream.respond({ ":status": 200 });
+      stream.end("ok");
+      if (closeAfterFirst) {
+        closeAfterFirst = false;
+        stream.session?.once("close", () => {
+          firstSessionClosedResolver?.();
+          firstSessionClosedResolver = null;
+        });
+        stream.session?.close();
+      }
+    });
+    backend.on("connection", () => {
+      connCount++;
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    await request(server, { host: "grpc.localhost" });
+    // Wait until the backend observes the first session fully closed, so the
+    // proxy's cached session has certainly been invalidated by its close
+    // handler before we issue the next request.
+    await firstSessionClosed;
+    await request(server, { host: "grpc.localhost" });
+
+    expect(connCount).toBe(2);
+  });
+});
+
+describe("createProxyServer with TLS and h2c upstream", () => {
+  let tlsCert: Buffer;
+  let tlsKey: Buffer;
+  let certDir: string;
+  const servers: AnyServer[] = [];
+  const h2cBackends: http2.Http2Server[] = [];
+
+  function trackServer<T extends AnyServer>(server: T): T {
+    servers.push(server);
+    return server;
+  }
+
+  function listenH2c(server: http2.Http2Server): Promise<number> {
+    return new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("no addr");
+        resolve(addr.port);
+      });
+    });
+  }
+
+  function createH2cBackend(
+    handler: (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => void
+  ): http2.Http2Server {
+    const backend = http2.createServer();
+    backend.on("stream", handler);
+    h2cBackends.push(backend);
+    return backend;
+  }
+
+  beforeAll(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-h2c-tls-test-"));
+    const certs = ensureCerts(certDir);
+    tlsCert = fs.readFileSync(certs.certPath);
+    tlsKey = fs.readFileSync(certs.keyPath);
+  }, 30_000);
+
+  afterAll(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    await Promise.all(
+      h2cBackends.map(
+        (b) =>
+          new Promise<void>((resolve) => {
+            b.close(() => resolve());
+            (b as http2.Http2Server & { closeAllConnections?: () => void }).closeAllConnections?.();
+            setTimeout(resolve, 1000);
+          })
+      )
+    );
+    h2cBackends.length = 0;
+
+    await Promise.all(
+      servers.map(
+        (s) =>
+          new Promise<void>((resolve) => {
+            s.close(() => resolve());
+            setTimeout(resolve, 1000);
+          })
+      )
+    );
+    servers.length = 0;
+  });
+
+  it("forwards response trailers from an h2c backend to an HTTP/2 client", async () => {
+    const backend = createH2cBackend((stream) => {
+      stream.respond(
+        { ":status": 200, "content-type": "application/grpc" },
+        { waitForTrailers: true }
+      );
+      stream.on("wantTrailers", () => {
+        stream.sendTrailers({ "grpc-status": "0", "grpc-message": "OK" });
+      });
+      stream.end(Buffer.from([0, 0, 0, 0, 0]));
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const result = await new Promise<{
+      status: number;
+      trailers: http2.IncomingHttpHeaders;
+    }>((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+
+      const req = client.request({
+        ":method": "POST",
+        ":path": "/Greeter/SayHello",
+        host: "grpc.localhost",
+      });
+
+      let status = 0;
+      let trailers: http2.IncomingHttpHeaders = {};
+      req.on("response", (headers) => {
+        status = headers[":status"] as number;
+      });
+      req.on("trailers", (t) => {
+        trailers = t;
+      });
+      req.on("data", () => {});
+      req.on("end", () => {
+        req.close();
+        client.close();
+        resolve({ status, trailers });
+      });
+      req.on("error", reject);
+      req.end(Buffer.from([0, 0, 0, 0, 0]));
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.trailers["grpc-status"]).toBe("0");
+    expect(result.trailers["grpc-message"]).toBe("OK");
+  });
+
+  it("delivers a trailers-only h2c response to an HTTP/2 client with no body", async () => {
+    const backend = createH2cBackend((stream) => {
+      stream.respond(
+        {
+          ":status": 200,
+          "content-type": "application/grpc",
+          "grpc-status": "5",
+          "grpc-message": "not found",
+        },
+        { endStream: true }
+      );
+    });
+    const backendPort = await listenH2c(backend);
+
+    const routes: RouteInfo[] = [
+      { hostname: "grpc.localhost", port: backendPort, protocol: "h2c" },
+    ];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const result = await new Promise<{
+      status: number;
+      grpcStatus: string | undefined;
+      byteCount: number;
+    }>((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+
+      const req = client.request({
+        ":method": "POST",
+        ":path": "/Missing/Method",
+        host: "grpc.localhost",
+      });
+
+      let status = 0;
+      let grpcStatus: string | undefined;
+      let byteCount = 0;
+      req.on("response", (headers) => {
+        status = headers[":status"] as number;
+        grpcStatus = headers["grpc-status"] as string | undefined;
+      });
+      req.on("data", (c: Buffer) => {
+        byteCount += c.length;
+      });
+      req.on("end", () => {
+        req.close();
+        client.close();
+        resolve({ status, grpcStatus, byteCount });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.grpcStatus).toBe("5");
+    expect(result.byteCount).toBe(0);
+  });
+});

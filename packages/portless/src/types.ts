@@ -1,7 +1,18 @@
+/**
+ * Upstream protocol for a proxied route.
+ * - "http" (default): HTTP/1.1 cleartext to the backend. Works for REST,
+ *   WebSocket upgrades, and most dev servers.
+ * - "h2c": HTTP/2 cleartext to the backend. Required for gRPC and any
+ *   backend that only accepts HTTP/2 on its non-TLS listener.
+ */
+export type UpstreamProtocol = "http" | "h2c";
+
 /** Route info used by the proxy server to map hostnames to ports. */
 export interface RouteInfo {
   hostname: string;
   port: number;
+  /** Upstream protocol used to reach the backend. Defaults to "http". */
+  protocol?: UpstreamProtocol;
 }
 
 export interface ProxyServerOptions {
