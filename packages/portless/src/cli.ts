@@ -521,6 +521,8 @@ function startProxyServer(
     console.log(
       colors.green(`${proto} proxy listening on port ${proxyPort}${tldLabel}${modeLabel}`)
     );
+    // Plain URL for VS Code / IDE port auto-detection
+    console.log(`${isTls ? "https" : "http"}://127.0.0.1:${proxyPort}`);
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
       console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
