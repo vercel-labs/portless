@@ -822,6 +822,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   ng: { strictPort: false },
   "react-native": { strictPort: false },
   expo: { strictPort: false },
+  rsbuild: { strictPort: false },
 };
 
 /** Known package runners. Values list subcommands that run a package. */
