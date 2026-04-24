@@ -710,11 +710,15 @@ function augmentedPath(env: NodeJS.ProcessEnv | undefined): string {
   // process.env but case-sensitive in plain objects created via spread).
   const base = source.PATH ?? source.Path ?? "";
   const bins = collectBinPaths(process.cwd());
-  // Ensure node's own directory is in PATH so .cmd wrappers in node_modules/.bin
-  // can locate the node executable (fixes Windows "node not recognized" errors).
-  const nodeBin = path.dirname(process.execPath);
-  const allBins = [...bins, nodeBin];
-  return allBins.join(path.delimiter) + path.delimiter + base;
+  // On Windows, append node's own directory so .cmd wrappers in node_modules/.bin
+  // can locate the node executable (fixes "node not recognized" errors).
+  // On Unix-like systems, skip this: the user's version manager (nvm/fnm/asdf/mise)
+  // already puts their preferred Node first in PATH, and prepending portless's own
+  // Node directory would shadow it, breaking setups that expect a specific version.
+  if (isWindows) {
+    bins.push(path.dirname(process.execPath));
+  }
+  return bins.join(path.delimiter) + path.delimiter + base;
 }
 
 /**
