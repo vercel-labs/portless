@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Bug Fixes
+
+- **Fast refresh broken with `bun --bun`**: Fix Next.js HMR WebSocket not working when running `bun --bun next dev` through portless. Bun's native runtime uses the `HOST` environment variable to configure WebSocket origin validation, causing the proxy's public hostname (e.g. `app.localhost`) to be rejected. Portless now skips injecting `HOST=127.0.0.1` when the `--bun` flag is detected; frameworks that need explicit binding (Vite, Astro, etc.) still receive `--host 127.0.0.1` via flag injection. (#64)
+- **`bun` not recognized as package runner**: `bun <bin>` and `bun run <bin>` are now recognized as package runner patterns, so frameworks like Vite started via `bun vite dev` or `bun --bun vite dev` correctly receive `--port` and `--host` flags. (#64)
+
+### Contributors
+
+- @creativoma
+
 ## 0.10.3
 
 <!-- release:start -->

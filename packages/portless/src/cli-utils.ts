@@ -829,6 +829,9 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
 const PACKAGE_RUNNERS: Record<string, string[]> = {
   npx: [],
   bunx: [],
+  // `bun <bin>` runs a binary directly (like bunx); `bun run <bin>` also runs
+  // a binary or package.json script. Both patterns need framework detection.
+  bun: ["run"],
   pnpx: [],
   yarn: ["dlx", "exec"],
   pnpm: ["dlx", "exec"],
