@@ -464,6 +464,13 @@ function startProxyServer(
     strict,
     onError: (msg) => console.error(colors.red(msg)),
     tls: tlsOptions,
+    getCaCert: () => {
+      try {
+        return fs.readFileSync(path.join(store.dir, "ca.pem"));
+      } catch {
+        return null;
+      }
+    },
   });
 
   server.on("error", (err: NodeJS.ErrnoException) => {
@@ -514,6 +521,8 @@ function startProxyServer(
     console.log(
       colors.green(`${proto} proxy listening on port ${proxyPort}${tldLabel}${modeLabel}`)
     );
+    // Plain URL for VS Code / IDE port auto-detection
+    console.log(`${isTls ? "https" : "http"}://127.0.0.1:${proxyPort}`);
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
       console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
@@ -1258,6 +1267,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
   ${colors.cyan("portless list")}                    Show active routes
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
+  ${colors.cyan("portless cert")}                    Output CA certificate to stdout (for piping over SSH)
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
   ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
@@ -1361,7 +1371,7 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, trust, clean, proxy are subcommands and cannot
+  run, get, alias, hosts, list, trust, cert, clean, proxy are subcommands and cannot
   be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
@@ -1416,6 +1426,19 @@ async function handleTrust(): Promise<void> {
 
   console.error(colors.red(`Failed to trust CA: ${result.error}`));
   process.exit(1);
+}
+
+async function handleCert(): Promise<void> {
+  const { dir, tld } = await discoverState();
+  const caPath = path.join(dir, "ca.pem");
+  if (!fs.existsSync(caPath)) {
+    console.error(colors.red("No CA certificate found. Start the proxy first to generate one."));
+    process.exit(1);
+  }
+  const proxyPort = getDefaultPort(true);
+  const url = `https://cert.${tld}${proxyPort === 443 ? "" : `:${proxyPort}`}`;
+  console.error(colors.gray(`Cert page: ${url}`));
+  process.stdout.write(fs.readFileSync(caPath));
 }
 
 async function handleClean(args: string[]): Promise<void> {
@@ -2437,7 +2460,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, clean, proxy).
+  // subcommand (run, alias, hosts, list, trust, cert, clean, proxy).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
@@ -2495,6 +2518,10 @@ async function main() {
     }
     if (args[0] === "--version" || args[0] === "-v") {
       printVersion();
+      return;
+    }
+    if (args[0] === "cert") {
+      await handleCert();
       return;
     }
     if (args[0] === "trust") {

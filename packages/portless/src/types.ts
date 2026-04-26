@@ -31,4 +31,9 @@ export interface ProxyServerOptions {
       cb: (err: Error | null, ctx?: import("node:tls").SecureContext) => void
     ) => void;
   };
+  /**
+   * Returns the CA certificate PEM content for the cert download endpoint.
+   * Used by cert.<tld> to serve the CA cert even when TLS is not enabled.
+   */
+  getCaCert?: () => Buffer | null;
 }
