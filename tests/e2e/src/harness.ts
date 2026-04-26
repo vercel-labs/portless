@@ -11,7 +11,7 @@ const E2E_NODE_MODULES = path.resolve(__dirname, "../node_modules");
 const VENV_DIR = path.resolve(__dirname, "../.venv");
 
 // Each e2e test uses a unique proxy port to allow sequential runs without
-// collisions. Current allocation: 19001-19011. Pick the next unused port
+// collisions. Current allocation: 19001-19013. Pick the next unused port
 // when adding a new test.
 
 const isWindows = process.platform === "win32";

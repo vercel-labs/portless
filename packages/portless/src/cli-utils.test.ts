@@ -418,6 +418,12 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
   });
 
+  it("injects for rsbuild without --strictPort", () => {
+    const args = ["rsbuild"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["rsbuild", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
   it("skips --host for expo in LAN mode (Metro defaults to LAN)", () => {
     const prev = process.env.PORTLESS_LAN;
     process.env.PORTLESS_LAN = "1";
