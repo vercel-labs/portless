@@ -701,6 +701,100 @@ describe("CLI", () => {
     });
   });
 
+  describe("Rsbuild flag injection", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-rsbuild-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeRsbuildShim(dir: string): void {
+      const captureScriptPath = path.join(dir, "capture-rsbuild.js");
+      fs.writeFileSync(
+        captureScriptPath,
+        [
+          'const fs = require("node:fs");',
+          "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+          "const payload = {",
+          "  args: process.argv.slice(2),",
+          "  env: {",
+          "    PORT: process.env.PORT,",
+          "    HOST: process.env.HOST,",
+          "    PORTLESS_URL: process.env.PORTLESS_URL,",
+          "  },",
+          "};",
+          "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+        ].join("\n") + "\n"
+      );
+
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(dir, "rsbuild.cmd"),
+          `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+        );
+        return;
+      }
+
+      const shimPath = path.join(dir, "rsbuild");
+      fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
+      fs.chmodSync(shimPath, 0o755);
+    }
+
+    it("injects --port and --host into rsbuild child commands", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-rsbuild-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+
+        writeRsbuildShim(shimDir);
+
+        const { status } = run(["run", "--name", "myapp", "--app-port", "4567", "rsbuild", "dev"], {
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["dev", "--port", "4567", "--host", "127.0.0.1"]);
+        expect(capture.env).toMatchObject({
+          PORT: "4567",
+          HOST: "127.0.0.1",
+          PORTLESS_URL: `http://myapp.localhost:${proxyPort}`,
+        });
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("NODE_EXTRA_CA_CERTS injection", () => {
     let tmpDir: string;
 
