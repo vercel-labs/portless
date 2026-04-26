@@ -818,6 +818,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   vite: { strictPort: true },
   vp: { strictPort: true },
   "react-router": { strictPort: true },
+  rsbuild: { strictPort: false },
   astro: { strictPort: false },
   ng: { strictPort: false },
   "react-native": { strictPort: false },

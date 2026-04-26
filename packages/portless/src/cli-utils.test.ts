@@ -394,6 +394,12 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
+  it("injects for rsbuild without --strictPort", () => {
+    const args = ["rsbuild", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["rsbuild", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
   it("injects for astro without --strictPort", () => {
     const args = ["astro", "dev"];
     injectFrameworkFlags(args, 4567);
@@ -586,6 +592,12 @@ describe("injectFrameworkFlags", () => {
     const args = ["pnpm", "exec", "astro", "dev"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects flags for npx rsbuild dev", () => {
+    const args = ["npx", "rsbuild", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx", "rsbuild", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
   // Implicit bin (yarn <framework>)
