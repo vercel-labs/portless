@@ -9,8 +9,7 @@ on:
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
 permissions:
-  contents: write
-  id-token: write
+  contents: read
 
 jobs:
   check-release:
@@ -29,7 +28,7 @@ jobs:
           LOCAL_VERSION=$(node -p "require('./packages/portless/package.json').version")
           echo "Local version: $LOCAL_VERSION"
 
-          NPM_VERSION=$(npm view portless version 2>/dev/null || echo "0.0.0")
+          NPM_VERSION=$(npm view portless version)
           echo "Registry version: $NPM_VERSION"
 
           if [ "$LOCAL_VERSION" != "$NPM_VERSION" ]; then
@@ -46,6 +45,10 @@ jobs:
     needs: check-release
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -75,6 +78,8 @@ jobs:
     needs: [check-release, publish]
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
