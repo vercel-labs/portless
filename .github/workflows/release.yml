@@ -45,7 +45,7 @@ jobs:
     needs: check-release
     if: needs.check-release.outputs.should_release == 'true'
     runs-on: ubuntu-latest
-    environment: release
+    environment: Release
     permissions:
       contents: read
       id-token: write
