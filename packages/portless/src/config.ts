@@ -6,7 +6,6 @@ export interface AppConfig {
   name?: string;
   script?: string;
   appPort?: number;
-  proxy?: boolean;
 }
 
 export interface PortlessConfig extends AppConfig {
@@ -21,37 +20,26 @@ export interface LoadedConfig {
 const CONFIG_FILENAME = "portless.json";
 
 /**
- * Walk up from `cwd` looking for portless config. Checks `portless.json`
- * first, then falls back to a `"portless"` key in `package.json`.
- * Returns the parsed config and the directory it was found in, or null.
+ * Load portless config from `cwd`. Checks `portless.json` first, then
+ * falls back to a `"portless"` key in `package.json`. Does not walk up
+ * to parent directories.
  */
 export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
-  let dir = cwd;
-  for (;;) {
-    // Prefer standalone portless.json
-    const configPath = path.join(dir, CONFIG_FILENAME);
-    try {
-      const raw = fs.readFileSync(configPath, "utf-8");
-      const parsed = JSON.parse(raw);
-      validateConfig(parsed, configPath);
-      return { config: parsed, configDir: dir };
-    } catch (err) {
-      if (isErrnoException(err) && err.code === "ENOENT") {
-        // No portless.json — try package.json "portless" key
-        const fromPkg = loadConfigFromPackageJson(dir);
-        if (fromPkg) return fromPkg;
-
-        const parent = path.dirname(dir);
-        if (parent === dir) return null;
-        dir = parent;
-        continue;
-      }
-      if (err instanceof SyntaxError) {
-        console.error(colors.red(`Error: Invalid JSON in ${configPath}`));
-        process.exit(1);
-      }
-      throw err;
+  const configPath = path.join(cwd, CONFIG_FILENAME);
+  try {
+    const raw = fs.readFileSync(configPath, "utf-8");
+    const parsed = JSON.parse(raw);
+    validateConfig(parsed, configPath);
+    return { config: parsed, configDir: cwd };
+  } catch (err) {
+    if (isErrnoException(err) && err.code === "ENOENT") {
+      return loadConfigFromPackageJson(cwd);
     }
+    if (err instanceof SyntaxError) {
+      console.error(colors.red(`Error: Invalid JSON in ${configPath}`));
+      process.exit(1);
+    }
+    throw err;
   }
 }
 
@@ -167,9 +155,28 @@ export function hasScript(scriptName: string, dir: string): boolean {
   }
 }
 
-/** Split a command string on whitespace into an args array. */
+/** Split a command string on whitespace, respecting single and double quotes. */
 export function splitCommand(command: string): string[] {
-  return command.trim().split(/\s+/).filter(Boolean);
+  const args: string[] = [];
+  let current = "";
+  let inSingle = false;
+  let inDouble = false;
+  for (const ch of command) {
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+    } else if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+    } else if (/\s/.test(ch) && !inSingle && !inDouble) {
+      if (current) {
+        args.push(current);
+        current = "";
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current) args.push(current);
+  return args;
 }
 
 /**
@@ -244,13 +251,6 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
     }
   }
 
-  if (obj.proxy !== undefined) {
-    if (typeof obj.proxy !== "boolean") {
-      console.error(colors.red(`Error: "proxy" in ${configPath} must be a boolean.`));
-      process.exit(1);
-    }
-  }
-
   if (obj.apps !== undefined) {
     if (typeof obj.apps !== "object" || obj.apps === null || Array.isArray(obj.apps)) {
       console.error(colors.red(`Error: "apps" in ${configPath} must be an object.`));
@@ -294,14 +294,6 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
         colors.red(
           `Error: "${prefix}.appPort" in ${configPath} must be an integer between 1 and 65535.`
         )
-      );
-      process.exit(1);
-    }
-  }
-  if (obj.proxy !== undefined) {
-    if (typeof obj.proxy !== "boolean") {
-      console.error(
-        colors.red(`Error: "${prefix}.proxy" in ${configPath} must be a boolean.`)
       );
       process.exit(1);
     }

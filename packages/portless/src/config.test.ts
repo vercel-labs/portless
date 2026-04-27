@@ -40,6 +40,29 @@ describe("splitCommand", () => {
   it("returns empty array for empty string", () => {
     expect(splitCommand("")).toEqual([]);
   });
+
+  it("preserves single-quoted arguments", () => {
+    expect(splitCommand("NODE_OPTIONS='--max-old-space-size=4096' next dev")).toEqual([
+      "NODE_OPTIONS=--max-old-space-size=4096",
+      "next",
+      "dev",
+    ]);
+  });
+
+  it("preserves double-quoted arguments", () => {
+    expect(splitCommand('echo "hello world"')).toEqual(["echo", "hello world"]);
+  });
+
+  it("handles mixed quotes", () => {
+    expect(splitCommand(`KEY='val with spaces' CMD="another arg"`)).toEqual([
+      "KEY=val with spaces",
+      "CMD=another arg",
+    ]);
+  });
+
+  it("handles quotes within a token", () => {
+    expect(splitCommand("--flag='some value'")).toEqual(["--flag=some value"]);
+  });
 });
 
 describe("loadConfig", () => {
@@ -65,14 +88,11 @@ describe("loadConfig", () => {
     expect(result!.configDir).toBe(tmpDir);
   });
 
-  it("walks up from a subdirectory", () => {
+  it("does not walk up from a subdirectory", () => {
     fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "myapp" }));
     const subDir = path.join(tmpDir, "src", "components");
     fs.mkdirSync(subDir, { recursive: true });
-    const result = loadConfig(subDir);
-    expect(result).not.toBeNull();
-    expect(result!.config.name).toBe("myapp");
-    expect(result!.configDir).toBe(tmpDir);
+    expect(loadConfig(subDir)).toBeNull();
   });
 
   it("loads config with all fields", () => {
@@ -150,17 +170,14 @@ describe("loadConfig", () => {
     expect(loadConfig(tmpDir)).toBeNull();
   });
 
-  it("walks up to find package.json portless key", () => {
+  it("does not walk up to find package.json portless key", () => {
     fs.writeFileSync(
       path.join(tmpDir, "package.json"),
       JSON.stringify({ name: "test", portless: { name: "root-app" } })
     );
     const subDir = path.join(tmpDir, "packages", "web");
     fs.mkdirSync(subDir, { recursive: true });
-    const result = loadConfig(subDir);
-    expect(result).not.toBeNull();
-    expect(result!.config.name).toBe("root-app");
-    expect(result!.configDir).toBe(tmpDir);
+    expect(loadConfig(subDir)).toBeNull();
   });
 });
 
@@ -401,10 +418,10 @@ describe("loadPackagePortlessConfig", () => {
   it("returns config from package.json portless key", () => {
     fs.writeFileSync(
       path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: { name: "myapp", proxy: false } })
+      JSON.stringify({ name: "test", portless: { name: "myapp", script: "start" } })
     );
     const result = loadPackagePortlessConfig(tmpDir);
-    expect(result).toEqual({ name: "myapp", proxy: false });
+    expect(result).toEqual({ name: "myapp", script: "start" });
   });
 
   it("returns config from string shorthand", () => {
@@ -425,10 +442,7 @@ describe("loadPackagePortlessConfig", () => {
   });
 
   it("returns null when no portless key", () => {
-    fs.writeFileSync(
-      path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test" })
-    );
+    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test" }));
     expect(loadPackagePortlessConfig(tmpDir)).toBeNull();
   });
 

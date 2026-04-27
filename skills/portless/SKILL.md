@@ -58,13 +58,15 @@ In non-interactive environments (no TTY, or `CI=1`), portless exits with a descr
 
 Create a `portless.json` with the app name. Your `package.json` scripts stay portless-free:
 
+**portless.json:**
+
 ```json
-// portless.json
 { "name": "myapp" }
 ```
 
+**package.json:**
+
 ```json
-// package.json
 { "scripts": { "dev": "next dev" } }
 ```
 

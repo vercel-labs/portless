@@ -62,7 +62,14 @@ import {
   unpublish,
   cleanupAll as cleanupMdns,
 } from "./mdns.js";
-import { loadConfig, resolveAppConfig, resolveScript, hasScript, isServerCommand, loadPackagePortlessConfig } from "./config.js";
+import {
+  loadConfig,
+  resolveAppConfig,
+  resolveScript,
+  hasScript,
+  isServerCommand,
+  loadPackagePortlessConfig,
+} from "./config.js";
 import type { AppConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
@@ -755,23 +762,25 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   console.log();
 }
 
-async function runApp(
-  initialStore: RouteStore,
-  proxyPort: number,
-  stateDir: string,
-  name: string,
-  commandArgs: string[],
-  tls: boolean,
-  tld: string,
-  force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
-  desiredPort?: number,
-  lanMode = false,
-  lanIp?: string | null
-) {
-  let store = initialStore;
-  console.log(chalk.blue.bold(`\nportless\n`));
+type EnsureProxyResult =
+  | { started: true; state: Awaited<ReturnType<typeof discoverState>> }
+  | { started: false; skipped: true }
+  | { started: false; skipped?: false };
 
+/**
+ * Check if the proxy is running and auto-start it if needed.
+ * Returns the discovered state after start, or `{ skipped: true }` when the
+ * user chose to skip, or `{ started: false }` when the proxy was already up.
+ *
+ * When `onSkip` is provided and the user chooses "skip", calls `onSkip`
+ * and returns `{ skipped: true }`. Pass null to disable the skip option.
+ */
+async function ensureProxyRunning(
+  proxyPort: number,
+  tls: boolean,
+  lanMode: boolean,
+  onSkip: (() => void) | null
+): Promise<EnsureProxyResult> {
   let envTld: string;
   try {
     envTld = getDefaultTld();
@@ -801,143 +810,195 @@ async function runApp(
     useWildcard: isWildcardEnvEnabled(),
   });
 
-  // Validate the hostname before we try to auto-start the proxy.
-  parseHostname(name, tld);
-
-  // Check if proxy is running, auto-start if possible.
-  // The proxy start command handles sudo elevation and fallback internally,
-  // so we just spawn it and then re-discover state to find the actual port.
   const proxyResponsive = await isProxyRunning(proxyPort, tls);
   const proxyListeningFromStateDir =
     !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
 
-  if (!proxyResponsive && !proxyListeningFromStateDir) {
-    // Merge persisted state from a previous proxy run so auto-start reuses
-    // the same port/TLS/TLD instead of falling back to defaults (#225).
-    const persisted = readPersistedProxyState();
-    const startConfig = { ...desiredConfig };
-    let startPort: number | undefined;
+  if (proxyResponsive || proxyListeningFromStateDir) {
+    return { started: false };
+  }
 
-    if (persisted) {
-      if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
-        startConfig.useHttps = persisted.tls;
-      }
-      if (!explicit.tld && persisted.tld !== desiredConfig.tld) {
-        startConfig.tld = persisted.tld;
-      }
-      if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
-        startConfig.lanMode = persisted.lanMode;
-      }
-      const envPort = getDefaultPort(startConfig.useHttps);
-      if (persisted.port !== envPort) {
-        startPort = persisted.port;
-      }
+  const persisted = readPersistedProxyState();
+  const startConfig = { ...desiredConfig };
+  let startPort: number | undefined;
+
+  if (persisted) {
+    if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
+      startConfig.useHttps = persisted.tls;
+    }
+    if (!explicit.tld && persisted.tld !== desiredConfig.tld) {
+      startConfig.tld = persisted.tld;
+    }
+    if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
+      startConfig.lanMode = persisted.lanMode;
+    }
+    const envPort = getDefaultPort(startConfig.useHttps);
+    if (persisted.port !== envPort) {
+      startPort = persisted.port;
+    }
+  }
+
+  const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
+  const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
+  const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
+  const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
+
+  const isInteractive = !!process.stdin.isTTY && !process.env.CI;
+
+  if (needsSudo && !isInteractive) {
+    console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
+    console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
+    console.error(colors.cyan(`  ${manualStartCommand}`));
+    console.error(
+      colors.blue(
+        `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
+      )
+    );
+    console.error(colors.cyan(`  ${fallbackStartCommand}`));
+    process.exit(1);
+  }
+
+  if (needsSudo) {
+    const answer = await prompt(colors.yellow("Proxy not running. Start it? [Y/n/skip] "));
+
+    if (answer === "n" || answer === "no") {
+      console.log(colors.gray("Cancelled."));
+      process.exit(0);
     }
 
-    const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
-    const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
-    const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
-    const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
-
-    // Detect non-interactive environments: no TTY, CI runners, or task
-    // runners like turborepo that pipe stdin (#224).
-    const isInteractive = !!process.stdin.isTTY && !process.env.CI;
-
-    if (needsSudo && !isInteractive) {
-      console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
-      console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
-      console.error(colors.cyan(`  ${manualStartCommand}`));
-      console.error(
-        colors.blue(
-          `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
-        )
-      );
-      console.error(colors.cyan(`  ${fallbackStartCommand}`));
-      process.exit(1);
+    if (onSkip && (answer === "s" || answer === "skip")) {
+      onSkip();
+      return { started: false, skipped: true };
     }
+  }
 
-    if (needsSudo) {
-      const answer = await prompt(colors.yellow("Proxy not running. Start it? [Y/n/skip] "));
+  if (persisted && startPort !== undefined) {
+    console.log(
+      colors.yellow(
+        `Starting proxy with previous configuration (port ${startPort}, ${startConfig.useHttps ? "HTTPS" : "HTTP"})...`
+      )
+    );
+  } else {
+    console.log(colors.yellow("Starting proxy..."));
+  }
+  const proxyStartConfig = buildProxyStartConfig({
+    useHttps: startConfig.useHttps,
+    customCertPath: startConfig.customCertPath,
+    customKeyPath: startConfig.customKeyPath,
+    lanMode: startConfig.lanMode,
+    lanIp: startConfig.lanIpExplicit ? startConfig.lanIp : null,
+    lanIpExplicit: startConfig.lanIpExplicit,
+    tld: startConfig.tld,
+    useWildcard: startConfig.useWildcard,
+    includePort: startPort !== undefined,
+    proxyPort: startPort,
+  });
+  const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
 
-      if (answer === "n" || answer === "no") {
-        console.log(colors.gray("Cancelled."));
-        process.exit(0);
-      }
+  const result = spawnSync(process.execPath, startArgs, {
+    stdio: "inherit",
+    timeout: SUDO_SPAWN_TIMEOUT_MS,
+  });
 
-      if (answer === "s" || answer === "skip") {
-        console.log(colors.gray("Skipping proxy, running command directly...\n"));
-        spawnCommand(commandArgs);
-        return;
-      }
-    }
-
-    if (persisted && startPort !== undefined) {
-      console.log(
-        colors.yellow(
-          `Starting proxy with previous configuration (port ${startPort}, ${startConfig.useHttps ? "HTTPS" : "HTTP"})...`
-        )
-      );
-    } else {
-      console.log(colors.yellow("Starting proxy..."));
-    }
-    const proxyStartConfig = buildProxyStartConfig({
-      useHttps: startConfig.useHttps,
-      customCertPath: startConfig.customCertPath,
-      customKeyPath: startConfig.customKeyPath,
-      lanMode: startConfig.lanMode,
-      lanIp: startConfig.lanIpExplicit ? startConfig.lanIp : null,
-      lanIpExplicit: startConfig.lanIpExplicit,
-      tld: startConfig.tld,
-      useWildcard: startConfig.useWildcard,
-      includePort: startPort !== undefined,
-      proxyPort: startPort,
-    });
-    const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
-
-    const result = spawnSync(process.execPath, startArgs, {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    });
-
-    // Poll discoverState + isProxyRunning until the daemon is reachable.
-    // The proxy may bind 443, fall back to 1355, or use another port, so we
-    // re-discover on each attempt instead of waiting on a single port.
-    let discovered: Awaited<ReturnType<typeof discoverState>> | null = null;
-    if (!result.signal) {
-      for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
-        await new Promise((r) => setTimeout(r, WAIT_FOR_PROXY_INTERVAL_MS));
-        const state = await discoverState();
-        if (await isProxyRunning(state.port)) {
-          discovered = state;
-          break;
-        }
+  let discovered: Awaited<ReturnType<typeof discoverState>> | null = null;
+  if (!result.signal) {
+    for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
+      await new Promise((r) => setTimeout(r, WAIT_FOR_PROXY_INTERVAL_MS));
+      const state = await discoverState();
+      if (await isProxyRunning(state.port)) {
+        discovered = state;
+        break;
       }
     }
+  }
 
-    if (!discovered) {
-      console.error(colors.red("Failed to start proxy."));
-      const fallbackDir = resolveStateDir(effectivePort);
-      const logPath = path.join(fallbackDir, "proxy.log");
-      console.error(colors.blue("Try starting it manually:"));
-      console.error(colors.cyan(`  ${manualStartCommand}`));
-      if (fs.existsSync(logPath)) {
-        console.error(colors.gray(`Logs: ${logPath}`));
-      }
-      process.exit(1);
-      return; // unreachable, but helps TypeScript narrow `discovered`
+  if (!discovered) {
+    console.error(colors.red("Failed to start proxy."));
+    const fallbackDir = resolveStateDir(effectivePort);
+    const logPath = path.join(fallbackDir, "proxy.log");
+    console.error(colors.blue("Try starting it manually:"));
+    console.error(colors.cyan(`  ${manualStartCommand}`));
+    if (fs.existsSync(logPath)) {
+      console.error(colors.gray(`Logs: ${logPath}`));
     }
-    proxyPort = discovered.port;
-    stateDir = discovered.dir;
-    tld = discovered.tld;
-    tls = discovered.tls;
-    lanMode = discovered.lanMode;
-    lanIp = discovered.lanIp;
+    process.exit(1);
+  }
+
+  console.log(colors.green("Proxy started in background"));
+  return { started: true, state: discovered! };
+}
+
+async function runApp(
+  initialStore: RouteStore,
+  proxyPort: number,
+  stateDir: string,
+  name: string,
+  commandArgs: string[],
+  tls: boolean,
+  tld: string,
+  force: boolean,
+  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  desiredPort?: number,
+  lanMode = false,
+  lanIp?: string | null
+) {
+  let store = initialStore;
+  console.log(chalk.blue.bold(`\nportless\n`));
+
+  let envTld: string;
+  try {
+    envTld = getDefaultTld();
+  } catch (err) {
+    console.error(colors.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
+
+  // Validate the hostname before we try to auto-start the proxy.
+  parseHostname(name, tld);
+
+  const ensureResult = await ensureProxyRunning(proxyPort, tls, lanMode, () => {
+    console.log(colors.gray("Skipping proxy, running command directly...\n"));
+    spawnCommand(commandArgs);
+  });
+
+  if (ensureResult.started === false && ensureResult.skipped) {
+    return;
+  }
+
+  if (ensureResult.started) {
+    proxyPort = ensureResult.state.port;
+    stateDir = ensureResult.state.dir;
+    tld = ensureResult.state.tld;
+    tls = ensureResult.state.tls;
+    lanMode = ensureResult.state.lanMode;
+    lanIp = ensureResult.state.lanIp;
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
-    console.log(colors.green("Proxy started in background"));
   } else {
     const runningConfig = readCurrentProxyConfig(stateDir);
+
+    const explicit: ProxyConfigExplicitness = {
+      useHttps: process.env.PORTLESS_HTTPS !== undefined,
+      customCert: false,
+      lanMode: process.env.PORTLESS_LAN !== undefined,
+      lanIp: process.env.PORTLESS_LAN_IP !== undefined,
+      tld: process.env.PORTLESS_TLD !== undefined,
+      useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+    };
+    const desiredConfig = resolveProxyConfig({
+      persistedLanMode: lanMode,
+      explicit,
+      defaultTld: envTld,
+      useHttps: !isHttpsEnvDisabled(),
+      customCertPath: null,
+      customKeyPath: null,
+      lanMode: isLanEnvEnabled(),
+      lanIp: process.env.PORTLESS_LAN_IP || null,
+      tld: envTld,
+      useWildcard: isWildcardEnvEnabled(),
+    });
+
     const mismatchMessages = getProxyConfigMismatchMessages(desiredConfig, runningConfig, explicit);
     if (mismatchMessages.length > 0) {
       printProxyConfigMismatch(proxyPort, desiredConfig, mismatchMessages);
@@ -2389,6 +2450,133 @@ async function handleDefaultSingle(cwd: string, scriptName: string): Promise<voi
  * Multi-app mode: discover workspace packages and run all that have
  * the target script through the proxy concurrently.
  */
+interface MultiAppEntry {
+  pkg: WorkspacePackage;
+  name: string;
+  commandArgs: string[];
+  appPort?: number;
+  proxied: boolean;
+}
+
+function spawnShellCommand(
+  commandStr: string,
+  env: Record<string, string | undefined>,
+  cwd: string
+): ReturnType<typeof spawn> {
+  return isWindows
+    ? spawn("cmd.exe", ["/d", "/s", "/c", commandStr], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        cwd,
+      })
+    : spawn("/bin/sh", ["-c", commandStr], {
+        stdio: ["ignore", "pipe", "pipe"],
+        env,
+        cwd,
+      });
+}
+
+function pipeOutput(child: ReturnType<typeof spawn>, prefix: string): void {
+  child.stdout?.on("data", (data: Buffer) => {
+    for (const line of data.toString().split("\n")) {
+      if (line) process.stdout.write(`${prefix} ${line}\n`);
+    }
+  });
+  child.stderr?.on("data", (data: Buffer) => {
+    for (const line of data.toString().split("\n")) {
+      if (line) process.stderr.write(`${prefix} ${line}\n`);
+    }
+  });
+}
+
+async function spawnProxiedApp(
+  app: MultiAppEntry,
+  stateDir: string,
+  proxyPort: number,
+  tls: boolean,
+  tld: string
+): Promise<ReturnType<typeof spawn>> {
+  const commandStr = app.commandArgs.join(" ");
+  const usesPortless = app.commandArgs[0] === "portless";
+
+  const pkgEnv: Record<string, string | undefined> = { ...process.env };
+  pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
+
+  let env: Record<string, string | undefined>;
+  let store: RouteStore | null = null;
+  let hostname: string | null = null;
+  let displayUrl: string;
+
+  if (usesPortless) {
+    env = pkgEnv;
+    displayUrl = "(managed by portless)";
+  } else {
+    store = new RouteStore(stateDir, {
+      onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
+    });
+
+    const appPort = app.appPort ?? (await findFreePort());
+    const protocol = tls ? "https" : "http";
+    const portSuffix =
+      (tls && proxyPort === 443) || (!tls && proxyPort === 80) ? "" : `:${proxyPort}`;
+    const url = `${protocol}://${app.name}.${tld}${portSuffix}`;
+    displayUrl = url;
+
+    hostname = parseHostname(app.name, tld);
+    store.addRoute(hostname, appPort, process.pid);
+
+    env = {
+      ...pkgEnv,
+      PORT: String(appPort),
+      HOST: "127.0.0.1",
+      PORTLESS_URL: url,
+    };
+
+    if (tls) {
+      const caPath = path.join(stateDir, "ca.pem");
+      if (fs.existsSync(caPath)) {
+        env.NODE_EXTRA_CA_CERTS = caPath;
+      }
+    }
+  }
+
+  console.log(
+    chalk.cyan(`  ${app.name}`),
+    chalk.gray(`-> ${displayUrl}`),
+    chalk.gray(`(${commandStr})`)
+  );
+
+  const child = spawnShellCommand(commandStr, env, app.pkg.dir);
+  pipeOutput(child, chalk.cyan(`[${app.name}]`));
+
+  const capturedStore = store;
+  const capturedHostname = hostname;
+  child.on("exit", () => {
+    if (capturedStore && capturedHostname) {
+      try {
+        capturedStore.removeRoute(capturedHostname);
+      } catch {
+        // non-fatal
+      }
+    }
+  });
+
+  return child;
+}
+
+function spawnTaskApp(app: MultiAppEntry): ReturnType<typeof spawn> {
+  const commandStr = app.commandArgs.join(" ");
+  const pkgEnv: Record<string, string | undefined> = { ...process.env };
+  pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
+
+  console.log(chalk.gray(`  ${app.name}`), chalk.gray(`(${commandStr})`));
+
+  const child = spawnShellCommand(commandStr, pkgEnv, app.pkg.dir);
+  pipeOutput(child, chalk.gray(`[${app.name}]`));
+
+  return child;
+}
+
 async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promise<void> {
   const loaded = loadConfig(wsRoot);
   const packages = discoverWorkspacePackages(wsRoot);
@@ -2409,7 +2597,18 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
       .map((label) => truncateLabel(label))
       .join(".");
   } else {
-    const commonScope = packages.find((p) => p.scope)?.scope;
+    const scopeCounts = new Map<string, number>();
+    for (const p of packages) {
+      if (p.scope) scopeCounts.set(p.scope, (scopeCounts.get(p.scope) ?? 0) + 1);
+    }
+    let commonScope: string | undefined;
+    let maxCount = 0;
+    for (const [scope, count] of scopeCounts) {
+      if (count > maxCount) {
+        commonScope = scope;
+        maxCount = count;
+      }
+    }
     if (commonScope) {
       projectName = sanitizeForHostname(commonScope) || inferProjectName(wsRoot).name;
     } else {
@@ -2417,20 +2616,9 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
     }
   }
 
-  interface AppEntry {
-    pkg: WorkspacePackage;
-    name: string;
-    commandArgs: string[];
-    appPort?: number;
-    /** Whether this app should be proxied. False for build-only tools. */
-    proxied: boolean;
-  }
-
-  const apps: AppEntry[] = [];
+  const apps: MultiAppEntry[] = [];
 
   for (const pkg of packages) {
-    if (!pkg.scripts[scriptName]) continue;
-
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
     const pkgConfig = loadPackagePortlessConfig(pkg.dir);
@@ -2438,19 +2626,16 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
     // Merge: root apps map > package.json "portless" key > defaults
     const appOverride: AppConfig = {
       ...pkgConfig,
-      ...Object.fromEntries(
-        Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)
-      ),
+      ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
     };
 
     const effectiveScript = appOverride.script ?? scriptName;
+    if (!pkg.scripts[effectiveScript]) continue;
+
     const resolved = resolveScript(effectiveScript, pkg.dir);
     if (!resolved) continue;
 
-    // Determine if this app should be proxied.
-    // Explicit config wins, then check if the command is a known build tool.
-    const proxied =
-      appOverride.proxy !== undefined ? appOverride.proxy : isServerCommand(resolved);
+    const proxied = isServerCommand(resolved);
 
     let name: string;
     if (appOverride.name) {
@@ -2483,144 +2668,29 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
   console.log(chalk.blue.bold(`\nportless\n`));
   console.log(chalk.gray(`Starting ${apps.length} app${apps.length === 1 ? "" : "s"}...\n`));
 
-  const { dir, port, tls, tld } = await discoverState();
+  let { dir, port, tls, tld } = await discoverState();
 
-  // Auto-start proxy if needed (reuse the first app to trigger auto-start via runApp)
-  // For multi-app, we spawn each as a separate child process.
-  const children: ReturnType<typeof spawn>[] = [];
-
-  // Print proxied apps first, then tasks.
-  for (const app of proxiedApps) {
-    const commandStr = app.commandArgs.join(" ");
-    const usesPortless = app.commandArgs[0] === "portless";
-
-    let env: Record<string, string | undefined>;
-    let store: RouteStore | null = null;
-    let hostname: string | null = null;
-    let displayUrl: string;
-
-    // Augment PATH so local binaries (next, tsup, vite, etc.) are found.
-    const pkgEnv = { ...process.env };
-    pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
-
-    if (usesPortless) {
-      // Script already invokes portless — let it handle its own routing.
-      env = pkgEnv;
-      displayUrl = "(managed by portless)";
-    } else {
-      store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
-      });
-
-      const appPort = app.appPort ?? (await findFreePort());
-      const protocol = tls ? "https" : "http";
-      const portSuffix = (tls && port === 443) || (!tls && port === 80) ? "" : `:${port}`;
-      const url = `${protocol}://${app.name}.${tld}${portSuffix}`;
-      displayUrl = url;
-
-      hostname = parseHostname(app.name, tld);
-      store.addRoute(hostname, appPort, process.pid);
-
-      env = {
-        ...pkgEnv,
-        PORT: String(appPort),
-        HOST: "127.0.0.1",
-        PORTLESS_URL: url,
-      };
-
-      if (tls) {
-        const caPath = path.join(dir, "ca.pem");
-        if (fs.existsSync(caPath)) {
-          env.NODE_EXTRA_CA_CERTS = caPath;
-        }
-      }
+  if (proxiedApps.length > 0) {
+    const ensureResult = await ensureProxyRunning(port, tls, false, null);
+    if (ensureResult.started) {
+      dir = ensureResult.state.dir;
+      port = ensureResult.state.port;
+      tls = ensureResult.state.tls;
+      tld = ensureResult.state.tld;
     }
-
-    console.log(
-      chalk.cyan(`  ${app.name}`),
-      chalk.gray(`-> ${displayUrl}`),
-      chalk.gray(`(${commandStr})`)
-    );
-
-    const child = isWindows
-      ? spawn("cmd.exe", ["/d", "/s", "/c", commandStr], {
-          stdio: ["ignore", "pipe", "pipe"],
-          env,
-          cwd: app.pkg.dir,
-        })
-      : spawn("/bin/sh", ["-c", commandStr], {
-          stdio: ["ignore", "pipe", "pipe"],
-          env,
-          cwd: app.pkg.dir,
-        });
-
-    const prefix = chalk.cyan(`[${app.name}]`);
-
-    child.stdout?.on("data", (data: Buffer) => {
-      for (const line of data.toString().split("\n")) {
-        if (line) process.stdout.write(`${prefix} ${line}\n`);
-      }
-    });
-
-    child.stderr?.on("data", (data: Buffer) => {
-      for (const line of data.toString().split("\n")) {
-        if (line) process.stderr.write(`${prefix} ${line}\n`);
-      }
-    });
-
-    const capturedStore = store;
-    const capturedHostname = hostname;
-    child.on("exit", () => {
-      if (capturedStore && capturedHostname) {
-        try {
-          capturedStore.removeRoute(capturedHostname);
-        } catch {
-          // non-fatal
-        }
-      }
-    });
-
-    children.push(child);
   }
 
-  // Spawn task apps (build watchers etc.) — no proxy route, just run the command.
+  const children: ReturnType<typeof spawn>[] = [];
+
+  for (const app of proxiedApps) {
+    children.push(await spawnProxiedApp(app, dir, port, tls, tld));
+  }
+
   if (taskApps.length > 0) {
     console.log(chalk.gray(`\n  Tasks:\n`));
   }
   for (const app of taskApps) {
-    const commandStr = app.commandArgs.join(" ");
-    const pkgEnv = { ...process.env };
-    pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
-
-    console.log(chalk.gray(`  ${app.name}`), chalk.gray(`(${commandStr})`));
-
-    const child = isWindows
-      ? spawn("cmd.exe", ["/d", "/s", "/c", commandStr], {
-          stdio: ["ignore", "pipe", "pipe"],
-          env: pkgEnv,
-          cwd: app.pkg.dir,
-        })
-      : spawn("/bin/sh", ["-c", commandStr], {
-          stdio: ["ignore", "pipe", "pipe"],
-          env: pkgEnv,
-          cwd: app.pkg.dir,
-        });
-
-    const prefix = chalk.gray(`[${app.name}]`);
-
-    child.stdout?.on("data", (data: Buffer) => {
-      for (const line of data.toString().split("\n")) {
-        if (line) process.stdout.write(`${prefix} ${line}\n`);
-      }
-    });
-
-    child.stderr?.on("data", (data: Buffer) => {
-      for (const line of data.toString().split("\n")) {
-        if (line) process.stderr.write(`${prefix} ${line}\n`);
-      }
-    });
-
-    children.push(child);
+    children.push(spawnTaskApp(app));
   }
 
   console.log("");

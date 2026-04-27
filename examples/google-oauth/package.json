@@ -1,6 +1,7 @@
 {
   "name": "google-oauth-example",
   "version": "0.0.0",
+  "portless": "google-oauth-example.portless",
   "private": true,
   "scripts": {
     "dev": "next dev"

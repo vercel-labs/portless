@@ -290,12 +290,7 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
   fs.chmodSync(certPath, 0o644);
   fixOwnership(keyPath, certPath);
 
-  // New CA invalidates any previous trust marker.
-  try {
-    fs.unlinkSync(path.join(stateDir, CA_TRUST_MARKER));
-  } catch {
-    // Marker may not exist yet — ignore.
-  }
+  clearTrustMarker(stateDir);
 
   return { certPath, keyPath };
 }
