@@ -25,6 +25,22 @@ npm install -D portless
 
 ## Run your app
 
+The simplest way: create a `portless.json` with the app name, then run `portless`:
+
+```json
+// portless.json
+{ "name": "myapp" }
+```
+
+```bash
+portless
+# -> runs "dev" script, https://myapp.localhost
+```
+
+Your `package.json` scripts stay portless-free. If someone doesn't have portless installed, `pnpm dev` still works.
+
+You can also run with an explicit command:
+
 ```bash
 portless myapp next dev
 # -> https://myapp.localhost
@@ -35,6 +51,20 @@ HTTPS with HTTP/2 is enabled by default. On first run, portless generates a loca
 The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
 
 ## Use in package.json
+
+With a `portless.json`, your scripts stay clean:
+
+```json
+{
+  "scripts": {
+    "dev": "next dev"
+  }
+}
+```
+
+Then run `portless` or `portless run` to go through the proxy.
+
+You can also use portless directly in scripts:
 
 ```json
 {

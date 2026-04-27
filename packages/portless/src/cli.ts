@@ -11,7 +11,12 @@ import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile, shouldAutoSyncHosts } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
-import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
+import {
+  inferProjectName,
+  detectWorktreePrefix,
+  truncateLabel,
+  sanitizeForHostname,
+} from "./auto.js";
 import {
   buildProxyStartConfig,
   DEFAULT_TLD,
@@ -56,6 +61,10 @@ import {
   unpublish,
   cleanupAll as cleanupMdns,
 } from "./mdns.js";
+import { loadConfig, resolveAppConfig, resolveScript, hasScript } from "./config.js";
+import type { AppConfig } from "./config.js";
+import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
+import type { WorkspacePackage } from "./workspace.js";
 
 const chalk = colors;
 
@@ -1123,7 +1132,10 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
 ${colors.bold("portless run")} - Infer project name and run through the proxy.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless run [options] <command...>")}
+  ${colors.cyan("portless run [options] [command...]")}
+
+  When no command is given and a portless.json exists, runs the configured
+  script (default: "dev") from package.json.
 
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
@@ -1132,15 +1144,17 @@ ${colors.bold("Options:")}
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
-  1. package.json "name" field (walks up directories)
-  2. Git repo root directory name
-  3. Current directory basename
+  1. portless.json "name" field
+  2. package.json "name" field (walks up directories)
+  3. Git repo root directory name
+  4. Current directory basename
 
   Use --name to override the inferred name while keeping worktree prefixes.
   In git worktrees, the branch name is prepended as a subdomain prefix
   (e.g. feature-auth.myapp.localhost).
 
 ${colors.bold("Examples:")}
+  portless run                        # With portless.json: run dev script
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
   portless run vite dev               # -> https://<project>.localhost
@@ -1246,13 +1260,13 @@ ${colors.bold("Install:")}
   ${colors.cyan("npm install -D portless")}          Project dev dependency
 
 ${colors.bold("Usage:")}
+  ${colors.cyan("portless")}                         Run dev script through proxy (needs portless.json)
+  ${colors.cyan("portless")}                         From monorepo root: run all workspace packages
+  ${colors.cyan("portless run")}                     Same as above (with portless.json or --script)
+  ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
+  ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
-  ${colors.cyan("portless proxy start --no-tls")}    Start without HTTPS (port 80)
-  ${colors.cyan("portless proxy start --lan")}       Start in LAN mode (mDNS for real device testing)
-  ${colors.cyan("portless proxy start -p 1355")}     Start on a custom port (no sudo)
   ${colors.cyan("portless proxy stop")}              Stop the proxy
-  ${colors.cyan("portless <name> <cmd>")}            Run your app through the proxy
-  ${colors.cyan("portless run <cmd>")}               Infer name from project, run through proxy
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
@@ -1263,22 +1277,32 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Examples:")}
-  portless proxy start                # Start HTTPS proxy on port 443
-  portless proxy start --no-tls       # Start HTTP proxy on port 80
+  portless                            # Run dev script (with portless.json)
+  portless                            # From monorepo root: start all apps
+  portless --script start             # Run "start" script instead of "dev"
   portless myapp next dev             # -> https://myapp.localhost
-  portless myapp vite dev             # -> https://myapp.localhost
-  portless api.myapp pnpm start       # -> https://api.myapp.localhost
   portless run next dev               # -> https://<project>.localhost
   portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
-  portless get backend                 # -> https://backend.localhost (for cross-service refs)
-  # Wildcard subdomains: tenant.myapp.localhost also routes to myapp
+  portless get backend                # -> https://backend.localhost
+
+${colors.bold("Configuration (portless.json):")}
+  Create a portless.json to enable zero-arg mode. Your package.json
+  scripts stay portless-free. Config is optional; portless infers
+  the name from package.json and defaults to the "dev" script.
+
+  Single app:  { "name": "myapp" }
+  Custom script: { "name": "myapp", "script": "start" }
+  Monorepo:    { "apps": { "apps/web": { "name": "myapp" } } }
 
 ${colors.bold("In package.json:")}
   {
     "scripts": {
-      "dev": "portless run next dev"
+      "dev": "next dev"
     }
   }
+  Then run: portless          (with portless.json)
+  Or:       portless run      (with portless.json)
+  Or:       portless run next dev
 
 ${colors.bold("How it works:")}
   1. Start the proxy once (HTTPS on port 443 by default, auto-elevates with sudo)
@@ -1314,6 +1338,7 @@ ${colors.bold("LAN mode:")}
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
+  --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo on macOS/Linux
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
@@ -2267,8 +2292,275 @@ ${colors.bold("LAN mode (--lan):")}
   }
 }
 
-async function handleRunMode(args: string[]): Promise<void> {
+/**
+ * Load the effective AppConfig for the current directory from portless.json.
+ * Handles both single-app (top-level fields) and monorepo (apps map) configs.
+ */
+function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
+  const loaded = loadConfig(cwd);
+  if (!loaded) return null;
+  return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+}
+
+/**
+ * Zero-arg dispatch: `portless` with no arguments.
+ * Returns true if handled, false to fall through to help text.
+ *
+ * Activates when:
+ * - At a workspace root (has pnpm-workspace.yaml in cwd) -> multi-app mode
+ * - Has a portless.json or --script flag -> single-app mode
+ * Without config, bare `portless` still prints help for backwards compat.
+ */
+async function handleDefaultMode(globalScript?: string): Promise<boolean> {
+  const cwd = process.cwd();
+
+  // Workspace root: multi-app mode
+  const wsRoot = findWorkspaceRoot(cwd);
+  if (wsRoot === cwd) {
+    await handleDefaultMulti(cwd, globalScript);
+    return true;
+  }
+
+  // Single-app mode requires portless.json or --script to activate.
+  const appConfig = loadAppConfig(cwd);
+  if (!appConfig && !globalScript) return false;
+
+  const scriptName = globalScript ?? appConfig?.script ?? "dev";
+  if (hasScript(scriptName, cwd)) {
+    await handleDefaultSingle(cwd, scriptName);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Single-app mode: run one package through the proxy.
+ */
+async function handleDefaultSingle(cwd: string, scriptName: string): Promise<void> {
+  const appConfig = loadAppConfig(cwd);
+
+  const resolved = resolveScript(scriptName, cwd);
+  if (!resolved) {
+    console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
+    process.exit(1);
+  }
+
+  let baseName: string;
+  let nameSource: string;
+
+  if (appConfig?.name) {
+    baseName = appConfig.name
+      .split(".")
+      .map((label) => truncateLabel(label))
+      .join(".");
+    nameSource = "portless.json";
+  } else {
+    const inferred = inferProjectName(cwd);
+    baseName = inferred.name;
+    nameSource = inferred.source;
+  }
+
+  const worktree = detectWorktreePrefix(cwd);
+  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+
+  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(colors.yellow(msg)),
+  });
+  await runApp(
+    store,
+    port,
+    dir,
+    effectiveName,
+    resolved,
+    tls,
+    tld,
+    false,
+    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    appConfig?.appPort,
+    lanMode,
+    lanIp
+  );
+}
+
+/**
+ * Multi-app mode: discover workspace packages and run all that have
+ * the target script through the proxy concurrently.
+ */
+async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promise<void> {
+  const loaded = loadConfig(wsRoot);
+  const packages = discoverWorkspacePackages(wsRoot);
+
+  if (packages.length === 0) {
+    console.error(colors.red("Error: No workspace packages found."));
+    process.exit(1);
+  }
+
+  const scriptName = globalScript ?? loaded?.config.script ?? "dev";
+
+  interface AppEntry {
+    pkg: WorkspacePackage;
+    name: string;
+    commandArgs: string[];
+    appPort?: number;
+  }
+
+  const apps: AppEntry[] = [];
+
+  for (const pkg of packages) {
+    if (!pkg.scripts[scriptName]) continue;
+
+    const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
+    const appOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
+
+    const effectiveScript = appOverride?.script ?? scriptName;
+    const resolved = resolveScript(effectiveScript, pkg.dir);
+    if (!resolved) continue;
+
+    let name: string;
+    if (appOverride?.name) {
+      name = appOverride.name
+        .split(".")
+        .map((label) => truncateLabel(label))
+        .join(".");
+    } else if (pkg.name) {
+      const sanitized = sanitizeForHostname(pkg.name);
+      name = sanitized || rel.replace(/\//g, "-");
+    } else {
+      name = rel.replace(/\//g, "-");
+    }
+
+    apps.push({ pkg, name, commandArgs: resolved, appPort: appOverride?.appPort });
+  }
+
+  if (apps.length === 0) {
+    console.error(colors.yellow(`No workspace packages have a "${scriptName}" script.`));
+    process.exit(1);
+  }
+
+  console.log(chalk.blue.bold(`\nportless\n`));
+  console.log(chalk.gray(`Starting ${apps.length} app${apps.length === 1 ? "" : "s"}...\n`));
+
+  const { dir, port, tls, tld } = await discoverState();
+
+  // Auto-start proxy if needed (reuse the first app to trigger auto-start via runApp)
+  // For multi-app, we spawn each as a separate child process.
+  const children: ReturnType<typeof spawn>[] = [];
+
+  for (const app of apps) {
+    const store = new RouteStore(dir, {
+      onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
+    });
+
+    const appPort = app.appPort ?? (await findFreePort());
+    const protocol = tls ? "https" : "http";
+    const portSuffix = (tls && port === 443) || (!tls && port === 80) ? "" : `:${port}`;
+    const url = `${protocol}://${app.name}.${tld}${portSuffix}`;
+
+    const hostname = parseHostname(app.name, tld);
+
+    store.addRoute(hostname, appPort, process.pid);
+
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PORT: String(appPort),
+      HOST: "127.0.0.1",
+      PORTLESS_URL: url,
+    };
+
+    if (tls) {
+      const caPath = path.join(dir, "ca.pem");
+      if (fs.existsSync(caPath)) {
+        env.NODE_EXTRA_CA_CERTS = caPath;
+      }
+    }
+
+    const commandStr = app.commandArgs.join(" ");
+    console.log(
+      chalk.cyan(`  ${app.name}`),
+      chalk.gray(`-> ${url}`),
+      chalk.gray(`(${commandStr})`)
+    );
+
+    const child = isWindows
+      ? spawn("cmd.exe", ["/d", "/s", "/c", commandStr], {
+          stdio: ["ignore", "pipe", "pipe"],
+          env,
+          cwd: app.pkg.dir,
+        })
+      : spawn("/bin/sh", ["-c", commandStr], {
+          stdio: ["ignore", "pipe", "pipe"],
+          env,
+          cwd: app.pkg.dir,
+        });
+
+    const prefix = chalk.cyan(`[${app.name}]`);
+
+    child.stdout?.on("data", (data: Buffer) => {
+      for (const line of data.toString().split("\n")) {
+        if (line) process.stdout.write(`${prefix} ${line}\n`);
+      }
+    });
+
+    child.stderr?.on("data", (data: Buffer) => {
+      for (const line of data.toString().split("\n")) {
+        if (line) process.stderr.write(`${prefix} ${line}\n`);
+      }
+    });
+
+    child.on("exit", () => {
+      try {
+        store.removeRoute(hostname);
+      } catch {
+        // non-fatal
+      }
+    });
+
+    children.push(child);
+  }
+
+  console.log("");
+
+  const cleanup = () => {
+    for (const child of children) {
+      try {
+        child.kill("SIGTERM");
+      } catch {
+        // already dead
+      }
+    }
+  };
+
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  // Wait for all children to exit
+  await Promise.all(
+    children.map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          child.on("exit", () => resolve());
+        })
+    )
+  );
+}
+
+async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
   const parsed = parseRunArgs(args);
+
+  const appConfig = loadAppConfig();
+
+  // Script/command fallback: only resolve from config when a portless.json
+  // exists or --script was passed. Without config, `portless run` with no
+  // args still errors (backwards compatible).
+  if (parsed.commandArgs.length === 0 && (appConfig || globalScript)) {
+    const scriptName = globalScript ?? appConfig?.script ?? "dev";
+    const resolved = resolveScript(scriptName, process.cwd());
+    if (resolved) {
+      parsed.commandArgs = resolved;
+    }
+  }
 
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
@@ -2290,10 +2582,20 @@ async function handleRunMode(args: string[]): Promise<void> {
       .map((label) => truncateLabel(label))
       .join(".");
     nameSource = "--name flag";
+  } else if (appConfig?.name) {
+    baseName = appConfig.name
+      .split(".")
+      .map((label) => truncateLabel(label))
+      .join(".");
+    nameSource = "portless.json";
   } else {
     const inferred = inferProjectName();
     baseName = inferred.name;
     nameSource = inferred.source;
+  }
+
+  if (!parsed.appPort && appConfig?.appPort) {
+    parsed.appPort = appConfig.appPort;
   }
 
   const worktree = detectWorktreePrefix();
@@ -2329,6 +2631,13 @@ async function handleNamedMode(args: string[]): Promise<void> {
     console.error(colors.blue("Example:"));
     console.error(colors.cyan("  portless myapp next dev"));
     process.exit(1);
+  }
+
+  if (!parsed.appPort) {
+    const appConfig = loadAppConfig();
+    if (appConfig?.appPort) {
+      parsed.appPort = appConfig.appPort;
+    }
   }
 
   // Truncate individual labels that exceed the DNS limit, same as handleRunMode.
@@ -2435,6 +2744,15 @@ async function main() {
     process.env.PORTLESS_LAN = "1";
   }
 
+  // --script flag: override the default "dev" script for zero-arg mode.
+  const scriptResult = stripGlobalFlag("--script", true);
+  if (scriptResult === false) {
+    console.error(colors.red("Error: --script requires a script name."));
+    console.error(colors.cyan("  portless --script start"));
+    process.exit(1);
+  }
+  const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
+
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
   // subcommand (run, alias, hosts, list, trust, clean, proxy).
@@ -2476,7 +2794,16 @@ async function main() {
     skipPortless &&
     (isRunCommand || (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean"))
   ) {
-    const { commandArgs } = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    const parsed = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    let commandArgs = parsed.commandArgs;
+    if (commandArgs.length === 0 && isRunCommand) {
+      const appConfig = loadAppConfig();
+      if (appConfig || globalScript) {
+        const scriptName = globalScript ?? appConfig?.script ?? "dev";
+        const resolved = resolveScript(scriptName, process.cwd());
+        if (resolved) commandArgs = resolved;
+      }
+    }
     if (commandArgs.length === 0) {
       console.error(colors.red("Error: No command provided."));
       process.exit(1);
@@ -2489,7 +2816,13 @@ async function main() {
   // When `run` is used, skip these so args like "list" or "--help" are treated
   // as child-command tokens, not portless subcommands.
   if (!isRunCommand) {
-    if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+    if (args[0] === "--help" || args[0] === "-h") {
+      printHelp();
+      return;
+    }
+    if (args.length === 0) {
+      const handled = await handleDefaultMode(globalScript);
+      if (handled) return;
       printHelp();
       return;
     }
@@ -2529,7 +2862,7 @@ async function main() {
 
   // Run app (either `portless run <cmd>` or `portless <name> <cmd>`)
   if (isRunCommand) {
-    await handleRunMode(args);
+    await handleRunMode(args, globalScript);
   } else {
     await handleNamedMode(args);
   }

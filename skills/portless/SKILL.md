@@ -54,7 +54,51 @@ In non-interactive environments (no TTY, or `CI=1`), portless exits with a descr
 
 ## Integration Patterns
 
+### Zero-config (recommended)
+
+Create a `portless.json` with the app name. Your `package.json` scripts stay portless-free:
+
+```json
+// portless.json
+{ "name": "myapp" }
+```
+
+```json
+// package.json
+{ "scripts": { "dev": "next dev" } }
+```
+
+```bash
+portless        # -> runs "dev" script through proxy as https://myapp.localhost
+pnpm dev        # -> works without portless, plain "next dev"
+```
+
+Without a `portless.json`, the name is inferred from `package.json`. The script defaults to `"dev"`.
+
+### Monorepo (pnpm workspace)
+
+One `portless.json` at the repo root. Portless reads `pnpm-workspace.yaml` to discover packages:
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "api.myapp" }
+  }
+}
+```
+
+```bash
+portless                  # from repo root: start all packages with a "dev" script
+cd apps/web && portless   # start just one package
+portless --script start   # run "start" instead of "dev"
+```
+
+The `apps` map is optional and only provides name overrides. Unlisted packages auto-discover with inferred names.
+
 ### package.json scripts
+
+You can still use portless directly in scripts:
 
 ```json
 {
@@ -173,7 +217,10 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 
 | Command                                | Description                                                    |
 | -------------------------------------- | -------------------------------------------------------------- |
-| `portless run <cmd> [args...]`         | Infer name from project, run through proxy (auto-starts)       |
+| `portless`                             | With portless.json: run dev script through proxy               |
+| `portless`                             | From monorepo root: run all workspace packages                 |
+| `portless --script <name>`             | Run a specific package.json script (default: dev)              |
+| `portless run [cmd] [args...]`         | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies)    |
 | `portless <name> <cmd> [args...]`      | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                  | Print URL for a service (for cross-service wiring)             |
@@ -203,6 +250,21 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 | `portless --version` / `-v`            | Show version                                                   |
 
 **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## portless.json
+
+Optional config file. Portless walks up from cwd to find it.
+
+| Field     | Type   | Default                    | Description                                              |
+| --------- | ------ | -------------------------- | -------------------------------------------------------- |
+| `name`    | string | inferred from package.json | Base app name (worktree prefix still applies)            |
+| `script`  | string | `"dev"`                    | Name of a package.json script to run                     |
+| `appPort` | number | auto-assigned              | Fixed port for the child process                         |
+| `apps`    | object |                            | Overrides for workspace packages, keyed by relative path |
+
+Each `apps` entry has the same shape (`name`, `script`, `appPort`). When `apps` is present, top-level fields apply only in single-app mode.
+
+Precedence: CLI flags > portless.json > package.json inference > defaults.
 
 ## Troubleshooting
 

@@ -38,7 +38,68 @@ When auto-starting, portless reuses the configuration (port, TLS, TLD) from the 
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners like turborepo and CI scripts fail early with a clear message.
 
+## Configuration
+
+Create a `portless.json` to enable zero-arg mode. Your `package.json` scripts stay portless-free:
+
+```json
+// portless.json
+{ "name": "myapp" }
+```
+
+```json
+// package.json
+{ "scripts": { "dev": "next dev" } }
+```
+
+```bash
+portless        # -> reads config, runs "dev" script, https://myapp.localhost
+pnpm dev        # -> works without portless, plain "next dev"
+```
+
+The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`.
+
+### Monorepo
+
+One `portless.json` at the repo root covers all workspace packages. Portless reads `pnpm-workspace.yaml` to discover packages:
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "api.myapp" }
+  }
+}
+```
+
+```bash
+portless        # from repo root: starts all workspace packages with a "dev" script
+cd apps/web && portless   # start just one package
+```
+
+The `apps` map is optional and only needed for name overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
+
+### Config fields
+
+| Field     | Type   | Default  | Description                                               |
+| --------- | ------ | -------- | --------------------------------------------------------- |
+| `name`    | string | inferred | Base app name. Worktree prefix still applies.             |
+| `script`  | string | `"dev"`  | Name of a `package.json` script to run.                   |
+| `appPort` | number | auto     | Fixed port for the child process.                         |
+| `apps`    | object |          | Overrides for workspace packages, keyed by relative path. |
+
+### --script flag
+
+Override the default script for a single invocation:
+
+```bash
+portless --script start       # run "start" instead of "dev"
+portless --script test        # run "test" instead of "dev"
+```
+
 ## Use in package.json
+
+You can still use portless in `package.json` scripts:
 
 ```json
 {
@@ -47,6 +108,18 @@ In non-interactive environments (no TTY, or `CI=1`), portless exits with a descr
   }
 }
 ```
+
+With a `portless.json`, you can simplify to:
+
+```json
+{
+  "scripts": {
+    "dev": "next dev"
+  }
+}
+```
+
+Then run `portless` or `portless run` to go through the proxy.
 
 ## Subdomains
 
@@ -163,7 +236,9 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 ## Commands
 
 ```bash
-portless run [--name <name>] <cmd> [args...]  # Infer name (or override with --name), run through proxy
+portless                        # With portless.json: run dev script through proxy
+portless                        # From monorepo root: run all workspace packages
+portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
@@ -200,6 +275,7 @@ portless proxy stop              # Stop the proxy
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name

@@ -1,6 +1,95 @@
 # Configuration
 
-Portless is configured through environment variables. No config files needed.
+## portless.json
+
+Create an optional `portless.json` to enable zero-arg mode. Your `package.json` scripts stay portless-free:
+
+```json
+// portless.json
+{ "name": "myapp" }
+```
+
+```json
+// package.json
+{ "scripts": { "dev": "next dev" } }
+```
+
+```bash
+portless        # reads config, runs "dev" script, https://myapp.localhost
+pnpm dev        # works without portless, plain "next dev"
+```
+
+Without a `portless.json`, the name is inferred from `package.json` and the script defaults to `"dev"`.
+
+### Fields
+
+<table>
+  <thead>
+    <tr>
+      <th>Field</th>
+      <th>Type</th>
+      <th>Default</th>
+      <th>Description</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td>`name`</td>
+      <td>string</td>
+      <td>inferred</td>
+      <td>Base app name. Worktree prefix still applies.</td>
+    </tr>
+    <tr>
+      <td>`script`</td>
+      <td>string</td>
+      <td>`"dev"`</td>
+      <td>Name of a `package.json` script to run.</td>
+    </tr>
+    <tr>
+      <td>`appPort`</td>
+      <td>number</td>
+      <td>auto</td>
+      <td>Fixed port for the child process.</td>
+    </tr>
+    <tr>
+      <td>`apps`</td>
+      <td>object</td>
+      <td></td>
+      <td>Overrides for workspace packages, keyed by relative path.</td>
+    </tr>
+  </tbody>
+</table>
+
+Each `apps` entry has the same shape (`name`, `script`, `appPort`). When `apps` is present, top-level fields apply only in single-app mode.
+
+### Monorepo
+
+For pnpm workspaces, one `portless.json` at the repo root covers all packages. Portless reads `pnpm-workspace.yaml` to discover them:
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "api.myapp" }
+  }
+}
+```
+
+```bash
+portless                  # from repo root: start all packages with a "dev" script
+cd apps/web && portless   # start just one package
+portless --script start   # run "start" instead of "dev"
+```
+
+The `apps` map is optional and only needed for overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
+
+### Precedence
+
+For `name`: CLI `--name` flag > `portless.json` > `package.json` inference.
+
+For `script`: CLI `--script` flag > `portless.json` > default `"dev"`.
+
+For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `portless.json` > auto-assigned.
 
 ## Environment variables
 

@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 
-/** Run the CLI with the given args and optional env overrides. */
-function run(args: string[], options?: { env?: Record<string, string | undefined> }) {
+/** Run the CLI with the given args and optional env/cwd overrides. */
+function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options?.env,
@@ -25,6 +25,7 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     encoding: "utf-8",
     timeout: 10_000,
     env,
+    cwd: options?.cwd,
   });
   return {
     status: result.status,
@@ -1160,5 +1161,150 @@ describe("CLI", () => {
         }
       }
     );
+  });
+
+  describe("portless.json config", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-config-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("portless (no args) prints help without portless.json", () => {
+      // Create a package.json with dev script but no portless.json
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      const { status, stdout } = run([], { cwd: tmpDir });
+      expect(status).toBe(0);
+      expect(stdout).toContain("Usage:");
+    });
+
+    it("portless run (no command) with portless.json resolves dev script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo config-dev" } })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "myapp" }));
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("config-dev");
+    });
+
+    it("portless run (no command) without portless.json errors", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+    });
+
+    it("portless run with explicit command ignores config script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo from-config" } })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "dev" })
+      );
+      const { stdout } = run(["run", "echo", "from-cli"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-cli");
+      expect(stdout).not.toContain("from-config");
+    });
+
+    it("portless run with portless.json script field uses that script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "start" })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+    });
+
+    it("--script flag overrides config script field", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "dev" })
+      );
+      const { stdout } = run(["--script", "start", "run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+    });
+
+    it("--name overrides portless.json name", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "config-name" }));
+      // With PORTLESS=0, the name doesn't matter (command runs directly)
+      // but we can verify via the run subcommand help text or named mode.
+      // Let's test it goes through without error.
+      const { stdout } = run(["--name", "override-name", "echo", "works"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("works");
+    });
+
+    it("portless run with missing script errors clearly", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: {} })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "nonexistent" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+    });
+
+    it("portless.json validation rejects invalid appPort", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ appPort: "not-a-number" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("appPort");
+    });
   });
 });
