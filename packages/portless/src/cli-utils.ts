@@ -484,7 +484,11 @@ export async function discoverState(): Promise<{
   for (const port of probePorts) {
     if (await isProxyRunning(port)) {
       const dir = resolveStateDir(port);
-      const tls = readTlsMarker(dir);
+      const markerTls = readTlsMarker(dir);
+      // State files in /tmp may have been cleaned while the daemon kept
+      // running.  When the marker is missing, infer TLS from the port:
+      // 443 is always HTTPS, 80 is always HTTP.
+      const tls = markerTls || port === getProtocolPort(true);
       const tld = readTldFromDir(dir);
       const lanIp = readLanMarker(dir);
       return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };

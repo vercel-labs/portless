@@ -66,6 +66,7 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScript,
+  resolveScriptCommand,
   hasScript,
   isServerCommand,
   loadPackagePortlessConfig,
@@ -2405,7 +2406,7 @@ async function handleDefaultSingle(
   scriptName: string,
   appConfig: AppConfig | null
 ): Promise<void> {
-  const resolved = resolveScript(scriptName, cwd);
+  const resolved = resolveScriptCommand(scriptName, cwd);
   if (!resolved) {
     console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
     process.exit(1);
@@ -2635,10 +2636,13 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
     const effectiveScript = appOverride.script ?? scriptName;
     if (!pkg.scripts[effectiveScript]) continue;
 
-    const resolved = resolveScript(effectiveScript, pkg.dir);
-    if (!resolved) continue;
+    const rawScript = resolveScript(effectiveScript, pkg.dir);
+    if (!rawScript) continue;
 
-    const proxied = appOverride.proxy ?? isServerCommand(resolved);
+    const commandArgs = resolveScriptCommand(effectiveScript, pkg.dir);
+    if (!commandArgs) continue;
+
+    const proxied = appOverride.proxy ?? isServerCommand(rawScript);
 
     let name: string;
     if (appOverride.name) {
@@ -2657,7 +2661,7 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
       name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
     }
 
-    apps.push({ pkg, name, commandArgs: resolved, appPort: appOverride.appPort, proxied });
+    apps.push({ pkg, name, commandArgs, appPort: appOverride.appPort, proxied });
   }
 
   if (apps.length === 0) {
@@ -2680,6 +2684,10 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
       port = ensureResult.state.port;
       tls = ensureResult.state.tls;
       tld = ensureResult.state.tld;
+    } else if (!("skipped" in ensureResult && ensureResult.skipped)) {
+      // Proxy was already running -- re-discover to pick up current state
+      // (markers may have been recreated since the first call).
+      ({ dir, port, tls, tld } = await discoverState());
     }
   }
 
@@ -2734,7 +2742,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   // args still errors (backwards compatible).
   if (parsed.commandArgs.length === 0 && (appConfig || globalScript)) {
     const scriptName = globalScript ?? appConfig?.script ?? "dev";
-    const resolved = resolveScript(scriptName, process.cwd());
+    const resolved = resolveScriptCommand(scriptName, process.cwd());
     if (resolved) {
       parsed.commandArgs = resolved;
     }
@@ -2978,7 +2986,7 @@ async function main() {
       const appConfig = loadAppConfig();
       if (appConfig || globalScript) {
         const scriptName = globalScript ?? appConfig?.script ?? "dev";
-        const resolved = resolveScript(scriptName, process.cwd());
+        const resolved = resolveScriptCommand(scriptName, process.cwd());
         if (resolved) commandArgs = resolved;
       }
     }

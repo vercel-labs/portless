@@ -6,6 +6,8 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScript,
+  resolveScriptCommand,
+  detectPackageManager,
   hasScript,
   splitCommand,
   isServerCommand,
@@ -520,6 +522,109 @@ describe("isServerCommand", () => {
 
   it("returns false for empty args", () => {
     expect(isServerCommand([])).toBe(false);
+  });
+});
+
+describe("detectPackageManager", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpDir);
+  });
+
+  it("detects pnpm from pnpm-lock.yaml", () => {
+    fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");
+    expect(detectPackageManager(tmpDir)).toBe("pnpm");
+  });
+
+  it("detects yarn from yarn.lock", () => {
+    fs.writeFileSync(path.join(tmpDir, "yarn.lock"), "");
+    expect(detectPackageManager(tmpDir)).toBe("yarn");
+  });
+
+  it("detects bun from bun.lockb", () => {
+    fs.writeFileSync(path.join(tmpDir, "bun.lockb"), "");
+    expect(detectPackageManager(tmpDir)).toBe("bun");
+  });
+
+  it("detects npm from package-lock.json", () => {
+    fs.writeFileSync(path.join(tmpDir, "package-lock.json"), "{}");
+    expect(detectPackageManager(tmpDir)).toBe("npm");
+  });
+
+  it("reads packageManager field from package.json", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ name: "test", packageManager: "pnpm@9.15.4" })
+    );
+    expect(detectPackageManager(tmpDir)).toBe("pnpm");
+  });
+
+  it("prefers packageManager field over lock file", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ name: "test", packageManager: "yarn@4.0.0" })
+    );
+    fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");
+    expect(detectPackageManager(tmpDir)).toBe("yarn");
+  });
+
+  it("walks up to find lock file in parent", () => {
+    fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");
+    const subDir = path.join(tmpDir, "packages", "web");
+    fs.mkdirSync(subDir, { recursive: true });
+    expect(detectPackageManager(subDir)).toBe("pnpm");
+  });
+
+  it("defaults to npm when nothing found", () => {
+    expect(detectPackageManager(tmpDir)).toBe("npm");
+  });
+});
+
+describe("resolveScriptCommand", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpDir);
+  });
+
+  it("returns PM-delegated command when script exists", () => {
+    fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ scripts: { dev: "next dev" } })
+    );
+    expect(resolveScriptCommand("dev", tmpDir)).toEqual(["pnpm", "run", "dev"]);
+  });
+
+  it("returns null when script is missing", () => {
+    fs.writeFileSync(path.join(tmpDir, "pnpm-lock.yaml"), "");
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ scripts: { build: "next build" } })
+    );
+    expect(resolveScriptCommand("dev", tmpDir)).toBeNull();
+  });
+
+  it("returns null when package.json is missing", () => {
+    expect(resolveScriptCommand("dev", tmpDir)).toBeNull();
+  });
+
+  it("uses detected package manager", () => {
+    fs.writeFileSync(path.join(tmpDir, "yarn.lock"), "");
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ scripts: { dev: "next dev" } })
+    );
+    expect(resolveScriptCommand("dev", tmpDir)).toEqual(["yarn", "run", "dev"]);
   });
 });
 

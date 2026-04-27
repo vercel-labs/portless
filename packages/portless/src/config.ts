@@ -155,6 +155,65 @@ export function hasScript(scriptName: string, dir: string): boolean {
   }
 }
 
+export type PackageManager = "npm" | "pnpm" | "yarn" | "bun";
+
+const LOCK_FILES: [string, PackageManager][] = [
+  ["pnpm-lock.yaml", "pnpm"],
+  ["yarn.lock", "yarn"],
+  ["bun.lockb", "bun"],
+  ["bun.lock", "bun"],
+  ["package-lock.json", "npm"],
+];
+
+/**
+ * Detect the package manager for a project by walking up from `cwd`.
+ * Checks `packageManager` field in package.json first, then lock files.
+ * Defaults to `npm` if nothing is found.
+ */
+export function detectPackageManager(cwd: string): PackageManager {
+  let dir = cwd;
+  for (;;) {
+    const pkgPath = path.join(dir, "package.json");
+    try {
+      const raw = fs.readFileSync(pkgPath, "utf-8");
+      const pkg = JSON.parse(raw);
+      if (typeof pkg.packageManager === "string") {
+        const name = pkg.packageManager.split("@")[0] as string;
+        if (name === "pnpm" || name === "yarn" || name === "bun" || name === "npm") {
+          return name;
+        }
+      }
+    } catch {
+      // no package.json here
+    }
+
+    for (const [file, pm] of LOCK_FILES) {
+      try {
+        fs.accessSync(path.join(dir, file), fs.constants.F_OK);
+        return pm;
+      } catch {
+        // not found
+      }
+    }
+
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return "npm";
+}
+
+/**
+ * Resolve a named script to a package-manager-delegated command.
+ * Returns e.g. `["pnpm", "run", "dev"]` instead of parsing the script contents.
+ * Returns null if the script doesn't exist.
+ */
+export function resolveScriptCommand(scriptName: string, packageDir: string): string[] | null {
+  if (!hasScript(scriptName, packageDir)) return null;
+  const pm = detectPackageManager(packageDir);
+  return [pm, "run", scriptName];
+}
+
 /** Split a command string on whitespace, respecting quotes and backslash escapes. */
 export function splitCommand(command: string): string[] {
   const args: string[] = [];

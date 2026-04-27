@@ -98,6 +98,19 @@ portless --script start   # run "start" instead of "dev"
 
 The `apps` map is optional and only provides name overrides. Unlisted packages auto-discover with inferred names.
 
+### Turborepo
+
+For turborepo projects, use portless as the `dev` script with the real command in a separate script:
+
+```json
+{
+  "scripts": { "dev": "portless", "dev:app": "next dev" },
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+`pnpm dev` runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy.
+
 ### package.json scripts
 
 You can still use portless directly in scripts:
