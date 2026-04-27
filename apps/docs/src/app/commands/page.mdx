@@ -3,8 +3,8 @@
 ## Run an app
 
 ```bash
-portless run [--name <name>] <cmd> [args...]
-portless <name> <cmd> [args...]
+portless run [--name <name>] [--path <prefix>] <cmd> [args...]
+portless <name> [--path <prefix>] <cmd> [args...]
 ```
 
 `portless run` infers the project name from package.json, git root, or directory name. Use `--name` to override the inferred name while still applying worktree prefixes.
@@ -36,6 +36,10 @@ portless docs.myapp next dev
       <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT`.</td>
     </tr>
     <tr>
+      <td>`--path <prefix>`</td>
+      <td>URL path prefix for path-based routing (e.g. `/api`). Also configurable via `PORTLESS_PATH`.</td>
+    </tr>
+    <tr>
       <td>`--force`</td>
       <td>Override an existing route registered by another process</td>
     </tr>
@@ -54,14 +58,14 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
-Applies worktree prefix detection by default. Use `--no-worktree` to skip it.
+Applies worktree prefix detection by default. Use `--no-worktree` to skip it. Use `--path <prefix>` to include a path prefix in the URL.
 
 ## Alias (static routes)
 
 ```bash
-portless alias <name> <port>
+portless alias <name> <port> [--path <prefix>]
 portless alias <name> <port> --force
-portless alias --remove <name>
+portless alias --remove <name> [--path <prefix>]
 ```
 
 Register a route for a service not managed by portless (e.g. a Docker container). Aliases persist across stale-route cleanup.

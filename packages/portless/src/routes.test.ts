@@ -399,4 +399,69 @@ describe("RouteStore", () => {
       expect(routes[0].hostname).toBe("contended.localhost");
     }, 10_000);
   });
+
+  describe("pathPrefix support", () => {
+    it("adds route with pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false, "/settings");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0]).toEqual({
+        hostname: "app.localhost",
+        port: 4001,
+        pid: process.pid,
+        pathPrefix: "/settings",
+      });
+    });
+
+    it("allows same hostname with different pathPrefixes", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/settings");
+      store.addRoute("app.localhost", 4003, process.pid, false, "/metrics");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(3);
+      const ports = routes.map((r) => r.port).sort();
+      expect(ports).toEqual([4001, 4002, 4003]);
+    });
+
+    it("detects conflict on same hostname + pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false, "/settings");
+      // Same PID re-registering replaces the route
+      store.addRoute("app.localhost", 4099, process.pid, false, "/settings");
+      const routes = store.loadRoutes();
+      const settingsRoute = routes.find((r) => r.pathPrefix === "/settings");
+      expect(settingsRoute?.port).toBe(4099);
+    });
+
+    it("removes route by hostname + pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/settings");
+      store.removeRoute("app.localhost", "/settings");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].port).toBe(4001);
+      expect(routes[0].pathPrefix).toBeUndefined();
+    });
+
+    it("removeRoute without pathPrefix only removes root route", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/settings");
+      store.removeRoute("app.localhost");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].pathPrefix).toBe("/settings");
+    });
+
+    it("loads routes.json with pathPrefix field from disk", () => {
+      store.ensureDir();
+      const routes = [
+        { hostname: "app.localhost", port: 4001, pid: process.pid },
+        { hostname: "app.localhost", port: 4002, pid: process.pid, pathPrefix: "/settings" },
+      ];
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const loaded = store.loadRoutes();
+      expect(loaded).toHaveLength(2);
+      expect(loaded[0].pathPrefix).toBeUndefined();
+      expect(loaded[1].pathPrefix).toBe("/settings");
+    });
+  });
 });
