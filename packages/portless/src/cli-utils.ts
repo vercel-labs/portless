@@ -704,12 +704,12 @@ function collectBinPaths(cwd: string): string[] {
 /**
  * Build a PATH string with `node_modules/.bin` directories prepended.
  */
-function augmentedPath(env: NodeJS.ProcessEnv | undefined): string {
+export function augmentedPath(env: NodeJS.ProcessEnv | undefined, cwd?: string): string {
   const source = env ?? process.env;
   // On Windows, the PATH variable may be stored as "Path" (case-insensitive in
   // process.env but case-sensitive in plain objects created via spread).
   const base = source.PATH ?? source.Path ?? "";
-  const bins = collectBinPaths(process.cwd());
+  const bins = collectBinPaths(cwd ?? process.cwd());
   // Ensure node's own directory is in PATH so .cmd wrappers in node_modules/.bin
   // can locate the node executable (fixes Windows "node not recognized" errors).
   const nodeBin = path.dirname(process.execPath);

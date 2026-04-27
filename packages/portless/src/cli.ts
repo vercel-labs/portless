@@ -46,6 +46,7 @@ import {
   readTlsMarker,
   resolveStateDir,
   spawnCommand,
+  augmentedPath,
   validateTld,
   waitForProxy,
   writeLanMarker,
@@ -2449,7 +2450,7 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
       } else {
         pkgLabel = rel.replace(/\//g, "-");
       }
-      name = `${pkgLabel}.${projectName}`;
+      name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
     }
 
     apps.push({ pkg, name, commandArgs: resolved, appPort: appOverride?.appPort });
@@ -2478,9 +2479,13 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
     let hostname: string | null = null;
     let displayUrl: string;
 
+    // Augment PATH so local binaries (next, tsup, vite, etc.) are found.
+    const pkgEnv = { ...process.env };
+    pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
+
     if (usesPortless) {
       // Script already invokes portless — let it handle its own routing.
-      env = { ...process.env };
+      env = pkgEnv;
       displayUrl = "(managed by portless)";
     } else {
       store = new RouteStore(dir, {
@@ -2497,7 +2502,7 @@ async function handleDefaultMulti(wsRoot: string, globalScript?: string): Promis
       store.addRoute(hostname, appPort, process.pid);
 
       env = {
-        ...process.env,
+        ...pkgEnv,
         PORT: String(appPort),
         HOST: "127.0.0.1",
         PORTLESS_URL: url,
