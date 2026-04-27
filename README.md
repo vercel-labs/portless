@@ -81,6 +81,8 @@ cd apps/web && portless   # start just one package
 
 The `apps` map is optional and only needed for name overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
 
+Without an `apps` map, hostnames follow the `<package>.<project>.localhost` convention. The project name comes from the most common npm scope across workspace packages (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it gets the bare `<project>.localhost` without duplication.
+
 ### Config fields
 
 | Field     | Type    | Default  | Description                                               |
@@ -90,6 +92,29 @@ The `apps` map is optional and only needed for name overrides. Packages not list
 | `appPort` | number  | auto     | Fixed port for the child process.                         |
 | `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
 | `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
+| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+
+### package.json "portless" key
+
+Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": "myapp"
+}
+```
+
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+The `package.json` `"portless"` key takes precedence over `portless.json` app entries but is overridden by CLI flags.
 
 ### --script flag
 
@@ -377,7 +402,7 @@ devServer: {
 }
 ```
 
-Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=/tmp/portless/ca.pem` (or `~/.portless/ca.pem` when the proxy runs on a non-privileged port like 1355). Alternatively, use `--no-tls` for plain HTTP.
+Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
 
 Portless detects this misconfiguration and responds with `508 Loop Detected` along with a message pointing to this fix.
 

@@ -68,10 +68,38 @@ Without a `portless.json`, the name is inferred from `package.json` and the scri
       <td></td>
       <td>Overrides for workspace packages, keyed by relative path.</td>
     </tr>
+    <tr>
+      <td>`turbo`</td>
+      <td>boolean</td>
+      <td>`true`</td>
+      <td>Set `false` to use direct spawning instead of turborepo in multi-app mode.</td>
+    </tr>
   </tbody>
 </table>
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+
+### package.json "portless" key
+
+Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": "myapp"
+}
+```
+
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+The `package.json` `"portless"` key takes precedence over `portless.json` app entries but is overridden by CLI flags.
 
 ### Monorepo
 
@@ -93,6 +121,8 @@ portless --script start   # run "start" instead of "dev"
 ```
 
 The `apps` map is optional and only needed for overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
+
+Without an `apps` map, hostnames follow the `<package>.<project>.localhost` convention. The project name comes from the most common npm scope across workspace packages (e.g. `@myorg/web` and `@myorg/api` produce project name `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it gets the bare `<project>.localhost` without duplication.
 
 ### Turborepo
 
@@ -166,7 +196,7 @@ For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.js
     <tr>
       <td>`PORTLESS_STATE_DIR`</td>
       <td>Override the state directory</td>
-      <td>see below</td>
+      <td>`~/.portless`</td>
     </tr>
     <tr>
       <td>`PORTLESS`</td>
@@ -178,32 +208,7 @@ For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.js
 
 ## State directory
 
-Portless stores state (routes, PID file, port file, TLS marker) in a directory that depends on the proxy port:
-
-<table>
-  <thead>
-    <tr>
-      <th>Condition</th>
-      <th>Path</th>
-    </tr>
-  </thead>
-  <tbody>
-    <tr>
-      <td>Port below 1024 (sudo, macOS/Linux)</td>
-      <td>`/tmp/portless`</td>
-    </tr>
-    <tr>
-      <td>Port 1024+ (no sudo)</td>
-      <td>`~/.portless`</td>
-    </tr>
-    <tr>
-      <td>Windows (any port)</td>
-      <td>`~/.portless`</td>
-    </tr>
-  </tbody>
-</table>
-
-Override with `PORTLESS_STATE_DIR`.
+Portless stores state (routes, PID file, port file, TLS marker) in `~/.portless` on all platforms. Override with `PORTLESS_STATE_DIR`.
 
 ## State files
 

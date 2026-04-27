@@ -98,6 +98,8 @@ portless --script start   # run "start" instead of "dev"
 
 The `apps` map is optional and only provides name overrides. Unlisted packages auto-discover with inferred names.
 
+Without an `apps` map, hostnames follow `<package>.<project>.localhost`. The project name comes from the most common npm scope (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it uses the bare `<project>.localhost`.
+
 ### Turborepo
 
 For turborepo projects, use portless as the `dev` script with the real command in a separate script:
@@ -169,13 +171,7 @@ Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automa
 
 ### State directory
 
-Portless stores its state (routes, PID file, port file) in a directory that depends on the proxy port:
-
-- **Port < 1024** (sudo required): `/tmp/portless` (macOS/Linux only)
-- **Port >= 1024** (no sudo): `~/.portless`
-- **Windows**: Always `~/.portless` (no privileged port concept)
-
-Override with the `PORTLESS_STATE_DIR` environment variable.
+Portless stores its state (routes, PID file, port file) in `~/.portless`. Override with the `PORTLESS_STATE_DIR` environment variable.
 
 ### Environment variables
 
@@ -277,8 +273,23 @@ Optional config file. Portless looks for it in the current directory.
 | `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
 | `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
 | `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
+| `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+
+### package.json "portless" key
+
+Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+
+```json
+{ "portless": "myapp" }
+```
+
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+
+```json
+{ "portless": { "name": "myapp", "script": "dev:app" } }
+```
 
 Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.json app entry > defaults.
 
@@ -367,7 +378,7 @@ proxy: {
 }
 ```
 
-Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=/tmp/portless/ca.pem` (or `~/.portless/ca.pem` when the proxy runs on a non-privileged port like 1355). Alternatively, use `--no-tls` for plain HTTP.
+Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
 
 ### Requirements
 
