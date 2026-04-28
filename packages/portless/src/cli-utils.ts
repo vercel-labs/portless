@@ -881,6 +881,7 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
   npx: [],
   bunx: [],
   pnpx: [],
+  npm: ["exec"],
   yarn: ["dlx", "exec"],
   pnpm: ["dlx", "exec"],
 };

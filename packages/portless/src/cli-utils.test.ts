@@ -591,6 +591,12 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
+  it("injects flags for npm exec astro dev", () => {
+    const args = ["npm", "exec", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
   it("injects flags for npx rsbuild dev", () => {
     const args = ["npx", "rsbuild", "dev"];
     injectFrameworkFlags(args, 4567);
