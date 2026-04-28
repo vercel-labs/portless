@@ -755,8 +755,20 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   }
 }
 
-function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
+function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, asJson = false): void {
   const routes = store.loadRoutes();
+
+  if (asJson) {
+    const payload = routes.map((route) => ({
+      hostname: route.hostname,
+      url: formatUrl(route.hostname, proxyPort, tls),
+      target_port: route.port,
+      pid: route.pid,
+      kind: route.pid === 0 ? "alias" : "app",
+    }));
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    return;
+  }
 
   if (routes.length === 0) {
     console.log(colors.yellow("No active routes."));
@@ -1627,12 +1639,43 @@ ${colors.bold("Options:")}
   );
 }
 
-async function handleList(): Promise<void> {
+async function handleList(args: string[] = []): Promise<void> {
+  let asJson = false;
+  for (let i = 1; i < args.length; i++) {
+    if (args[i] === "--json") {
+      asJson = true;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      console.log(`
+${colors.bold("portless list")} - Show active routes.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless list")}              Show active routes (human-readable)
+  ${colors.cyan("portless list --json")}       Output routes as JSON for scripts/agents
+
+${colors.bold("Options:")}
+  --json                 Output a JSON array to stdout
+  --help, -h             Show this help
+
+${colors.bold("JSON fields:")}
+  hostname               The route hostname (e.g. myapp.localhost)
+  url                    Full URL served by the proxy
+  target_port            The local port the app listens on
+  pid                    Owning process PID (0 for alias)
+  kind                   "app" or "alias"
+`);
+      process.exit(0);
+    } else {
+      console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
+      console.error(colors.blue("Known flags: --json, --help"));
+      process.exit(1);
+    }
+  }
+
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  listRoutes(store, port, tls);
+  listRoutes(store, port, tls, asJson);
 }
 
 async function handleGet(args: string[]): Promise<void> {
@@ -1642,6 +1685,7 @@ ${colors.bold("portless get")} - Print the URL for a service.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}
+  ${colors.cyan("portless get <name> --json")}
 
 Constructs the URL using the same hostname and worktree logic as
 "portless run", then prints it to stdout. Useful for wiring services
@@ -1649,27 +1693,42 @@ together:
 
   BACKEND_URL=$(portless get backend)
 
+With --json, prints a JSON object suitable for consumption by other agents.
+
 ${colors.bold("Options:")}
   --no-worktree          Skip worktree prefix detection
+  --json                 Output a JSON object to stdout
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
   portless get backend                  # -> https://backend.localhost
   portless get backend                  # in worktree -> https://auth.backend.localhost
   portless get backend --no-worktree    # -> https://backend.localhost (skip worktree)
+  portless get backend --json           # -> {"name":"backend",...}
+
+${colors.bold("JSON fields:")}
+  name                   The requested service name
+  hostname               The resolved hostname (with any worktree prefix)
+  url                    Full URL served by the proxy
+  proxy_port             The proxy port
+  tls                    Whether HTTPS is enabled
+  tld                    The configured TLD
 `);
     process.exit(0);
   }
 
   let skipWorktree = false;
+  let asJson = false;
   const positional: string[] = [];
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--no-worktree") {
       skipWorktree = true;
+    } else if (args[i] === "--json") {
+      asJson = true;
     } else if (args[i].startsWith("-")) {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --no-worktree, --help"));
+      console.error(colors.blue("Known flags: --no-worktree, --json, --help"));
       process.exit(1);
     } else {
       positional.push(args[i]);
@@ -1692,6 +1751,20 @@ ${colors.bold("Examples:")}
   const { port, tls, tld } = await discoverState();
   const hostname = parseHostname(effectiveName, tld);
   const url = formatUrl(hostname, port, tls);
+
+  if (asJson) {
+    const payload = {
+      name,
+      hostname,
+      url,
+      proxy_port: port,
+      tls,
+      tld,
+    };
+    process.stdout.write(JSON.stringify(payload, null, 2) + "\n");
+    return;
+  }
+
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
@@ -3328,7 +3401,7 @@ async function main() {
       return;
     }
     if (args[0] === "list") {
-      await handleList();
+      await handleList(args);
       return;
     }
     if (args[0] === "get") {
