@@ -99,6 +99,20 @@ describe("normalizePathPrefix", () => {
   it("throws for paths with invalid characters", () => {
     expect(() => normalizePathPrefix("/set tings")).toThrow("Invalid path prefix");
   });
+
+  it("throws for paths with empty segments (//)", () => {
+    expect(() => normalizePathPrefix("/api//v1")).toThrow("empty path segments");
+  });
+
+  it("throws for paths containing .. segments", () => {
+    expect(() => normalizePathPrefix("/..")).toThrow('".." segments');
+    expect(() => normalizePathPrefix("/api/../etc")).toThrow('".." segments');
+  });
+
+  it("allows dots within a segment (not standalone ..)", () => {
+    expect(normalizePathPrefix("/v1.2.3")).toBe("/v1.2.3");
+    expect(normalizePathPrefix("/...")).toBe("/...");
+  });
 });
 
 describe("formatUrl", () => {

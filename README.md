@@ -208,7 +208,7 @@ portless myapp --path /api pnpm start    # serves /api/*
 portless myapp --path /docs next dev     # serves /docs/*
 ```
 
-The proxy uses longest-prefix matching to dispatch requests. The full request path is forwarded to the backend unchanged. Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain and route by path.
+The proxy uses longest-prefix matching to dispatch requests. The full request path is forwarded to the backend unchanged — `--path /api` does not strip `/api` before proxying, so your app must serve its routes under that prefix (or set a base path). Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain and route by path.
 
 Also available via environment variable: `PORTLESS_PATH=/api`.
 

@@ -1744,10 +1744,7 @@ ${colors.bold("Examples:")}
     const hostname = parseHostname(aliasName, tld);
     const routes = store.loadRoutes();
     const existing = routes.find(
-      (r) =>
-        r.hostname === hostname &&
-        r.pid === 0 &&
-        (r.pathPrefix || undefined) === (removePathPrefix || undefined)
+      (r) => r.hostname === hostname && r.pid === 0 && r.pathPrefix === removePathPrefix
     );
     if (!existing) {
       console.error(

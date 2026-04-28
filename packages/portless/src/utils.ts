@@ -57,6 +57,12 @@ export function normalizePathPrefix(input: string | undefined): string | undefin
       `Invalid path prefix "${input}": only letters, digits, hyphens, underscores, dots, and slashes are allowed`
     );
   }
+  if (p.includes("//")) {
+    throw new Error(`Invalid path prefix "${input}": empty path segments are not allowed`);
+  }
+  if (p.split("/").some((seg) => seg === "..")) {
+    throw new Error(`Invalid path prefix "${input}": ".." segments are not allowed`);
+  }
   return p;
 }
 

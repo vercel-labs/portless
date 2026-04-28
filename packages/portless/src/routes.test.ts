@@ -463,5 +463,32 @@ describe("RouteStore", () => {
       expect(loaded[0].pathPrefix).toBeUndefined();
       expect(loaded[1].pathPrefix).toBe("/settings");
     });
+
+    it("throws RouteConflictError when same (hostname, pathPrefix) is owned by another live process", () => {
+      const child = spawn("node", ["-e", "setTimeout(()=>{},60000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      const otherPid = child.pid!;
+      try {
+        store.addRoute("app.localhost", 4001, otherPid, false, "/settings");
+        // Different hostname or different prefix should not conflict.
+        expect(() => store.addRoute("app.localhost", 4002, process.pid)).not.toThrow();
+        expect(() =>
+          store.addRoute("app.localhost", 4003, process.pid, false, "/other")
+        ).not.toThrow();
+        // Same (hostname, pathPrefix) owned by the other live PID conflicts.
+        expect(() =>
+          store.addRoute("app.localhost", 4099, process.pid, false, "/settings")
+        ).toThrow(RouteConflictError);
+      } finally {
+        try {
+          process.kill(otherPid, "SIGTERM");
+        } catch {
+          // already dead
+        }
+      }
+    });
   });
 });
