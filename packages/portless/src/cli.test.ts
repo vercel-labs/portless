@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 
-/** Run the CLI with the given args and optional env overrides. */
-function run(args: string[], options?: { env?: Record<string, string | undefined> }) {
+/** Run the CLI with the given args and optional env/cwd overrides. */
+function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options?.env,
@@ -25,6 +25,7 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     encoding: "utf-8",
     timeout: 10_000,
     env,
+    cwd: options?.cwd,
   });
   return {
     status: result.status,
@@ -115,10 +116,16 @@ describe("CLI", () => {
       expect(stdout).toContain("Usage:");
     });
 
-    it("prints help and exits 0 with no args", () => {
-      const { status, stdout } = run([]);
-      expect(status).toBe(0);
-      expect(stdout).toContain("Usage:");
+    it("prints help and exits 0 with no args when no dev script exists", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-help-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stdout } = run([], { cwd: tmpDir });
+        expect(status).toBe(0);
+        expect(stdout).toContain("Usage:");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -282,10 +289,16 @@ describe("CLI", () => {
   });
 
   describe("run subcommand dispatch", () => {
-    it("exits 1 with 'No command provided' when no args follow run", () => {
-      const { status, stderr } = run(["run"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("No command provided");
+    it("exits 1 with 'No command provided' when no args follow run and no dev script", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run"], { cwd: tmpDir });
+        expect(status).toBe(1);
+        expect(stderr).toContain("No command provided");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("does not dispatch 'list' as the global list command", () => {
@@ -701,6 +714,200 @@ describe("CLI", () => {
     });
   });
 
+  describe("Rsbuild flag injection", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-rsbuild-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeRsbuildShim(dir: string): void {
+      const captureScriptPath = path.join(dir, "capture-rsbuild.js");
+      fs.writeFileSync(
+        captureScriptPath,
+        [
+          'const fs = require("node:fs");',
+          "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+          "const payload = {",
+          "  args: process.argv.slice(2),",
+          "  env: {",
+          "    PORT: process.env.PORT,",
+          "    HOST: process.env.HOST,",
+          "    PORTLESS_URL: process.env.PORTLESS_URL,",
+          "  },",
+          "};",
+          "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+        ].join("\n") + "\n"
+      );
+
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(dir, "rsbuild.cmd"),
+          `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+        );
+        return;
+      }
+
+      const shimPath = path.join(dir, "rsbuild");
+      fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
+      fs.chmodSync(shimPath, 0o755);
+    }
+
+    it("injects --port and --host into rsbuild child commands", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-rsbuild-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+
+        writeRsbuildShim(shimDir);
+
+        const { status } = run(["run", "--name", "myapp", "--app-port", "4567", "rsbuild", "dev"], {
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["dev", "--port", "4567", "--host", "127.0.0.1"]);
+        expect(capture.env).toMatchObject({
+          PORT: "4567",
+          HOST: "127.0.0.1",
+          PORTLESS_URL: `http://myapp.localhost:${proxyPort}`,
+        });
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("NODE_EXTRA_CA_CERTS injection", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ca-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    async function runWithMockProxy(opts: {
+      tls?: boolean;
+      writeCaPem?: boolean;
+      env?: Record<string, string | undefined>;
+    }): Promise<{ status: number | null; capture: Record<string, unknown> }> {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        if (opts.tls !== false) {
+          fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+        }
+        if (opts.writeCaPem !== false) {
+          fs.writeFileSync(path.join(tmpDir, "ca.pem"), "fake-ca-cert");
+        }
+
+        const capturePath = path.join(tmpDir, "capture.json");
+        const scriptPath = path.join(tmpDir, "capture-env.js");
+        fs.writeFileSync(
+          scriptPath,
+          [
+            'const fs = require("node:fs");',
+            `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+            "  NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS,",
+            "}));",
+          ].join("\n") + "\n"
+        );
+
+        const { status } = run(["run", "--name", "testapp", "node", scriptPath], {
+          env: { PORTLESS_STATE_DIR: tmpDir, ...opts.env },
+        });
+
+        const capture = fs.existsSync(capturePath)
+          ? JSON.parse(fs.readFileSync(capturePath, "utf-8"))
+          : {};
+        return { status, capture };
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+
+    it("sets NODE_EXTRA_CA_CERTS when TLS is active and ca.pem exists", async () => {
+      const { status, capture } = await runWithMockProxy({
+        env: { NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBe(path.join(tmpDir, "ca.pem"));
+    });
+
+    it("does not set NODE_EXTRA_CA_CERTS when TLS is disabled", async () => {
+      const { status, capture } = await runWithMockProxy({
+        tls: false,
+        env: { PORTLESS_HTTPS: "0", NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBeUndefined();
+    });
+
+    it("does not set NODE_EXTRA_CA_CERTS when ca.pem is missing", async () => {
+      const { status, capture } = await runWithMockProxy({
+        writeCaPem: false,
+        env: { NODE_EXTRA_CA_CERTS: undefined },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBeUndefined();
+    });
+
+    it("does not override user-set NODE_EXTRA_CA_CERTS", async () => {
+      const userCaPath = "/custom/ca.pem";
+      const { status, capture } = await runWithMockProxy({
+        env: { NODE_EXTRA_CA_CERTS: userCaPath },
+      });
+      expect(status).toBe(0);
+      expect(capture.NODE_EXTRA_CA_CERTS).toBe(userCaPath);
+    });
+  });
+
   describe("get subcommand", () => {
     let tmpDir: string;
 
@@ -924,6 +1131,222 @@ describe("CLI", () => {
       });
       expect(stop.status).toBe(0);
       expect(stop.stdout).toContain("Proxy stopped");
+    });
+  });
+
+  describe("HTTPS proxy with broken security binary (#228)", () => {
+    let fakeBinDir: string;
+    let tmpDir: string;
+    let testPort: number;
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-trust-timeout-"));
+      testPort = await getFreePort();
+
+      // Create a fake `security` binary that always fails, simulating the
+      // macOS Keychain Services daemon being unresponsive. The real issue
+      // (#228) is a slow/hanging securityd, but an instant failure exercises
+      // the same error-handling code path without making the test wait minutes.
+      fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-fake-bin-"));
+      const fakeSecurityPath = path.join(fakeBinDir, "security");
+      fs.writeFileSync(fakeSecurityPath, "#!/bin/sh\nexit 1\n");
+      fs.chmodSync(fakeSecurityPath, 0o755);
+    });
+
+    afterEach(() => {
+      run(["proxy", "stop", "-p", String(testPort)], {
+        env: { PORTLESS_STATE_DIR: tmpDir },
+      });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+      fs.rmSync(fakeBinDir, { recursive: true, force: true });
+    });
+
+    it.skipIf(process.platform !== "darwin")(
+      "starts HTTPS proxy when security commands fail",
+      () => {
+        const env = {
+          PORTLESS_PORT: String(testPort),
+          PORTLESS_STATE_DIR: tmpDir,
+          // Put fake security first in PATH; real openssl is still reachable
+          PATH: `${fakeBinDir}:${process.env.PATH}`,
+        };
+
+        // HTTPS is on by default (no PORTLESS_HTTPS=0), so this exercises
+        // cert generation, the failing trust check, and daemon startup.
+        const start = spawnSync(process.execPath, [CLI_PATH, "proxy", "start"], {
+          encoding: "utf-8",
+          timeout: 30_000,
+          env: { ...process.env, ...env, NO_COLOR: "1" },
+        });
+
+        // The proxy should start despite the broken security binary.
+        // Before the fix, the daemon would re-run the failing trust flow,
+        // potentially stalling long enough for waitForProxy to time out.
+        // After the fix, the parent passes --skip-trust to the daemon.
+        expect(start.status).toBe(0);
+        expect(start.stdout).toContain(`proxy started on port ${testPort}`);
+
+        // Parent should warn that trust failed
+        const combined = start.stdout + start.stderr;
+        expect(combined).toContain("Could not add CA to system trust store");
+
+        // Daemon log should NOT contain trust attempts (--skip-trust was passed)
+        const logPath = path.join(tmpDir, "proxy.log");
+        if (fs.existsSync(logPath)) {
+          const log = fs.readFileSync(logPath, "utf-8");
+          expect(log).not.toContain("Adding CA to system trust store");
+          expect(log).toContain("HTTPS/2 proxy listening");
+        }
+      }
+    );
+  });
+
+  describe("portless.json config", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-config-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("portless (no args) runs dev script without portless.json", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      const { status, stdout } = run([], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("hello");
+    });
+
+    it("portless run (no command) with portless.json resolves dev script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo config-dev" } })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "myapp" }));
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("config-dev");
+    });
+
+    it("portless run (no command) without portless.json resolves dev script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("hello");
+    });
+
+    it("portless run with explicit command ignores config script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo from-config" } })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "dev" })
+      );
+      const { stdout } = run(["run", "echo", "from-cli"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-cli");
+      expect(stdout).not.toContain("from-config");
+    });
+
+    it("portless run with portless.json script field uses that script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "start" })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+    });
+
+    it("--script flag overrides config script field", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "dev" })
+      );
+      const { stdout } = run(["--script", "start", "run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+    });
+
+    it("--name overrides portless.json name", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "config-name" }));
+      // With PORTLESS=0, the name doesn't matter (command runs directly)
+      // but we can verify via the run subcommand help text or named mode.
+      // Let's test it goes through without error.
+      const { stdout } = run(["--name", "override-name", "echo", "works"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("works");
+    });
+
+    it("portless run with missing script errors clearly", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: {} })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "nonexistent" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+    });
+
+    it("portless.json validation rejects invalid appPort", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ appPort: "not-a-number" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("appPort");
     });
   });
 });

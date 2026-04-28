@@ -1,9 +1,10 @@
 {
   "name": "google-oauth-example",
   "version": "0.0.0",
+  "portless": "google-oauth-example.portless",
   "private": true,
   "scripts": {
-    "dev": "portless myapp.local.mydomain next dev"
+    "dev": "next dev"
   },
   "dependencies": {
     "@base-ui/react": "^1.3.0",

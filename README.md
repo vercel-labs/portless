@@ -32,9 +32,117 @@ portless myapp next dev
 
 HTTPS with HTTP/2 is enabled by default. On first run, portless generates a local CA, trusts it, and binds port 443 (auto-elevates with sudo on macOS/Linux). Use `--no-tls` for plain HTTP.
 
-The proxy auto-starts when you run an app. A random port (4000--4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
+The proxy auto-starts when you run an app. A random port (4000-4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
+
+When auto-starting, portless reuses the configuration (port, TLS, TLD) from the most recent proxy run, so a restart or reboot does not silently revert to defaults. Explicit env vars (`PORTLESS_PORT`, `PORTLESS_HTTPS`, etc.) always take priority.
+
+In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners like turborepo and CI scripts fail early with a clear message.
+
+## Configuration
+
+Bare `portless` works out of the box. It runs the `"dev"` script from `package.json` through the proxy, inferring the app name from the package name, git root, or directory:
+
+```bash
+portless        # -> runs "dev" script, https://<project>.localhost
+```
+
+Use an optional `portless.json` to override defaults:
+
+```json
+{ "name": "myapp" }
+```
+
+```bash
+portless        # -> runs "dev" script, https://myapp.localhost
+```
+
+The script defaults to `"dev"`. The name is inferred from `package.json` if not set in config.
+
+### Monorepo
+
+One `portless.json` at the repo root covers all workspace packages. Portless discovers packages from `pnpm-workspace.yaml`, or the `"workspaces"` field in `package.json` (npm, yarn, bun):
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "api.myapp" }
+  }
+}
+```
+
+```bash
+portless        # from repo root: starts all workspace packages with a "dev" script
+cd apps/web && portless   # start just one package
+```
+
+The `apps` map is optional and only needed for name overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
+
+Without an `apps` map, hostnames follow the `<package>.<project>.localhost` convention. The project name comes from the most common npm scope across workspace packages (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it gets the bare `<project>.localhost` without duplication.
+
+### Config fields
+
+| Field     | Type    | Default  | Description                                               |
+| --------- | ------- | -------- | --------------------------------------------------------- |
+| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
+| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
+| `appPort` | number  | auto     | Fixed port for the child process.                         |
+| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
+| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
+| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+
+### package.json "portless" key
+
+Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": "myapp"
+}
+```
+
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+The `package.json` `"portless"` key takes precedence over `portless.json` app entries but is overridden by CLI flags.
+
+### --script flag
+
+Override the default script for a single invocation:
+
+```bash
+portless --script start       # run "start" instead of "dev"
+portless --script test        # run "test" instead of "dev"
+```
+
+### Turborepo
+
+To use portless with turborepo, put `portless` as the `dev` script and the real command in a separate script:
+
+```json
+{
+  "scripts": {
+    "dev": "portless",
+    "dev:app": "next dev"
+  },
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+Turbo runs each package's `dev` script, which invokes portless. Portless reads the config, detects the package manager, and runs `pnpm run dev:app` (or yarn/bun/npm) through the proxy. No changes to `turbo.json` are needed.
+
+`pnpm dev` at the root works through turbo as usual. People without portless can run `pnpm run dev:app` directly.
 
 ## Use in package.json
+
+You can still use portless in `package.json` scripts:
 
 ```json
 {
@@ -43,6 +151,18 @@ The proxy auto-starts when you run an app. A random port (4000--4999) is assigne
   }
 }
 ```
+
+With a `portless.json`, you can simplify to:
+
+```json
+{
+  "scripts": {
+    "dev": "next dev"
+  }
+}
+```
+
+Then run `portless` or `portless run` to go through the proxy.
 
 ## Subdomains
 
@@ -153,7 +273,7 @@ portless proxy start --lan --ip 192.168.1.42
 
 `--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
 
-Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. Other proxy settings still follow the current flags and env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. All proxy settings (port, TLS, TLD, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
 LAN mode depends on the system mDNS tools that portless already spawns: macOS ships with `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s equivalent). If the command is missing or your network isn’t reachable, `portless proxy start --lan` prints the relevant error and exits.
 
@@ -173,7 +293,9 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 ## Commands
 
 ```bash
-portless run [--name <name>] [--path <prefix>] <cmd> [args...]  # Infer name, run through proxy
+portless                        # Run dev script through proxy
+portless                        # From monorepo root: run all workspace packages
+portless run [--name <name>] [--path <prefix>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> [--path <prefix>] <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
@@ -210,6 +332,7 @@ portless proxy stop              # Stop the proxy
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --path <prefix>                  URL path prefix for path-based routing (e.g. /api)
 --force                          Kill the existing process and take over its route
@@ -234,6 +357,7 @@ PORTLESS_STATE_DIR=<path>        Override the state directory
 PORT                             Ephemeral port the child should listen on
 HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode)
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
+NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
 > **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
@@ -291,7 +415,7 @@ devServer: {
 }
 ```
 
-If your tooling doesn't trust the portless CA, point Node.js at it: `NODE_EXTRA_CA_CERTS=/tmp/portless/ca.pem` (or `~/.portless/ca.pem` when the proxy runs on a non-privileged port like 1355). Alternatively, use `--no-tls` for plain HTTP.
+Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
 
 Portless detects this misconfiguration and responds with `508 Loop Detected` along with a message pointing to this fix.
 

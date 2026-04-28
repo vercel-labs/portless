@@ -368,6 +368,33 @@ describe("trustCA", () => {
     expect(result.error).toContain("CA certificate not found");
     expect(result.error).toContain("portless trust");
   });
+
+  it.skipIf(process.platform !== "darwin")(
+    "returns actionable error when security command fails (#228)",
+    () => {
+      // Generate real certs so trustCA reaches the security command
+      ensureCerts(tmpDir);
+
+      // Create a fake security binary that always fails
+      const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-fake-sec-"));
+      const fakePath = path.join(fakeBinDir, "security");
+      fs.writeFileSync(fakePath, "#!/bin/sh\nexit 1\n");
+      fs.chmodSync(fakePath, 0o755);
+
+      const origPath = process.env.PATH;
+      try {
+        process.env.PATH = `${fakeBinDir}:${origPath}`;
+        const result = trustCA(tmpDir);
+        expect(result.trusted).toBe(false);
+        expect(result.error).toBeDefined();
+        // Should include the actual error, not just a raw internal message
+        expect(result.error!.length).toBeGreaterThan(10);
+      } finally {
+        process.env.PATH = origPath;
+        fs.rmSync(fakeBinDir, { recursive: true, force: true });
+      }
+    }
+  );
 });
 
 describe("untrustCA", () => {

@@ -1,17 +1,34 @@
 # Commands
 
+## Zero-arg mode
+
+```bash
+portless
+```
+
+Runs the `"dev"` script from `package.json` through the proxy. The app name is inferred from the package name, git root, or directory name. From a monorepo root (detected via `pnpm-workspace.yaml` or `package.json` `"workspaces"`), starts all workspace packages that have the target script.
+
+```bash
+portless                      # single app: run dev script
+portless                      # monorepo root: start all apps
+portless --script start       # run "start" instead of "dev"
+```
+
+Use a `portless.json` to override defaults. See [Configuration](/configuration).
+
 ## Run an app
 
 ```bash
-portless run [--name <name>] [--path <prefix>] <cmd> [args...]
+portless run [--name <name>] [--path <prefix>] [cmd] [args...]
 portless <name> [--path <prefix>] <cmd> [args...]
 ```
 
-`portless run` infers the project name from package.json, git root, or directory name. Use `--name` to override the inferred name while still applying worktree prefixes.
+`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes.
 
 `portless <name>` uses an explicit name with no inference or prefixing.
 
 ```bash
+portless run                             # run dev script through proxy
 portless run next dev                    # infer name from project
 portless run --name myapp next dev       # override inferred name
 portless myapp next dev                  # explicit name
@@ -32,8 +49,12 @@ portless docs.myapp next dev
       <td>Override the inferred base name (worktree prefix still applies). Only for `portless run`.</td>
     </tr>
     <tr>
+      <td>`--script <name>`</td>
+      <td>Run a specific `package.json` script instead of the default (`"dev"`). Global flag.</td>
+    </tr>
+    <tr>
       <td>`--app-port <number>`</td>
-      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT`.</td>
+      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`.</td>
     </tr>
     <tr>
       <td>`--path <prefix>`</td>

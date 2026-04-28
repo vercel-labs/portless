@@ -34,14 +34,14 @@ export const INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP";
 export const INTERNAL_LAN_IP_FLAG = "--lan-ip-auto";
 
 /**
- * System-wide state directory (used when proxy needs sudo on Unix).
- * Hardcoded to /tmp/portless rather than os.tmpdir() because macOS returns
- * a per-user dir from os.tmpdir() (/var/folders/...) while sudo (root)
- * gets /tmp, causing the proxy writer and client reader to disagree.
+ * @deprecated No longer used. All state now lives in USER_STATE_DIR.
+ * Kept as a read-only reference for migration and cleanup of old installs.
  */
-export const SYSTEM_STATE_DIR = isWindows ? path.join(os.tmpdir(), "portless") : "/tmp/portless";
+export const LEGACY_SYSTEM_STATE_DIR = isWindows
+  ? path.join(os.tmpdir(), "portless")
+  : "/tmp/portless";
 
-/** Per-user state directory (used when proxy runs without sudo). */
+/** Per-user state directory. All proxy state lives here regardless of port. */
 export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
 
 /** Minimum app port when finding a free port. */
@@ -124,15 +124,11 @@ export function getDefaultPort(tls?: boolean): number {
 
 /**
  * Determine the state directory for a given proxy port.
- * On Unix, privileged ports (< 1024) use the system dir so both root and
- * non-root processes can share state. Unprivileged ports use the user's
- * home directory (~/.portless). On Windows, always use the user dir
- * (no privileged port concept).
+ * Always returns USER_STATE_DIR (~/.portless) unless PORTLESS_STATE_DIR is set.
  */
-export function resolveStateDir(port: number): string {
+export function resolveStateDir(_port?: number): string {
   if (process.env.PORTLESS_STATE_DIR) return process.env.PORTLESS_STATE_DIR;
-  if (isWindows) return USER_STATE_DIR;
-  return port < PRIVILEGED_PORT_THRESHOLD ? SYSTEM_STATE_DIR : USER_STATE_DIR;
+  return USER_STATE_DIR;
 }
 
 /** Read the proxy port from a given state directory. Returns null if unreadable. */
@@ -306,6 +302,32 @@ export function isLanEnvEnabled(): boolean {
   return val === "1" || val === "true";
 }
 
+/**
+ * Read the last-known proxy configuration from the state directory on disk.
+ * Unlike {@link discoverState}, this does not check whether the proxy is
+ * actually running. It simply reads whatever state files exist so a
+ * subsequent auto-start can reuse the previous settings.
+ *
+ * Returns null when no prior state is found.
+ */
+export function readPersistedProxyState(): {
+  port: number;
+  tls: boolean;
+  tld: string;
+  lanMode: boolean;
+} | null {
+  const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
+  const port = readPortFromDir(dir);
+  if (port !== null) {
+    const tls = readTlsMarker(dir);
+    const tld = readTldFromDir(dir);
+    const lanIp = readLanMarker(dir);
+    return { port, tls, tld, lanMode: lanIp !== null || tld === "local" };
+  }
+
+  return null;
+}
+
 export function buildProxyStartConfig(options: {
   useHttps: boolean;
   customCertPath?: string | null;
@@ -318,6 +340,7 @@ export function buildProxyStartConfig(options: {
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
+  skipTrust?: boolean;
 }): { effectiveTld: string; args: string[] } {
   const effectiveTld = options.lanMode ? "local" : options.tld;
   const args: string[] = [];
@@ -357,14 +380,18 @@ export function buildProxyStartConfig(options: {
     args.push("--wildcard");
   }
 
+  if (options.skipTrust) {
+    args.push("--skip-trust");
+  }
+
   return { effectiveTld, args };
 }
 
 /**
  * Discover the active proxy's state directory, port, TLS mode, TLD, LAN mode,
  * and current LAN IP when available.
- * Checks the user-level dir first, then the system-level dir.
- * Falls back to the system dir with the default port if nothing is running.
+ * Checks the user-level dir first, then the legacy /tmp/portless dir as a
+ * read-only fallback for proxies started with older versions.
  */
 export async function discoverState(): Promise<{
   dir: string;
@@ -416,16 +443,17 @@ export async function discoverState(): Promise<{
     }
   }
 
-  // Check system-level state (/tmp/portless)
-  const systemPort = readPortFromDir(SYSTEM_STATE_DIR);
-  if (systemPort !== null) {
-    if (await isProxyRunning(systemPort)) {
-      const tls = readTlsMarker(SYSTEM_STATE_DIR);
-      const tld = readTldFromDir(SYSTEM_STATE_DIR);
-      const lanIp = readLanMarker(SYSTEM_STATE_DIR);
+  // Check legacy system-level state (/tmp/portless) for proxies started with
+  // older versions. Read-only: no root operations are performed on this path.
+  const legacyPort = readPortFromDir(LEGACY_SYSTEM_STATE_DIR);
+  if (legacyPort !== null) {
+    if (await isProxyRunning(legacyPort)) {
+      const tls = readTlsMarker(LEGACY_SYSTEM_STATE_DIR);
+      const tld = readTldFromDir(LEGACY_SYSTEM_STATE_DIR);
+      const lanIp = readLanMarker(LEGACY_SYSTEM_STATE_DIR);
       return {
-        dir: SYSTEM_STATE_DIR,
-        port: systemPort,
+        dir: LEGACY_SYSTEM_STATE_DIR,
+        port: legacyPort,
         tls,
         tld,
         lanMode: lanIp !== null || tld === "local",
@@ -434,9 +462,7 @@ export async function discoverState(): Promise<{
     }
   }
 
-  // State files didn't help. Probe well-known ports as a last resort --
-  // privileged-port proxies store state in /tmp which macOS cleans on reboot,
-  // so the daemon may still be alive after the port file is gone.
+  // State files didn't help. Probe well-known ports as a last resort.
   // Standard ports first (443, 80) since those are the new defaults, then the
   // legacy fallback port, then any PORTLESS_PORT override.
   const configuredPort = getDefaultPort();
@@ -444,7 +470,10 @@ export async function discoverState(): Promise<{
   for (const port of probePorts) {
     if (await isProxyRunning(port)) {
       const dir = resolveStateDir(port);
-      const tls = readTlsMarker(dir);
+      const markerTls = readTlsMarker(dir);
+      // When the marker is missing, infer TLS from the port:
+      // 443 is always HTTPS, 80 is always HTTP.
+      const tls = markerTls || port === getProtocolPort(true);
       const tld = readTldFromDir(dir);
       const lanIp = readLanMarker(dir);
       return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
@@ -455,8 +484,8 @@ export async function discoverState(): Promise<{
   return {
     dir,
     port: configuredPort,
-    tls: false,
-    tld: getDefaultTld(),
+    tls: readTlsMarker(dir),
+    tld: readTldFromDir(dir),
     lanMode: readLanMarker(dir) !== null,
     lanIp: null,
   };
@@ -664,12 +693,12 @@ function collectBinPaths(cwd: string): string[] {
 /**
  * Build a PATH string with `node_modules/.bin` directories prepended.
  */
-function augmentedPath(env: NodeJS.ProcessEnv | undefined): string {
+export function augmentedPath(env: NodeJS.ProcessEnv | undefined, cwd?: string): string {
   const source = env ?? process.env;
   // On Windows, the PATH variable may be stored as "Path" (case-insensitive in
   // process.env but case-sensitive in plain objects created via spread).
   const base = source.PATH ?? source.Path ?? "";
-  const bins = collectBinPaths(process.cwd());
+  const bins = collectBinPaths(cwd ?? process.cwd());
   // Ensure node's own directory is in PATH so .cmd wrappers in node_modules/.bin
   // can locate the node executable (fixes Windows "node not recognized" errors).
   const nodeBin = path.dirname(process.execPath);
@@ -778,6 +807,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   vite: { strictPort: true },
   vp: { strictPort: true },
   "react-router": { strictPort: true },
+  rsbuild: { strictPort: false },
   astro: { strictPort: false },
   ng: { strictPort: false },
   "react-native": { strictPort: false },

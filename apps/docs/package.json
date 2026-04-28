@@ -1,10 +1,11 @@
 {
   "name": "@portless/docs",
   "version": "0.0.0",
+  "portless": "portless",
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "portless portless next dev",
+    "dev": "next dev",
     "build": "next build",
     "start": "next start"
   },
