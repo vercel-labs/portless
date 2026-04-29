@@ -162,16 +162,51 @@ describe("RouteStore", () => {
       store.addRoute("myapp.localhost", 4001, process.pid);
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
-      expect(routes[0]).toEqual({
+      expect(routes[0]).toMatchObject({
         hostname: "myapp.localhost",
         port: 4001,
         pid: process.pid,
       });
+      expect(routes[0].id).toBe(`myapp.localhost:4001:${process.pid}`);
     });
 
     it("replaces existing route with same hostname", () => {
       store.addRoute("myapp.localhost", 4001, process.pid);
       store.addRoute("myapp.localhost", 4002, process.pid);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].port).toBe(4002);
+    });
+
+    it("allows duplicate hostnames when multiplex is enabled", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid);
+      store.addRoute("myapp.localhost", 4002, 0, false, true);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(2);
+      expect(routes.map((r) => r.port).sort()).toEqual([4001, 4002]);
+    });
+
+    it("allows duplicate multiplex hostnames owned by the same PID when ports differ", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid, false, true);
+      store.addRoute("myapp.localhost", 4002, process.pid, false, true);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(2);
+      expect(routes.map((r) => r.port).sort()).toEqual([4001, 4002]);
+    });
+
+    it("removes only the matching PID when one is provided", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid);
+      store.addRoute("myapp.localhost", 4002, 0, false, true);
+      store.removeRoute("myapp.localhost", process.pid);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].port).toBe(4002);
+    });
+
+    it("removes only the matching port when PID and port are provided", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid, false, true);
+      store.addRoute("myapp.localhost", 4002, process.pid, false, true);
+      store.removeRoute("myapp.localhost", process.pid, 4001);
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].port).toBe(4002);

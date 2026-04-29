@@ -1,6 +1,7 @@
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
+import * as zlib from "node:zlib";
 import type { ProxyServerOptions } from "./types.js";
 import { escapeHtml, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
@@ -76,6 +77,16 @@ const PORTLESS_HOPS_HEADER = "x-portless-hops";
  */
 const MAX_PROXY_HOPS = 5;
 
+const SELECTOR_COOKIE = "portless_app";
+const CONTROL_PREFIX = "/__portless__";
+const MAX_SWITCHER_INJECTION_BYTES = 2 * 1024 * 1024;
+
+type ProxyRoute = { id?: string; hostname: string; port: number; pid?: number };
+
+function getRouteId(route: ProxyRoute): string {
+  return route.id || `${route.hostname}:${route.port}:${route.pid ?? 0}`;
+}
+
 /**
  * Find the route matching a given host. Matches exact hostname first, then
  * falls back to wildcard subdomain matching (e.g. tenant.myapp.localhost
@@ -84,15 +95,168 @@ const MAX_PROXY_HOPS = 5;
  * When `strict` is true, only exact matches are returned; unregistered
  * subdomain prefixes will not fall back to the base service.
  */
-function findRoute(
-  routes: { hostname: string; port: number }[],
+function findRoutes(routes: ProxyRoute[], host: string, strict?: boolean): ProxyRoute[] {
+  const exact = routes.filter((r) => r.hostname === host);
+  if (exact.length > 0 || strict) return exact;
+  return routes.filter((r) => host.endsWith("." + r.hostname));
+}
+
+function parseCookies(header: string | string[] | undefined): Record<string, string> {
+  const raw = Array.isArray(header) ? header.join(";") : header || "";
+  const cookies: Record<string, string> = {};
+  for (const part of raw.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq === -1) continue;
+    const key = part.slice(0, eq).trim();
+    const value = part.slice(eq + 1).trim();
+    if (!key) continue;
+    try {
+      cookies[key] = decodeURIComponent(value);
+    } catch {
+      cookies[key] = value;
+    }
+  }
+  return cookies;
+}
+
+function isPortlessPath(url: string | undefined): boolean {
+  return (url || "/").startsWith(CONTROL_PREFIX);
+}
+
+function renderSelectorPage(
+  status: number,
   host: string,
-  strict?: boolean
-): { hostname: string; port: number } | undefined {
-  return (
-    routes.find((r) => r.hostname === host) ||
-    (strict ? undefined : routes.find((r) => host.endsWith("." + r.hostname)))
+  routes: ProxyRoute[],
+  proxyPort: number,
+  tls: boolean,
+  currentId?: string,
+  next = "/"
+): string {
+  const safeHost = escapeHtml(host);
+  const safeNext = encodeURIComponent(next || "/");
+  const items = routes
+    .map((route) => {
+      const id = getRouteId(route);
+      const selected = currentId === id ? " selected" : "";
+      const href = `${CONTROL_PREFIX}/select?id=${encodeURIComponent(id)}&next=${safeNext}`;
+      const label = route.pid === 0 ? "alias" : `pid ${route.pid ?? "unknown"}`;
+      return `<li><a href="${href}" class="card-link${selected}"><span class="name">${escapeHtml(route.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(route.port))}</code><code class="port">${escapeHtml(label)}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`;
+    })
+    .join("");
+  const clearUrl = `${CONTROL_PREFIX}/clear?next=${safeNext}`;
+  const body = `<div class="content"><p class="desc">Multiple apps are registered for <strong>${safeHost}</strong>. Choose which one this browser should use.</p><div class="section"><p class="label">Available apps</p><ul class="card">${items}</ul></div><div class="section"><p class="desc"><a href="${clearUrl}">Clear selection</a> for ${escapeHtml(formatUrl(host, proxyPort, tls))}</p></div></div>`;
+  return renderPage(status, "Select App", body);
+}
+
+function routeFromCookie(routes: ProxyRoute[], cookieHeader: string | string[] | undefined) {
+  const selected = parseCookies(cookieHeader)[SELECTOR_COOKIE];
+  if (!selected) return undefined;
+  return routes.find((route) => getRouteId(route) === selected);
+}
+
+function setSelectionCookie(res: http.ServerResponse, routeId: string): void {
+  res.setHeader(
+    "Set-Cookie",
+    `${SELECTOR_COOKIE}=${encodeURIComponent(routeId)}; Path=/; HttpOnly; SameSite=Lax`
   );
+}
+
+function clearSelectionCookie(res: http.ServerResponse): void {
+  res.setHeader("Set-Cookie", `${SELECTOR_COOKIE}=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax`);
+}
+
+function getRedirectTarget(reqUrl: string | undefined): string {
+  try {
+    const parsed = new URL(reqUrl || "/", "http://portless.local");
+    const next = parsed.searchParams.get("next") || "/";
+    return next.startsWith("/") && !next.startsWith("//") ? next : "/";
+  } catch {
+    return "/";
+  }
+}
+
+function handlePortlessControl(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  host: string,
+  routes: ProxyRoute[],
+  proxyPort: number,
+  tls: boolean
+): boolean {
+  const url = req.url || "/";
+  if (!isPortlessPath(url)) return false;
+  if (url.startsWith(`${CONTROL_PREFIX}/select`)) {
+    const parsed = new URL(url, "http://portless.local");
+    const id = parsed.searchParams.get("id");
+    const route = routes.find((candidate) => getRouteId(candidate) === id);
+    if (route) {
+      setSelectionCookie(res, getRouteId(route));
+      res.writeHead(302, { Location: getRedirectTarget(url) });
+      res.end();
+      return true;
+    }
+  }
+  if (url.startsWith(`${CONTROL_PREFIX}/clear`)) {
+    clearSelectionCookie(res);
+    res.writeHead(302, { Location: getRedirectTarget(url) });
+    res.end();
+    return true;
+  }
+  const currentId = parseCookies(req.headers.cookie)[SELECTOR_COOKIE];
+  res.writeHead(200, { "Content-Type": "text/html" });
+  res.end(renderSelectorPage(200, host, routes, proxyPort, tls, currentId, getRedirectTarget(url)));
+  return true;
+}
+
+function decodeBody(body: Buffer, encoding: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    if (encoding === "gzip")
+      zlib.gunzip(body, (err, result) => (err ? reject(err) : resolve(result)));
+    else if (encoding === "br")
+      zlib.brotliDecompress(body, (err, result) => (err ? reject(err) : resolve(result)));
+    else if (encoding === "deflate")
+      zlib.inflate(body, (err, result) => (err ? reject(err) : resolve(result)));
+    else resolve(body);
+  });
+}
+
+function encodeBody(body: Buffer, encoding: string): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    if (encoding === "gzip")
+      zlib.gzip(body, (err, result) => (err ? reject(err) : resolve(result)));
+    else if (encoding === "br")
+      zlib.brotliCompress(body, (err, result) => (err ? reject(err) : resolve(result)));
+    else if (encoding === "deflate")
+      zlib.deflate(body, (err, result) => (err ? reject(err) : resolve(result)));
+    else resolve(body);
+  });
+}
+
+async function injectSwitcher(
+  chunks: Buffer[],
+  headers: http.OutgoingHttpHeaders,
+  host: string,
+  routes: ProxyRoute[],
+  currentRoute: ProxyRoute,
+  reqUrl: string | undefined
+): Promise<Buffer> {
+  const encoding = String(headers["content-encoding"] || "").toLowerCase();
+  const raw = Buffer.concat(chunks);
+  const decoded = await decodeBody(raw, encoding);
+  const html = decoded.toString("utf-8");
+  const next = encodeURIComponent(reqUrl || "/");
+  const currentId = getRouteId(currentRoute);
+  const links = routes
+    .map((route) => {
+      const selected = getRouteId(route) === currentId ? "font-weight:600;" : "";
+      return `<a style="${selected}display:block;padding:6px 8px;color:inherit;text-decoration:none" href="${CONTROL_PREFIX}/select?id=${encodeURIComponent(getRouteId(route))}&next=${next}">${escapeHtml(String(route.pid ?? route.port))} <span style="color:#777">127.0.0.1:${escapeHtml(String(route.port))}</span></a>`;
+    })
+    .join("");
+  const widget = `<div style="position:fixed;right:12px;bottom:12px;z-index:2147483647;font:13px system-ui,-apple-system,Segoe UI,sans-serif;color:#111;background:#fff;border:1px solid rgba(0,0,0,.14);box-shadow:0 8px 24px rgba(0,0,0,.16);border-radius:8px;overflow:hidden"><div style="padding:7px 10px;border-bottom:1px solid rgba(0,0,0,.08);font-weight:600">portless ${escapeHtml(host)}</div>${links}</div>`;
+  const injected = html.includes("</body>")
+    ? html.replace("</body>", `${widget}</body>`)
+    : `${html}${widget}`;
+  return encodeBody(Buffer.from(injected), encoding);
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
@@ -115,6 +279,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     proxyPort,
     tld = "localhost",
     strict = true,
+    multiplex = false,
     onError = (msg: string) => console.error(msg),
     tls,
   } = options;
@@ -156,9 +321,33 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, host, strict);
+    const matchingRoutes = findRoutes(routes, host, strict);
+    if (multiplex && matchingRoutes.length > 1) {
+      if (handlePortlessControl(req, res, host, matchingRoutes, proxyPort, reqTls)) {
+        return;
+      }
+    }
+    const route =
+      multiplex && matchingRoutes.length > 1
+        ? routeFromCookie(matchingRoutes, req.headers.cookie)
+        : matchingRoutes[0];
 
     if (!route) {
+      if (multiplex && matchingRoutes.length > 1) {
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(
+          renderSelectorPage(
+            200,
+            host,
+            matchingRoutes,
+            proxyPort,
+            reqTls,
+            undefined,
+            req.url || "/"
+          )
+        );
+        return;
+      }
       const safeHost = escapeHtml(host);
       const strippedHost = host.endsWith(tldSuffix) ? host.slice(0, -tldSuffix.length) : host;
       const safeSuggestion = escapeHtml(strippedHost);
@@ -205,7 +394,18 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             delete responseHeaders[h];
           }
         }
-        res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+        const contentType = String(proxyRes.headers["content-type"] || "");
+        const contentEncoding = String(proxyRes.headers["content-encoding"] || "").toLowerCase();
+        const canInject =
+          multiplex &&
+          matchingRoutes.length > 1 &&
+          req.method !== "HEAD" &&
+          !isPortlessPath(req.url) &&
+          contentType.includes("text/html") &&
+          ["", "gzip", "br", "deflate"].includes(contentEncoding);
+        if (!canInject) {
+          res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+        }
         proxyRes.on("error", () => {
           if (!res.headersSent) {
             res.writeHead(502, { "Content-Type": "text/plain" });
@@ -217,7 +417,52 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             res.destroy();
           }
         });
-        proxyRes.pipe(res);
+        if (canInject) {
+          const chunks: Buffer[] = [];
+          let bufferedBytes = 0;
+          let passthrough = false;
+          const startPassthrough = () => {
+            passthrough = true;
+            delete responseHeaders["content-length"];
+            res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+            for (const buffered of chunks) {
+              res.write(buffered);
+            }
+            chunks.length = 0;
+          };
+          proxyRes.on("data", (chunk: Buffer) => {
+            if (passthrough) {
+              res.write(chunk);
+              return;
+            }
+            bufferedBytes += chunk.length;
+            chunks.push(chunk);
+            if (bufferedBytes > MAX_SWITCHER_INJECTION_BYTES) {
+              startPassthrough();
+            }
+          });
+          proxyRes.on("end", () => {
+            if (passthrough) {
+              res.end();
+              return;
+            }
+            injectSwitcher(chunks, responseHeaders, host, matchingRoutes, route, req.url)
+              .then((body) => {
+                delete responseHeaders["transfer-encoding"];
+                responseHeaders["content-length"] = String(body.length);
+                res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+                res.end(body);
+              })
+              .catch(() => {
+                delete responseHeaders["content-length"];
+                res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+                for (const chunk of chunks) res.write(chunk);
+                res.end();
+              });
+          });
+        } else {
+          proxyRes.pipe(res);
+        }
       }
     );
 
@@ -278,7 +523,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const routes = getRoutes();
     const host = getRequestHost(req).split(":")[0];
-    const route = findRoute(routes, host, strict);
+    const matchingRoutes = findRoutes(routes, host, strict);
+    const route =
+      multiplex && matchingRoutes.length > 1
+        ? routeFromCookie(matchingRoutes, req.headers.cookie)
+        : matchingRoutes[0];
 
     if (!route) {
       socket.destroy();

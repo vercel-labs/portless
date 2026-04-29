@@ -45,6 +45,7 @@ import {
   getDefaultTld,
   injectFrameworkFlags,
   isHttpsEnvDisabled,
+  isMultiplexEnvEnabled,
   isPortListening,
   isWildcardEnvEnabled,
   isLanEnvEnabled,
@@ -52,6 +53,7 @@ import {
   isWindows,
   killTree,
   readLanMarker,
+  readMultiplexMarker,
   readPersistedProxyState,
   readTldFromDir,
   readTlsMarker,
@@ -61,6 +63,7 @@ import {
   validateTld,
   waitForProxy,
   writeLanMarker,
+  writeMultiplexMarker,
   writeTldFile,
   writeTlsMarker,
 } from "./cli-utils.js";
@@ -124,6 +127,7 @@ type ProxyConfigExplicitness = {
   lanIp: boolean;
   tld: boolean;
   useWildcard: boolean;
+  multiplex: boolean;
 };
 
 type ProxyConfig = {
@@ -135,6 +139,7 @@ type ProxyConfig = {
   lanIpExplicit: boolean;
   tld: string;
   useWildcard: boolean;
+  multiplex: boolean;
 };
 
 function defaultProxyConfig(tld: string, useHttps: boolean, lanMode: boolean): ProxyConfig {
@@ -147,6 +152,7 @@ function defaultProxyConfig(tld: string, useHttps: boolean, lanMode: boolean): P
     lanIpExplicit: false,
     tld: lanMode ? "local" : tld,
     useWildcard: false,
+    multiplex: false,
   };
 }
 
@@ -161,6 +167,7 @@ function resolveProxyConfig(options: {
   lanIp: string | null;
   tld: string;
   useWildcard: boolean;
+  multiplex: boolean;
 }): ProxyConfig {
   const config = defaultProxyConfig(
     options.defaultTld,
@@ -207,6 +214,10 @@ function resolveProxyConfig(options: {
     config.useWildcard = options.useWildcard;
   }
 
+  if (options.explicit.multiplex) {
+    config.multiplex = options.multiplex;
+  }
+
   if (!config.lanMode) {
     config.lanIp = null;
     config.lanIpExplicit = false;
@@ -240,6 +251,7 @@ function readCurrentProxyConfig(dir: string): ProxyConfig {
     lanIpExplicit: false,
     tld,
     useWildcard: false,
+    multiplex: readMultiplexMarker(dir),
   };
 }
 
@@ -278,6 +290,14 @@ function getProxyConfigMismatchMessages(
     );
   }
 
+  if (explicit.multiplex && desiredConfig.multiplex !== actualConfig.multiplex) {
+    messages.push(
+      desiredConfig.multiplex
+        ? "requested multiplex mode, but the running proxy is not using multiplex mode"
+        : "requested non-multiplex mode, but the running proxy is using multiplex mode"
+    );
+  }
+
   return messages;
 }
 
@@ -292,6 +312,7 @@ function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string
     lanIpExplicit: config.lanIpExplicit,
     tld: config.tld,
     useWildcard: config.useWildcard,
+    multiplex: config.multiplex,
     includePort: proxyPort !== getDefaultPort(config.useHttps),
     proxyPort,
   });
@@ -384,7 +405,8 @@ function startProxyServer(
   tld: string,
   tlsOptions?: { cert: Buffer; key: Buffer },
   lanIp?: string | null,
-  strict?: boolean
+  strict?: boolean,
+  multiplex = false
 ): void {
   store.ensureDir();
 
@@ -501,6 +523,7 @@ function startProxyServer(
     proxyPort,
     tld,
     strict,
+    multiplex,
     onError: (msg) => console.error(colors.red(msg)),
     tls: tlsOptions,
   });
@@ -546,12 +569,16 @@ function startProxyServer(
     writeTlsMarker(store.dir, isTls);
     writeTldFile(store.dir, tld);
     writeLanMarker(store.dir, activeLanIp);
+    writeMultiplexMarker(store.dir, multiplex);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
     const proto = isTls ? "HTTPS/2" : "HTTP";
     const tldLabel = tld !== DEFAULT_TLD ? ` (TLD: .${tld})` : "";
     const modeLabel = strict === false ? " (wildcard)" : "";
+    const multiplexLabel = multiplex ? " (multiplex)" : "";
     console.log(
-      colors.green(`${proto} proxy listening on port ${proxyPort}${tldLabel}${modeLabel}`)
+      colors.green(
+        `${proto} proxy listening on port ${proxyPort}${tldLabel}${modeLabel}${multiplexLabel}`
+      )
     );
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
@@ -604,6 +631,7 @@ function startProxyServer(
     writeTlsMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
     writeLanMarker(store.dir, null);
+    writeMultiplexMarker(store.dir, false);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
@@ -656,6 +684,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           writeTlsMarker(store.dir, false);
           writeTldFile(store.dir, DEFAULT_TLD);
           writeLanMarker(store.dir, null);
+          writeMultiplexMarker(store.dir, false);
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
@@ -696,6 +725,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       writeTlsMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
+      writeMultiplexMarker(store.dir, false);
       return;
     }
 
@@ -717,6 +747,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       writeTlsMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
+      writeMultiplexMarker(store.dir, false);
       return;
     }
 
@@ -734,6 +765,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       writeTlsMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
+      writeMultiplexMarker(store.dir, false);
       return;
     }
 
@@ -747,6 +779,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     writeTlsMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
     writeLanMarker(store.dir, null);
+    writeMultiplexMarker(store.dir, false);
     console.log(colors.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
@@ -807,6 +840,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     lanIp: process.env.PORTLESS_LAN_IP !== undefined,
     tld: process.env.PORTLESS_TLD !== undefined,
     useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+    multiplex: process.env.PORTLESS_MULTIPLEX !== undefined,
   };
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
@@ -819,6 +853,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     lanIp: process.env.PORTLESS_LAN_IP || null,
     tld: envTld,
     useWildcard: isWildcardEnvEnabled(),
+    multiplex: isMultiplexEnvEnabled(),
   });
   return { explicit, desiredConfig, envTld };
 }
@@ -857,6 +892,9 @@ async function ensureProxyRunning(
     if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
       startConfig.lanMode = persisted.lanMode;
     }
+    if (!explicit.multiplex && persisted.multiplex !== desiredConfig.multiplex) {
+      startConfig.multiplex = persisted.multiplex;
+    }
     const envPort = getDefaultPort(startConfig.useHttps);
     if (persisted.port !== envPort) {
       startPort = persisted.port;
@@ -893,6 +931,7 @@ async function ensureProxyRunning(
     lanIpExplicit: startConfig.lanIpExplicit,
     tld: startConfig.tld,
     useWildcard: startConfig.useWildcard,
+    multiplex: startConfig.multiplex,
     includePort: startPort !== undefined,
     proxyPort: startPort,
   });
@@ -943,7 +982,8 @@ async function runApp(
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  multiplex = false
 ) {
   let store = initialStore;
   console.log(chalk.blue.bold(`\nportless\n`));
@@ -994,6 +1034,7 @@ async function runApp(
     tls = ensureResult.state.tls;
     lanMode = ensureResult.state.lanMode;
     lanIp = ensureResult.state.lanIp;
+    multiplex = ensureResult.state.multiplex;
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
@@ -1013,6 +1054,7 @@ async function runApp(
     }
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
+    multiplex = runningConfig.multiplex;
     console.log(chalk.gray("-- Proxy is running"));
   }
 
@@ -1051,7 +1093,7 @@ async function runApp(
   // Register route (--force kills the existing owner if any)
   let killedPid: number | undefined;
   try {
-    killedPid = store.addRoute(hostname, port, process.pid, force);
+    killedPid = store.addRoute(hostname, port, process.pid, force, multiplex);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -1108,11 +1150,15 @@ async function runApp(
     }
 
     try {
-      store.updateRoute(hostname, {
-        tailscaleUrl: tailscaleUrl,
-        tailscaleHttpsPort,
-        tailscaleFunnel: wantsFunnel || undefined,
-      });
+      store.updateRoute(
+        hostname,
+        {
+          tailscaleUrl: tailscaleUrl,
+          tailscaleHttpsPort,
+          tailscaleFunnel: wantsFunnel || undefined,
+        },
+        process.pid
+      );
     } catch {
       // Non-fatal: route display metadata only
     }
@@ -1186,7 +1232,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -1509,6 +1555,7 @@ ${colors.bold("Options:")}
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --multiplex                   Allow multiple apps to share the same hostname
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
@@ -1523,6 +1570,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
+  PORTLESS_MULTIPLEX=1          Allow multiple apps to share the same hostname
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
@@ -1892,7 +1940,7 @@ ${colors.bold("Examples:")}
       console.error(colors.red(`Error: No alias found for "${hostname}".`));
       process.exit(1);
     }
-    store.removeRoute(hostname);
+    store.removeRoute(hostname, 0);
     console.log(colors.green(`Removed alias: ${hostname}`));
     return;
   }
@@ -2071,6 +2119,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy start --multiplex")}    Allow multiple apps to share one hostname
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("LAN mode (--lan):")}
@@ -2166,6 +2215,7 @@ ${colors.bold("LAN mode (--lan):")}
   }
   // Parse --wildcard flag (disables the default strict subdomain matching)
   const useWildcard = args.includes("--wildcard") || isWildcardEnvEnabled();
+  const multiplex = args.includes("--multiplex") || isMultiplexEnvEnabled();
 
   const explicit: ProxyConfigExplicitness = {
     useHttps:
@@ -2179,6 +2229,7 @@ ${colors.bold("LAN mode (--lan):")}
     lanIp: process.env.PORTLESS_LAN_IP !== undefined,
     tld: tldIdx !== -1 || process.env.PORTLESS_TLD !== undefined,
     useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
+    multiplex: args.includes("--multiplex") || process.env.PORTLESS_MULTIPLEX !== undefined,
   };
 
   // Resolve state directory based on the port
@@ -2208,6 +2259,7 @@ ${colors.bold("LAN mode (--lan):")}
     lanIp: process.env.PORTLESS_LAN_IP || null,
     tld,
     useWildcard,
+    multiplex,
   });
   const lanMode = desiredConfig.lanMode;
   useHttps = desiredConfig.useHttps;
@@ -2215,6 +2267,7 @@ ${colors.bold("LAN mode (--lan):")}
   customKeyPath = desiredConfig.customKeyPath;
   tld = desiredConfig.tld;
   const desiredWildcard = desiredConfig.useWildcard;
+  const desiredMultiplex = desiredConfig.multiplex;
   let lanIp: string | null = desiredConfig.lanIpExplicit ? desiredConfig.lanIp : null;
 
   if (!hasExplicitPort && runningPort === null) {
@@ -2318,6 +2371,7 @@ ${colors.bold("LAN mode (--lan):")}
     lanIpExplicit: desiredConfig.lanIpExplicit,
     tld,
     useWildcard: desiredWildcard,
+    multiplex: desiredMultiplex,
   };
 
   // Privileged ports require root on Unix. Auto-elevate with sudo when
@@ -2337,6 +2391,7 @@ ${colors.bold("LAN mode (--lan):")}
         lanIpExplicit: desiredConfig.lanIpExplicit,
         tld,
         useWildcard: desiredWildcard,
+        multiplex: desiredMultiplex,
         foreground: isForeground,
         includePort: true,
         proxyPort,
@@ -2478,7 +2533,15 @@ ${colors.bold("LAN mode (--lan):")}
   // Foreground mode: run the proxy directly in this process
   if (isForeground) {
     console.log(chalk.blue.bold("\nportless proxy\n"));
-    startProxyServer(store, proxyPort, tld, tlsOptions, lanIp, desiredWildcard ? false : undefined);
+    startProxyServer(
+      store,
+      proxyPort,
+      tld,
+      tlsOptions,
+      lanIp,
+      desiredWildcard ? false : undefined,
+      desiredMultiplex
+    );
     return;
   }
 
@@ -2507,6 +2570,7 @@ ${colors.bold("LAN mode (--lan):")}
         lanIpExplicit: desiredConfig.lanIpExplicit,
         tld,
         useWildcard: desiredWildcard,
+        multiplex: desiredMultiplex,
         foreground: true,
         includePort: true,
         proxyPort,
@@ -2643,7 +2707,7 @@ async function handleDefaultSingle(
   const worktree = detectWorktreePrefix(cwd);
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
-  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
+  const { dir, port, tls, tld, lanMode, lanIp, multiplex } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -2659,7 +2723,8 @@ async function handleDefaultSingle(
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    multiplex
   );
 }
 
@@ -2725,11 +2790,12 @@ async function spawnProxiedApp(
   proxyPort: number,
   tls: boolean,
   tld: string,
+  multiplex: boolean,
   exitCodes: Map<string, number | null>
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
-  route: { store: RouteStore; hostname: string } | null;
+  route: { store: RouteStore; hostname: string; pid: number; port: number } | null;
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
 
@@ -2739,6 +2805,7 @@ async function spawnProxiedApp(
   let env: Record<string, string | undefined>;
   let store: RouteStore | null = null;
   let hostname: string | null = null;
+  let registeredPort: number | null = null;
   let displayUrl: string;
 
   if (usesPortless) {
@@ -2750,6 +2817,7 @@ async function spawnProxiedApp(
     });
 
     const appPort = app.appPort ?? (await findFreePort());
+    registeredPort = appPort;
     const protocol = tls ? "https" : "http";
     const portSuffix =
       (tls && proxyPort === 443) || (!tls && proxyPort === 80) ? "" : `:${proxyPort}`;
@@ -2757,7 +2825,7 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     hostname = parseHostname(app.name, tld);
-    store.addRoute(hostname, appPort, process.pid);
+    store.addRoute(hostname, appPort, process.pid, false, multiplex);
 
     env = {
       ...pkgEnv,
@@ -2788,14 +2856,17 @@ async function spawnProxiedApp(
     }
     if (capturedStore && capturedHostname) {
       try {
-        capturedStore.removeRoute(capturedHostname);
+        capturedStore.removeRoute(capturedHostname, process.pid, registeredPort ?? undefined);
       } catch {
         // non-fatal
       }
     }
   });
 
-  const route = store && hostname ? { store, hostname } : null;
+  const route =
+    store && hostname && registeredPort !== null
+      ? { store, hostname, pid: process.pid, port: registeredPort }
+      : null;
   return { child, displayUrl, route };
 }
 
@@ -2941,7 +3012,7 @@ async function handleDefaultMulti(
 
   console.log(chalk.blue.bold(`\nportless\n`));
 
-  let { dir, port, tls, tld } = await discoverState();
+  let { dir, port, tls, tld, multiplex } = await discoverState();
 
   if (proxiedApps.length > 0) {
     let multiDesired: ProxyDesiredState;
@@ -2957,9 +3028,10 @@ async function handleDefaultMulti(
       port = ensureResult.state.port;
       tls = ensureResult.state.tls;
       tld = ensureResult.state.tld;
+      multiplex = ensureResult.state.multiplex;
     } else {
       // Proxy was already running; re-discover to pick up current state.
-      ({ dir, port, tls, tld } = await discoverState());
+      ({ dir, port, tls, tld, multiplex } = await discoverState());
     }
 
     if (tls && !isCATrusted(dir)) {
@@ -2970,9 +3042,20 @@ async function handleDefaultMulti(
   const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
 
   if (useTurbo) {
-    await runWithTurbo(wsRoot, dir, port, tls, tld, scriptName, proxiedApps, taskApps, extraArgs);
+    await runWithTurbo(
+      wsRoot,
+      dir,
+      port,
+      tls,
+      tld,
+      multiplex,
+      scriptName,
+      proxiedApps,
+      taskApps,
+      extraArgs
+    );
   } else {
-    await runWithDirectSpawn(dir, port, tls, tld, proxiedApps, taskApps);
+    await runWithDirectSpawn(dir, port, tls, tld, multiplex, proxiedApps, taskApps);
   }
 }
 
@@ -2982,6 +3065,7 @@ async function runWithTurbo(
   proxyPort: number,
   tls: boolean,
   tld: string,
+  multiplex: boolean,
   scriptName: string,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[],
@@ -2992,7 +3076,7 @@ async function runWithTurbo(
   });
 
   const manifest: Record<string, ManifestEntry> = {};
-  const routes: { hostname: string }[] = [];
+  const routes: { hostname: string; port: number }[] = [];
   const appUrls: { label: string; url: string }[] = [];
 
   for (const app of proxiedApps) {
@@ -3010,8 +3094,8 @@ async function runWithTurbo(
     appUrls.push({ label: app.label, url });
 
     const hostname = parseHostname(app.name, tld);
-    store.addRoute(hostname, appPort, process.pid);
-    routes.push({ hostname });
+    store.addRoute(hostname, appPort, process.pid, false, multiplex);
+    routes.push({ hostname, port: appPort });
 
     const entry: ManifestEntry = {
       PORT: String(appPort),
@@ -3073,9 +3157,9 @@ async function runWithTurbo(
       }
     }, SIGKILL_TIMEOUT_MS).unref();
 
-    for (const { hostname } of routes) {
+    for (const { hostname, port } of routes) {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid, port);
       } catch {
         // non-fatal
       }
@@ -3102,13 +3186,14 @@ async function runWithDirectSpawn(
   proxyPort: number,
   tls: boolean,
   tld: string,
+  multiplex: boolean,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[]
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
   const exitCodes = new Map<string, number | null>();
   const appUrls: { label: string; url: string }[] = [];
-  const routeEntries: { store: RouteStore; hostname: string }[] = [];
+  const routeEntries: { store: RouteStore; hostname: string; pid: number; port: number }[] = [];
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
@@ -3119,6 +3204,7 @@ async function runWithDirectSpawn(
       proxyPort,
       tls,
       tld,
+      multiplex,
       exitCodes
     );
     children.push(child);
@@ -3160,9 +3246,9 @@ async function runWithDirectSpawn(
       }
     }, SIGKILL_TIMEOUT_MS).unref();
 
-    for (const { store, hostname } of routeEntries) {
+    for (const { store, hostname, pid, port } of routeEntries) {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, pid, port);
       } catch {
         // non-fatal
       }
@@ -3244,7 +3330,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   const worktree = detectWorktreePrefix();
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
-  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
+  const { dir, port, tls, tld, lanMode, lanIp, multiplex } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -3260,7 +3346,8 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    multiplex
   );
 }
 
@@ -3289,7 +3376,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     .map((label) => truncateLabel(label))
     .join(".");
 
-  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
+  const { dir, port, tls, tld, lanMode, lanIp, multiplex } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -3305,7 +3392,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     undefined,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    multiplex
   );
 }
 
@@ -3393,6 +3481,9 @@ async function main() {
   if (stripGlobalFlag("--funnel", false)) {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
+  }
+  if (stripGlobalFlag("--multiplex", false)) {
+    process.env.PORTLESS_MULTIPLEX = "1";
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.
