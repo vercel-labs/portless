@@ -1323,4 +1323,61 @@ describe("CLI", () => {
       expect(stderr).toContain("appPort");
     });
   });
+
+  describe("--tailscale flag", () => {
+    it("shows --tailscale in help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--tailscale");
+      expect(stdout).toContain("--funnel");
+      expect(stdout).toContain("PORTLESS_TAILSCALE");
+    });
+
+    it("fails with actionable message when tailscale is not installed", () => {
+      const { status, stderr } = run(["--tailscale", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("fails with --funnel when tailscale is not installed", () => {
+      const { status, stderr } = run(["--funnel", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts PORTLESS_TAILSCALE=1 env var", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: { PORTLESS_TAILSCALE: "1", PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale after app name", () => {
+      const { status, stderr } = run(["myapp", "--tailscale", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale in run subcommand", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run", "--tailscale", "echo", "hello"], {
+          cwd: tmpDir,
+          env: { PATH: "/tmp/portless-no-ts-path" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain("Tailscale");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
 });

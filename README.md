@@ -276,6 +276,34 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 
 - **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
 
+## Tailscale sharing
+
+Share your dev server with teammates on your [Tailscale](https://tailscale.com) network:
+
+```bash
+portless myapp --tailscale next dev
+# -> https://myapp.localhost           (local)
+# -> https://devbox.yourteam.ts.net    (tailnet)
+```
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no framework `basePath` configuration is needed. The first app gets port 443, subsequent apps get 8443, 8444, etc.
+
+```bash
+portless myapp --tailscale next dev     # -> https://devbox.ts.net
+portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
+```
+
+Use `--funnel` to expose your dev server to the public internet via [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
+
+```bash
+portless myapp --funnel next dev
+# -> https://devbox.yourteam.ts.net    (public)
+```
+
+Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
+
+Requires the Tailscale CLI to be installed and connected (`tailscale up`).
+
 ## Commands
 
 ```bash
@@ -321,6 +349,8 @@ portless proxy stop              # Stop the proxy
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--tailscale                      Share the app on your Tailscale network (tailnet)
+--funnel                         Share the app publicly via Tailscale Funnel
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
@@ -336,12 +366,15 @@ PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
+PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
+PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
 PORT                             Ephemeral port the child should listen on
 HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode)
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
+PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
@@ -422,3 +455,4 @@ pnpm format           # Format all files with Prettier
 
 - Node.js 20+
 - macOS, Linux, or Windows
+- Tailscale CLI (optional, for `--tailscale` and `--funnel`)

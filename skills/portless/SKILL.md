@@ -171,17 +171,19 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. Overri
 
 ### Environment variables
 
-| Variable              | Description                                                           |
-| --------------------- | --------------------------------------------------------------------- |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without) |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                   |
-| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)       |
-| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)            |
-| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                     |
-| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent    |
-| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)         |
-| `PORTLESS_STATE_DIR`  | Override the state directory                                          |
-| `PORTLESS=0`          | Bypass the proxy, run the command directly                            |
+| Variable              | Description                                                                 |
+| --------------------- | --------------------------------------------------------------------------- |
+| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)       |
+| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                         |
+| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)             |
+| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                  |
+| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                           |
+| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent          |
+| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
+| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)  |
+| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`) |
+| `PORTLESS_STATE_DIR`  | Override the state directory                                                |
+| `PORTLESS=0`          | Bypass the proxy, run the command directly                                  |
 
 ### HTTP/2 + HTTPS
 
@@ -220,6 +222,22 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 
 - **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
 
+### Tailscale sharing
+
+Share dev servers with teammates on your Tailscale network using `--tailscale`, or expose to the public internet with `--funnel`:
+
+```bash
+portless myapp --tailscale next dev
+# -> https://myapp.localhost           (local)
+# -> https://devbox.yourteam.ts.net    (tailnet)
+
+portless myapp --funnel next dev
+# -> https://myapp.localhost           (local)
+# -> https://devbox.yourteam.ts.net    (public internet)
+```
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected.
+
 ## CLI Reference
 
 | Command                                | Description                                                    |
@@ -251,6 +269,8 @@ LAN mode depends on the system mDNS helpers that portless launches: macOS includ
 | `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                        |
 | `portless hosts clean`                 | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment        |
+| `portless <name> --tailscale <cmd>`    | Share the app on your Tailscale network (tailnet)              |
+| `portless <name> --funnel <cmd>`       | Share the app publicly via Tailscale Funnel                    |
 | `portless <name> --force <cmd>`        | Kill the existing process and take over its route              |
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |
@@ -378,8 +398,20 @@ proxy: {
 
 Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
 
+### Tailscale not working
+
+If `--tailscale` or `--funnel` fails:
+
+```bash
+tailscale status     # Check if connected
+tailscale up         # Connect to your tailnet
+```
+
+Requires the Tailscale CLI to be installed (https://tailscale.com/download) and on PATH.
+
 ### Requirements
 
 - Node.js 20+
 - macOS, Linux, or Windows
 - `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions; on Windows, install via `winget install -e --id ShiningLight.OpenSSL.Dev` or use the copy bundled with Git for Windows)
+- `tailscale` CLI (optional, for `--tailscale` and `--funnel`)

@@ -23,6 +23,9 @@ export const DIR_MODE = 0o755;
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
+  tailscaleUrl?: string;
+  tailscaleHttpsPort?: number;
+  tailscaleFunnel?: boolean;
 }
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
@@ -228,7 +231,8 @@ export class RouteStore {
         }
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);
-      filtered.push({ hostname, port, pid });
+      const entry: RouteMapping = { hostname, port, pid };
+      filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {
       this.releaseLock();
@@ -286,6 +290,32 @@ export class RouteStore {
         this.saveRoutes(alive);
       }
       return stale;
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /**
+   * Update metadata on an existing route entry. Only provided fields are
+   * merged; the route must already exist (matched by hostname).
+   */
+  updateRoute(
+    hostname: string,
+    fields: Partial<Pick<RouteMapping, "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel">>
+  ): void {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const routes = this.loadRoutes(true);
+      const route = routes.find((r) => r.hostname === hostname);
+      if (!route) return;
+      if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
+      if (fields.tailscaleHttpsPort !== undefined)
+        route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
+      if (fields.tailscaleFunnel !== undefined) route.tailscaleFunnel = fields.tailscaleFunnel;
+      this.saveRoutes(routes);
     } finally {
       this.releaseLock();
     }
