@@ -321,6 +321,10 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("@media (prefers-color-scheme:dark)");
       expect(res.body).toContain("<strong>myapp.localhost</strong>");
       expect(res.body).toContain("/__portless__/select?id=one");
+      expect(res.body).toContain(">Select</a>");
+      expect(res.body).toContain(">Selected</a>");
+      expect(res.body).toContain("/__portless__/clear?next=%2F");
+      expect(res.body).toContain("Clear selection");
       expect(res.body).toContain("feature-auth");
       expect(res.body).toContain("/repo/apps/web");
       expect(res.body).toContain("next dev");

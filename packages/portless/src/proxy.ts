@@ -256,6 +256,7 @@ async function injectSwitcher(
   const next = encodeURIComponent(reqUrl || "/");
   const currentId = getRouteId(currentRoute);
   const routeCount = String(routes.length);
+  const clearHref = `${CONTROL_PREFIX}/clear?next=${next}`;
   const links = routes
     .map((route) => {
       const id = getRouteId(route);
@@ -276,10 +277,10 @@ async function injectSwitcher(
             `<span class="pl-row"><span>${escapeHtml(label)}</span><code>${escapeHtml(value)}</code></span>`
         )
         .join("");
-      return `<a class="pl-app${selected ? " pl-active" : ""}" href="${href}"><span class="pl-app-top"><span class="pl-dot"></span><span class="pl-title">${escapeHtml(route.folder || route.hostname)}</span><span class="pl-port">${escapeHtml(String(route.port))}</span></span><span class="pl-details">${detailRows}</span></a>`;
+      return `<div class="pl-app${selected ? " pl-active" : ""}"><div class="pl-app-top"><span class="pl-dot"></span><span class="pl-title">${escapeHtml(route.folder || route.hostname)}</span><span class="pl-port">${escapeHtml(String(route.port))}</span></div><div class="pl-details">${detailRows}</div><div class="pl-actions"><a class="pl-select" href="${href}">${selected ? "Selected" : "Select"}</a></div></div>`;
     })
     .join("");
-  const widget = `<div class="pl-switcher" aria-label="Portless app switcher"><input id="pl-switcher-toggle" type="checkbox" class="pl-toggle"><label for="pl-switcher-toggle" class="pl-icon" title="Switch portless app"><span class="pl-mark">p</span><span class="pl-count">${escapeHtml(routeCount)}</span></label><div class="pl-panel"><div class="pl-head"><div><p>portless</p><strong>${escapeHtml(host)}</strong></div><label for="pl-switcher-toggle" aria-label="Collapse portless app switcher">close</label></div><div class="pl-list">${links}</div></div><style>
+  const widget = `<div class="pl-switcher" aria-label="Portless app switcher"><input id="pl-switcher-toggle" type="checkbox" class="pl-toggle"><label for="pl-switcher-toggle" class="pl-icon" title="Switch portless app"><span class="pl-mark">p</span><span class="pl-count">${escapeHtml(routeCount)}</span></label><div class="pl-panel"><div class="pl-head"><div><p>portless</p><strong>${escapeHtml(host)}</strong></div><label for="pl-switcher-toggle" aria-label="Collapse portless app switcher">close</label></div><div class="pl-list">${links}</div><div class="pl-foot"><a class="pl-clear" href="${clearHref}">Clear selection</a></div></div><style>
 .pl-switcher{--pl-bg:#fff;--pl-fg:#111;--pl-muted:#666;--pl-soft:#f6f6f6;--pl-border:rgba(0,0,0,.13);--pl-active:#eef6ff;--pl-active-border:#60a5fa;position:fixed;right:16px;bottom:16px;z-index:2147483647;font:13px/1.35 ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--pl-fg)}
 @media (prefers-color-scheme:dark){.pl-switcher{--pl-bg:#0b0b0b;--pl-fg:#f4f4f5;--pl-muted:#a1a1aa;--pl-soft:#18181b;--pl-border:rgba(255,255,255,.16);--pl-active:#082f49;--pl-active-border:#38bdf8}}
 .pl-switcher *{box-sizing:border-box}
@@ -295,7 +296,7 @@ async function injectSwitcher(
 .pl-head strong{display:block;max-inline-size:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:14px}
 .pl-head label{color:var(--pl-muted);font-size:12px;cursor:pointer}
 .pl-list{display:grid;gap:8px;max-block-size:520px;overflow:auto;padding:10px}
-.pl-app{display:block;padding:10px;border:1px solid var(--pl-border);border-radius:8px;background:var(--pl-soft);color:inherit;text-decoration:none}
+.pl-app{display:block;padding:10px;border:1px solid var(--pl-border);border-radius:8px;background:var(--pl-soft);color:inherit}
 .pl-app:hover{border-color:var(--pl-active-border)}
 .pl-active{background:var(--pl-active);border-color:var(--pl-active-border)}
 .pl-app-top{display:grid;grid-template-columns:10px minmax(0,1fr) auto;align-items:center;gap:8px}
@@ -307,6 +308,13 @@ async function injectSwitcher(
 .pl-row{min-width:0}
 .pl-row span{display:block;margin-bottom:2px;color:var(--pl-muted);font-size:10px;font-weight:650;text-transform:uppercase;letter-spacing:0}
 .pl-row code{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--pl-fg);font:12px ui-monospace,SFMono-Regular,Menlo,monospace}
+.pl-actions{display:flex;justify-content:flex-end;margin-top:10px}
+.pl-select,.pl-clear{display:inline-flex;align-items:center;justify-content:center;min-block-size:30px;border-radius:6px;text-decoration:none;font-weight:700}
+.pl-select{padding:0 11px;background:var(--pl-fg);color:var(--pl-bg)}
+.pl-active .pl-select{border:1px solid var(--pl-border);background:transparent;color:var(--pl-fg)}
+.pl-foot{display:flex;justify-content:flex-end;padding:0 10px 10px}
+.pl-clear{padding:0 10px;border:1px solid var(--pl-border);color:var(--pl-muted);background:transparent}
+.pl-clear:hover{color:var(--pl-fg);border-color:var(--pl-active-border)}
 @media (max-width:460px){.pl-switcher{right:10px;bottom:10px}.pl-details{grid-template-columns:1fr}.pl-head strong{max-inline-size:230px}}
 </style></div>`;
   const injected = html.includes("</body>")
