@@ -434,6 +434,41 @@ describe("injectFrameworkFlags", () => {
     }
   });
 
+  // Wrangler doesn't honor PORT (issue #263). Wrangler uses --ip for the
+  // bind address; --host has a different meaning (route hostname).
+  it("injects --port and --ip for wrangler dev", () => {
+    const args = ["wrangler", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--port", "4567", "--ip", "127.0.0.1"]);
+  });
+
+  it("skips --ip injection for wrangler when --ip is already present", () => {
+    const args = ["wrangler", "dev", "--ip", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--ip", "0.0.0.0", "--port", "4567"]);
+  });
+
+  it("does not inject --host for wrangler (route hostname, not bind address)", () => {
+    const args = ["wrangler", "dev", "--host", "example.com"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "wrangler",
+      "dev",
+      "--host",
+      "example.com",
+      "--port",
+      "4567",
+      "--ip",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npx wrangler dev", () => {
+    const args = ["npx", "wrangler", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx", "wrangler", "dev", "--port", "4567", "--ip", "127.0.0.1"]);
+  });
+
   it("does not inject for frameworks that read PORT", () => {
     const nextArgs = ["next", "dev"];
     injectFrameworkFlags(nextArgs, 4567);
