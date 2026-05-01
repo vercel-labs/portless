@@ -868,6 +868,7 @@ export function spawnCommand(
 const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   vite: { strictPort: true },
   vp: { strictPort: true },
+  vitepress: { strictPort: true },
   "react-router": { strictPort: true },
   rsbuild: { strictPort: false },
   astro: { strictPort: false },

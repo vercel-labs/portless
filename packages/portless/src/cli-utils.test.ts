@@ -377,6 +377,20 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["vp", "dev", "--port", "4567", "--strictPort", "--host", "127.0.0.1"]);
   });
 
+  it("injects --port, --strictPort, and --host for vitepress command", () => {
+    const args = ["vitepress", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vitepress",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
   it("injects for react-router with --strictPort", () => {
     const args = ["react-router", "dev"];
     injectFrameworkFlags(args, 4567);
