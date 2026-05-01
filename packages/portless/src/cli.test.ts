@@ -1331,6 +1331,7 @@ describe("CLI", () => {
       expect(stdout).toContain("--tailscale");
       expect(stdout).toContain("--funnel");
       expect(stdout).toContain("PORTLESS_TAILSCALE");
+      expect(stdout).toContain("HTTPS Certificates");
     });
 
     it("fails with actionable message when tailscale is not installed", () => {
