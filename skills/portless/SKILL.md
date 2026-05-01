@@ -236,7 +236,7 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public internet)
 ```
 
-Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected.
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with MagicDNS and HTTPS Certificates enabled on the active tailnet.
 
 ## CLI Reference
 
@@ -407,7 +407,7 @@ tailscale status     # Check if connected
 tailscale up         # Connect to your tailnet
 ```
 
-Requires the Tailscale CLI to be installed (https://tailscale.com/download) and on PATH.
+Requires the Tailscale CLI to be installed (https://tailscale.com/download) and on PATH, with MagicDNS and HTTPS Certificates enabled on the active tailnet.
 
 ### Requirements
 

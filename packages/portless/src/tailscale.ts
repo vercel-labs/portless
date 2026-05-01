@@ -30,6 +30,7 @@ interface TailscaleStatusJson {
   CurrentTailnet?: {
     MagicDNSSuffix?: string;
   };
+  CertDomains?: string[] | null;
 }
 
 export interface TailscaleReadyResult {
@@ -107,8 +108,25 @@ function statusToDnsName(status: TailscaleStatusJson): string {
   );
 }
 
+function ensureHttpsCertificatesEnabled(status: TailscaleStatusJson, dnsName: string): void {
+  const certDomains = status.CertDomains;
+  const normalizedDnsName = trimDot(dnsName).toLowerCase();
+  const hasCertDomain =
+    Array.isArray(certDomains) &&
+    certDomains.some(
+      (domain) => typeof domain === "string" && trimDot(domain).toLowerCase() === normalizedDnsName
+    );
+
+  if (!hasCertDomain) {
+    throw new Error(
+      `Tailscale HTTPS Certificates are not enabled for ${dnsName}. ` +
+        "Enable MagicDNS and HTTPS Certificates in the Tailscale admin console DNS page, then retry."
+    );
+  }
+}
+
 /**
- * Verify that the Tailscale CLI is installed and the node is connected.
+ * Verify that the Tailscale CLI is installed, connected, and ready for Serve.
  * Returns the node's DNS name and base URL.
  */
 export function ensureTailscaleReady(
@@ -118,6 +136,7 @@ export function ensureTailscaleReady(
   const statusResult = runOrThrow(["status", "--json"], "read tailscale status", runner);
   const status = parseStatusJson(statusResult.stdout);
   const dnsName = statusToDnsName(status);
+  ensureHttpsCertificatesEnabled(status, dnsName);
   return {
     dnsName,
     baseUrl: `https://${dnsName}`,

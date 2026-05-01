@@ -302,7 +302,7 @@ portless myapp --funnel next dev
 
 Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
 
-Requires the Tailscale CLI to be installed and connected (`tailscale up`).
+Requires the Tailscale CLI to be installed and connected (`tailscale up`), with MagicDNS and HTTPS Certificates enabled on the active tailnet.
 
 ## Commands
 

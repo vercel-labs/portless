@@ -966,6 +966,8 @@ async function runApp(
       console.error(colors.red(`Error: ${message}`));
       if (message.includes("not found")) {
         console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
+      } else if (message.includes("HTTPS Certificates")) {
+        // The error already points at the required admin console setting.
       } else {
         console.error(colors.blue("Make sure Tailscale is connected:"));
         console.error(colors.cyan("  tailscale up"));
@@ -1490,7 +1492,8 @@ ${colors.bold("Tailscale sharing:")}
   Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
   8444, etc.) so no basePath configuration is needed.
   Use --funnel to expose your dev server to the public internet via
-  Tailscale Funnel. Requires Tailscale CLI to be installed and connected.
+  Tailscale Funnel. Requires Tailscale CLI to be installed and connected,
+  with MagicDNS and HTTPS Certificates enabled on the active tailnet.
   ${colors.cyan("portless myapp --tailscale next dev")}
   ${colors.cyan("portless myapp --funnel next dev")}
 

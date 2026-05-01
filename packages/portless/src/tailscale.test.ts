@@ -52,6 +52,7 @@ describe("tailscale", () => {
           status: 0,
           stdout: JSON.stringify({
             Self: { DNSName: "devbox.example.ts.net." },
+            CertDomains: ["devbox.example.ts.net"],
           }),
         },
       });
@@ -68,12 +69,53 @@ describe("tailscale", () => {
           stdout: JSON.stringify({
             Self: { HostName: "devbox" },
             CurrentTailnet: { MagicDNSSuffix: "example.ts.net." },
+            CertDomains: ["devbox.example.ts.net"],
           }),
         },
       });
       const ready = ensureTailscaleReady(runner);
       expect(ready.dnsName).toBe("devbox.example.ts.net");
     });
+
+    it("accepts certificate domains with trailing dots", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: { DNSName: "devbox.example.ts.net." },
+            CertDomains: ["devbox.example.ts.net."],
+          }),
+        },
+      });
+      const ready = ensureTailscaleReady(runner);
+      expect(ready.dnsName).toBe("devbox.example.ts.net");
+    });
+
+    it.each([
+      ["missing", undefined],
+      ["null", null],
+      ["empty", []],
+      ["mismatched", ["other.example.ts.net"]],
+    ] as Array<[string, string[] | null | undefined]>)(
+      "throws when HTTPS Certificates are %s",
+      (_label, certDomains) => {
+        const status: { Self: { DNSName: string }; CertDomains?: string[] | null } = {
+          Self: { DNSName: "devbox.example.ts.net." },
+        };
+        if (certDomains !== undefined) {
+          status.CertDomains = certDomains;
+        }
+        const runner = createRunner({
+          version: { status: 0 },
+          "status --json": {
+            status: 0,
+            stdout: JSON.stringify(status),
+          },
+        });
+        expect(() => ensureTailscaleReady(runner)).toThrow("HTTPS Certificates");
+      }
+    );
 
     it("throws when tailscale CLI is missing", () => {
       const enoent = Object.assign(new Error("spawn tailscale ENOENT"), {
