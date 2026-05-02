@@ -200,15 +200,15 @@ Put `portless run` in your `package.json` once and it works everywhere. The main
 
 ## Custom TLD
 
-By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
+By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD, including a multi-segment value such as `.local.example.dev`, use `--tld`:
 
 ```bash
-portless proxy start --tld test
+portless proxy start --tld local.example.dev
 portless myapp next dev
-# -> https://myapp.test
+# -> https://myapp.local.example.dev
 ```
 
-The proxy auto-syncs `/etc/hosts` for route hostnames (including `.test`), so those domains resolve on your machine.
+The proxy auto-syncs `/etc/hosts` for route hostnames (including custom TLDs), so those domains resolve on your machine.
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
@@ -345,7 +345,7 @@ portless proxy stop              # Stop the proxy
 --cert <path>                    Use a custom TLS certificate
 --key <path>                     Use a custom TLS private key
 --foreground                     Run proxy in foreground instead of daemon
---tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
+--tld <tld>                      Use a custom TLD instead of .localhost (e.g. test, local.example.dev)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
@@ -363,7 +363,7 @@ PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
-PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
+PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test, local.example.dev; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)

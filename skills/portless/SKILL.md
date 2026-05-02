@@ -177,7 +177,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. Overri
 | `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                         |
 | `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)             |
 | `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                  |
-| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                           |
+| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test, local.example.dev)        |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent          |
 | `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
 | `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)  |
@@ -259,7 +259,7 @@ Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, the
 | `portless proxy start --no-tls`        | Start without HTTPS (plain HTTP on port 80)                    |
 | `portless proxy start --lan`           | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
 | `portless proxy start -p <number>`     | Start the proxy on a custom port                               |
-| `portless proxy start --tld test`      | Use .test instead of .localhost                                |
+| `portless proxy start --tld local.example.dev` | Use .local.example.dev instead of .localhost                    |
 | `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                  |
 | `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
 | `portless proxy stop`                  | Stop the proxy                                                 |
