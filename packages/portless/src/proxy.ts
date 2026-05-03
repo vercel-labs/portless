@@ -376,11 +376,15 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
    *
    * Flow:
    *   browser → portless (h2 stream, :method=CONNECT, :protocol=websocket)
-   *   portless → backend (http.request with Upgrade: websocket)
+   *   portless → backend (raw net.Socket + manual HTTP/1.1 Upgrade request)
    *   backend → portless (101 Switching Protocols + Sec-WebSocket-Accept)
    *   portless → browser (HTTP/2 :status=200, no Sec-WebSocket-Accept needed
    *                       per RFC 8441 §4)
    *   ↔ pipe raw WebSocket frames in both directions
+   *
+   * Raw net.Socket (not http.request) because Node 24's ClientRequest tears
+   * down the socket prematurely when used in this CONNECT-bridging context;
+   * see comment on backendSocket below for details.
    */
   const handleH2WebSocket = (
     stream: http2.ServerHttp2Stream,
@@ -413,8 +417,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const hops =
-      parseInt(headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
+    const hops = parseInt(headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
     if (hops >= MAX_PROXY_HOPS) {
       onError(
         `WebSocket loop detected for ${host}: request has passed through portless ${hops} times.`
@@ -435,8 +438,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     // under RFC 8441, but pass it through if present for diagnostic clarity;
     // otherwise generate one.
     const wsKey =
-      (headers["sec-websocket-key"] as string) ||
-      crypto.randomBytes(16).toString("base64");
+      (headers["sec-websocket-key"] as string) || crypto.randomBytes(16).toString("base64");
 
     const fakeReq = {
       socket: stream.session?.socket,
@@ -448,17 +450,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       host: authority,
       connection: "Upgrade",
       upgrade: "websocket",
-      "sec-websocket-version":
-        (headers["sec-websocket-version"] as string) || "13",
+      "sec-websocket-version": (headers["sec-websocket-version"] as string) || "13",
       "sec-websocket-key": wsKey,
     };
     if (headers["sec-websocket-protocol"]) {
-      backendHeaders["sec-websocket-protocol"] =
-        headers["sec-websocket-protocol"] as string;
+      backendHeaders["sec-websocket-protocol"] = headers["sec-websocket-protocol"] as string;
     }
     if (headers["sec-websocket-extensions"]) {
-      backendHeaders["sec-websocket-extensions"] =
-        headers["sec-websocket-extensions"] as string;
+      backendHeaders["sec-websocket-extensions"] = headers["sec-websocket-extensions"] as string;
     }
     if (headers["origin"]) {
       backendHeaders["origin"] = headers["origin"] as string;
@@ -634,10 +633,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     h2Server.prependListener(
       "stream",
       (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
-        if (
-          headers[":method"] !== "CONNECT" ||
-          headers[":protocol"] !== "websocket"
-        ) {
+        if (headers[":method"] !== "CONNECT" || headers[":protocol"] !== "websocket") {
           // Regular request — handled by the 'request' event listener above.
           return;
         }
