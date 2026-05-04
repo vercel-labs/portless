@@ -50,6 +50,7 @@ const CA_KEY_FILE = "ca-key.pem";
 const CA_CERT_FILE = "ca.pem";
 const SERVER_KEY_FILE = "server-key.pem";
 const SERVER_CERT_FILE = "server.pem";
+const CA_TRUST_MARKER = "ca.trusted";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -61,6 +62,41 @@ function fileExists(filePath: string): boolean {
     return true;
   } catch {
     return false;
+  }
+}
+
+function caFingerprint(stateDir: string): string | null {
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  try {
+    const pem = fs.readFileSync(caCertPath);
+    return crypto.createHash("sha256").update(pem).digest("hex");
+  } catch {
+    return null;
+  }
+}
+
+function readTrustMarker(stateDir: string): string | null {
+  try {
+    const value = fs.readFileSync(path.join(stateDir, CA_TRUST_MARKER), "utf-8").trim();
+    return value || null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTrustMarker(stateDir: string): void {
+  const fp = caFingerprint(stateDir);
+  if (fp) {
+    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), fp + "\n");
+    fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
+  }
+}
+
+function clearTrustMarker(stateDir: string): void {
+  try {
+    fs.unlinkSync(path.join(stateDir, CA_TRUST_MARKER));
+  } catch {
+    // Marker may not exist yet; ignore.
   }
 }
 
@@ -255,6 +291,8 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
   fs.chmodSync(certPath, 0o644);
   fixOwnership(keyPath, certPath);
 
+  clearTrustMarker(stateDir);
+
   return { certPath, keyPath };
 }
 
@@ -363,19 +401,17 @@ export function ensureCerts(stateDir: string): {
   const serverKeyPath = path.join(stateDir, SERVER_KEY_FILE);
 
   let caGenerated = false;
-
-  // Ensure CA exists
-  if (
+  const caMissing =
     !fileExists(caCertPath) ||
     !fileExists(caKeyPath) ||
     !isCertValid(caCertPath) ||
-    !isCertSignatureStrong(caCertPath)
-  ) {
+    !isCertSignatureStrong(caCertPath);
+
+  if (caMissing) {
     generateCA(stateDir);
     caGenerated = true;
   }
 
-  // Ensure server cert exists and is valid
   if (
     caGenerated ||
     !fileExists(serverCertPath) ||
@@ -389,7 +425,7 @@ export function ensureCerts(stateDir: string): {
 
   return {
     certPath: serverCertPath,
-    keyPath: path.join(stateDir, SERVER_KEY_FILE),
+    keyPath: serverKeyPath,
     caPath: caCertPath,
     caGenerated,
   };
@@ -401,6 +437,13 @@ export function ensureCerts(stateDir: string): {
 export function isCATrusted(stateDir: string): boolean {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) return false;
+
+  // Fast path: if we previously trusted this exact CA, skip the OS check.
+  const marker = readTrustMarker(stateDir);
+  if (marker) {
+    const fp = caFingerprint(stateDir);
+    if (fp && marker === fp) return true;
+  }
 
   if (process.platform === "darwin") {
     return isCATrustedMacOS(caCertPath);
@@ -843,6 +886,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
           { stdio: "pipe", timeout: MACOS_SECURITY_AUTH_TIMEOUT_MS }
         );
       }
+      writeTrustMarker(stateDir);
       return { trusted: true };
     } else if (process.platform === "linux") {
       const config = getLinuxCATrustConfig();
@@ -852,12 +896,14 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      writeTrustMarker(stateDir);
       return { trusted: true };
     } else if (process.platform === "win32") {
       execFileSync("certutil", ["-addstore", "-user", "Root", caCertPath], {
         stdio: "pipe",
         timeout: 30_000,
       });
+      writeTrustMarker(stateDir);
       return { trusted: true };
     }
     return { trusted: false, error: `Unsupported platform: ${process.platform}` };
@@ -894,24 +940,28 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
 export function untrustCA(stateDir: string): { removed: boolean; error?: string } {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) {
+    clearTrustMarker(stateDir);
     return { removed: true };
   }
 
   if (!isCATrusted(stateDir)) {
+    clearTrustMarker(stateDir);
     return { removed: true };
   }
 
   try {
+    let result: { removed: boolean; error?: string };
     if (process.platform === "darwin") {
-      return untrustCAMacOS(caCertPath);
+      result = untrustCAMacOS(caCertPath);
+    } else if (process.platform === "linux") {
+      result = untrustCALinux(stateDir);
+    } else if (process.platform === "win32") {
+      result = untrustCAWindows(caCertPath);
+    } else {
+      result = { removed: false, error: `Unsupported platform: ${process.platform}` };
     }
-    if (process.platform === "linux") {
-      return untrustCALinux(stateDir);
-    }
-    if (process.platform === "win32") {
-      return untrustCAWindows(caCertPath);
-    }
-    return { removed: false, error: `Unsupported platform: ${process.platform}` };
+    if (result.removed) clearTrustMarker(stateDir);
+    return result;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     return { removed: false, error: message };
@@ -921,7 +971,7 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
 function untrustCAMacOS(caCertPath: string): { removed: boolean; error?: string } {
   const errors: string[] = [];
 
-  const tryExec = (args: string[]) => {
+  const tryExec = (args: string[]): boolean => {
     try {
       execFileSync("security", args, { stdio: "pipe", timeout: MACOS_SECURITY_ROOT_TIMEOUT_MS });
       return true;
@@ -932,15 +982,17 @@ function untrustCAMacOS(caCertPath: string): { removed: boolean; error?: string 
     }
   };
 
-  if (tryExec(["remove-trusted-cert", caCertPath])) {
-    return isCATrustedMacOSAfterAttempt(caCertPath)
-      ? { removed: false, error: errors.join("; ") || "Trust entry may still be present" }
-      : { removed: true };
-  }
+  tryExec(["remove-trusted-cert", caCertPath]);
 
-  const login = loginKeychainPath();
-  tryExec(["delete-certificate", "-c", CA_COMMON_NAME, login]);
-  tryExec(["delete-certificate", "-c", CA_COMMON_NAME, "/Library/Keychains/System.keychain"]);
+  // delete-certificate -c fails when multiple certs share the same CN
+  // ("is ambiguous, matches more than one certificate"). Loop until all
+  // matching certs are removed from each keychain.
+  const keychains = [loginKeychainPath(), "/Library/Keychains/System.keychain"];
+  for (const kc of keychains) {
+    for (let i = 0; i < 20; i++) {
+      if (!tryExec(["delete-certificate", "-c", CA_COMMON_NAME, kc])) break;
+    }
+  }
 
   return isCATrustedMacOSAfterAttempt(caCertPath)
     ? { removed: false, error: errors.join("; ") || "Could not remove CA from keychain (try sudo)" }

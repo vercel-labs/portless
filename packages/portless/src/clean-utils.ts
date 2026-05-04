@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
+import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
 
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
@@ -36,7 +36,7 @@ export function collectStateDirsForCleanup(): string[] {
     if (fs.existsSync(resolved)) dirs.add(resolved);
   };
   add(USER_STATE_DIR);
-  add(SYSTEM_STATE_DIR);
+  add(LEGACY_SYSTEM_STATE_DIR);
   add(process.env.PORTLESS_STATE_DIR);
   return [...dirs];
 }

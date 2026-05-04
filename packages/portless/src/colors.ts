@@ -11,17 +11,17 @@ const wrap = (open: string, close: string) => {
   return (s: string) => `\x1b[${open}m${s}\x1b[${close}m`;
 };
 
-const bold = wrap("1", "22");
-const red = wrap("31", "39");
-const green = wrap("32", "39");
-const yellow = wrap("33", "39");
-const blue = Object.assign(wrap("34", "39"), {
-  bold: enabled ? (s: string) => `\x1b[34;1m${s}\x1b[22;39m` : (s: string) => s,
-});
-const cyan = Object.assign(wrap("36", "39"), {
-  bold: enabled ? (s: string) => `\x1b[36;1m${s}\x1b[22;39m` : (s: string) => s,
-});
-const white = wrap("37", "39");
-const gray = wrap("90", "39");
+const identity = (s: string) => s;
 
-export default { bold, red, green, yellow, blue, cyan, white, gray };
+const bold = wrap("1", "22");
+const dim = wrap("2", "22");
+
+const red = wrap("31", "39");
+const green = identity;
+const yellow = wrap("33", "39");
+const blue = Object.assign(identity, { bold } as { bold: (s: string) => string });
+const cyan = Object.assign(identity, { bold } as { bold: (s: string) => string });
+const white = identity;
+const gray = dim;
+
+export default { bold, dim, red, green, yellow, blue, cyan, white, gray };
