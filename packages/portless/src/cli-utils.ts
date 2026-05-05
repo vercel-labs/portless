@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
 
 // ---------------------------------------------------------------------------
@@ -41,8 +41,36 @@ export const LEGACY_SYSTEM_STATE_DIR = isWindows
   ? path.join(os.tmpdir(), "portless")
   : "/tmp/portless";
 
+/**
+ * Resolve the home directory for state storage. When running under sudo,
+ * uses the original user's home directory (via SUDO_USER) so the proxy
+ * and child processes share the same state directory.
+ */
+function resolveStateHomeDir(): string {
+  const sudoer = process.env.SUDO_USER;
+  const validUsername = /^[a-zA-Z0-9._-]+$/;
+
+  if (sudoer && process.platform !== "win32" && validUsername.test(sudoer)) {
+    try {
+      // Use execFileSync with an array to avoid shell interpolation.
+      const out = execFileSync("getent", ["passwd", sudoer], {
+        encoding: "utf-8",
+      });
+      const parts = out.trim().split(":");
+
+      if (parts.length >= 5 && parts[0] === sudoer) {
+        return parts[5];
+      }
+    } catch {
+      // Fall through to os.homedir() if getent fails
+    }
+  }
+
+  return os.homedir();
+}
+
 /** Per-user state directory. All proxy state lives here regardless of port. */
-export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
+export const USER_STATE_DIR = path.join(resolveStateHomeDir(), ".portless");
 
 /** Minimum app port when finding a free port. */
 const MIN_APP_PORT = 4000;
