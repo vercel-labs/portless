@@ -5,6 +5,7 @@ import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fixOwnership } from "./utils.js";
+import { isWSL, runPowerShellFromWSL, wslToWindowsPath } from "./wsl-utils.js";
 
 /** How long the CA certificate is valid (10 years, in days). */
 const CA_VALIDITY_DAYS = 3650;
@@ -73,6 +74,15 @@ function caFingerprint(stateDir: string): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Extract the SHA-1 fingerprint from a PEM certificate file.
+ */
+function getCertFingerprint(caCertPath: string): string {
+  const pem = fs.readFileSync(caCertPath, "utf-8");
+  const cert = new crypto.X509Certificate(pem);
+  return cert.fingerprint.replace(/:/g, "").toLowerCase();
 }
 
 function readTrustMarker(stateDir: string): string | null {
@@ -448,7 +458,13 @@ export function isCATrusted(stateDir: string): boolean {
   if (process.platform === "darwin") {
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
-    return isCATrustedLinux(stateDir);
+    const isTrustedLinux = isCATrustedLinux(stateDir);
+    if (isWSL()) {
+      // On WSL, also check if the CA is trusted in the Windows store,
+      // since browsers run in Windows and won't see the Linux trust.
+      return isTrustedLinux && isCATrustedWindowsFromWSL(caCertPath);
+    }
+    return isTrustedLinux;
   } else if (process.platform === "win32") {
     return isCATrustedWindows(caCertPath);
   }
@@ -457,11 +473,7 @@ export function isCATrusted(stateDir: string): boolean {
 
 function isCATrustedWindows(caCertPath: string): boolean {
   try {
-    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
-      .trim()
-      .replace(/^.*=/, "")
-      .replace(/:/g, "")
-      .toLowerCase();
+    const fingerprint = getCertFingerprint(caCertPath);
     const result = execFileSync("certutil", ["-store", "-user", "Root"], {
       encoding: "utf-8",
       timeout: 10_000,
@@ -470,6 +482,84 @@ function isCATrustedWindows(caCertPath: string): boolean {
     return result.replace(/\s/g, "").toLowerCase().includes(fingerprint);
   } catch {
     return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Windows CA trust operations from WSL
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if the CA is trusted in the Windows certificate store from WSL.
+ * Uses PowerShell interop to query Cert:\CurrentUser\Root.
+ */
+function isCATrustedWindowsFromWSL(caCertPath: string): boolean {
+  try {
+    const fingerprint = getCertFingerprint(caCertPath);
+
+    const result = runPowerShellFromWSL([
+      "-NoProfile",
+      "-Command",
+      `(Get-ChildItem -Path Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${fingerprint}' }).Thumbprint`,
+    ]);
+
+    return result.replace(/\s/g, "").toLowerCase().includes(fingerprint);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Install the CA in the Windows trust store from WSL via PowerShell interop.
+ */
+function trustCAWindowsFromWSL(caCertPath: string): void {
+  const windowsPath = wslToWindowsPath(caCertPath);
+
+  runPowerShellFromWSL([
+    "-NoProfile",
+    "-Command",
+    `certutil -addstore -user Root "${windowsPath}"`,
+  ]);
+}
+
+/**
+ * Remove the CA from the Windows trust store from WSL via PowerShell interop.
+ */
+function untrustCAWindowsFromWSL(caCertPath: string): {
+  removed: boolean;
+  error?: string;
+} {
+  try {
+    const fingerprint = getCertFingerprint(caCertPath);
+
+    // Check if the cert is in the Windows store
+    const checkResult = runPowerShellFromWSL([
+      "-NoProfile",
+      "-Command",
+      `(Get-ChildItem -Path Cert:\\CurrentUser\\Root | Where-Object { $_.Thumbprint -eq '${fingerprint}' }).Thumbprint`,
+    ]);
+
+    if (!checkResult.replace(/\s/g, "").toLowerCase().includes(fingerprint)) {
+      return { removed: true };
+    }
+
+    // Remove it
+    runPowerShellFromWSL([
+      "-NoProfile",
+      "-Command",
+      `certutil -delstore -user Root "portless Local CA"`,
+    ]);
+
+    // Verify removal
+    if (isCATrustedWindowsFromWSL(caCertPath)) {
+      return {
+        removed: false,
+        error: "Could not remove the portless CA from Windows trust store",
+      };
+    }
+    return { removed: true };
+  } catch (err: unknown) {
+    return { removed: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
 
@@ -852,7 +942,9 @@ export function createSNICallback(
  *
  * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
  */
-export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
+export type TrustCAResult = { trusted: boolean; error?: string; warning?: string };
+
+export function trustCA(stateDir: string): TrustCAResult {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) {
     return {
@@ -896,8 +988,25 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+
+      let warning: string | undefined;
+
+      // On WSL, also install the CA in the Windows trust store so that
+      // browsers running on the Windows host can verify portless certs.
+      if (isWSL()) {
+        try {
+          trustCAWindowsFromWSL(caCertPath);
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          warning =
+            "Could not add CA to the Windows trust store from WSL. " +
+            "Windows browsers may still show certificate warnings." +
+            (message ? ` ${message}` : "");
+        }
+      }
+
       writeTrustMarker(stateDir);
-      return { trusted: true };
+      return warning ? { trusted: true, warning } : { trusted: true };
     } else if (process.platform === "win32") {
       execFileSync("certutil", ["-addstore", "-user", "Root", caCertPath], {
         stdio: "pipe",
@@ -955,6 +1064,12 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
       result = untrustCAMacOS(caCertPath);
     } else if (process.platform === "linux") {
       result = untrustCALinux(stateDir);
+      if (isWSL()) {
+        const winResult = untrustCAWindowsFromWSL(caCertPath);
+        if (!winResult.removed) {
+          result = winResult;
+        }
+      }
     } else if (process.platform === "win32") {
       result = untrustCAWindows(caCertPath);
     } else {
