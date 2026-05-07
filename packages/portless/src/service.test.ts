@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { buildServiceSpec, tryUninstallService } from "./service.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { buildServiceSpec, handleService, tryUninstallService } from "./service.js";
 
 describe("buildServiceSpec", () => {
   it("builds a macOS LaunchDaemon for the HTTPS proxy", () => {
@@ -136,5 +136,56 @@ describe("tryUninstallService", () => {
     const result = tryUninstallService("/fake/cli.js", runner);
     expect(result.removed).toBe(false);
     expect(result.error).toContain("spawn failed");
+  });
+});
+
+describe("handleService", () => {
+  let exitSpy: ReturnType<typeof vi.spyOn>;
+  let logSpy: ReturnType<typeof vi.spyOn>;
+  let errorSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    exitSpy = vi.spyOn(process, "exit").mockImplementation(() => {
+      throw new Error("process.exit");
+    });
+    logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    logSpy.mockRestore();
+    errorSpy.mockRestore();
+  });
+
+  it("prints help and exits 0 for --help", async () => {
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    await expect(
+      handleService(["service", "--help"], { entryScript: "/fake/cli.js", runner })
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(0);
+    const output = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("portless service");
+    expect(output).toContain("service install");
+    expect(output).toContain("service uninstall");
+    expect(output).toContain("service status");
+  });
+
+  it("prints help and exits 0 when no subcommand is given", async () => {
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    await expect(
+      handleService(["service"], { entryScript: "/fake/cli.js", runner })
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it("exits 1 for unknown subcommand", async () => {
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    await expect(
+      handleService(["service", "bogus"], { entryScript: "/fake/cli.js", runner })
+    ).rejects.toThrow("process.exit");
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    const output = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(output).toContain("bogus");
   });
 });

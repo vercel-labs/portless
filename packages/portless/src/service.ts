@@ -500,7 +500,7 @@ export function tryUninstallService(
       fs.rmSync(spec.unitPath, { force: true });
       runOptional(runner, "systemctl", ["daemon-reload"]);
     } else {
-      const query = runner("schtasks", ["/Query", "/TN", "Portless Proxy", "/FO", "LIST"]);
+      const query = runner("schtasks", ["/Query", "/TN", spec.taskName, "/FO", "LIST"]);
       if (query.status !== 0) return { removed: false };
       runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
       runOptional(runner, "schtasks", spec.deleteArgs);
