@@ -191,6 +191,7 @@ describe("tryUninstallService", () => {
   });
 
   it("returns removed: false when runner throws", () => {
+    setPlatform("linux");
     vi.mocked(existsSync).mockReturnValue(true);
     const runner = () => {
       throw new Error("spawn failed");
