@@ -164,7 +164,7 @@ describe("handleService", () => {
       handleService(["service", "--help"], { entryScript: "/fake/cli.js", runner })
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(0);
-    const output = logSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    const output = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
     expect(output).toContain("portless service");
     expect(output).toContain("service install");
     expect(output).toContain("service uninstall");
@@ -185,7 +185,7 @@ describe("handleService", () => {
       handleService(["service", "bogus"], { entryScript: "/fake/cli.js", runner })
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(1);
-    const output = errorSpy.mock.calls.map((c) => c.join(" ")).join("\n");
+    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
     expect(output).toContain("bogus");
   });
 });
