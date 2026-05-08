@@ -1,9 +1,17 @@
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
+import * as crypto from "node:crypto";
 import type { ProxyServerOptions } from "./types.js";
 import { escapeHtml, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
+
+/**
+ * RFC 6455 magic GUID — used to derive Sec-WebSocket-Accept from
+ * Sec-WebSocket-Key when bridging HTTP/2 Extended CONNECT (RFC 8441) to an
+ * HTTP/1.1 backend that expects the classic WebSocket handshake.
+ */
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /** Response header used to identify a portless proxy (for health checks). */
 export const PORTLESS_HEADER = "X-Portless";
@@ -362,11 +370,217 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     proxyReq.end();
   };
 
+  /**
+   * Bridge an incoming HTTP/2 Extended CONNECT (RFC 8441) WebSocket request
+   * to an HTTP/1.1 backend that speaks classic RFC 6455.
+   *
+   * Flow:
+   *   browser → portless (h2 stream, :method=CONNECT, :protocol=websocket)
+   *   portless → backend (raw net.Socket + manual HTTP/1.1 Upgrade request)
+   *   backend → portless (101 Switching Protocols + Sec-WebSocket-Accept)
+   *   portless → browser (HTTP/2 :status=200, no Sec-WebSocket-Accept needed
+   *                       per RFC 8441 §4)
+   *   ↔ pipe raw WebSocket frames in both directions
+   *
+   * Raw net.Socket (not http.request) because Node 24's ClientRequest tears
+   * down the socket prematurely when used in this CONNECT-bridging context;
+   * see comment on backendSocket below for details.
+   */
+  const handleH2WebSocket = (
+    stream: http2.ServerHttp2Stream,
+    headers: http2.IncomingHttpHeaders
+  ) => {
+    stream.on("error", () => stream.destroy());
+
+    const authority = (headers[":authority"] as string) || "";
+    const host = authority.split(":")[0];
+    const path = (headers[":path"] as string) || "/";
+
+    // CRITICAL: respond synchronously *now* to claim the stream. When both a
+    // 'request' and a 'stream' listener are registered (our case — the
+    // 'request' listener serves regular HTTPS), Node's HTTP/2 compatibility
+    // layer auto-responds 405 to CONNECT requests if the stream hasn't been
+    // responded to yet. Our async backend wiring below would lose that race.
+    // Per RFC 8441, the server responds `:status: 200` to accept the
+    // WebSocket; we then bridge to the HTTP/1.1 backend and pipe frames.
+    // If the backend rejects, we destroy the stream — the client treats it
+    // as a disconnect and retries, same as any transient WS failure.
+    try {
+      stream.respond({ ":status": 200 });
+    } catch {
+      stream.destroy();
+      return;
+    }
+
+    if (!host) {
+      stream.destroy();
+      return;
+    }
+
+    const hops = parseInt(headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
+    if (hops >= MAX_PROXY_HOPS) {
+      onError(
+        `WebSocket loop detected for ${host}: request has passed through portless ${hops} times.`
+      );
+      stream.destroy();
+      return;
+    }
+
+    const routes = getRoutes();
+    const route = findRoute(routes, host, strict);
+    if (!route) {
+      stream.destroy();
+      return;
+    }
+
+    // Build classic WebSocket Upgrade headers for the HTTP/1.1 backend. The
+    // browser-supplied Sec-WebSocket-Key (if any) isn't strictly meaningful
+    // under RFC 8441, but pass it through if present for diagnostic clarity;
+    // otherwise generate one.
+    const wsKey =
+      (headers["sec-websocket-key"] as string) || crypto.randomBytes(16).toString("base64");
+
+    const fakeReq = {
+      socket: stream.session?.socket,
+      headers: { ...headers, host: authority },
+    } as unknown as http.IncomingMessage;
+    const forwardedHeaders = buildForwardedHeaders(fakeReq, true);
+
+    const backendHeaders: http.OutgoingHttpHeaders = {
+      host: authority,
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-version": (headers["sec-websocket-version"] as string) || "13",
+      "sec-websocket-key": wsKey,
+    };
+    if (headers["sec-websocket-protocol"]) {
+      backendHeaders["sec-websocket-protocol"] = headers["sec-websocket-protocol"] as string;
+    }
+    if (headers["sec-websocket-extensions"]) {
+      backendHeaders["sec-websocket-extensions"] = headers["sec-websocket-extensions"] as string;
+    }
+    if (headers["origin"]) {
+      backendHeaders["origin"] = headers["origin"] as string;
+    }
+    if (headers["user-agent"]) {
+      backendHeaders["user-agent"] = headers["user-agent"] as string;
+    }
+    if (headers["cookie"]) {
+      backendHeaders["cookie"] = headers["cookie"] as string;
+    }
+    for (const [key, value] of Object.entries(forwardedHeaders)) {
+      backendHeaders[key] = value;
+    }
+    backendHeaders[PORTLESS_HOPS_HEADER] = String(hops + 1);
+
+    // Open a raw TCP socket to the backend and write the WebSocket upgrade
+    // request ourselves. We avoid http.request here because Node 24's
+    // ClientRequest closes the socket prematurely when used in this CONNECT-
+    // bridging context (it detects "no body / GET" and tears down before the
+    // server's 101 response arrives). Manual framing gives us tight control
+    // over the upgrade lifecycle.
+    const backendSocket = net.connect(route.port, "127.0.0.1");
+    backendSocket.on("error", () => {
+      backendSocket.destroy();
+      if (!stream.destroyed) stream.destroy();
+    });
+
+    let upgradeHandshakeBuffer = Buffer.alloc(0);
+    let upgraded = false;
+
+    const onBackendData = (chunk: Buffer) => {
+      if (upgraded) return; // shouldn't fire — pipes take over
+      upgradeHandshakeBuffer = Buffer.concat([upgradeHandshakeBuffer, chunk]);
+      const headerEnd = upgradeHandshakeBuffer.indexOf("\r\n\r\n");
+      if (headerEnd === -1) return; // wait for more
+      const headerBlock = upgradeHandshakeBuffer.slice(0, headerEnd).toString("utf8");
+      const remaining = upgradeHandshakeBuffer.slice(headerEnd + 4);
+      const lines = headerBlock.split("\r\n");
+      const statusLine = lines[0];
+      // Status line: "HTTP/1.1 101 Switching Protocols"
+      const statusMatch = statusLine.match(/^HTTP\/1\.[01]\s+(\d{3})/);
+      const status = statusMatch ? parseInt(statusMatch[1], 10) : 0;
+      if (status !== 101) {
+        // Backend rejected; we already told the client :status 200, so the
+        // only graceful out is to drop the stream. Client retries.
+        backendSocket.destroy();
+        if (!stream.destroyed) stream.destroy();
+        return;
+      }
+
+      // Validate Sec-WebSocket-Accept matches what we sent.
+      const acceptHeader = lines
+        .slice(1)
+        .map((l) => l.split(":"))
+        .find(([k]) => k && k.trim().toLowerCase() === "sec-websocket-accept");
+      const acceptValue = acceptHeader ? acceptHeader.slice(1).join(":").trim() : "";
+      const expectedAccept = crypto
+        .createHash("sha1")
+        .update(wsKey + WS_GUID)
+        .digest("base64");
+      if (acceptValue !== expectedAccept) {
+        backendSocket.destroy();
+        if (!stream.destroyed) stream.destroy();
+        return;
+      }
+
+      upgraded = true;
+      backendSocket.removeListener("data", onBackendData);
+
+      // Flush any WS frame bytes that arrived in the same TCP packet as the
+      // 101 response (rare but possible) before piping.
+      if (remaining.length > 0 && !stream.destroyed) {
+        stream.write(remaining);
+      }
+
+      // Pipe raw WS frames both directions. HTTP/2 DATA frames carry the
+      // bytes transparently — same byte stream as HTTP/1.1 after upgrade.
+      backendSocket.pipe(stream);
+      stream.pipe(backendSocket);
+
+      const cleanup = () => {
+        backendSocket.destroy();
+        if (!stream.destroyed) stream.close();
+      };
+      backendSocket.on("error", cleanup);
+      backendSocket.on("close", cleanup);
+      backendSocket.on("end", cleanup);
+      stream.on("close", cleanup);
+      stream.on("aborted", cleanup);
+    };
+
+    backendSocket.once("connect", () => {
+      backendSocket.on("data", onBackendData);
+
+      // Build the HTTP/1.1 WebSocket upgrade request manually.
+      let req = `GET ${path} HTTP/1.1\r\n`;
+      for (const [name, value] of Object.entries(backendHeaders)) {
+        if (value === undefined) continue;
+        req += `${name}: ${value}\r\n`;
+      }
+      req += "\r\n";
+      backendSocket.write(req);
+    });
+
+    stream.on("close", () => {
+      if (!backendSocket.destroyed) backendSocket.destroy();
+    });
+  };
+
   if (tls) {
     const h2Server = http2.createSecureServer({
       cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
+      // Advertise RFC 8441 Extended CONNECT support to clients. Required so
+      // browsers send `:method=CONNECT, :protocol=websocket` for WebSockets
+      // over an existing HTTP/2 connection (instead of opening a separate
+      // HTTP/1.1 connection, which they don't anymore on Chrome/Firefox).
+      // Without this setting, the h2 server RST_STREAMs Extended CONNECT
+      // requests, the browser reports the WebSocket as failed, and Next.js
+      // Turbopack / Vite HMR breaks (manifests as random page reloads when
+      // the HMR client gives up reconnecting).
+      settings: { enableConnectProtocol: true },
       // Tolerate high rates of RST_STREAM from browsers during HMR and
       // page navigations. Without this, Node sends GOAWAY INTERNAL_ERROR
       // after ~1000 cumulative stream resets and kills the session,
@@ -386,9 +600,64 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       // Absorb RST_STREAM errors from cancelled requests (browser navigation,
       // HMR) so they don't propagate to the HTTP/2 session.
       req.stream?.on("error", () => {});
+      // RFC 8441 Extended CONNECT (WebSocket-over-HTTP/2) fires both 'stream'
+      // and 'request' events; the 'stream' listener handles bridging. Here
+      // we neutralize the compat-layer Http2ServerResponse so it doesn't
+      // end the underlying stream — without this, the compat layer's
+      // implicit response lifecycle closes the stream's writable side
+      // immediately after the listener returns, killing the WS tunnel.
+      if (req.method === "CONNECT") {
+        const noop = () => res;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (res as any).end = noop;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (res as any).writeHead = noop;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (res as any).write = noop;
+        return;
+      }
       handleRequest(req as unknown as http.IncomingMessage, res as unknown as http.ServerResponse);
     });
-    // WebSocket upgrades arrive over HTTP/1.1 connections (allowHTTP1)
+
+    // RFC 8441 Extended CONNECT: WebSocket-over-HTTP/2 from modern browsers.
+    // Bridges to the HTTP/1.1 backend (Next.js/Vite/etc. dev servers) by
+    // synthesizing a classic WebSocket Upgrade request and piping bytes
+    // both directions once the backend confirms the upgrade.
+    //
+    // prependListener is critical: Node http2's compatibility layer also
+    // listens for 'stream' and auto-responds 405 to CONNECT requests when a
+    // 'request' listener is registered (because compat layer can't route
+    // CONNECT to a normal request handler). Without prepending, the compat
+    // layer wins the race, sets headers, and our stream.respond throws
+    // "Response has already been initiated".
+    h2Server.prependListener(
+      "stream",
+      (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+        if (headers[":method"] !== "CONNECT" || headers[":protocol"] !== "websocket") {
+          // Regular request — handled by the 'request' event listener above.
+          return;
+        }
+        // Node's HTTP/2 compatibility layer (internal/http2/compat.js)
+        // unconditionally calls `response.end()` on CONNECT streams when a
+        // 'request' listener is registered, because the compat API's
+        // request/response abstraction doesn't model CONNECT. That call
+        // sends END_STREAM on our writable side and breaks WebSocket
+        // tunneling. Override `stream.end` to a no-op so the compat layer's
+        // shutdown attempt is harmless; the WebSocket bridge below pipes
+        // raw bytes via stream.write directly. The stream is destroyed
+        // (RST_STREAM) at the end of the WS lifecycle on disconnect, so we
+        // never need stream.end() for graceful shutdown.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (stream as any).end = function (this: http2.ServerHttp2Stream) {
+          return this;
+        };
+        handleH2WebSocket(stream, headers);
+      }
+    );
+
+    // HTTP/1.1 fallback: legacy clients (curl, older browsers) that never
+    // upgrade to HTTP/2 use the classic Upgrade: websocket flow. Still
+    // possible because allowHTTP1 is true.
     h2Server.on("upgrade", (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
       handleUpgrade(req, socket, head);
     });
