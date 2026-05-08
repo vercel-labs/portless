@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 
 const TAILSCALE_BINARY = "tailscale";
+const TAILSCALE_COMMAND_TIMEOUT_MS = 30_000;
 
 /**
  * Port allocation sequence for tailscale serve HTTPS ports.
@@ -24,8 +25,11 @@ export type TailscaleCommandRunner = (args: string[]) => TailscaleCommandResult;
 
 interface TailscaleStatusJson {
   Self?: {
+    Capabilities?: string[];
+    CapMap?: Record<string, unknown>;
     DNSName?: string;
     HostName?: string;
+    ID?: string;
   };
   CurrentTailnet?: {
     MagicDNSSuffix?: string;
@@ -37,8 +41,18 @@ export interface TailscaleReadyResult {
   baseUrl: string;
 }
 
+export interface EnsureTailscaleReadyOptions {
+  requireFunnel?: boolean;
+  requireHttps?: boolean;
+  runner?: TailscaleCommandRunner;
+}
+
 function defaultRunner(args: string[]): TailscaleCommandResult {
-  const result = spawnSync(TAILSCALE_BINARY, args, { encoding: "utf-8" });
+  const result = spawnSync(TAILSCALE_BINARY, args, {
+    encoding: "utf-8",
+    killSignal: "SIGKILL",
+    timeout: TAILSCALE_COMMAND_TIMEOUT_MS,
+  });
   return {
     status: result.status,
     stdout: result.stdout ?? "",
@@ -107,17 +121,75 @@ function statusToDnsName(status: TailscaleStatusJson): string {
   );
 }
 
+function isFunnelCapability(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return normalized === "funnel" || normalized.endsWith("/funnel");
+}
+
+function isHttpsCapability(value: string): boolean {
+  const normalized = value.toLowerCase();
+  return normalized === "https" || normalized.endsWith("/https");
+}
+
+function hasCapability(
+  status: TailscaleStatusJson,
+  predicate: (value: string) => boolean
+): boolean {
+  const capabilities = status.Self?.Capabilities;
+  if (Array.isArray(capabilities) && capabilities.some(predicate)) {
+    return true;
+  }
+
+  const capMap = status.Self?.CapMap;
+  return Boolean(capMap && Object.keys(capMap).some(predicate));
+}
+
+function hasHttpsCapability(status: TailscaleStatusJson): boolean {
+  return hasCapability(status, isHttpsCapability);
+}
+
+function hasFunnelCapability(status: TailscaleStatusJson): boolean {
+  return hasCapability(status, isFunnelCapability);
+}
+
+function throwHttpsNotEnabled(): never {
+  throw new Error(
+    "Tailscale HTTPS is not enabled on your tailnet. " +
+      "Enable HTTPS certificates in Tailscale DNS settings, then run portless again."
+  );
+}
+
+function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
+  const nodeId = status.Self?.ID;
+  const enableUrl =
+    typeof nodeId === "string" && nodeId.length > 0
+      ? ` Visit https://login.tailscale.com/f/funnel?node=${nodeId} to enable it.`
+      : "";
+  throw new Error(
+    "Tailscale Funnel is not enabled on your tailnet. " +
+      "Enable Funnel for this node, then run portless again." +
+      enableUrl
+  );
+}
+
 /**
  * Verify that the Tailscale CLI is installed and the node is connected.
  * Returns the node's DNS name and base URL.
  */
 export function ensureTailscaleReady(
-  runner: TailscaleCommandRunner = defaultRunner
+  options: EnsureTailscaleReadyOptions = {}
 ): TailscaleReadyResult {
+  const runner = options.runner ?? defaultRunner;
   runOrThrow(["version"], "check tailscale version", runner);
   const statusResult = runOrThrow(["status", "--json"], "read tailscale status", runner);
   const status = parseStatusJson(statusResult.stdout);
   const dnsName = statusToDnsName(status);
+  if (options.requireHttps && !hasHttpsCapability(status)) {
+    throwHttpsNotEnabled();
+  }
+  if (options.requireFunnel && !hasFunnelCapability(status)) {
+    throwFunnelNotEnabled(status);
+  }
   return {
     dnsName,
     baseUrl: `https://${dnsName}`,
@@ -209,6 +281,20 @@ function isConflictError(stderr: string, stdout: string): boolean {
   );
 }
 
+function isFunnelNotEnabledError(stderr: string, stdout: string): boolean {
+  const text = `${stderr}\n${stdout}`.toLowerCase();
+  return text.includes("funnel is not enabled on your tailnet");
+}
+
+function formatFunnelNotEnabledError(stderr: string, stdout: string): string {
+  const details = normalizeSpace(`${stderr}\n${stdout}`);
+  return (
+    "Tailscale Funnel is not enabled on your tailnet. " +
+    "Enable Funnel for this node, then run portless again." +
+    (details ? ` Tailscale said: ${details}` : "")
+  );
+}
+
 export type TailscaleMode = "serve" | "funnel";
 
 export interface RegisterServeOptions {
@@ -235,9 +321,20 @@ function register(
         "Tailscale CLI not found. Install Tailscale (https://tailscale.com/download) and ensure `tailscale` is on PATH."
       );
     }
+    if (mode === "funnel" && isFunnelNotEnabledError(result.stderr, result.stdout)) {
+      throw new Error(formatFunnelNotEnabledError(result.stderr, result.stdout));
+    }
+    if (mode === "funnel" && errno.code === "ETIMEDOUT") {
+      throw new Error(
+        "Tailscale Funnel registration timed out. Make sure Funnel is enabled on your tailnet, then run portless again."
+      );
+    }
     throw new Error(`Failed to register tailscale ${mode}: ${result.error.message}`);
   }
   if (result.status !== 0) {
+    if (mode === "funnel" && isFunnelNotEnabledError(result.stderr, result.stdout)) {
+      throw new Error(formatFunnelNotEnabledError(result.stderr, result.stdout));
+    }
     if (isConflictError(result.stderr, result.stdout)) {
       throw new Error(
         `Tailscale ${mode === "funnel" ? "Funnel " : ""}HTTPS port ${httpsPort} is already in use. ` +

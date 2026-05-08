@@ -187,6 +187,16 @@ portless proxy start
 portless proxy stop
 ```
 
+## OS startup service
+
+```bash
+portless service install
+portless service status
+portless service uninstall
+```
+
+Installs the proxy as an OS startup service using the default clean URL behavior: HTTPS on port 443 with `.localhost` names. macOS and Linux use a root-owned service so port 443 can bind at boot. Windows uses a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
+
 ### LAN mode
 
 Access services from phones and other devices on the same WiFi via mDNS (`.local` domains):

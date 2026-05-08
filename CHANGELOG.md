@@ -1,8 +1,24 @@
 # Changelog
 
-## 0.12.0
+## 0.13.0
 
 <!-- release:start -->
+
+### New Features
+
+- **OS startup service**: New `portless service install`, `portless service status`, and `portless service uninstall` commands manage a native startup service for the HTTPS proxy across macOS launchd, Linux systemd, and Windows Task Scheduler. The service starts clean `.localhost` URLs after reboot, and `portless clean` removes it during cleanup. (#289)
+
+### Bug Fixes
+
+- **Tailscale readiness preflight**: `--tailscale` and `--funnel` now check Tailscale HTTPS and Funnel prerequisites before starting the child process, surfacing actionable errors instead of hanging during registration. (#282)
+
+### Contributors
+
+- @ctate
+- @Anshuman71
+<!-- release:end -->
+
+## 0.12.0
 
 ### New Features
 
@@ -19,7 +35,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.11.1
 

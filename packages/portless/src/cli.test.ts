@@ -99,6 +99,7 @@ describe("CLI", () => {
       expect(stdout).toContain("Usage:");
       expect(stdout).toContain("Examples:");
       expect(stdout).toContain("proxy start");
+      expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
       expect(stdout).toContain("run [--name <name>]");
@@ -166,6 +167,26 @@ describe("CLI", () => {
       const { status, stdout } = run(["proxy", "unknown"]);
       expect(status).toBe(1);
       expect(stdout).toContain("proxy start");
+    });
+  });
+
+  describe("service", () => {
+    it("prints service help", () => {
+      const { status, stdout } = run(["service", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless service");
+      expect(stdout).toContain("service install");
+      expect(stdout).toContain("service uninstall");
+      expect(stdout).toContain("service status");
+    });
+
+    it("still dispatches service help when PORTLESS=0", () => {
+      const { status, stdout } = run(["service", "--help"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless service");
+      expect(stdout).toContain("service install");
     });
   });
 

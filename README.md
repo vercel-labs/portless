@@ -249,6 +249,18 @@ portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
 
+## Start at OS startup
+
+Install the proxy as an OS startup service so clean HTTPS URLs are available after reboot without starting the proxy from a terminal:
+
+```bash
+portless service install
+portless service status
+portless service uninstall
+```
+
+The service uses portless defaults: HTTPS on port 443 with `.localhost` names. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
+
 ## LAN mode
 
 ```bash
@@ -300,9 +312,11 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public)
 ```
 
+Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+
 Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
 
-Requires the Tailscale CLI to be installed and connected (`tailscale up`).
+Requires the Tailscale CLI to be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled.
 
 ## Commands
 
@@ -332,6 +346,11 @@ portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
 portless proxy stop              # Stop the proxy
+
+# OS startup service
+portless service install         # Start HTTPS proxy when the OS starts
+portless service status          # Show service and proxy status
+portless service uninstall       # Remove the startup service
 ```
 
 ### Options
@@ -378,7 +397,7 @@ PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is a
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
-> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Uninstall / reset
 

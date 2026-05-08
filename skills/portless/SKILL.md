@@ -236,7 +236,21 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public internet)
 ```
 
-Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected.
+Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
+
+## OS startup service
+
+Use the service command when users want the proxy to start automatically after reboot:
+
+```bash
+portless service install
+portless service status
+portless service uninstall
+```
+
+The service uses the default clean URL behavior: HTTPS on port 443 with `.localhost` names. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
 ## CLI Reference
 
@@ -263,6 +277,9 @@ Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, the
 | `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                  |
 | `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
 | `portless proxy stop`                  | Stop the proxy                                                 |
+| `portless service install`             | Start the HTTPS proxy when the OS starts                       |
+| `portless service status`              | Show service and proxy status                                  |
+| `portless service uninstall`           | Remove the startup service                                     |
 | `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)           |
 | `portless alias <name> <port> --force` | Overwrite an existing route                                    |
 | `portless alias --remove <name>`       | Remove a static route                                          |
@@ -278,7 +295,7 @@ Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, the
 | `portless run --help`                  | Show help for a subcommand (also: alias, hosts, clean)         |
 | `portless --version` / `-v`            | Show version                                                   |
 
-**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## portless.json
 

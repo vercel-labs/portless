@@ -55,7 +55,7 @@ describe("tailscale", () => {
           }),
         },
       });
-      const ready = ensureTailscaleReady(runner);
+      const ready = ensureTailscaleReady({ runner });
       expect(ready.dnsName).toBe("devbox.example.ts.net");
       expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
     });
@@ -71,8 +71,96 @@ describe("tailscale", () => {
           }),
         },
       });
-      const ready = ensureTailscaleReady(runner);
+      const ready = ensureTailscaleReady({ runner });
       expect(ready.dnsName).toBe("devbox.example.ts.net");
+    });
+
+    it("throws when Funnel is required but not enabled on the tailnet", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              ID: "nMNPgMjBts11CNTRL",
+              DNSName: "devbox.example.ts.net.",
+              Capabilities: ["https"],
+            },
+          }),
+        },
+      });
+      expect(() => ensureTailscaleReady({ runner, requireFunnel: true })).toThrow(
+        "https://login.tailscale.com/f/funnel?node=nMNPgMjBts11CNTRL"
+      );
+    });
+
+    it("validates node DNS before checking required capabilities", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {},
+          }),
+        },
+      });
+      expect(() =>
+        ensureTailscaleReady({ runner, requireFunnel: true, requireHttps: true })
+      ).toThrow("Could not determine Tailscale node DNS name");
+    });
+
+    it("throws when HTTPS is required but not enabled on the tailnet", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              DNSName: "devbox.example.ts.net.",
+              Capabilities: ["funnel"],
+            },
+          }),
+        },
+      });
+      expect(() => ensureTailscaleReady({ runner, requireHttps: true })).toThrow(
+        "Tailscale HTTPS is not enabled on your tailnet"
+      );
+    });
+
+    it("allows HTTPS when the node has an HTTPS capability", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              DNSName: "devbox.example.ts.net.",
+              CapMap: {
+                https: null,
+              },
+            },
+          }),
+        },
+      });
+      const ready = ensureTailscaleReady({ runner, requireHttps: true });
+      expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
+    });
+
+    it("allows Funnel when the node has a Funnel capability", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              DNSName: "devbox.example.ts.net.",
+              Capabilities: ["https", "https://tailscale.com/cap/funnel"],
+            },
+          }),
+        },
+      });
+      const ready = ensureTailscaleReady({ runner, requireFunnel: true });
+      expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
     });
 
     it("throws when tailscale CLI is missing", () => {
@@ -82,7 +170,7 @@ describe("tailscale", () => {
       const runner = createRunner({
         version: { status: null, error: enoent },
       });
-      expect(() => ensureTailscaleReady(runner)).toThrow("Tailscale CLI not found");
+      expect(() => ensureTailscaleReady({ runner })).toThrow("Tailscale CLI not found");
     });
 
     it("throws when tailscale is not connected", () => {
@@ -93,14 +181,14 @@ describe("tailscale", () => {
           stdout: JSON.stringify({ Self: {} }),
         },
       });
-      expect(() => ensureTailscaleReady(runner)).toThrow("Could not determine");
+      expect(() => ensureTailscaleReady({ runner })).toThrow("Could not determine");
     });
 
     it("throws on version check failure", () => {
       const runner = createRunner({
         version: { status: 1, stderr: "not found" },
       });
-      expect(() => ensureTailscaleReady(runner)).toThrow("Failed to check tailscale version");
+      expect(() => ensureTailscaleReady({ runner })).toThrow("Failed to check tailscale version");
     });
 
     it("throws on invalid status JSON", () => {
@@ -111,7 +199,7 @@ describe("tailscale", () => {
           stdout: "not json",
         },
       });
-      expect(() => ensureTailscaleReady(runner)).toThrow("Failed to parse");
+      expect(() => ensureTailscaleReady({ runner })).toThrow("Failed to parse");
     });
   });
 
@@ -344,6 +432,38 @@ describe("tailscale", () => {
       });
       expect(() => registerFunnel(4123, 443, { runner })).toThrow(
         "Tailscale Funnel supports ports 443, 8443, and 10000"
+      );
+    });
+
+    it("throws an actionable error when Funnel is not enabled on the tailnet", () => {
+      const runner = createRunner({
+        "funnel --bg --yes --https=443 http://127.0.0.1:4123": {
+          status: 1,
+          stderr: [
+            "Funnel is not enabled on your tailnet.",
+            "To enable, visit:",
+            "",
+            "https://login.tailscale.com/f/funnel?node=nMNPgMjBts11CNTRL",
+          ].join("\n"),
+        },
+      });
+      expect(() => registerFunnel(4123, 443, { runner })).toThrow(
+        "Tailscale Funnel is not enabled on your tailnet"
+      );
+    });
+
+    it("throws an actionable error when Funnel registration times out", () => {
+      const timeout = Object.assign(new Error("spawnSync tailscale ETIMEDOUT"), {
+        code: "ETIMEDOUT",
+      });
+      const runner = createRunner({
+        "funnel --bg --yes --https=443 http://127.0.0.1:4123": {
+          status: null,
+          error: timeout,
+        },
+      });
+      expect(() => registerFunnel(4123, 443, { runner })).toThrow(
+        "Tailscale Funnel registration timed out"
       );
     });
   });
