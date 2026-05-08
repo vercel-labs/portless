@@ -782,6 +782,118 @@ describe("createProxyServer", () => {
     });
   });
 
+  describe("cert endpoint", () => {
+    const fakeCaCert = Buffer.from(
+      "-----BEGIN CERTIFICATE-----\nFAKE\n-----END CERTIFICATE-----\n"
+    );
+
+    it("serves cert page at cert.localhost", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          getCaCert: () => fakeCaCert,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("text/html");
+      expect(res.body).toContain("Install the portless CA Certificate");
+      expect(res.body).toContain("/download");
+    });
+
+    it("serves PEM download at /download", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          getCaCert: () => fakeCaCert,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.localhost", path: "/download" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("application/x-pem-file");
+      expect(res.headers["content-disposition"]).toBe('attachment; filename="portless-ca.pem"');
+      expect(res.body).toBe(fakeCaCert.toString());
+    });
+
+    it("serves PEM download at /ca.pem", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          getCaCert: () => fakeCaCert,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.localhost", path: "/ca.pem" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe(fakeCaCert.toString());
+    });
+
+    it("returns 404 when CA cert is not available", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("CA certificate not available");
+    });
+
+    it("respects custom TLD", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+          getCaCert: () => fakeCaCert,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.test" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("Install the portless CA Certificate");
+    });
+
+    it("does not match cert.localhost on different TLD", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+          getCaCert: () => fakeCaCert,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.localhost" });
+      expect(res.status).toBe(404);
+    });
+
+    it("strips query string from download path", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          getCaCert: () => fakeCaCert,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "cert.localhost", path: "/download?t=123" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toBe("application/x-pem-file");
+    });
+  });
+
   describe("XSS safety", () => {
     it("escapes hostname in 404 page", async () => {
       const routes: RouteInfo[] = [];
@@ -1469,4 +1581,37 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     },
     15_000
   );
+
+  it("uses getCaCert when both getCaCert and tls.ca are available", async () => {
+    const tlsCa = Buffer.from("TLS-CA");
+    const callbackCa = Buffer.from("CALLBACK-CA");
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey, ca: tlsCa },
+        getCaCert: () => callbackCa,
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "cert.localhost", path: "/download" });
+    expect(res.body).toBe("CALLBACK-CA");
+  });
+
+  it("falls back to tls.ca when getCaCert returns null", async () => {
+    const tlsCa = Buffer.from("TLS-CA");
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey, ca: tlsCa },
+        getCaCert: () => null,
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, { host: "cert.localhost", path: "/download" });
+    expect(res.body).toBe("TLS-CA");
+  });
 });

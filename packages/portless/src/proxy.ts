@@ -3,7 +3,7 @@ import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
 import { escapeHtml, formatUrl } from "./utils.js";
-import { ARROW_SVG, renderPage } from "./pages.js";
+import { ARROW_SVG, renderPage, renderCertPage, detectOS } from "./pages.js";
 
 /** Response header used to identify a portless proxy (for health checks). */
 export const PORTLESS_HEADER = "X-Portless";
@@ -153,6 +153,30 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 }</pre></div></div>`
         )
       );
+      return;
+    }
+
+    // Cert download endpoint: cert.<tld>
+    if (host === "cert." + tld) {
+      const caCert = options.getCaCert?.() ?? tls?.ca;
+      if (!caCert) {
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end("CA certificate not available");
+        return;
+      }
+      const urlPath = req.url?.split("?")[0] || "/";
+      if (urlPath === "/download" || urlPath === "/ca.pem") {
+        res.writeHead(200, {
+          "Content-Type": "application/x-pem-file",
+          "Content-Disposition": 'attachment; filename="portless-ca.pem"',
+        });
+        res.end(caCert);
+      } else {
+        const userAgent = req.headers["user-agent"] || "";
+        const os = detectOS(userAgent);
+        res.writeHead(200, { "Content-Type": "text/html" });
+        res.end(renderCertPage(os));
+      }
       return;
     }
 
