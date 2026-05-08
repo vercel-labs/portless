@@ -1497,8 +1497,8 @@ ${colors.bold("How it works:")}
   3. Access via https://<name>.localhost
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
-     Expo, React Native) get --port and, when needed, --host flags
-     injected automatically
+     Expo, React Native, Wrangler) get --port and, when needed, --host or
+     --ip flags injected automatically
 
 ${colors.bold("HTTP/2 + HTTPS (default):")}
   HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
