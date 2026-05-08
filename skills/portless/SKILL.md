@@ -63,7 +63,7 @@ portless        # -> runs "dev" script, https://<project>.localhost
 pnpm dev        # -> works without portless, plain "next dev"
 ```
 
-Use an optional `portless.json` to override defaults (name, script, port):
+Use an optional `portless.json` or `.config/portless.json` to override defaults (name, script, port):
 
 ```json
 { "name": "myapp" }
@@ -75,7 +75,7 @@ portless        # -> runs "dev" script, https://myapp.localhost
 
 ### Monorepo
 
-One `portless.json` at the repo root. Portless discovers packages from `pnpm-workspace.yaml`, or the `"workspaces"` field in `package.json` (npm, yarn, bun):
+One portless config file at the repo root. Portless discovers packages from `pnpm-workspace.yaml`, or the `"workspaces"` field in `package.json` (npm, yarn, bun):
 
 ```json
 {
@@ -92,7 +92,7 @@ cd apps/web && portless   # start just one package
 portless --script start   # run "start" instead of "dev"
 ```
 
-The `apps` map is optional and only provides name overrides. Unlisted packages auto-discover with inferred names.
+The `apps` map is optional and only provides name overrides. Unlisted packages auto-discover with inferred names. Paths in `apps` are always relative to the repo root, even if the config file lives in `.config/`.
 
 Without an `apps` map, hostnames follow `<package>.<project>.localhost`. The project name comes from the most common npm scope (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it uses the bare `<project>.localhost`.
 
@@ -297,9 +297,9 @@ The service uses the default clean URL behavior: HTTPS on port 443 with `.localh
 
 **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
-## portless.json
+## portless config
 
-Optional config file. Portless looks for it in the current directory.
+Optional config file. Portless looks for `portless.json` in the current directory, then `.config/portless.json`.
 
 | Field     | Type    | Default                    | Description                                              |
 | --------- | ------- | -------------------------- | -------------------------------------------------------- |
@@ -314,7 +314,7 @@ Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). Whe
 
 ### package.json "portless" key
 
-Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+Instead of a separate config file, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
 
 ```json
 { "portless": "myapp" }
@@ -326,7 +326,13 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
 { "portless": { "name": "myapp", "script": "dev:app" } }
 ```
 
-Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.json app entry > defaults.
+Lookup order:
+
+1. `portless.json`
+2. `.config/portless.json`
+3. `package.json` `"portless"` key
+
+For workspace package overrides, precedence is: CLI flags > package `package.json` `"portless"` key > root config `apps` entry > defaults.
 
 ## Troubleshooting
 
