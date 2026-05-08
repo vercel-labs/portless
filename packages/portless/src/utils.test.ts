@@ -178,6 +178,14 @@ describe("parseHostname", () => {
       expect(parseHostname("api.myapp", "test")).toBe("api.myapp.test");
     });
 
+    it("handles multi-segment custom TLDs", () => {
+      expect(parseHostname("myapp", "local.example.dev")).toBe("myapp.local.example.dev");
+      expect(parseHostname("api.myapp", "local.example.dev")).toBe("api.myapp.local.example.dev");
+      expect(parseHostname("myapp.local.example.dev", "local.example.dev")).toBe(
+        "myapp.local.example.dev"
+      );
+    });
+
     it("throws on empty input with custom TLD", () => {
       expect(() => parseHostname("", "test")).toThrow("Hostname cannot be empty");
     });

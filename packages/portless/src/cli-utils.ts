@@ -251,8 +251,22 @@ export const RISKY_TLDS = new Map<string, string>([
  */
 export function validateTld(tld: string): string | null {
   if (!tld) return "TLD cannot be empty";
-  if (!/^[a-z0-9]+$/.test(tld)) {
-    return `Invalid TLD "${tld}": must contain only lowercase letters and digits`;
+  if (tld.length > 253) {
+    return `Invalid TLD "${tld}": exceeds 253-character DNS limit`;
+  }
+
+  const labelRe = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+  const labels = tld.split(".");
+  for (const label of labels) {
+    if (!label) {
+      return `Invalid TLD "${tld}": labels cannot be empty`;
+    }
+    if (label.length > 63) {
+      return `Invalid TLD "${tld}": label "${label}" exceeds 63-character DNS limit`;
+    }
+    if (!labelRe.test(label)) {
+      return `Invalid TLD "${tld}": labels must contain only lowercase letters, digits, and interior hyphens`;
+    }
   }
   return null;
 }

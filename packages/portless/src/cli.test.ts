@@ -391,6 +391,48 @@ describe("CLI", () => {
     });
   });
 
+  describe("--tld flag", () => {
+    it("accepts leading multi-segment TLDs before run mode", () => {
+      const { status, stdout } = run(["--tld", "local.example.dev", "run", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("accepts leading multi-segment TLDs before named mode", () => {
+      const { status, stdout } = run(["--tld", "local.example.dev", "myapp", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("accepts multi-segment TLDs in run mode", () => {
+      const { status, stdout } = run(["run", "--tld", "local.example.dev", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("accepts multi-segment TLDs in named mode", () => {
+      const { status, stdout } = run(["myapp", "--tld", "local.example.dev", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("rejects invalid multi-segment TLDs in named mode", () => {
+      const { status, stderr } = run(["myapp", "--tld", "foo..bar", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("labels cannot be empty");
+    });
+  });
+
   describe("alias subcommand", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["alias", "--help"]);

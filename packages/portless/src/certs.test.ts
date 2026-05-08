@@ -269,6 +269,24 @@ describe("createSNICallback", () => {
     expect(cert.subjectAltName).toContain("DNS:chat.myapp.localhost");
   });
 
+  it("generates per-hostname cert for multi-segment TLDs", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey, "local.example.dev");
+    const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("myapp.local.example.dev", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    expect(ctx).toBeDefined();
+
+    const hostCertPath = path.join(tmpDir, "host-certs", "myapp_local_example_dev.pem");
+    expect(fs.existsSync(hostCertPath)).toBe(true);
+
+    const cert = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
+    expect(cert.subjectAltName).toContain("DNS:myapp.local.example.dev");
+  });
+
   it("generates cert for a hostname longer than 64 characters (X.509 CN limit)", async () => {
     // Construct a hostname that exceeds the 64-char CN limit:
     // "inngest.ap.very-long-branch-name-that-exceeds-the-cn-limit.dev" = 63+ chars
