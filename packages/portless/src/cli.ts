@@ -2891,6 +2891,8 @@ async function handleDefaultMulti(
     process.exit(1);
   }
 
+  const worktree = detectWorktreePrefix(wsRoot);
+
   const scriptName = globalScript ?? loaded?.config.script ?? "dev";
 
   // Infer the monorepo project name for use as the base domain.
@@ -2958,10 +2960,11 @@ async function handleDefaultMulti(
     let name: string;
     let label: string;
     if (appOverride.name) {
-      name = appOverride.name
+      const baseName = appOverride.name
         .split(".")
         .map((l) => truncateLabel(l))
         .join(".");
+      name = worktree ? `${worktree.prefix}.${baseName}` : baseName;
       label = appOverride.name;
     } else {
       let pkgLabel: string;
@@ -2971,7 +2974,8 @@ async function handleDefaultMulti(
       } else {
         pkgLabel = rel.replace(/\//g, "-");
       }
-      name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
+      const baseName = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
+      name = worktree ? `${worktree.prefix}.${baseName}` : baseName;
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
