@@ -18,7 +18,7 @@ type AnyServer = http.Server | ProxyServer;
 
 function request(
   server: AnyServer,
-  options: { host?: string; path?: string; method?: string }
+  options: { host?: string; path?: string; method?: string; headers?: http.OutgoingHttpHeaders }
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
     const addr = server.address();
@@ -31,7 +31,7 @@ function request(
         port: addr.port,
         path: options.path || "/",
         method: options.method || "GET",
-        headers: { host: options.host || "" },
+        headers: { host: options.host || "", ...options.headers },
       },
       (res) => {
         let body = "";
@@ -151,6 +151,206 @@ describe("createProxyServer", () => {
       const res = await request(server, { host: "myapp.localhost" });
       expect(res.status).toBe(200);
       expect(res.body).toBe("hello from backend");
+    });
+
+    it("shows selector for duplicate hostnames in multiplex mode", async () => {
+      const routes: RouteInfo[] = [
+        {
+          id: "one",
+          hostname: "myapp.localhost",
+          port: 4001,
+          pid: 111,
+          folder: "api",
+          gitBranch: "feature-auth",
+          cwd: "/repo/apps/api",
+          command: "pnpm dev",
+        },
+        {
+          id: "two",
+          hostname: "myapp.localhost",
+          port: 4002,
+          pid: 222,
+          folder: "web",
+          gitBranch: "feature-auth",
+          cwd: "/repo/apps/web",
+          command: "next dev",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          multiplex: true,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("Select App");
+      expect(res.body).toContain("127.0.0.1:4001");
+      expect(res.body).toContain("127.0.0.1:4002");
+      expect(res.body).toContain("feature-auth");
+      expect(res.body).toContain("/repo/apps/api");
+      expect(res.body).toContain("pnpm dev");
+      expect(res.body).toContain(">Select</a>");
+      expect(res.body).not.toContain("Clear selection");
+    });
+
+    it("routes duplicate hostnames by selection cookie in multiplex mode", async () => {
+      const firstBackend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("first");
+        })
+      );
+      await listen(firstBackend);
+      const firstAddr = firstBackend.address();
+      if (!firstAddr || typeof firstAddr === "string") throw new Error("no addr");
+
+      const secondBackend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("second");
+        })
+      );
+      await listen(secondBackend);
+      const secondAddr = secondBackend.address();
+      if (!secondAddr || typeof secondAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        { id: "one", hostname: "myapp.localhost", port: firstAddr.port, pid: 111 },
+        { id: "two", hostname: "myapp.localhost", port: secondAddr.port, pid: 222 },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          multiplex: true,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "myapp.localhost",
+        headers: { cookie: "portless_app=two" },
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("second");
+    });
+
+    it("sets selection cookie from the multiplex selector", async () => {
+      const routes: RouteInfo[] = [
+        { id: "one", hostname: "myapp.localhost", port: 4001, pid: 111 },
+        { id: "two", hostname: "myapp.localhost", port: 4002, pid: 222 },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          multiplex: true,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "myapp.localhost",
+        path: "/__portless__/select?id=two&next=/dashboard",
+      });
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe("/dashboard");
+      expect(res.headers["set-cookie"]?.[0]).toContain("portless_app=two");
+    });
+
+    it("does not reserve the control path when multiplex has only one matching route", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("backend control path");
+        })
+      );
+      await listen(backend);
+      const addr = backend.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ id: "one", hostname: "myapp.localhost", port: addr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          multiplex: true,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "myapp.localhost",
+        path: "/__portless__/select?id=one",
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("backend control path");
+    });
+
+    it("injects a switcher into selected HTML responses in multiplex mode", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/html" });
+          res.end("<html><body><main>hello</main></body></html>");
+        })
+      );
+      await listen(backend);
+      const addr = backend.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          id: "one",
+          hostname: "myapp.localhost",
+          port: 4001,
+          pid: 111,
+          folder: "api",
+          gitBranch: "feature-auth",
+          cwd: "/repo/apps/api",
+          command: "pnpm dev",
+        },
+        {
+          id: "two",
+          hostname: "myapp.localhost",
+          port: addr.port,
+          pid: 222,
+          folder: "web",
+          gitBranch: "feature-auth",
+          cwd: "/repo/apps/web",
+          command: "next dev",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          multiplex: true,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "myapp.localhost",
+        headers: { cookie: "portless_app=two" },
+      });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("<main>hello</main>");
+      expect(res.body).toContain("pl-switcher");
+      expect(res.body).toContain('class="pl-icon"');
+      expect(res.body).toContain("@media (prefers-color-scheme:dark)");
+      expect(res.body).toContain("<strong>myapp.localhost</strong>");
+      expect(res.body).toContain("/__portless__/select?id=one");
+      expect(res.body).toContain(">Select</a>");
+      expect(res.body).toContain(">Selected</a>");
+      expect(res.body).toContain("/__portless__/clear?next=%2F");
+      expect(res.body).toContain("Clear selection");
+      expect(res.body).toContain("feature-auth");
+      expect(res.body).toContain("/repo/apps/web");
+      expect(res.body).toContain("next dev");
     });
 
     it("routes wildcard subdomain to matching parent route when strict is false", async () => {

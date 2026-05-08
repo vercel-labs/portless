@@ -29,6 +29,7 @@ import {
   resolveStateDir,
   validateTld,
   writeLanMarker,
+  writeMultiplexMarker,
   writeTldFile,
   writeTlsMarker,
 } from "./cli-utils.js";
@@ -773,6 +774,7 @@ describe("buildProxyStartConfig", () => {
         lanIpExplicit: true,
         tld: "test",
         useWildcard: true,
+        multiplex: true,
         foreground: true,
         includePort: true,
         proxyPort: 8080,
@@ -788,6 +790,7 @@ describe("buildProxyStartConfig", () => {
         "--ip",
         "192.168.1.42",
         "--wildcard",
+        "--multiplex",
       ],
     });
   });
@@ -849,14 +852,15 @@ describe("readLanMarker / writeLanMarker", () => {
   it("uses the LAN marker to remember LAN mode when the proxy is stopped", async () => {
     const prevStateDir = process.env.PORTLESS_STATE_DIR;
     try {
-      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+      const port = await findFreePort();
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(port));
       writeTldFile(tmpDir, "local");
       writeLanMarker(tmpDir, "192.168.1.42");
       process.env.PORTLESS_STATE_DIR = tmpDir;
 
       await expect(discoverState()).resolves.toMatchObject({
         dir: tmpDir,
-        port: 1355,
+        port,
         tld: "local",
         lanMode: true,
         lanIp: null,
@@ -993,6 +997,14 @@ describe("readPersistedProxyState", () => {
     expect(state!.lanMode).toBe(true);
   });
 
+  it("reads multiplex mode from persisted state", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    writeMultiplexMarker(tmpDir, true);
+    const state = readPersistedProxyState();
+    expect(state).not.toBeNull();
+    expect(state!.multiplex).toBe(true);
+  });
+
   it("returns full previous config for a custom proxy setup", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
     writeTlsMarker(tmpDir, true);
@@ -1004,6 +1016,7 @@ describe("readPersistedProxyState", () => {
       tls: true,
       tld: "local",
       lanMode: true,
+      multiplex: false,
     });
   });
 });
