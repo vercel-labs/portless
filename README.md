@@ -288,6 +288,17 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 
 - **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
 
+  On **Node.js 17+**, `localhost` may resolve to **`::1` first** while the portless dev proxy forwards upstream to **`127.0.0.1:<port>`**. If Metro binds in a way that only accepts IPv6 loopback, you can see proxy errors like **`connect ECONNREFUSED 127.0.0.1:<port>`** even when **`http://localhost:<port>`** still opens in the browser. Add this **at the top of `metro.config.js`** (before `getDefaultConfig` / Metro starts):
+
+  ```js
+  // Node 17+ often resolves `localhost` to ::1 first. Portless (and other tools)
+  // connect upstream via 127.0.0.1 — if Metro binds only IPv6, you get ECONNREFUSED.
+  const dns = require("node:dns");
+  if (typeof dns.setDefaultResultOrder === "function") {
+    dns.setDefaultResultOrder("ipv4first");
+  }
+  ```
+
 ## Tailscale sharing
 
 Share your dev server with teammates on your [Tailscale](https://tailscale.com) network:
