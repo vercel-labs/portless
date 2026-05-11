@@ -21,6 +21,7 @@ import {
   registerServe,
   unregisterTailscale,
 } from "./tailscale.js";
+import { ensureNetbirdReady, startExpose, type ExposeHandle } from "./netbird.js";
 import {
   inferProjectName,
   detectWorktreePrefix,
@@ -815,6 +816,9 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
     }
+    if (route.netbirdUrl) {
+      console.log(`    ${colors.gray("netbird:")} ${colors.green(route.netbirdUrl)}`);
+    }
   }
   console.log();
 }
@@ -1008,6 +1012,25 @@ async function runApp(
     }
   }
 
+  const wantsNetbird =
+    process.env.PORTLESS_NETBIRD === "1" || process.env.PORTLESS_NETBIRD === "true";
+
+  if (wantsNetbird) {
+    try {
+      ensureNetbirdReady();
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(colors.red(`Error: ${message}`));
+      if (message.includes("not found")) {
+        console.error(colors.blue("Install NetBird: https://netbird.io/download"));
+      } else {
+        console.error(colors.blue("Make sure NetBird is connected:"));
+        console.error(colors.cyan("  netbird up"));
+      }
+      process.exit(1);
+    }
+  }
+
   let desired: ProxyDesiredState;
   try {
     desired = resolveProxyDesiredState(lanMode);
@@ -1152,13 +1175,58 @@ async function runApp(
     }
   }
 
+  // NetBird sharing: spawn `netbird expose` and hold the foreground child
+  // alive for the lifetime of the dev server. Killing the child stops
+  // exposure (NetBird has no separate unregister step).
+  let netbirdHandle: ExposeHandle | undefined;
+  let netbirdUrl: string | undefined;
+
+  if (wantsNetbird) {
+    const namePrefix = name
+      .replace(/[^a-z0-9-]/gi, "-")
+      .toLowerCase()
+      .slice(0, 32);
+    const groupsEnv = process.env.PORTLESS_NETBIRD_GROUPS;
+    const userGroups = groupsEnv
+      ? groupsEnv
+          .split(",")
+          .map((g) => g.trim())
+          .filter(Boolean)
+      : undefined;
+    try {
+      netbirdHandle = await startExpose(port, {
+        namePrefix,
+        password: process.env.PORTLESS_NETBIRD_PASSWORD,
+        pin: process.env.PORTLESS_NETBIRD_PIN,
+        userGroups,
+      });
+      netbirdUrl = netbirdHandle.info.url;
+      console.log(chalk.green(`  NetBird -> ${netbirdUrl}`));
+      console.log(chalk.gray("  (accessible via NetBird reverse proxy)\n"));
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(colors.red(`Error: ${message}`));
+      process.exit(1);
+    }
+
+    try {
+      store.updateRoute(hostname, { netbirdUrl });
+    } catch {
+      // Non-fatal: route display metadata only
+    }
+  }
+
   // Child servers always bind to localhost; the proxy handles cross-device LAN access.
   // Exception: Expo in LAN mode — Metro defaults to LAN and setting HOST=127.0.0.1
   // conflicts with its internal networking, causing HMR WebSocket degradation.
   const basename = path.basename(commandArgs[0]);
   const isExpo = basename === "expo";
   const isExpoLan = isExpo && (lanMode || isLanEnvEnabled());
-  const hostBind = isExpoLan ? undefined : "127.0.0.1";
+  // With --netbird, the local end of the tunnel dials the peer's NetBird
+  // WireGuard IP (not 127.0.0.1), so the app must bind to all interfaces
+  // for netbird expose to reach it. Same idea as --lan, applied to the app
+  // bind instead of the proxy bind.
+  const hostBind = isExpoLan ? undefined : wantsNetbird ? "0.0.0.0" : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
   // was started with --lan separately and discovered from the state marker,
@@ -1208,6 +1276,7 @@ async function runApp(
       // own LAN discovery natively.
       ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
       ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
+      ...(netbirdUrl ? { PORTLESS_NETBIRD_URL: netbirdUrl } : {}),
       ...caEnv,
     },
     onCleanup: () => {
@@ -1216,6 +1285,11 @@ async function runApp(
           tailscaleHttpsPort,
           tailscaleFunnel: wantsFunnel || undefined,
         });
+      } catch {
+        // Best-effort cleanup; non-fatal
+      }
+      try {
+        netbirdHandle?.stop();
       } catch {
         // Best-effort cleanup; non-fatal
       }
@@ -1284,6 +1358,34 @@ function applyTailscaleFlag(flag: string): boolean {
   return false;
 }
 
+function applyNetbirdFlag(flag: string): boolean {
+  if (flag === "--netbird") {
+    process.env.PORTLESS_NETBIRD = "1";
+    return true;
+  }
+  return false;
+}
+
+const NETBIRD_VALUE_FLAGS: Record<string, string> = {
+  "--netbird-password": "PORTLESS_NETBIRD_PASSWORD",
+  "--netbird-pin": "PORTLESS_NETBIRD_PIN",
+  "--netbird-groups": "PORTLESS_NETBIRD_GROUPS",
+};
+
+function isNetbirdValueFlag(flag: string): boolean {
+  return Object.prototype.hasOwnProperty.call(NETBIRD_VALUE_FLAGS, flag);
+}
+
+function consumeNetbirdValueFlag(flag: string, value: string | undefined): void {
+  const envKey = NETBIRD_VALUE_FLAGS[flag];
+  if (!value || value.startsWith("-")) {
+    console.error(colors.red(`Error: ${flag} requires a value.`));
+    process.exit(1);
+  }
+  process.env[envKey] = value;
+  process.env.PORTLESS_NETBIRD = "1";
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -1348,12 +1450,18 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
-    } else if (applyTailscaleFlag(args[i])) {
+    } else if (applyTailscaleFlag(args[i]) || applyNetbirdFlag(args[i])) {
       // handled
+    } else if (isNetbirdValueFlag(args[i])) {
+      const flag = args[i];
+      i++;
+      consumeNetbirdValueFlag(flag, args[i]);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --name, --force, --app-port, --tailscale, --funnel, --help")
+        colors.blue(
+          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --netbird, --netbird-password, --netbird-pin, --netbird-groups, --help"
+        )
       );
       process.exit(1);
     }
@@ -1387,11 +1495,19 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
-    } else if (applyTailscaleFlag(args[i])) {
+    } else if (applyTailscaleFlag(args[i]) || applyNetbirdFlag(args[i])) {
       // handled
+    } else if (isNetbirdValueFlag(args[i])) {
+      const flag = args[i];
+      i++;
+      consumeNetbirdValueFlag(flag, args[i]);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --netbird, --netbird-password, --netbird-pin, --netbird-groups"
+        )
+      );
       process.exit(1);
     }
     i++;
@@ -1411,11 +1527,19 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
-    } else if (applyTailscaleFlag(args[i])) {
+    } else if (applyTailscaleFlag(args[i]) || applyNetbirdFlag(args[i])) {
       // handled
+    } else if (isNetbirdValueFlag(args[i])) {
+      const flag = args[i];
+      i++;
+      consumeNetbirdValueFlag(flag, args[i]);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --netbird, --netbird-password, --netbird-pin, --netbird-groups"
+        )
+      );
       process.exit(1);
     }
     i++;
@@ -1471,6 +1595,7 @@ ${colors.bold("Examples:")}
   portless get backend                # -> https://backend.localhost
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
+  portless myapp --netbird next dev   # -> also https://<name>.<proxy-cluster> (NetBird)
 
 ${colors.bold("Configuration (portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
@@ -1532,6 +1657,12 @@ ${colors.bold("Tailscale sharing:")}
   ${colors.cyan("portless myapp --tailscale next dev")}
   ${colors.cyan("portless myapp --funnel next dev")}
 
+${colors.bold("NetBird sharing:")}
+  Use --netbird to share your dev server via the NetBird reverse proxy.
+  Portless runs "netbird expose" in the background and stops it on exit.
+  Requires NetBird CLI to be installed and connected ("netbird up").
+  ${colors.cyan("portless myapp --netbird next dev")}
+
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
@@ -1550,6 +1681,10 @@ ${colors.bold("Options:")}
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
+  --netbird                     Share the app via NetBird reverse proxy
+  --netbird-password <string>   Protect the NetBird-exposed service with a password
+  --netbird-pin <code>          Protect the NetBird-exposed service with a 6-digit PIN
+  --netbird-groups <csv>        Restrict NetBird access to SSO user groups (comma-separated)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -1564,15 +1699,20 @@ ${colors.bold("Environment variables:")}
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
+  PORTLESS_NETBIRD=1            Share apps via NetBird reverse proxy (same as --netbird)
+  PORTLESS_NETBIRD_PASSWORD     Password for NetBird-exposed services (same as --netbird-password)
+  PORTLESS_NETBIRD_PIN          6-digit PIN for NetBird-exposed services (same as --netbird-pin)
+  PORTLESS_NETBIRD_GROUPS       CSV of SSO user groups (same as --netbird-groups)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
 ${colors.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
-  HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
+  HOST                          Usually 127.0.0.1 (0.0.0.0 with --netbird, omitted for Expo in LAN mode)
   PORTLESS_URL                  Public URL of the app (e.g. https://myapp.localhost)
   PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
   PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
+  PORTLESS_NETBIRD_URL          NetBird URL of the app (when --netbird is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
 
 ${colors.bold("Safari / DNS:")}
@@ -3441,6 +3581,19 @@ async function main() {
   if (stripGlobalFlag("--funnel", false)) {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
+  }
+  if (stripGlobalFlag("--netbird", false)) {
+    process.env.PORTLESS_NETBIRD = "1";
+  }
+  for (const [flag, envKey] of Object.entries(NETBIRD_VALUE_FLAGS)) {
+    const result = stripGlobalFlag(flag, true);
+    if (result === false) {
+      console.error(colors.red(`Error: ${flag} requires a value.`));
+      process.exit(1);
+    } else if (typeof result === "string") {
+      process.env[envKey] = result;
+      process.env.PORTLESS_NETBIRD = "1";
+    }
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

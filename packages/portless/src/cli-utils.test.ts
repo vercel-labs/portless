@@ -434,6 +434,19 @@ describe("injectFrameworkFlags", () => {
     }
   });
 
+  it("injects --host 0.0.0.0 in NetBird mode so the netbird daemon can reach the app", () => {
+    const prev = process.env.PORTLESS_NETBIRD;
+    process.env.PORTLESS_NETBIRD = "1";
+    try {
+      const args = ["vite", "dev"];
+      injectFrameworkFlags(args, 4567);
+      expect(args).toEqual(["vite", "dev", "--port", "4567", "--strictPort", "--host", "0.0.0.0"]);
+    } finally {
+      if (prev === undefined) delete process.env.PORTLESS_NETBIRD;
+      else process.env.PORTLESS_NETBIRD = prev;
+    }
+  });
+
   it("does not inject for frameworks that read PORT", () => {
     const nextArgs = ["next", "dev"];
     injectFrameworkFlags(nextArgs, 4567);
