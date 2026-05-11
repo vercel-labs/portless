@@ -1186,8 +1186,20 @@ async function runApp(
       .replace(/[^a-z0-9-]/gi, "-")
       .toLowerCase()
       .slice(0, 32);
+    const groupsEnv = process.env.PORTLESS_NETBIRD_GROUPS;
+    const userGroups = groupsEnv
+      ? groupsEnv
+          .split(",")
+          .map((g) => g.trim())
+          .filter(Boolean)
+      : undefined;
     try {
-      netbirdHandle = await startExpose(port, { namePrefix });
+      netbirdHandle = await startExpose(port, {
+        namePrefix,
+        password: process.env.PORTLESS_NETBIRD_PASSWORD,
+        pin: process.env.PORTLESS_NETBIRD_PIN,
+        userGroups,
+      });
       netbirdUrl = netbirdHandle.info.url;
       console.log(chalk.green(`  NetBird -> ${netbirdUrl}`));
       console.log(chalk.gray("  (accessible via NetBird reverse proxy)\n"));
@@ -1354,6 +1366,26 @@ function applyNetbirdFlag(flag: string): boolean {
   return false;
 }
 
+const NETBIRD_VALUE_FLAGS: Record<string, string> = {
+  "--netbird-password": "PORTLESS_NETBIRD_PASSWORD",
+  "--netbird-pin": "PORTLESS_NETBIRD_PIN",
+  "--netbird-groups": "PORTLESS_NETBIRD_GROUPS",
+};
+
+function isNetbirdValueFlag(flag: string): boolean {
+  return Object.prototype.hasOwnProperty.call(NETBIRD_VALUE_FLAGS, flag);
+}
+
+function consumeNetbirdValueFlag(flag: string, value: string | undefined): void {
+  const envKey = NETBIRD_VALUE_FLAGS[flag];
+  if (!value || value.startsWith("-")) {
+    console.error(colors.red(`Error: ${flag} requires a value.`));
+    process.exit(1);
+  }
+  process.env[envKey] = value;
+  process.env.PORTLESS_NETBIRD = "1";
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -1420,11 +1452,15 @@ ${colors.bold("Examples:")}
       name = args[i];
     } else if (applyTailscaleFlag(args[i]) || applyNetbirdFlag(args[i])) {
       // handled
+    } else if (isNetbirdValueFlag(args[i])) {
+      const flag = args[i];
+      i++;
+      consumeNetbirdValueFlag(flag, args[i]);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --netbird, --help"
+          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --netbird, --netbird-password, --netbird-pin, --netbird-groups, --help"
         )
       );
       process.exit(1);
@@ -1461,10 +1497,16 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       appPort = parseAppPort(args[i]);
     } else if (applyTailscaleFlag(args[i]) || applyNetbirdFlag(args[i])) {
       // handled
+    } else if (isNetbirdValueFlag(args[i])) {
+      const flag = args[i];
+      i++;
+      consumeNetbirdValueFlag(flag, args[i]);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --netbird")
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --netbird, --netbird-password, --netbird-pin, --netbird-groups"
+        )
       );
       process.exit(1);
     }
@@ -1487,10 +1529,16 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       appPort = parseAppPort(args[i]);
     } else if (applyTailscaleFlag(args[i]) || applyNetbirdFlag(args[i])) {
       // handled
+    } else if (isNetbirdValueFlag(args[i])) {
+      const flag = args[i];
+      i++;
+      consumeNetbirdValueFlag(flag, args[i]);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --netbird")
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --netbird, --netbird-password, --netbird-pin, --netbird-groups"
+        )
       );
       process.exit(1);
     }
@@ -1634,6 +1682,9 @@ ${colors.bold("Options:")}
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
   --netbird                     Share the app via NetBird reverse proxy
+  --netbird-password <string>   Protect the NetBird-exposed service with a password
+  --netbird-pin <code>          Protect the NetBird-exposed service with a 6-digit PIN
+  --netbird-groups <csv>        Restrict NetBird access to SSO user groups (comma-separated)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -1649,6 +1700,9 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_NETBIRD=1            Share apps via NetBird reverse proxy (same as --netbird)
+  PORTLESS_NETBIRD_PASSWORD     Password for NetBird-exposed services (same as --netbird-password)
+  PORTLESS_NETBIRD_PIN          6-digit PIN for NetBird-exposed services (same as --netbird-pin)
+  PORTLESS_NETBIRD_GROUPS       CSV of SSO user groups (same as --netbird-groups)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
@@ -3530,6 +3584,16 @@ async function main() {
   }
   if (stripGlobalFlag("--netbird", false)) {
     process.env.PORTLESS_NETBIRD = "1";
+  }
+  for (const [flag, envKey] of Object.entries(NETBIRD_VALUE_FLAGS)) {
+    const result = stripGlobalFlag(flag, true);
+    if (result === false) {
+      console.error(colors.red(`Error: ${flag} requires a value.`));
+      process.exit(1);
+    } else if (typeof result === "string") {
+      process.env[envKey] = result;
+      process.env.PORTLESS_NETBIRD = "1";
+    }
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

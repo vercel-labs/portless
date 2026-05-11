@@ -330,6 +330,14 @@ portless myapp --netbird next dev
 
 Portless runs `netbird expose` in the background, derives the service name from the app name, and stops the exposure when the app exits. Set `PORTLESS_NETBIRD=1` in your shell profile or `.env` to share every app by default. `portless list` shows the NetBird URL alongside the local URL.
 
+Protect the exposed service with a password, PIN, or SSO user groups (pass-through to `netbird expose`):
+
+```bash
+portless myapp --netbird --netbird-password s3cret next dev
+portless myapp --netbird --netbird-pin 123456 next dev
+portless myapp --netbird --netbird-groups devops,Backend next dev
+```
+
 Requires the NetBird CLI to be installed and connected (`netbird up`). See [Expose from CLI](https://docs.netbird.io/manage/reverse-proxy/expose-from-cli) for setup details.
 
 ## Commands
@@ -385,6 +393,9 @@ portless service uninstall       # Remove the startup service
 --tailscale                      Share the app on your Tailscale network (tailnet)
 --funnel                         Share the app publicly via Tailscale Funnel
 --netbird                        Share the app via NetBird reverse proxy
+--netbird-password <string>      Protect the NetBird-exposed service with a password
+--netbird-pin <code>             Protect the NetBird-exposed service with a 6-digit PIN
+--netbird-groups <csv>           Restrict NetBird access to SSO user groups (comma-separated)
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
@@ -403,6 +414,9 @@ PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_NETBIRD=1               Share apps via NetBird reverse proxy (same as --netbird)
+PORTLESS_NETBIRD_PASSWORD        Password for NetBird-exposed services (same as --netbird-password)
+PORTLESS_NETBIRD_PIN             6-digit PIN for NetBird-exposed services (same as --netbird-pin)
+PORTLESS_NETBIRD_GROUPS          CSV of SSO user groups (same as --netbird-groups)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
