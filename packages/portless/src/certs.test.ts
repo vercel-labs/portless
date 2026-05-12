@@ -20,6 +20,34 @@ function getCertSignatureAlgo(certPath: string): string {
   return match ? match[1].toLowerCase() : "";
 }
 
+function rewritePemSignatureAlgorithm(pem: string, fromOidByte: number, toOidByte: number): string {
+  const base64 = pem.replace(/-----BEGIN CERTIFICATE-----|-----END CERTIFICATE-----|\s/g, "");
+  const der = Buffer.from(base64, "base64");
+  const rsaSignatureOidPrefix = Buffer.from([
+    0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01,
+  ]);
+  let replacements = 0;
+
+  for (let i = 0; i <= der.length - rsaSignatureOidPrefix.length - 1; i++) {
+    if (der.subarray(i, i + rsaSignatureOidPrefix.length).equals(rsaSignatureOidPrefix)) {
+      const oidByteIndex = i + rsaSignatureOidPrefix.length;
+      if (der[oidByteIndex] === fromOidByte) {
+        der[oidByteIndex] = toOidByte;
+        replacements++;
+      }
+    }
+  }
+
+  expect(replacements).toBeGreaterThanOrEqual(2);
+
+  const rewritten =
+    der
+      .toString("base64")
+      .match(/.{1,64}/g)
+      ?.join("\n") ?? "";
+  return `-----BEGIN CERTIFICATE-----\n${rewritten}\n-----END CERTIFICATE-----\n`;
+}
+
 describe("ensureCerts", () => {
   let tmpDir: string;
 
@@ -139,48 +167,38 @@ describe("ensureCerts", () => {
 
   it("regenerates server cert if it uses SHA-1 signature", () => {
     const first = ensureCerts(tmpDir);
-    const caKeyPath = path.join(tmpDir, "ca-key.pem");
-    const csrPath = path.join(tmpDir, "server-weak.csr");
-    const extPath = path.join(tmpDir, "server-weak-ext.cnf");
+    const weakKeyPath = path.join(tmpDir, "server-weak-key.pem");
 
-    execFileSync("openssl", [
-      "req",
-      "-new",
-      "-key",
-      first.keyPath,
-      "-out",
-      csrPath,
-      "-subj",
-      "/CN=localhost",
-    ]);
-    fs.writeFileSync(
-      extPath,
+    // OpenSSL 3 can reject creating SHA-1 signatures with "invalid digest".
+    // Generate a modern RSA cert, then rewrite the signature algorithm OIDs to
+    // match an old SHA-1 cert. The regeneration logic only needs to parse the
+    // certificate metadata and does not verify the intentionally stale signature.
+    execFileSync(
+      "openssl",
       [
-        "authorityKeyIdentifier=keyid,issuer",
-        "basicConstraints=CA:FALSE",
-        "keyUsage=digitalSignature,keyEncipherment",
-        "extendedKeyUsage=serverAuth",
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-sha256",
+        "-nodes",
+        "-keyout",
+        weakKeyPath,
+        "-out",
+        first.certPath,
+        "-days",
+        "365",
+        "-subj",
+        "/CN=localhost",
+        "-addext",
         "subjectAltName=DNS:localhost,DNS:*.localhost",
-      ].join("\n") + "\n"
+      ],
+      { stdio: "ignore" }
     );
-    execFileSync("openssl", [
-      "x509",
-      "-req",
-      "-sha1",
-      "-in",
-      csrPath,
-      "-CA",
-      first.caPath,
-      "-CAkey",
-      caKeyPath,
-      "-CAcreateserial",
-      "-out",
+    fs.writeFileSync(
       first.certPath,
-      "-days",
-      "365",
-      "-extfile",
-      extPath,
-    ]);
+      rewritePemSignatureAlgorithm(fs.readFileSync(first.certPath, "utf-8"), 0x0b, 0x05)
+    );
 
     expect(getCertSignatureAlgo(first.certPath)).toContain("sha1");
 
