@@ -33,10 +33,11 @@ vi.mock("./utils.js", () => ({
   fixOwnership: vi.fn(),
 }));
 
-const { existsSync, rmSync } = await import("node:fs");
+const { existsSync, rmSync, writeFileSync } = await import("node:fs");
 
 const originalPlatform = process.platform;
 const originalGetuid = process.getuid;
+const originalPortlessWildcard = process.env.PORTLESS_WILDCARD;
 
 function setPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, "platform", {
@@ -61,8 +62,14 @@ afterEach(() => {
     configurable: true,
     value: originalGetuid,
   });
+  if (originalPortlessWildcard === undefined) {
+    delete process.env.PORTLESS_WILDCARD;
+  } else {
+    process.env.PORTLESS_WILDCARD = originalPortlessWildcard;
+  }
   vi.mocked(existsSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
+  vi.mocked(writeFileSync).mockClear();
 });
 
 describe("buildServiceSpec", () => {
@@ -198,6 +205,42 @@ describe("buildServiceSpec", () => {
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
     expect(spec.plist).toContain("<key>KeepAlive</key>\n  <true/>");
     expect(spec.plist).not.toContain("SuccessfulExit");
+  });
+
+  it("builds wildcard service specs for macOS, Linux, and Windows", () => {
+    const mac = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/local/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      useWildcard: true,
+    });
+    const linux = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/portless/cli.js",
+      userHome: "/home/alice",
+      useWildcard: true,
+    });
+    const windows = buildServiceSpec({
+      platform: "win32",
+      nodePath: "C:\\nodejs\\node.exe",
+      entryScript: "C:\\cli.js",
+      userHome: "C:\\Users\\Alice",
+      useWildcard: true,
+    });
+
+    if (mac.platform !== "darwin") throw new Error("Expected macOS service spec");
+    if (linux.platform !== "linux") throw new Error("Expected Linux service spec");
+    if (windows.platform !== "win32") throw new Error("Expected Windows service spec");
+
+    expect(mac.programArguments).toContain("--wildcard");
+    expect(mac.plist).toContain("<key>PORTLESS_WILDCARD</key>");
+    expect(mac.plist).toContain("<string>1</string>");
+    expect(linux.execStart).toContain("--wildcard");
+    expect(linux.unit).toContain('Environment=PORTLESS_WILDCARD="1"');
+    expect(windows.script).toContain("--wildcard");
+    expect(windows.script).toContain('set "PORTLESS_WILDCARD=1"');
   });
 });
 
@@ -343,5 +386,60 @@ describe("handleService", () => {
 
     expect(stopIndex).toBeGreaterThanOrEqual(0);
     expect(restartIndex).toBeGreaterThan(stopIndex);
+  });
+
+  it("installs the service in wildcard mode from the --wildcard flag", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    await handleService(["service", "install", "--wildcard"], {
+      entryScript: "/fake/cli.js",
+      runner,
+    });
+
+    const writtenUnit = vi
+      .mocked(writeFileSync)
+      .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service")?.[1];
+    expect(writtenUnit).toContain('"--wildcard"');
+    expect(writtenUnit).toContain('Environment=PORTLESS_WILDCARD="1"');
+  });
+
+  it("installs the service in wildcard mode from PORTLESS_WILDCARD", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    process.env.PORTLESS_WILDCARD = "1";
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    await handleService(["service", "install"], {
+      entryScript: "/fake/cli.js",
+      runner,
+    });
+
+    const writtenUnit = vi
+      .mocked(writeFileSync)
+      .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service")?.[1];
+    expect(writtenUnit).toContain('"--wildcard"');
+    expect(writtenUnit).toContain('Environment=PORTLESS_WILDCARD="1"');
+  });
+
+  it("preserves --wildcard when escalating service install with sudo", async () => {
+    setPlatform("linux");
+    setGetuid(1000);
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    await expect(
+      handleService(["service", "install", "--wildcard"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      })
+    ).rejects.toThrow("process.exit");
+
+    const sudoCall = runner.mock.calls.find(([command]) => command === "sudo");
+    expect(sudoCall?.[1]).toContain("--wildcard");
   });
 });
