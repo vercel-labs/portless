@@ -1281,6 +1281,43 @@ describe("CLI", () => {
       expect(stdout).toContain("from-start");
     });
 
+    it("prints package.json as the name source for package portless config", async () => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-config-state-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({
+            name: "test-app",
+            scripts: { dev: "node -e \"console.log('from-dev')\"" },
+            portless: { name: "pkg-name" },
+          })
+        );
+
+        const { status, stdout } = run([], {
+          cwd: tmpDir,
+          env: {
+            PORTLESS_HTTPS: "0",
+            PORTLESS_PORT: String(proxyPort),
+            PORTLESS_STATE_DIR: stateDir,
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain('Name "pkg-name" (from package.json)');
+        expect(stdout).not.toContain('Name "pkg-name" (from portless.json)');
+      } finally {
+        run(["proxy", "stop"], {
+          env: {
+            PORTLESS_HTTPS: "0",
+            PORTLESS_PORT: String(proxyPort),
+            PORTLESS_STATE_DIR: stateDir,
+          },
+        });
+        fs.rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+
     it("--script flag overrides config script field", () => {
       fs.writeFileSync(
         path.join(tmpDir, "package.json"),
