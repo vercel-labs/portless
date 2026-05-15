@@ -96,6 +96,8 @@ The `apps` map is optional and only provides name overrides. Unlisted packages a
 
 Without an `apps` map, hostnames follow `<package>.<project>.localhost`. The project name comes from the most common npm scope (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it uses the bare `<project>.localhost`.
 
+In linked git worktrees, monorepo URLs also get the branch prefix. A package that normally uses `web.example.localhost` uses `fix-ui.web.example.localhost` from a `fix-ui` worktree.
+
 ### Turborepo
 
 For turborepo projects, use portless as the `dev` script with the real command in a separate script:
@@ -143,6 +145,9 @@ portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
 portless run next dev   # -> https://fix-ui.myapp.localhost
+
+# From a linked monorepo worktree
+portless                # -> https://fix-ui.web.example.localhost
 ```
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.

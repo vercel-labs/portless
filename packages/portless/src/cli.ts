@@ -1463,6 +1463,7 @@ ${colors.bold("Usage:")}
 ${colors.bold("Examples:")}
   portless                            # Run dev script through proxy
   portless                            # From monorepo root: start all apps
+  portless                            # in worktree -> https://<worktree>.<app>.<project>.localhost
   portless --script start             # Run "start" script instead of "dev"
   portless myapp next dev             # -> https://myapp.localhost
   portless run next dev               # -> https://<project>.localhost
@@ -2921,6 +2922,7 @@ async function handleDefaultMulti(
     }
   }
 
+  const worktree = detectWorktreePrefix(wsRoot);
   const apps: MultiAppEntry[] = [];
 
   for (const pkg of packages) {
@@ -2973,6 +2975,10 @@ async function handleDefaultMulti(
       }
       name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
+    }
+
+    if (worktree) {
+      name = `${worktree.prefix}.${name}`;
     }
 
     apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
