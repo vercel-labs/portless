@@ -59,9 +59,27 @@ describe("findFreePort", () => {
   it("throws when no port is available in a tiny occupied range", async () => {
     // Occupy a single-port range
     const server = net.createServer();
-    await new Promise<void>((resolve) => server.listen(9999, () => resolve()));
+    await new Promise<void>((resolve) => server.listen(9999, "127.0.0.1", () => resolve()));
     try {
       await expect(findFreePort(9999, 9999)).rejects.toThrow("No free port found");
+    } finally {
+      server.close();
+    }
+  });
+
+  it("treats ports occupied on 127.0.0.1 as unavailable", async () => {
+    const server = net.createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          resolve(addr.port);
+        }
+      });
+    });
+
+    try {
+      await expect(findFreePort(port, port)).rejects.toThrow("No free port found");
     } finally {
       server.close();
     }
