@@ -9,8 +9,8 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 
-/** Run the CLI with the given args and optional env overrides. */
-function run(args: string[], options?: { env?: Record<string, string | undefined> }) {
+/** Run the CLI with the given args and optional env/cwd overrides. */
+function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
   const env: Record<string, string | undefined> = {
     ...process.env,
     ...options?.env,
@@ -25,6 +25,7 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     encoding: "utf-8",
     timeout: 10_000,
     env,
+    cwd: options?.cwd,
   });
   return {
     status: result.status,
@@ -98,6 +99,7 @@ describe("CLI", () => {
       expect(stdout).toContain("Usage:");
       expect(stdout).toContain("Examples:");
       expect(stdout).toContain("proxy start");
+      expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
       expect(stdout).toContain("run [--name <name>]");
@@ -115,10 +117,16 @@ describe("CLI", () => {
       expect(stdout).toContain("Usage:");
     });
 
-    it("prints help and exits 0 with no args", () => {
-      const { status, stdout } = run([]);
-      expect(status).toBe(0);
-      expect(stdout).toContain("Usage:");
+    it("prints help and exits 0 with no args when no dev script exists", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-help-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stdout } = run([], { cwd: tmpDir });
+        expect(status).toBe(0);
+        expect(stdout).toContain("Usage:");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -159,6 +167,26 @@ describe("CLI", () => {
       const { status, stdout } = run(["proxy", "unknown"]);
       expect(status).toBe(1);
       expect(stdout).toContain("proxy start");
+    });
+  });
+
+  describe("service", () => {
+    it("prints service help", () => {
+      const { status, stdout } = run(["service", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless service");
+      expect(stdout).toContain("service install");
+      expect(stdout).toContain("service uninstall");
+      expect(stdout).toContain("service status");
+    });
+
+    it("still dispatches service help when PORTLESS=0", () => {
+      const { status, stdout } = run(["service", "--help"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless service");
+      expect(stdout).toContain("service install");
     });
   });
 
@@ -282,10 +310,16 @@ describe("CLI", () => {
   });
 
   describe("run subcommand dispatch", () => {
-    it("exits 1 with 'No command provided' when no args follow run", () => {
-      const { status, stderr } = run(["run"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("No command provided");
+    it("exits 1 with 'No command provided' when no args follow run and no dev script", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run"], { cwd: tmpDir });
+        expect(status).toBe(1);
+        expect(stderr).toContain("No command provided");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("does not dispatch 'list' as the global list command", () => {
@@ -701,6 +735,100 @@ describe("CLI", () => {
     });
   });
 
+  describe("Rsbuild flag injection", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-rsbuild-test-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function writeRsbuildShim(dir: string): void {
+      const captureScriptPath = path.join(dir, "capture-rsbuild.js");
+      fs.writeFileSync(
+        captureScriptPath,
+        [
+          'const fs = require("node:fs");',
+          "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+          "const payload = {",
+          "  args: process.argv.slice(2),",
+          "  env: {",
+          "    PORT: process.env.PORT,",
+          "    HOST: process.env.HOST,",
+          "    PORTLESS_URL: process.env.PORTLESS_URL,",
+          "  },",
+          "};",
+          "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+        ].join("\n") + "\n"
+      );
+
+      if (process.platform === "win32") {
+        fs.writeFileSync(
+          path.join(dir, "rsbuild.cmd"),
+          `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+        );
+        return;
+      }
+
+      const shimPath = path.join(dir, "rsbuild");
+      fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
+      fs.chmodSync(shimPath, 0o755);
+    }
+
+    it("injects --port and --host into rsbuild child commands", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-rsbuild-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+
+        writeRsbuildShim(shimDir);
+
+        const { status } = run(["run", "--name", "myapp", "--app-port", "4567", "rsbuild", "dev"], {
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["dev", "--port", "4567", "--host", "127.0.0.1"]);
+        expect(capture.env).toMatchObject({
+          PORT: "4567",
+          HOST: "127.0.0.1",
+          PORTLESS_URL: `http://myapp.localhost:${proxyPort}`,
+        });
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("NODE_EXTRA_CA_CERTS injection", () => {
     let tmpDir: string;
 
@@ -1066,5 +1194,211 @@ describe("CLI", () => {
         }
       }
     );
+  });
+
+  describe("portless.json config", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-config-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("portless (no args) runs dev script without portless.json", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      const { status, stdout } = run([], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("hello");
+    });
+
+    it("portless run (no command) with portless.json resolves dev script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo config-dev" } })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "myapp" }));
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("config-dev");
+    });
+
+    it("portless run (no command) without portless.json resolves dev script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("hello");
+    });
+
+    it("portless run with explicit command ignores config script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo from-config" } })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "dev" })
+      );
+      const { stdout } = run(["run", "echo", "from-cli"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-cli");
+      expect(stdout).not.toContain("from-config");
+    });
+
+    it("portless run with portless.json script field uses that script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "start" })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+    });
+
+    it("--script flag overrides config script field", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "dev" })
+      );
+      const { stdout } = run(["--script", "start", "run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+    });
+
+    it("--name overrides portless.json name", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "config-name" }));
+      // With PORTLESS=0, the name doesn't matter (command runs directly)
+      // but we can verify via the run subcommand help text or named mode.
+      // Let's test it goes through without error.
+      const { stdout } = run(["--name", "override-name", "echo", "works"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("works");
+    });
+
+    it("portless run with missing script errors clearly", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: {} })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", script: "nonexistent" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+    });
+
+    it("portless.json validation rejects invalid appPort", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ appPort: "not-a-number" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("appPort");
+    });
+  });
+
+  describe("--tailscale flag", () => {
+    it("shows --tailscale in help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--tailscale");
+      expect(stdout).toContain("--funnel");
+      expect(stdout).toContain("PORTLESS_TAILSCALE");
+    });
+
+    it("fails with actionable message when tailscale is not installed", () => {
+      const { status, stderr } = run(["--tailscale", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("fails with --funnel when tailscale is not installed", () => {
+      const { status, stderr } = run(["--funnel", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts PORTLESS_TAILSCALE=1 env var", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: { PORTLESS_TAILSCALE: "1", PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale after app name", () => {
+      const { status, stderr } = run(["myapp", "--tailscale", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale in run subcommand", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run", "--tailscale", "echo", "hello"], {
+          cwd: tmpDir,
+          env: { PATH: "/tmp/portless-no-ts-path" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain("Tailscale");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 });

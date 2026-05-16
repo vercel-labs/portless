@@ -38,7 +38,111 @@ When auto-starting, portless reuses the configuration (port, TLS, TLD) from the 
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners like turborepo and CI scripts fail early with a clear message.
 
+## Configuration
+
+Bare `portless` works out of the box. It runs the `"dev"` script from `package.json` through the proxy, inferring the app name from the package name, git root, or directory:
+
+```bash
+portless        # -> runs "dev" script, https://<project>.localhost
+```
+
+Use an optional `portless.json` to override defaults:
+
+```json
+{ "name": "myapp" }
+```
+
+```bash
+portless        # -> runs "dev" script, https://myapp.localhost
+```
+
+The script defaults to `"dev"`. The name is inferred from `package.json` if not set in config.
+
+### Monorepo
+
+One `portless.json` at the repo root covers all workspace packages. Portless discovers packages from `pnpm-workspace.yaml`, or the `"workspaces"` field in `package.json` (npm, yarn, bun):
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "api.myapp" }
+  }
+}
+```
+
+```bash
+portless        # from repo root: starts all workspace packages with a "dev" script
+cd apps/web && portless   # start just one package
+```
+
+The `apps` map is optional and only needed for name overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
+
+Without an `apps` map, hostnames follow the `<package>.<project>.localhost` convention. The project name comes from the most common npm scope across workspace packages (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it gets the bare `<project>.localhost` without duplication.
+
+### Config fields
+
+| Field     | Type    | Default  | Description                                               |
+| --------- | ------- | -------- | --------------------------------------------------------- |
+| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
+| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
+| `appPort` | number  | auto     | Fixed port for the child process.                         |
+| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
+| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
+| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+
+### package.json "portless" key
+
+Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": "myapp"
+}
+```
+
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+
+```json
+{
+  "name": "@myorg/web",
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+The `package.json` `"portless"` key takes precedence over `portless.json` app entries but is overridden by CLI flags.
+
+### --script flag
+
+Override the default script for a single invocation:
+
+```bash
+portless --script start       # run "start" instead of "dev"
+portless --script test        # run "test" instead of "dev"
+```
+
+### Turborepo
+
+To use portless with turborepo, put `portless` as the `dev` script and the real command in a separate script:
+
+```json
+{
+  "scripts": {
+    "dev": "portless",
+    "dev:app": "next dev"
+  },
+  "portless": { "name": "myapp", "script": "dev:app" }
+}
+```
+
+Turbo runs each package's `dev` script, which invokes portless. Portless reads the config, detects the package manager, and runs `pnpm run dev:app` (or yarn/bun/npm) through the proxy. No changes to `turbo.json` are needed.
+
+`pnpm dev` at the root works through turbo as usual. People without portless can run `pnpm run dev:app` directly.
+
 ## Use in package.json
+
+You can still use portless in `package.json` scripts:
 
 ```json
 {
@@ -47,6 +151,18 @@ In non-interactive environments (no TTY, or `CI=1`), portless exits with a descr
   }
 }
 ```
+
+With a `portless.json`, you can simplify to:
+
+```json
+{
+  "scripts": {
+    "dev": "next dev"
+  }
+}
+```
+
+Then run `portless` or `portless run` to go through the proxy.
 
 ## Subdomains
 
@@ -133,6 +249,18 @@ portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
 
+## Start at OS startup
+
+Install the proxy as an OS startup service so clean HTTPS URLs are available after reboot without starting the proxy from a terminal:
+
+```bash
+portless service install
+portless service status
+portless service uninstall
+```
+
+The service uses portless defaults: HTTPS on port 443 with `.localhost` names. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
+
 ## LAN mode
 
 ```bash
@@ -160,10 +288,42 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 
 - **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
 
+## Tailscale sharing
+
+Share your dev server with teammates on your [Tailscale](https://tailscale.com) network:
+
+```bash
+portless myapp --tailscale next dev
+# -> https://myapp.localhost           (local)
+# -> https://devbox.yourteam.ts.net    (tailnet)
+```
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no framework `basePath` configuration is needed. The first app gets port 443, subsequent apps get 8443, 8444, etc.
+
+```bash
+portless myapp --tailscale next dev     # -> https://devbox.ts.net
+portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
+```
+
+Use `--funnel` to expose your dev server to the public internet via [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
+
+```bash
+portless myapp --funnel next dev
+# -> https://devbox.yourteam.ts.net    (public)
+```
+
+Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+
+Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
+
+Requires the Tailscale CLI to be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled.
+
 ## Commands
 
 ```bash
-portless run [--name <name>] <cmd> [args...]  # Infer name (or override with --name), run through proxy
+portless                        # Run dev script through proxy
+portless                        # From monorepo root: run all workspace packages
+portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
@@ -171,6 +331,7 @@ portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
+portless prune                   # Kill orphaned dev servers from crashed sessions
 portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
 
@@ -185,6 +346,11 @@ portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
 portless proxy stop              # Stop the proxy
+
+# OS startup service
+portless service install         # Start HTTPS proxy when the OS starts
+portless service status          # Show service and proxy status
+portless service uninstall       # Remove the startup service
 ```
 
 ### Options
@@ -200,7 +366,10 @@ portless proxy stop              # Stop the proxy
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--tailscale                      Share the app on your Tailscale network (tailnet)
+--funnel                         Share the app publicly via Tailscale Funnel
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
@@ -216,16 +385,19 @@ PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
+PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
+PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
 PORT                             Ephemeral port the child should listen on
 HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode)
 PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
+PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
-> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Uninstall / reset
 
@@ -280,7 +452,7 @@ devServer: {
 }
 ```
 
-Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=/tmp/portless/ca.pem` (or `~/.portless/ca.pem` when the proxy runs on a non-privileged port like 1355). Alternatively, use `--no-tls` for plain HTTP.
+Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
 
 Portless detects this misconfiguration and responds with `508 Loop Detected` along with a message pointing to this fix.
 
@@ -302,3 +474,4 @@ pnpm format           # Format all files with Prettier
 
 - Node.js 20+
 - macOS, Linux, or Windows
+- Tailscale CLI (optional, for `--tailscale` and `--funnel`)

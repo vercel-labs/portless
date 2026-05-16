@@ -6,12 +6,27 @@ import colors from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
+import { StringDecoder } from "node:string_decoder";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import { fixOwnership, formatUrl, isErrnoException, parseHostname } from "./utils.js";
 import { syncHostsFile, cleanHostsFile, shouldAutoSyncHosts } from "./hosts.js";
 import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
-import { inferProjectName, detectWorktreePrefix, truncateLabel } from "./auto.js";
+import {
+  ensureTailscaleReady,
+  findAvailableServePort,
+  formatTailscaleUrl,
+  getUsedServePorts,
+  registerFunnel,
+  registerServe,
+  unregisterTailscale,
+} from "./tailscale.js";
+import {
+  inferProjectName,
+  detectWorktreePrefix,
+  truncateLabel,
+  sanitizeForHostname,
+} from "./auto.js";
 import {
   buildProxyStartConfig,
   DEFAULT_TLD,
@@ -25,6 +40,7 @@ import {
   discoverState,
   findFreePort,
   findPidOnPort,
+  findPidsOnPort,
   getDefaultPort,
   getDefaultTld,
   injectFrameworkFlags,
@@ -34,13 +50,14 @@ import {
   isLanEnvEnabled,
   isProxyRunning,
   isWindows,
-  prompt,
+  killTree,
   readLanMarker,
   readPersistedProxyState,
   readTldFromDir,
   readTlsMarker,
   resolveStateDir,
   spawnCommand,
+  augmentedPath,
   validateTld,
   waitForProxy,
   writeLanMarker,
@@ -56,6 +73,29 @@ import {
   unpublish,
   cleanupAll as cleanupMdns,
 } from "./mdns.js";
+import {
+  loadConfig,
+  resolveAppConfig,
+  resolveScriptCommand,
+  hasScript,
+  isServerCommand,
+  splitCommand,
+  detectPackageManager,
+  loadPackagePortlessConfig,
+  ConfigValidationError,
+} from "./config.js";
+import type { AppConfig } from "./config.js";
+import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
+import type { WorkspacePackage } from "./workspace.js";
+import {
+  ensureEnvLoader,
+  writeManifest,
+  removeManifest,
+  buildNodeOptions,
+  hasTurboConfig,
+} from "./turbo.js";
+import type { ManifestEntry } from "./turbo.js";
+import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
 
 const chalk = colors;
 
@@ -329,6 +369,36 @@ function sudoStop(port: number): boolean {
   const stopArgs = [process.execPath, getEntryScript(), "proxy", "stop", "-p", String(port)];
   console.log(colors.yellow("Proxy is running as root. Elevating with sudo to stop it..."));
   const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...stopArgs], {
+    stdio: "inherit",
+    timeout: SUDO_SPAWN_TIMEOUT_MS,
+  });
+  return result.status === 0;
+}
+
+function runCleanWithSudo(reason: string): boolean {
+  console.log(colors.yellow(`${reason} Requesting sudo...`));
+  const home = process.env.HOME;
+  const result = spawnSync(
+    "sudo",
+    [
+      "env",
+      ...collectPortlessEnvArgs(),
+      ...(home ? [`HOME=${home}`] : []),
+      process.execPath,
+      getEntryScript(),
+      "clean",
+    ],
+    {
+      stdio: "inherit",
+      timeout: SUDO_SPAWN_TIMEOUT_MS,
+    }
+  );
+  return result.status === 0;
+}
+
+function runServiceUninstallWithSudo(reason: string): boolean {
+  console.log(colors.yellow(`${reason} Requesting sudo...`));
+  const result = spawnSync("sudo", buildServiceUninstallSudoArgs(getEntryScript()), {
     stdio: "inherit",
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
@@ -741,35 +811,26 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
     console.log(
       `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}`
     );
+    if (route.tailscaleUrl) {
+      const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
+      console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
+    }
   }
   console.log();
 }
 
-async function runApp(
-  initialStore: RouteStore,
-  proxyPort: number,
-  stateDir: string,
-  name: string,
-  commandArgs: string[],
-  tls: boolean,
-  tld: string,
-  force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
-  desiredPort?: number,
-  lanMode = false,
-  lanIp?: string | null
-) {
-  let store = initialStore;
-  console.log(chalk.blue.bold(`\nportless\n`));
+type EnsureProxyResult =
+  | { started: true; state: Awaited<ReturnType<typeof discoverState>> }
+  | { started: false };
 
-  let envTld: string;
-  try {
-    envTld = getDefaultTld();
-  } catch (err) {
-    console.error(colors.red(`Error: ${(err as Error).message}`));
-    process.exit(1);
-  }
+interface ProxyDesiredState {
+  explicit: ProxyConfigExplicitness;
+  desiredConfig: ReturnType<typeof resolveProxyConfig>;
+  envTld: string;
+}
 
+function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
+  const envTld = getDefaultTld();
   const explicit: ProxyConfigExplicitness = {
     useHttps: process.env.PORTLESS_HTTPS !== undefined,
     customCert: false,
@@ -790,147 +851,199 @@ async function runApp(
     tld: envTld,
     useWildcard: isWildcardEnvEnabled(),
   });
+  return { explicit, desiredConfig, envTld };
+}
 
-  // Validate the hostname before we try to auto-start the proxy.
-  parseHostname(name, tld);
+/**
+ * Check if the proxy is running and auto-start it if needed.
+ * Returns the discovered state after start, or `{ started: false }` when
+ * the proxy was already up.
+ */
+async function ensureProxyRunning(
+  proxyPort: number,
+  tls: boolean,
+  desired: ProxyDesiredState
+): Promise<EnsureProxyResult> {
+  const { explicit, desiredConfig } = desired;
 
-  // Check if proxy is running, auto-start if possible.
-  // The proxy start command handles sudo elevation and fallback internally,
-  // so we just spawn it and then re-discover state to find the actual port.
   const proxyResponsive = await isProxyRunning(proxyPort, tls);
   const proxyListeningFromStateDir =
     !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
 
-  if (!proxyResponsive && !proxyListeningFromStateDir) {
-    // Merge persisted state from a previous proxy run so auto-start reuses
-    // the same port/TLS/TLD instead of falling back to defaults (#225).
-    const persisted = readPersistedProxyState();
-    const startConfig = { ...desiredConfig };
-    let startPort: number | undefined;
+  if (proxyResponsive || proxyListeningFromStateDir) {
+    return { started: false };
+  }
 
-    if (persisted) {
-      if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
-        startConfig.useHttps = persisted.tls;
-      }
-      if (!explicit.tld && persisted.tld !== desiredConfig.tld) {
-        startConfig.tld = persisted.tld;
-      }
-      if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
-        startConfig.lanMode = persisted.lanMode;
-      }
-      const envPort = getDefaultPort(startConfig.useHttps);
-      if (persisted.port !== envPort) {
-        startPort = persisted.port;
+  const persisted = readPersistedProxyState();
+  const startConfig = { ...desiredConfig };
+  let startPort: number | undefined;
+
+  if (persisted) {
+    if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
+      startConfig.useHttps = persisted.tls;
+    }
+    if (!explicit.tld && persisted.tld !== desiredConfig.tld) {
+      startConfig.tld = persisted.tld;
+    }
+    if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
+      startConfig.lanMode = persisted.lanMode;
+    }
+    const envPort = getDefaultPort(startConfig.useHttps);
+    if (persisted.port !== envPort) {
+      startPort = persisted.port;
+    }
+  }
+
+  const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
+  const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
+  const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
+  const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
+
+  const isInteractive = !!process.stdin.isTTY && !process.env.CI;
+
+  if (needsSudo && !isInteractive) {
+    console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
+    console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
+    console.error(colors.cyan(`  ${manualStartCommand}`));
+    console.error(
+      colors.blue(
+        `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
+      )
+    );
+    console.error(colors.cyan(`  ${fallbackStartCommand}`));
+    process.exit(1);
+  }
+
+  console.log(colors.gray("Starting proxy..."));
+  const proxyStartConfig = buildProxyStartConfig({
+    useHttps: startConfig.useHttps,
+    customCertPath: startConfig.customCertPath,
+    customKeyPath: startConfig.customKeyPath,
+    lanMode: startConfig.lanMode,
+    lanIp: startConfig.lanIpExplicit ? startConfig.lanIp : null,
+    lanIpExplicit: startConfig.lanIpExplicit,
+    tld: startConfig.tld,
+    useWildcard: startConfig.useWildcard,
+    includePort: startPort !== undefined,
+    proxyPort: startPort,
+  });
+  const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
+
+  const result = spawnSync(process.execPath, startArgs, {
+    stdio: "inherit",
+    timeout: SUDO_SPAWN_TIMEOUT_MS,
+  });
+
+  let discovered: Awaited<ReturnType<typeof discoverState>> | null = null;
+  if (!result.signal) {
+    for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
+      await new Promise((r) => setTimeout(r, WAIT_FOR_PROXY_INTERVAL_MS));
+      const state = await discoverState();
+      if (await isProxyRunning(state.port)) {
+        discovered = state;
+        break;
       }
     }
+  }
 
-    const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
-    const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
-    const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
-    const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
+  if (!discovered) {
+    console.error(colors.red("Failed to start proxy."));
+    const fallbackDir = resolveStateDir(effectivePort);
+    const logPath = path.join(fallbackDir, "proxy.log");
+    console.error(colors.blue("Try starting it manually:"));
+    console.error(colors.cyan(`  ${manualStartCommand}`));
+    if (fs.existsSync(logPath)) {
+      console.error(colors.gray(`Logs: ${logPath}`));
+    }
+    process.exit(1);
+    return { started: false }; // unreachable; helps TypeScript narrow `discovered`
+  }
 
-    // Detect non-interactive environments: no TTY, CI runners, or task
-    // runners like turborepo that pipe stdin (#224).
-    const isInteractive = !!process.stdin.isTTY && !process.env.CI;
+  return { started: true, state: discovered };
+}
 
-    if (needsSudo && !isInteractive) {
-      console.error(colors.red("Proxy is not running and no TTY is available for sudo."));
-      console.error(colors.blue("Option 1: start the proxy in a terminal (will prompt for sudo):"));
-      console.error(colors.cyan(`  ${manualStartCommand}`));
-      console.error(
-        colors.blue(
-          `Option 2: use an unprivileged port (no sudo needed, URLs will include :${FALLBACK_PROXY_PORT}):`
-        )
-      );
-      console.error(colors.cyan(`  ${fallbackStartCommand}`));
+async function runApp(
+  initialStore: RouteStore,
+  proxyPort: number,
+  stateDir: string,
+  name: string,
+  commandArgs: string[],
+  tls: boolean,
+  tld: string,
+  force: boolean,
+  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  desiredPort?: number,
+  lanMode = false,
+  lanIp?: string | null
+) {
+  let store = initialStore;
+  console.log(chalk.blue.bold(`\nportless\n`));
+
+  // Check tailscale readiness early, before auto-starting the proxy.
+  // No point starting the proxy if tailscale will fail afterward.
+  const wantsFunnel = process.env.PORTLESS_FUNNEL === "1" || process.env.PORTLESS_FUNNEL === "true";
+  const wantsTailscale =
+    wantsFunnel ||
+    process.env.PORTLESS_TAILSCALE === "1" ||
+    process.env.PORTLESS_TAILSCALE === "true";
+  let tsBaseUrl: string | undefined;
+
+  if (wantsTailscale) {
+    try {
+      const tsReady = ensureTailscaleReady({
+        requireFunnel: wantsFunnel,
+        requireHttps: true,
+      });
+      tsBaseUrl = tsReady.baseUrl;
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(colors.red(`Error: ${message}`));
+      if (message.includes("not found")) {
+        console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
+      } else if (!message.includes("not enabled on your tailnet")) {
+        console.error(colors.blue("Make sure Tailscale is connected:"));
+        console.error(colors.cyan("  tailscale up"));
+      }
       process.exit(1);
     }
+  }
 
-    if (needsSudo) {
-      const answer = await prompt(colors.yellow("Proxy not running. Start it? [Y/n/skip] "));
+  let desired: ProxyDesiredState;
+  try {
+    desired = resolveProxyDesiredState(lanMode);
+  } catch (err) {
+    console.error(colors.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
 
-      if (answer === "n" || answer === "no") {
-        console.log(colors.gray("Cancelled."));
-        process.exit(0);
-      }
+  // Validate the hostname before we try to auto-start the proxy.
+  parseHostname(name, tld);
 
-      if (answer === "s" || answer === "skip") {
-        console.log(colors.gray("Skipping proxy, running command directly...\n"));
-        spawnCommand(commandArgs);
-        return;
-      }
-    }
+  const ensureResult = await ensureProxyRunning(proxyPort, tls, desired);
 
-    if (persisted && startPort !== undefined) {
-      console.log(
-        colors.yellow(
-          `Starting proxy with previous configuration (port ${startPort}, ${startConfig.useHttps ? "HTTPS" : "HTTP"})...`
-        )
-      );
-    } else {
-      console.log(colors.yellow("Starting proxy..."));
-    }
-    const proxyStartConfig = buildProxyStartConfig({
-      useHttps: startConfig.useHttps,
-      customCertPath: startConfig.customCertPath,
-      customKeyPath: startConfig.customKeyPath,
-      lanMode: startConfig.lanMode,
-      lanIp: startConfig.lanIpExplicit ? startConfig.lanIp : null,
-      lanIpExplicit: startConfig.lanIpExplicit,
-      tld: startConfig.tld,
-      useWildcard: startConfig.useWildcard,
-      includePort: startPort !== undefined,
-      proxyPort: startPort,
-    });
-    const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
-
-    const result = spawnSync(process.execPath, startArgs, {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    });
-
-    // Poll discoverState + isProxyRunning until the daemon is reachable.
-    // The proxy may bind 443, fall back to 1355, or use another port, so we
-    // re-discover on each attempt instead of waiting on a single port.
-    let discovered: Awaited<ReturnType<typeof discoverState>> | null = null;
-    if (!result.signal) {
-      for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
-        await new Promise((r) => setTimeout(r, WAIT_FOR_PROXY_INTERVAL_MS));
-        const state = await discoverState();
-        if (await isProxyRunning(state.port)) {
-          discovered = state;
-          break;
-        }
-      }
-    }
-
-    if (!discovered) {
-      console.error(colors.red("Failed to start proxy."));
-      const fallbackDir = resolveStateDir(effectivePort);
-      const logPath = path.join(fallbackDir, "proxy.log");
-      console.error(colors.blue("Try starting it manually:"));
-      console.error(colors.cyan(`  ${manualStartCommand}`));
-      if (fs.existsSync(logPath)) {
-        console.error(colors.gray(`Logs: ${logPath}`));
-      }
-      process.exit(1);
-      return; // unreachable, but helps TypeScript narrow `discovered`
-    }
-    proxyPort = discovered.port;
-    stateDir = discovered.dir;
-    tld = discovered.tld;
-    tls = discovered.tls;
-    lanMode = discovered.lanMode;
-    lanIp = discovered.lanIp;
+  if (ensureResult.started) {
+    proxyPort = ensureResult.state.port;
+    stateDir = ensureResult.state.dir;
+    tld = ensureResult.state.tld;
+    tls = ensureResult.state.tls;
+    lanMode = ensureResult.state.lanMode;
+    lanIp = ensureResult.state.lanIp;
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
-    console.log(colors.green("Proxy started in background"));
+    if (tls && !isCATrusted(stateDir)) {
+      await handleTrust();
+    }
   } else {
     const runningConfig = readCurrentProxyConfig(stateDir);
-    const mismatchMessages = getProxyConfigMismatchMessages(desiredConfig, runningConfig, explicit);
+
+    const mismatchMessages = getProxyConfigMismatchMessages(
+      desired.desiredConfig,
+      runningConfig,
+      desired.explicit
+    );
     if (mismatchMessages.length > 0) {
-      printProxyConfigMismatch(proxyPort, desiredConfig, mismatchMessages);
+      printProxyConfigMismatch(proxyPort, desired.desiredConfig, mismatchMessages);
     }
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
@@ -941,10 +1054,10 @@ async function runApp(
   // (e.g. --lan changes tld from "localhost" to "local")
   const hostname = parseHostname(name, tld);
 
-  if (envTld !== DEFAULT_TLD && envTld !== tld) {
+  if (desired.envTld !== DEFAULT_TLD && desired.envTld !== tld) {
     console.warn(
       chalk.yellow(
-        `Warning: PORTLESS_TLD=${envTld} but the running proxy uses .${tld}. Using .${tld}.`
+        `Warning: PORTLESS_TLD=${desired.envTld} but the running proxy uses .${tld}. Using .${tld}.`
       )
     );
   }
@@ -989,6 +1102,54 @@ async function runApp(
   if (lanIp) {
     console.log(chalk.green(`  LAN -> ${finalUrl}`));
     console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+  }
+
+  // Tailscale sharing: register with tailscale serve (or funnel).
+  // Readiness was already checked at the top of runApp().
+  let tailscaleHttpsPort: number | undefined;
+  let tailscaleUrl: string | undefined;
+
+  if (wantsTailscale && tsBaseUrl) {
+    const maxAttempts = 3;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const usedPorts = getUsedServePorts();
+      tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
+      try {
+        if (wantsFunnel) {
+          registerFunnel(port, tailscaleHttpsPort);
+        } else {
+          registerServe(port, tailscaleHttpsPort);
+        }
+        break;
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        const isConflict = message.includes("already in use");
+        if (isConflict && attempt < maxAttempts) continue;
+        console.error(colors.red(`Error: ${message}`));
+        process.exit(1);
+      }
+    }
+
+    // tailscaleHttpsPort is always assigned: the loop either breaks after
+    // a successful register or exits the process on final failure.
+    tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
+    const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
+    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+    if (wantsFunnel) {
+      console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+    } else {
+      console.log(chalk.gray("  (accessible from your tailnet)\n"));
+    }
+
+    try {
+      store.updateRoute(hostname, {
+        tailscaleUrl: tailscaleUrl,
+        tailscaleHttpsPort,
+        tailscaleFunnel: wantsFunnel || undefined,
+      });
+    } catch {
+      // Non-fatal: route display metadata only
+    }
   }
 
   // Child servers always bind to localhost; the proxy handles cross-device LAN access.
@@ -1052,9 +1213,18 @@ async function runApp(
       // baked-in pinging, making this env var ineffective. Expo handles its
       // own LAN discovery natively.
       ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
+      ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
       ...caEnv,
     },
     onCleanup: () => {
+      try {
+        unregisterTailscale({
+          tailscaleHttpsPort,
+          tailscaleFunnel: wantsFunnel || undefined,
+        });
+      } catch {
+        // Best-effort cleanup; non-fatal
+      }
       try {
         store.removeRoute(hostname);
       } catch {
@@ -1107,6 +1277,19 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+function applyTailscaleFlag(flag: string): boolean {
+  if (flag === "--tailscale") {
+    process.env.PORTLESS_TAILSCALE = "1";
+    return true;
+  }
+  if (flag === "--funnel") {
+    process.env.PORTLESS_FUNNEL = "1";
+    process.env.PORTLESS_TAILSCALE = "1";
+    return true;
+  }
+  return false;
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -1129,7 +1312,10 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
 ${colors.bold("portless run")} - Infer project name and run through the proxy.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless run [options] <command...>")}
+  ${colors.cyan("portless run [options] [command...]")}
+
+  When no command is given, runs the configured script (default: "dev")
+  from package.json.
 
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
@@ -1138,15 +1324,17 @@ ${colors.bold("Options:")}
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
-  1. package.json "name" field (walks up directories)
-  2. Git repo root directory name
-  3. Current directory basename
+  1. portless.json "name" field
+  2. package.json "name" field (walks up directories)
+  3. Git repo root directory name
+  4. Current directory basename
 
   Use --name to override the inferred name while keeping worktree prefixes.
   In git worktrees, the branch name is prepended as a subdomain prefix
   (e.g. feature-auth.myapp.localhost).
 
 ${colors.bold("Examples:")}
+  portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
   portless run vite dev               # -> https://<project>.localhost
@@ -1166,9 +1354,13 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (applyTailscaleFlag(args[i])) {
+      // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --name, --force, --app-port, --help"));
+      console.error(
+        colors.blue("Known flags: --name, --force, --app-port, --tailscale, --funnel, --help")
+      );
       process.exit(1);
     }
     i++;
@@ -1201,9 +1393,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleFlag(args[i])) {
+      // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port"));
+      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
       process.exit(1);
     }
     i++;
@@ -1223,9 +1417,11 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleFlag(args[i])) {
+      // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port"));
+      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
       process.exit(1);
     }
     i++;
@@ -1252,39 +1448,53 @@ ${colors.bold("Install:")}
   ${colors.cyan("npm install -D portless")}          Project dev dependency
 
 ${colors.bold("Usage:")}
+  ${colors.cyan("portless")}                         Run dev script through proxy
+  ${colors.cyan("portless")}                         From monorepo root: run all workspace packages
+  ${colors.cyan("portless run")}                     Same as above
+  ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
+  ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
-  ${colors.cyan("portless proxy start --no-tls")}    Start without HTTPS (port 80)
-  ${colors.cyan("portless proxy start --lan")}       Start in LAN mode (mDNS for real device testing)
-  ${colors.cyan("portless proxy start -p 1355")}     Start on a custom port (no sudo)
   ${colors.cyan("portless proxy stop")}              Stop the proxy
-  ${colors.cyan("portless <name> <cmd>")}            Run your app through the proxy
-  ${colors.cyan("portless run <cmd>")}               Infer name from project, run through proxy
+  ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
   ${colors.cyan("portless list")}                    Show active routes
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
+  ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
   ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Examples:")}
-  portless proxy start                # Start HTTPS proxy on port 443
-  portless proxy start --no-tls       # Start HTTP proxy on port 80
+  portless                            # Run dev script through proxy
+  portless                            # From monorepo root: start all apps
+  portless --script start             # Run "start" script instead of "dev"
   portless myapp next dev             # -> https://myapp.localhost
-  portless myapp vite dev             # -> https://myapp.localhost
-  portless api.myapp pnpm start       # -> https://api.myapp.localhost
   portless run next dev               # -> https://<project>.localhost
   portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
-  portless get backend                 # -> https://backend.localhost (for cross-service refs)
-  # Wildcard subdomains: tenant.myapp.localhost also routes to myapp
+  portless service install            # Start HTTPS proxy on OS startup
+  portless get backend                # -> https://backend.localhost
+  portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
+  portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
+
+${colors.bold("Configuration (portless.json):")}
+  Optional. Portless works out of the box by running the "dev" script
+  from package.json. Use portless.json to override defaults.
+
+  Override name:   { "name": "myapp" }
+  Override script: { "name": "myapp", "script": "start" }
+  Monorepo:        { "apps": { "apps/web": { "name": "myapp" } } }
 
 ${colors.bold("In package.json:")}
   {
     "scripts": {
-      "dev": "portless run next dev"
+      "dev": "next dev"
     }
   }
+  Then run: portless
+  Or:       portless run
+  Or:       portless run next dev
 
 ${colors.bold("How it works:")}
   1. Start the proxy once (HTTPS on port 443 by default, auto-elevates with sudo)
@@ -1317,9 +1527,21 @@ ${colors.bold("LAN mode:")}
   ${colors.cyan("portless proxy start --lan --https")}
   ${colors.cyan("portless proxy start --lan --ip 192.168.1.42")}
 
+${colors.bold("Tailscale sharing:")}
+  Use --tailscale to share your dev server with teammates on your tailnet.
+  Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
+  8444, etc.) so no basePath configuration is needed.
+  Use --funnel to expose your dev server to the public internet via
+  Tailscale Funnel. Requires Tailscale CLI to be installed and connected,
+  with Tailscale HTTPS certificates enabled. Funnel must also be enabled
+  on your tailnet.
+  ${colors.cyan("portless myapp --tailscale next dev")}
+  ${colors.cyan("portless myapp --funnel next dev")}
+
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
+  --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo on macOS/Linux
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
@@ -1332,6 +1554,8 @@ ${colors.bold("Options:")}
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
+  --tailscale                   Share the app on your Tailscale network (tailnet)
+  --funnel                      Share the app publicly via Tailscale Funnel
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -1344,6 +1568,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
+  PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
+  PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
@@ -1352,6 +1578,7 @@ ${colors.bold("Child process environment:")}
   HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
   PORTLESS_URL                  Public URL of the app (e.g. https://myapp.localhost)
   PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
+  PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
 
 ${colors.bold("Safari / DNS:")}
@@ -1367,8 +1594,8 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, trust, clean, proxy are subcommands and cannot
-  be used as app names directly. Use "portless run" to infer the name,
+  run, get, alias, hosts, list, trust, clean, prune, proxy, service are subcommands and
+  cannot be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
   process.exit(0);
@@ -1429,10 +1656,11 @@ async function handleClean(args: string[]): Promise<void> {
     console.log(`
 ${colors.bold("portless clean")} - Remove portless artifacts from this machine.
 
-Stops the proxy if it is running, removes the local CA from the OS trust store
-when it was installed by portless, deletes known files under state directories
-(~/.portless, the system state directory, and PORTLESS_STATE_DIR when set),
-and removes the portless block from ${HOSTS_DISPLAY}.
+Stops the proxy if it is running, uninstalls the startup service if installed,
+removes the local CA from the OS trust store when it was installed by portless,
+deletes known files under state directories (~/.portless, the system state
+directory, and PORTLESS_STATE_DIR when set), and removes the portless block
+from ${HOSTS_DISPLAY}.
 
 Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed.
@@ -1455,12 +1683,45 @@ ${colors.bold("Options:")}
     process.exit(1);
   }
 
+  const serviceResult = tryUninstallService(getEntryScript());
+  if (serviceResult.removed) {
+    console.log(colors.green("Removed startup service."));
+  } else if (serviceResult.needsElevation && !isWindows && (process.getuid?.() ?? -1) !== 0) {
+    if (
+      !runServiceUninstallWithSudo("Removing the startup service requires elevated privileges.")
+    ) {
+      console.error(colors.red("Failed to remove startup service with sudo."));
+      process.exit(1);
+    }
+  } else if (serviceResult.error) {
+    const adminHint = isWindows ? " Run as Administrator and try again." : "";
+    const message = `Could not remove startup service: ${serviceResult.error}${adminHint}`;
+    if (serviceResult.installed) {
+      console.error(colors.red(message));
+      process.exit(1);
+    }
+    console.warn(colors.yellow(message));
+  }
+
   console.log(colors.cyan("Stopping proxy if it is running..."));
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
   await stopProxy(store, port, tls);
+
+  // Clean up any tailscale serve/funnel registrations tied to stale routes
+  const routesForClean = store.loadRoutesRaw();
+  for (const route of routesForClean) {
+    if (route.tailscaleHttpsPort) {
+      try {
+        unregisterTailscale(route);
+        console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
+      } catch {
+        // Tailscale may not be installed; non-fatal
+      }
+    }
+  }
 
   const stateDirs = collectStateDirsForCleanup();
   for (const stateDir of stateDirs) {
@@ -1489,18 +1750,7 @@ ${colors.bold("Options:")}
   if (cleanHostsFile()) {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
   } else if (!isWindows && process.getuid?.() !== 0) {
-    console.log(
-      colors.yellow(`Updating ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
-    );
-    const result = spawnSync(
-      "sudo",
-      ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "clean"],
-      {
-        stdio: "inherit",
-        timeout: SUDO_SPAWN_TIMEOUT_MS,
-      }
-    );
-    if (result.status !== 0) {
+    if (!runCleanWithSudo(`Updating ${HOSTS_DISPLAY} requires elevated privileges.`)) {
       console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
       process.exit(1);
     }
@@ -1513,6 +1763,81 @@ ${colors.bold("Options:")}
   }
 
   console.log(colors.green("Clean finished."));
+}
+
+async function handlePrune(args: string[]): Promise<void> {
+  if (args[1] === "--help" || args[1] === "-h") {
+    console.log(`
+${colors.bold("portless prune")} - Kill orphaned dev servers left behind by crashed portless sessions.
+
+When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
+may survive and continue holding their ports. This command finds those orphans
+by checking routes whose owning CLI process is dead but whose port is still in
+use, then terminates them and cleans up the stale route entries.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless prune")}
+  ${colors.cyan("portless prune --force")}     Send SIGKILL instead of SIGTERM
+
+${colors.bold("Options:")}
+  --force                Send SIGKILL instead of SIGTERM
+  --help, -h             Show this help
+`);
+    process.exit(0);
+  }
+
+  const forceKill = args.includes("--force");
+
+  const { dir } = await discoverState();
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(colors.yellow(msg)),
+  });
+
+  const stale = store.pruneStaleRoutes();
+  if (stale.length === 0) {
+    console.log("No orphaned routes found.");
+    return;
+  }
+
+  for (const route of stale) {
+    if (route.tailscaleHttpsPort) {
+      try {
+        unregisterTailscale(route);
+        console.log(
+          `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
+        );
+      } catch {
+        // Tailscale CLI may not be installed; non-fatal during prune
+      }
+    }
+  }
+
+  let killed = 0;
+  for (const route of stale) {
+    const pids = findPidsOnPort(route.port);
+    if (pids.length === 0) {
+      console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
+      continue;
+    }
+    const signal = forceKill ? "SIGKILL" : "SIGTERM";
+    for (const pid of pids) {
+      try {
+        process.kill(pid, signal);
+        killed++;
+        console.log(`  ${route.hostname} :${route.port} - killed PID ${pid} (${signal})`);
+      } catch {
+        console.log(`  ${route.hostname} :${route.port} - PID ${pid} already exited`);
+      }
+    }
+  }
+
+  const routeWord = stale.length === 1 ? "route" : "routes";
+  const procWord = killed === 1 ? "process" : "processes";
+  console.log(
+    colors.green(
+      `\nPruned ${stale.length} stale ${routeWord}, killed ${killed} orphaned ${procWord}.`
+    )
+  );
 }
 
 async function handleList(): Promise<void> {
@@ -2273,8 +2598,666 @@ ${colors.bold("LAN mode (--lan):")}
   }
 }
 
-async function handleRunMode(args: string[]): Promise<void> {
+/**
+ * Load the effective AppConfig for the current directory from portless.json.
+ * Handles both single-app (top-level fields) and monorepo (apps map) configs.
+ */
+function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
+  try {
+    const loaded = loadConfig(cwd);
+    if (!loaded) return null;
+    return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      console.error(colors.red(`Error: ${err.message}`));
+      process.exit(1);
+    }
+    throw err;
+  }
+}
+
+/**
+ * Zero-arg dispatch: `portless` with no arguments.
+ * Returns true if handled, false to fall through to help text.
+ *
+ * Activates when:
+ * - At a workspace root (pnpm, npm, yarn, or bun) -> multi-app mode
+ * - In any directory with a package.json that has the target script -> single-app mode
+ * Config (portless.json / package.json "portless" key) is loaded for overrides
+ * but is not required.
+ */
+async function handleDefaultMode(
+  globalScript?: string,
+  extraArgs: string[] = []
+): Promise<boolean> {
+  const cwd = process.cwd();
+
+  // Workspace root: multi-app mode, but only when at least one package
+  // has the target script. Otherwise fall through to single-app mode so
+  // a workspace root with its own dev script still works.
+  const wsRoot = findWorkspaceRoot(cwd);
+  if (wsRoot === cwd) {
+    const packages = discoverWorkspacePackages(cwd);
+    let wsScriptName: string;
+    try {
+      wsScriptName = globalScript ?? loadConfig(cwd)?.config.script ?? "dev";
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        console.error(colors.red(`Error: ${err.message}`));
+        process.exit(1);
+      }
+      throw err;
+    }
+    const hasMatchingPackages = packages.some((p) => p.scripts[wsScriptName]);
+    if (hasMatchingPackages) {
+      await handleDefaultMulti(cwd, globalScript, extraArgs);
+      return true;
+    }
+  }
+
+  const appConfig = loadAppConfig(cwd);
+  const scriptName = globalScript ?? appConfig?.script ?? "dev";
+  if (hasScript(scriptName, cwd)) {
+    await handleDefaultSingle(cwd, scriptName, appConfig);
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Single-app mode: run one package through the proxy.
+ */
+async function handleDefaultSingle(
+  cwd: string,
+  scriptName: string,
+  appConfig: AppConfig | null
+): Promise<void> {
+  const resolved = resolveScriptCommand(scriptName, cwd);
+  if (!resolved) {
+    console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
+    process.exit(1);
+  }
+
+  let baseName: string;
+  let nameSource: string;
+
+  if (appConfig?.name) {
+    baseName = appConfig.name
+      .split(".")
+      .map((label) => truncateLabel(label))
+      .join(".");
+    nameSource = "portless.json";
+  } else {
+    const inferred = inferProjectName(cwd);
+    baseName = inferred.name;
+    nameSource = inferred.source;
+  }
+
+  const worktree = detectWorktreePrefix(cwd);
+  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+
+  const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(colors.yellow(msg)),
+  });
+  await runApp(
+    store,
+    port,
+    dir,
+    effectiveName,
+    resolved,
+    tls,
+    tld,
+    false,
+    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    appConfig?.appPort,
+    lanMode,
+    lanIp
+  );
+}
+
+/**
+ * Multi-app mode: discover workspace packages and run all that have
+ * the target script through the proxy concurrently.
+ */
+interface MultiAppEntry {
+  pkg: WorkspacePackage;
+  /** Portless hostname (e.g. "web.json-render") */
+  name: string;
+  /** Human-readable package label for display (e.g. "web") */
+  label: string;
+  commandArgs: string[];
+  appPort?: number;
+  proxied: boolean;
+}
+
+function spawnChildProcess(
+  commandArgs: string[],
+  env: Record<string, string | undefined>,
+  cwd: string
+): ReturnType<typeof spawn> {
+  return spawn(commandArgs[0], commandArgs.slice(1), {
+    stdio: ["ignore", "pipe", "pipe"],
+    env,
+    cwd,
+    ...(isWindows ? {} : { detached: true }),
+  });
+}
+
+function prefixStream(
+  stream: NodeJS.ReadableStream | null,
+  output: NodeJS.WritableStream,
+  prefix: string
+): void {
+  if (!stream) return;
+  const decoder = new StringDecoder("utf8");
+  let buffer = "";
+  stream.on("data", (data: Buffer) => {
+    buffer += decoder.write(data);
+    let idx: number;
+    while ((idx = buffer.indexOf("\n")) !== -1) {
+      const line = buffer.slice(0, idx).replace(/\r$/, "");
+      buffer = buffer.slice(idx + 1);
+      output.write(`${prefix} ${line}\n`);
+    }
+  });
+  stream.on("end", () => {
+    buffer += decoder.end();
+    if (buffer) output.write(`${prefix} ${buffer}\n`);
+  });
+}
+
+function pipeOutput(child: ReturnType<typeof spawn>, prefix: string): void {
+  prefixStream(child.stdout, process.stdout, prefix);
+  prefixStream(child.stderr, process.stderr, prefix);
+}
+
+async function spawnProxiedApp(
+  app: MultiAppEntry,
+  stateDir: string,
+  proxyPort: number,
+  tls: boolean,
+  tld: string,
+  exitCodes: Map<string, number | null>
+): Promise<{
+  child: ReturnType<typeof spawn>;
+  displayUrl: string;
+  route: { store: RouteStore; hostname: string } | null;
+}> {
+  const usesPortless = app.commandArgs[0] === "portless";
+
+  const pkgEnv: Record<string, string | undefined> = { ...process.env };
+  pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
+
+  let env: Record<string, string | undefined>;
+  let store: RouteStore | null = null;
+  let hostname: string | null = null;
+  let displayUrl: string;
+
+  if (usesPortless) {
+    env = pkgEnv;
+    displayUrl = "(managed by portless)";
+  } else {
+    store = new RouteStore(stateDir, {
+      onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
+    });
+
+    const appPort = app.appPort ?? (await findFreePort());
+    const protocol = tls ? "https" : "http";
+    const portSuffix =
+      (tls && proxyPort === 443) || (!tls && proxyPort === 80) ? "" : `:${proxyPort}`;
+    const url = `${protocol}://${app.name}.${tld}${portSuffix}`;
+    displayUrl = url;
+
+    hostname = parseHostname(app.name, tld);
+    store.addRoute(hostname, appPort, process.pid);
+
+    env = {
+      ...pkgEnv,
+      PORT: String(appPort),
+      HOST: "127.0.0.1",
+      PORTLESS_URL: url,
+    };
+
+    if (tls) {
+      const caPath = path.join(stateDir, "ca.pem");
+      if (fs.existsSync(caPath)) {
+        env.NODE_EXTRA_CA_CERTS = caPath;
+      }
+    }
+  }
+
+  const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
+  pipeOutput(child, chalk.cyan(`[${app.name}]`));
+
+  const capturedStore = store;
+  const capturedHostname = hostname;
+  child.on("exit", (code, signal) => {
+    exitCodes.set(app.name, code);
+    if (code !== 0 && code !== null) {
+      console.error(colors.red(`[${app.name}] exited with code ${code}`));
+    } else if (signal) {
+      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+    }
+    if (capturedStore && capturedHostname) {
+      try {
+        capturedStore.removeRoute(capturedHostname);
+      } catch {
+        // non-fatal
+      }
+    }
+  });
+
+  const route = store && hostname ? { store, hostname } : null;
+  return { child, displayUrl, route };
+}
+
+function spawnTaskApp(
+  app: MultiAppEntry,
+  exitCodes: Map<string, number | null>
+): ReturnType<typeof spawn> {
+  const pkgEnv: Record<string, string | undefined> = { ...process.env };
+  pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
+
+  const child = spawnChildProcess(app.commandArgs, pkgEnv, app.pkg.dir);
+  pipeOutput(child, chalk.gray(`[${app.name}]`));
+
+  child.on("exit", (code, signal) => {
+    exitCodes.set(app.name, code);
+    if (code !== 0 && code !== null) {
+      console.error(colors.red(`[${app.name}] exited with code ${code}`));
+    } else if (signal) {
+      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+    }
+  });
+
+  return child;
+}
+
+async function handleDefaultMulti(
+  wsRoot: string,
+  globalScript?: string,
+  extraArgs: string[] = []
+): Promise<void> {
+  let loaded: ReturnType<typeof loadConfig>;
+  try {
+    loaded = loadConfig(wsRoot);
+  } catch (err) {
+    if (err instanceof ConfigValidationError) {
+      console.error(colors.red(`Error: ${err.message}`));
+      process.exit(1);
+    }
+    throw err;
+  }
+  const packages = discoverWorkspacePackages(wsRoot);
+
+  if (packages.length === 0) {
+    console.error(colors.red("Error: No workspace packages found."));
+    process.exit(1);
+  }
+
+  const scriptName = globalScript ?? loaded?.config.script ?? "dev";
+
+  // Infer the monorepo project name for use as the base domain.
+  // Config name > common npm scope > workspace root inference.
+  let projectName: string;
+  if (loaded?.config.name) {
+    projectName = loaded.config.name
+      .split(".")
+      .map((label) => truncateLabel(label))
+      .join(".");
+  } else {
+    const scopeCounts = new Map<string, number>();
+    for (const p of packages) {
+      if (p.scope) scopeCounts.set(p.scope, (scopeCounts.get(p.scope) ?? 0) + 1);
+    }
+    let commonScope: string | undefined;
+    let maxCount = 0;
+    for (const [scope, count] of scopeCounts) {
+      if (count > maxCount) {
+        commonScope = scope;
+        maxCount = count;
+      }
+    }
+    if (commonScope) {
+      projectName = sanitizeForHostname(commonScope) || inferProjectName(wsRoot).name;
+    } else {
+      projectName = inferProjectName(wsRoot).name;
+    }
+  }
+
+  const apps: MultiAppEntry[] = [];
+
+  for (const pkg of packages) {
+    const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
+    const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
+    let pkgConfig: AppConfig | null;
+    try {
+      pkgConfig = loadPackagePortlessConfig(pkg.dir);
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        console.error(colors.red(`Error: ${err.message}`));
+        process.exit(1);
+      }
+      throw err;
+    }
+
+    // Merge (closest wins): package.json "portless" > portless.json app entry > defaults
+    const appOverride: AppConfig = {
+      ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
+      ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
+    };
+
+    const effectiveScript = appOverride.script ?? scriptName;
+    const scriptValue = pkg.scripts[effectiveScript];
+    if (!scriptValue) continue;
+
+    const rawScript = splitCommand(scriptValue);
+    if (rawScript.length === 0) continue;
+
+    const pm = detectPackageManager(pkg.dir);
+    const commandArgs = [pm, "run", effectiveScript];
+
+    const proxied = appOverride.proxy ?? isServerCommand(rawScript);
+
+    let name: string;
+    let label: string;
+    if (appOverride.name) {
+      name = appOverride.name
+        .split(".")
+        .map((l) => truncateLabel(l))
+        .join(".");
+      label = appOverride.name;
+    } else {
+      let pkgLabel: string;
+      if (pkg.name) {
+        const sanitized = sanitizeForHostname(pkg.name);
+        pkgLabel = sanitized || rel.replace(/\//g, "-");
+      } else {
+        pkgLabel = rel.replace(/\//g, "-");
+      }
+      name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
+      label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
+    }
+
+    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+  }
+
+  if (apps.length === 0) {
+    console.error(colors.yellow(`No workspace packages have a "${scriptName}" script.`));
+    process.exit(1);
+  }
+
+  apps.sort((a, b) => a.label.localeCompare(b.label));
+  const proxiedApps = apps.filter((a) => a.proxied);
+  const taskApps = apps.filter((a) => !a.proxied);
+
+  console.log(chalk.blue.bold(`\nportless\n`));
+
+  let { dir, port, tls, tld } = await discoverState();
+
+  if (proxiedApps.length > 0) {
+    let multiDesired: ProxyDesiredState;
+    try {
+      multiDesired = resolveProxyDesiredState(false);
+    } catch (err) {
+      console.error(colors.red(`Error: ${(err as Error).message}`));
+      process.exit(1);
+    }
+    const ensureResult = await ensureProxyRunning(port, tls, multiDesired);
+    if (ensureResult.started) {
+      dir = ensureResult.state.dir;
+      port = ensureResult.state.port;
+      tls = ensureResult.state.tls;
+      tld = ensureResult.state.tld;
+    } else {
+      // Proxy was already running; re-discover to pick up current state.
+      ({ dir, port, tls, tld } = await discoverState());
+    }
+
+    if (tls && !isCATrusted(dir)) {
+      await handleTrust();
+    }
+  }
+
+  const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
+
+  if (useTurbo) {
+    await runWithTurbo(wsRoot, dir, port, tls, tld, scriptName, proxiedApps, taskApps, extraArgs);
+  } else {
+    await runWithDirectSpawn(dir, port, tls, tld, proxiedApps, taskApps);
+  }
+}
+
+async function runWithTurbo(
+  wsRoot: string,
+  stateDir: string,
+  proxyPort: number,
+  tls: boolean,
+  tld: string,
+  scriptName: string,
+  proxiedApps: MultiAppEntry[],
+  taskApps: MultiAppEntry[],
+  extraArgs: string[] = []
+): Promise<void> {
+  const store = new RouteStore(stateDir, {
+    onWarning: (msg: string) => console.warn(colors.yellow(msg)),
+  });
+
+  const manifest: Record<string, ManifestEntry> = {};
+  const routes: { hostname: string }[] = [];
+  const appUrls: { label: string; url: string }[] = [];
+
+  for (const app of proxiedApps) {
+    const usesPortless = app.commandArgs[0] === "portless";
+    if (usesPortless) {
+      appUrls.push({ label: app.label, url: "(managed by portless)" });
+      continue;
+    }
+
+    const appPort = app.appPort ?? (await findFreePort());
+    const protocol = tls ? "https" : "http";
+    const portSuffix =
+      (tls && proxyPort === 443) || (!tls && proxyPort === 80) ? "" : `:${proxyPort}`;
+    const url = `${protocol}://${app.name}.${tld}${portSuffix}`;
+    appUrls.push({ label: app.label, url });
+
+    const hostname = parseHostname(app.name, tld);
+    store.addRoute(hostname, appPort, process.pid);
+    routes.push({ hostname });
+
+    const entry: ManifestEntry = {
+      PORT: String(appPort),
+      HOST: "127.0.0.1",
+      PORTLESS_URL: url,
+    };
+    if (tls) {
+      const caPath = path.join(stateDir, "ca.pem");
+      if (fs.existsSync(caPath)) {
+        entry.NODE_EXTRA_CA_CERTS = caPath;
+      }
+    }
+    manifest[app.pkg.dir] = entry;
+  }
+
+  ensureEnvLoader();
+  writeManifest(manifest);
+
+  if (appUrls.length > 0) {
+    const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
+    for (const { label, url } of appUrls) {
+      const pad = " ".repeat(maxLabel - label.length);
+      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+    }
+  }
+  console.log("");
+
+  const pm = detectPackageManager(wsRoot);
+  const useRootScript = hasScript(scriptName, wsRoot);
+  const turboArgs = useRootScript
+    ? [pm, "run", scriptName, ...extraArgs]
+    : pm === "npm"
+      ? ["npx", "turbo", "run", scriptName, ...extraArgs]
+      : pm === "bun"
+        ? ["bunx", "turbo", "run", scriptName, ...extraArgs]
+        : [pm, "exec", "turbo", "run", scriptName, ...extraArgs];
+
+  const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
+    stdio: "inherit",
+    cwd: wsRoot,
+    env: {
+      ...process.env,
+      NODE_OPTIONS: buildNodeOptions(),
+    },
+    ...(isWindows ? {} : { detached: true }),
+  });
+
+  const SIGKILL_TIMEOUT_MS = 5_000;
+
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+
+    killTree(turboChild, "SIGTERM");
+    setTimeout(() => {
+      if (turboChild.exitCode === null && !turboChild.killed) {
+        killTree(turboChild, "SIGKILL");
+      }
+    }, SIGKILL_TIMEOUT_MS).unref();
+
+    for (const { hostname } of routes) {
+      try {
+        store.removeRoute(hostname);
+      } catch {
+        // non-fatal
+      }
+    }
+    removeManifest();
+  };
+
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  const exitCode = await new Promise<number | null>((resolve) => {
+    turboChild.on("exit", (code) => resolve(code));
+  });
+
+  cleanup();
+
+  if (exitCode !== 0 && exitCode !== null) {
+    process.exit(exitCode);
+  }
+}
+
+async function runWithDirectSpawn(
+  stateDir: string,
+  proxyPort: number,
+  tls: boolean,
+  tld: string,
+  proxiedApps: MultiAppEntry[],
+  taskApps: MultiAppEntry[]
+): Promise<void> {
+  const children: ReturnType<typeof spawn>[] = [];
+  const exitCodes = new Map<string, number | null>();
+  const appUrls: { label: string; url: string }[] = [];
+  const routeEntries: { store: RouteStore; hostname: string }[] = [];
+
+  // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
+  // a port, so parallel spawning could cause port collisions.
+  for (const app of proxiedApps) {
+    const { child, displayUrl, route } = await spawnProxiedApp(
+      app,
+      stateDir,
+      proxyPort,
+      tls,
+      tld,
+      exitCodes
+    );
+    children.push(child);
+    if (route) routeEntries.push(route);
+    appUrls.push({ label: app.label, url: displayUrl });
+  }
+
+  const taskLabels: string[] = [];
+  for (const app of taskApps) {
+    children.push(spawnTaskApp(app, exitCodes));
+    taskLabels.push(app.label);
+  }
+
+  // Print a clean summary after all processes are spawned.
+  if (appUrls.length > 0) {
+    const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
+    for (const { label, url } of appUrls) {
+      const pad = " ".repeat(maxLabel - label.length);
+      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+    }
+  }
+  console.log("");
+
+  const SIGKILL_TIMEOUT_MS = 5_000;
+
+  let cleanedUp = false;
+  const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+
+    for (const child of children) {
+      killTree(child, "SIGTERM");
+    }
+    setTimeout(() => {
+      for (const child of children) {
+        if (child.exitCode === null && !child.killed) {
+          killTree(child, "SIGKILL");
+        }
+      }
+    }, SIGKILL_TIMEOUT_MS).unref();
+
+    for (const { store, hostname } of routeEntries) {
+      try {
+        store.removeRoute(hostname);
+      } catch {
+        // non-fatal
+      }
+    }
+  };
+
+  process.on("SIGINT", cleanup);
+  process.on("SIGTERM", cleanup);
+
+  await Promise.all(
+    children.map(
+      (child) =>
+        new Promise<void>((resolve) => {
+          child.on("exit", () => resolve());
+        })
+    )
+  );
+
+  const failed = [...exitCodes.entries()].filter(([, code]) => code !== 0 && code !== null);
+  if (failed.length > 0) {
+    console.error(
+      colors.red(
+        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([name, code]) => `${name} (${code})`).join(", ")}`
+      )
+    );
+    process.exit(1);
+  }
+}
+
+async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
   const parsed = parseRunArgs(args);
+
+  const appConfig = loadAppConfig();
+
+  if (parsed.commandArgs.length === 0) {
+    const scriptName = globalScript ?? appConfig?.script ?? "dev";
+    const resolved = resolveScriptCommand(scriptName, process.cwd());
+    if (resolved) {
+      parsed.commandArgs = resolved;
+    }
+  }
 
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
@@ -2296,10 +3279,20 @@ async function handleRunMode(args: string[]): Promise<void> {
       .map((label) => truncateLabel(label))
       .join(".");
     nameSource = "--name flag";
+  } else if (appConfig?.name) {
+    baseName = appConfig.name
+      .split(".")
+      .map((label) => truncateLabel(label))
+      .join(".");
+    nameSource = "portless.json";
   } else {
     const inferred = inferProjectName();
     baseName = inferred.name;
     nameSource = inferred.source;
+  }
+
+  if (!parsed.appPort && appConfig?.appPort) {
+    parsed.appPort = appConfig.appPort;
   }
 
   const worktree = detectWorktreePrefix();
@@ -2335,6 +3328,13 @@ async function handleNamedMode(args: string[]): Promise<void> {
     console.error(colors.blue("Example:"));
     console.error(colors.cyan("  portless myapp next dev"));
     process.exit(1);
+  }
+
+  if (!parsed.appPort) {
+    const appConfig = loadAppConfig();
+    if (appConfig?.appPort) {
+      parsed.appPort = appConfig.appPort;
+    }
   }
 
   // Truncate individual labels that exceed the DNS limit, same as handleRunMode.
@@ -2441,9 +3441,26 @@ async function main() {
     process.env.PORTLESS_LAN = "1";
   }
 
+  if (stripGlobalFlag("--tailscale", false)) {
+    process.env.PORTLESS_TAILSCALE = "1";
+  }
+  if (stripGlobalFlag("--funnel", false)) {
+    process.env.PORTLESS_FUNNEL = "1";
+    process.env.PORTLESS_TAILSCALE = "1";
+  }
+
+  // --script flag: override the default "dev" script for zero-arg mode.
+  const scriptResult = stripGlobalFlag("--script", true);
+  if (scriptResult === false) {
+    console.error(colors.red("Error: --script requires a script name."));
+    console.error(colors.cyan("  portless --script start"));
+    process.exit(1);
+  }
+  const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
+
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, clean, proxy).
+  // subcommand (run, alias, hosts, list, trust, clean, prune, proxy, service).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
@@ -2480,9 +3497,18 @@ async function main() {
     process.env.PORTLESS === "skip";
   if (
     skipPortless &&
-    (isRunCommand || (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean"))
+    (isRunCommand ||
+      args.length === 0 ||
+      (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean" && args[0] !== "service"))
   ) {
-    const { commandArgs } = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    const parsed = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    let commandArgs = parsed.commandArgs;
+    if (commandArgs.length === 0 && (isRunCommand || args.length === 0)) {
+      const appConfig = loadAppConfig();
+      const scriptName = globalScript ?? appConfig?.script ?? "dev";
+      const resolved = resolveScriptCommand(scriptName, process.cwd());
+      if (resolved) commandArgs = resolved;
+    }
     if (commandArgs.length === 0) {
       console.error(colors.red("Error: No command provided."));
       process.exit(1);
@@ -2491,11 +3517,18 @@ async function main() {
     return;
   }
 
-  // Global dispatch: help, version, trust, clean, list, alias, hosts, proxy
+  // Global dispatch: help, version, trust, clean, prune, list, alias, hosts, proxy, service
   // When `run` is used, skip these so args like "list" or "--help" are treated
   // as child-command tokens, not portless subcommands.
   if (!isRunCommand) {
-    if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
+    if (args[0] === "--help" || args[0] === "-h") {
+      printHelp();
+      return;
+    }
+    if (args.length === 0 || args[0] === "--") {
+      const extraArgs = args[0] === "--" ? args.slice(1) : [];
+      const handled = await handleDefaultMode(globalScript, extraArgs);
+      if (handled) return;
       printHelp();
       return;
     }
@@ -2509,6 +3542,10 @@ async function main() {
     }
     if (args[0] === "clean") {
       await handleClean(args);
+      return;
+    }
+    if (args[0] === "prune") {
+      await handlePrune(args);
       return;
     }
     if (args[0] === "list") {
@@ -2531,11 +3568,15 @@ async function main() {
       await handleProxy(args);
       return;
     }
+    if (args[0] === "service") {
+      await handleService(args, { entryScript: getEntryScript() });
+      return;
+    }
   }
 
   // Run app (either `portless run <cmd>` or `portless <name> <cmd>`)
   if (isRunCommand) {
-    await handleRunMode(args);
+    await handleRunMode(args, globalScript);
   } else {
     await handleNamedMode(args);
   }

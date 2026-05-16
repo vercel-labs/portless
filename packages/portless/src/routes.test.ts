@@ -399,4 +399,49 @@ describe("RouteStore", () => {
       expect(routes[0].hostname).toBe("contended.localhost");
     }, 10_000);
   });
+
+  describe("tailscale metadata", () => {
+    it("persists and loads tailscale fields via updateRoute", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      store.updateRoute("myapp.localhost", {
+        tailscaleUrl: "https://devbox.example.ts.net",
+        tailscaleHttpsPort: 443,
+      });
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].tailscaleUrl).toBe("https://devbox.example.ts.net");
+      expect(routes[0].tailscaleHttpsPort).toBe(443);
+      expect(routes[0].tailscaleFunnel).toBeUndefined();
+    });
+
+    it("persists funnel flag via updateRoute", () => {
+      store.addRoute("api.localhost", 4456, process.pid);
+      store.updateRoute("api.localhost", {
+        tailscaleUrl: "https://devbox.example.ts.net:8443",
+        tailscaleHttpsPort: 8443,
+        tailscaleFunnel: true,
+      });
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].tailscaleFunnel).toBe(true);
+    });
+
+    it("loads routes without tailscale fields (backward compat)", () => {
+      store.addRoute("legacy.localhost", 4000, process.pid);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].tailscaleUrl).toBeUndefined();
+      expect(routes[0].tailscaleHttpsPort).toBeUndefined();
+    });
+
+    it("updateRoute is a no-op for nonexistent hostname", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      store.updateRoute("noexist.localhost", {
+        tailscaleUrl: "https://devbox.example.ts.net",
+      });
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].tailscaleUrl).toBeUndefined();
+    });
+  });
 });

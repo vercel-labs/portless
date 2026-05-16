@@ -10,9 +10,9 @@ import {
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
+  LEGACY_SYSTEM_STATE_DIR,
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
-  SYSTEM_STATE_DIR,
   USER_STATE_DIR,
   discoverState,
   findFreePort,
@@ -139,13 +139,10 @@ describe("isProxyRunning", () => {
 });
 
 describe("resolveStateDir", () => {
-  it.skipIf(process.platform === "win32")("returns system dir for privileged ports", () => {
-    expect(resolveStateDir(80)).toBe(SYSTEM_STATE_DIR);
-    expect(resolveStateDir(443)).toBe(SYSTEM_STATE_DIR);
-    expect(resolveStateDir(1023)).toBe(SYSTEM_STATE_DIR);
-  });
-
-  it("returns user dir for non-privileged ports", () => {
+  it("returns user dir for all ports", () => {
+    expect(resolveStateDir(80)).toBe(USER_STATE_DIR);
+    expect(resolveStateDir(443)).toBe(USER_STATE_DIR);
+    expect(resolveStateDir(1023)).toBe(USER_STATE_DIR);
     expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
     expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
     expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
@@ -161,11 +158,11 @@ describe("constants", () => {
     expect(PRIVILEGED_PORT_THRESHOLD).toBe(1024);
   });
 
-  it("SYSTEM_STATE_DIR is /tmp/portless on Unix, os.tmpdir() on Windows", () => {
+  it("LEGACY_SYSTEM_STATE_DIR is /tmp/portless on Unix, os.tmpdir() on Windows", () => {
     if (process.platform === "win32") {
-      expect(SYSTEM_STATE_DIR).toBe(path.join(os.tmpdir(), "portless"));
+      expect(LEGACY_SYSTEM_STATE_DIR).toBe(path.join(os.tmpdir(), "portless"));
     } else {
-      expect(SYSTEM_STATE_DIR).toBe("/tmp/portless");
+      expect(LEGACY_SYSTEM_STATE_DIR).toBe("/tmp/portless");
     }
   });
 
@@ -392,6 +389,12 @@ describe("injectFrameworkFlags", () => {
       "--host",
       "127.0.0.1",
     ]);
+  });
+
+  it("injects for rsbuild without --strictPort", () => {
+    const args = ["rsbuild", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["rsbuild", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
   it("injects for astro without --strictPort", () => {
@@ -680,6 +683,12 @@ describe("injectFrameworkFlags", () => {
     const args = ["pnpm", "exec", "astro", "dev"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects flags for npx rsbuild dev", () => {
+    const args = ["npx", "rsbuild", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["npx", "rsbuild", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
   // Implicit bin (yarn <framework>)

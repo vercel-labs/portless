@@ -1,19 +1,84 @@
 # Changelog
 
-## Unreleased
+## 0.13.0
+
+<!-- release:start -->
+
+### New Features
+
+- **OS startup service**: New `portless service install`, `portless service status`, and `portless service uninstall` commands manage a native startup service for the HTTPS proxy across macOS launchd, Linux systemd, and Windows Task Scheduler. The service starts clean `.localhost` URLs after reboot, and `portless clean` removes it during cleanup. (#289)
 
 ### Bug Fixes
 
-- **Fast refresh broken with `bun --bun`**: Fix Next.js HMR WebSocket not working when running `bun --bun next dev` through portless. Bun's native runtime uses the `HOST` environment variable to configure WebSocket origin validation, causing the proxy's public hostname (e.g. `app.localhost`) to be rejected. Portless now skips injecting `HOST=127.0.0.1` when the `--bun` flag is detected; frameworks that need explicit binding (Vite, Astro, etc.) still receive `--host 127.0.0.1` via flag injection. (#64)
-- **`bun` not recognized as package runner**: `bun <bin>` and `bun run <bin>` are now recognized as package runner patterns, so frameworks like Vite started via `bun vite dev` or `bun --bun vite dev` correctly receive `--port` and `--host` flags. (#64)
+- **Tailscale readiness preflight**: `--tailscale` and `--funnel` now check Tailscale HTTPS and Funnel prerequisites before starting the child process, surfacing actionable errors instead of hanging during registration. (#282)
 
 ### Contributors
 
-- @creativoma
+- @ctate
+- @Anshuman71
+<!-- release:end -->
+
+## 0.12.0
+
+### New Features
+
+- **Tailscale sharing**: New `--tailscale` flag shares any portless app over your Tailscale network with zero framework config. Each app is root-mounted on its own Tailscale HTTPS port (443, 8443, 8444, ...) so no `basePath` configuration is needed. Works as a global flag, per-app flag (`portless myapp --tailscale next dev`), or env var (`PORTLESS_TAILSCALE=1`). (#262)
+- **Tailscale Funnel**: New `--funnel` flag exposes apps to the public internet through Tailscale Funnel. Implies `--tailscale`. Also configurable via `PORTLESS_FUNNEL=1`. (#262)
+- **`PORTLESS_TAILSCALE_URL` env var**: Child processes receive `PORTLESS_TAILSCALE_URL` containing the Tailscale HTTPS URL so apps can reference their public address. (#262)
+- **Tailscale URLs in `portless list`**: The list command now shows tailnet URLs alongside local URLs when Tailscale sharing is active. (#262)
+
+### Improvements
+
+- **`portless prune` cleans stale Tailscale registrations**: Prune now removes orphaned `tailscale serve` entries left behind by dead CLI sessions. (#262)
+- **`portless clean` removes Tailscale serve state**: Clean now tears down any Tailscale serve/funnel registrations alongside the usual CA and hosts file cleanup. (#262)
+
+### Contributors
+
+- @ctate
+
+## 0.11.1
+
+### New Features
+
+- **`portless prune` command**: Safety net to find and kill orphaned dev servers left behind by dead CLI sessions. Reads stale route entries, checks if something is still listening on each port, and terminates the orphan.
+
+### Bug Fixes
+
+- **Zombie process orphaning on CLI crash**: Spawn child processes with `detached:true` on Unix so they get their own process group. Signal handlers now kill the entire group instead of just the immediate child, preventing orphaned dev servers from surviving CLI crashes or `kill -9`.
+
+### Contributors
+
+- @ctate
+
+## 0.11.0
+
+### New Features
+
+- **Zero-arg mode**: Run bare `portless` from any project directory to auto-discover the dev script from `package.json` and start it through the proxy. No arguments, no config required. (#251)
+- **Multi-app orchestration**: In monorepos, bare `portless` auto-discovers workspace packages (pnpm, npm, yarn, bun) and starts all dev scripts concurrently through the proxy. Each package gets a subdomain derived from its npm scope (e.g. `@acme/docs` becomes `docs.acme.localhost`). (#251)
+- **Turborepo integration**: When `turbo.json` is present, portless delegates to `turbo run <script>` instead of spawning each app individually. Per-app `PORT`, `HOST`, and `PORTLESS_URL` are injected via a lightweight `--require` loader so turbo retains dependency ordering and task graph awareness. Set `turbo: false` in config to opt out. (#251)
+- **`portless.json` config file**: Configure app name, script, port, and turbo settings without embedding portless in `package.json` scripts. Also supports a `"portless"` key in `package.json` as an inline alternative. (#251)
+- **`--script` flag**: Override the default `"dev"` script for a single invocation (e.g. `portless --script start`). (#251)
+- **Rsbuild support**: Auto-inject `--port` and `--host` CLI flags for Rsbuild dev server (#250)
+
+### Bug Fixes
+
+- **State directory moved to `~/.portless`**: All proxy state now lives in `~/.portless` instead of `/tmp/portless`, fixing repeated CA trust prompts on macOS (where `/tmp` is periodically cleaned) and a symlink local privilege escalation vulnerability (#251)
+- **Duplicate macOS CA certificates**: Fix `security delete-certificate` failing with "is ambiguous" when multiple portless CA entries had accumulated in the keychain (#251)
+- **CA trust marker caching**: Cache the CA fingerprint after a successful trust so subsequent proxy starts skip the OS security check and avoid re-triggering the macOS authentication dialog (#251)
+
+### Improvements
+
+- **Auto-trust CA on proxy auto-start**: When the proxy is auto-started and the CA is not yet trusted, portless automatically runs trust with proper sudo elevation (#251)
+- **Package manager delegation**: Detects pnpm, yarn, bun, or npm and delegates script execution to the correct package manager (#251)
+- **Non-server script detection**: Build-only tools (tsup, tsc, esbuild, etc.) are auto-detected and run without a proxy route. Use `proxy: false` in config for explicit control. (#251)
+- **Monochrome CLI output**: Bold for headers and errors, dim for warnings and muted text, no color codes (#251)
+
+### Contributors
+
+- @ctate
 
 ## 0.10.3
-
-<!-- release:start -->
 
 ### Bug Fixes
 
@@ -22,7 +87,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.10.2
 

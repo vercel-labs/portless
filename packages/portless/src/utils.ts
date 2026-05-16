@@ -12,6 +12,8 @@ export function fixOwnership(...paths: string[]): void {
   if (!uid || process.getuid?.() !== 0) return;
   for (const p of paths) {
     try {
+      const stat = fs.lstatSync(p);
+      if (stat.isSymbolicLink()) continue;
       fs.chownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
     } catch {
       // Best-effort
