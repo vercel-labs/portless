@@ -227,6 +227,29 @@ export function writeLanMarker(dir: string, ip: string | null): void {
   }
 }
 
+const MULTIPLEX_MARKER_FILE = "proxy.multiplex";
+
+export function readMultiplexMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, MULTIPLEX_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+export function writeMultiplexMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, MULTIPLEX_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
 
@@ -323,6 +346,11 @@ export function isWildcardEnvEnabled(): boolean {
   return val === "1" || val === "true";
 }
 
+export function isMultiplexEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_MULTIPLEX;
+  return val === "1" || val === "true";
+}
+
 /**
  * Return whether LAN mode is requested via the PORTLESS_LAN env var.
  */
@@ -344,6 +372,7 @@ export function readPersistedProxyState(): {
   tls: boolean;
   tld: string;
   lanMode: boolean;
+  multiplex: boolean;
 } | null {
   const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
   const port = readPortFromDir(dir);
@@ -351,7 +380,8 @@ export function readPersistedProxyState(): {
     const tls = readTlsMarker(dir);
     const tld = readTldFromDir(dir);
     const lanIp = readLanMarker(dir);
-    return { port, tls, tld, lanMode: lanIp !== null || tld === "local" };
+    const multiplex = readMultiplexMarker(dir);
+    return { port, tls, tld, lanMode: lanIp !== null || tld === "local", multiplex };
   }
 
   return null;
@@ -366,6 +396,7 @@ export function buildProxyStartConfig(options: {
   lanIpExplicit?: boolean;
   tld: string;
   useWildcard?: boolean;
+  multiplex?: boolean;
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
@@ -409,6 +440,10 @@ export function buildProxyStartConfig(options: {
     args.push("--wildcard");
   }
 
+  if (options.multiplex) {
+    args.push("--multiplex");
+  }
+
   if (options.skipTrust) {
     args.push("--skip-trust");
   }
@@ -429,6 +464,7 @@ export async function discoverState(): Promise<{
   tld: string;
   lanMode: boolean;
   lanIp: string | null;
+  multiplex: boolean;
 }> {
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
@@ -438,7 +474,8 @@ export async function discoverState(): Promise<{
     if ((await isProxyRunning(port)) || (await isPortListening(port))) {
       const tls = readTlsMarker(dir);
       const tld = readTldFromDir(dir);
-      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
+      const multiplex = readMultiplexMarker(dir);
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp, multiplex };
     }
 
     return {
@@ -448,6 +485,7 @@ export async function discoverState(): Promise<{
       tld: readTldFromDir(dir),
       lanMode: lanIp !== null,
       lanIp: null,
+      multiplex: readMultiplexMarker(dir),
     };
   }
 
@@ -461,6 +499,7 @@ export async function discoverState(): Promise<{
       const tls = readTlsMarker(USER_STATE_DIR);
       const tld = readTldFromDir(USER_STATE_DIR);
       const lanIp = readLanMarker(USER_STATE_DIR);
+      const multiplex = readMultiplexMarker(USER_STATE_DIR);
       return {
         dir: USER_STATE_DIR,
         port: userPort,
@@ -468,6 +507,7 @@ export async function discoverState(): Promise<{
         tld,
         lanMode: lanIp !== null || tld === "local",
         lanIp,
+        multiplex,
       };
     }
   }
@@ -487,6 +527,7 @@ export async function discoverState(): Promise<{
         tld,
         lanMode: lanIp !== null || tld === "local",
         lanIp,
+        multiplex: false,
       };
     }
   }
@@ -505,7 +546,8 @@ export async function discoverState(): Promise<{
       const tls = markerTls || port === getProtocolPort(true);
       const tld = readTldFromDir(dir);
       const lanIp = readLanMarker(dir);
-      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
+      const multiplex = readMultiplexMarker(dir);
+      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp, multiplex };
     }
   }
 
@@ -517,6 +559,7 @@ export async function discoverState(): Promise<{
     tld: readTldFromDir(dir),
     lanMode: readLanMarker(dir) !== null,
     lanIp: null,
+    multiplex: readMultiplexMarker(dir),
   };
 }
 

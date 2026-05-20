@@ -1320,6 +1320,23 @@ describe("CLI", () => {
       expect(stdout).toContain("from-start");
     });
 
+    it("--multiplex is accepted as a global flag", () => {
+      const { status, stdout } = run(
+        [
+          "--multiplex",
+          "run",
+          process.execPath,
+          "-e",
+          "console.log(process.env.PORTLESS_MULTIPLEX)",
+        ],
+        {
+          env: { PORTLESS: "0" },
+        }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("1");
+    });
+
     it("--name overrides portless.json name", () => {
       fs.writeFileSync(
         path.join(tmpDir, "package.json"),

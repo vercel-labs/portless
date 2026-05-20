@@ -178,6 +178,18 @@ portless docs.myapp next dev
 
 By default, only explicitly registered subdomains are routed (strict mode). Use `--wildcard` when starting the proxy to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app without extra registration).
 
+## Multiplexed Hostnames
+
+By default, registering the same hostname twice is a conflict. Start the proxy with `--multiplex` to allow multiple apps to share one hostname:
+
+```bash
+portless proxy start --multiplex
+portless myapp next dev
+portless myapp vite dev
+```
+
+If only one `myapp.localhost` app is running, requests go straight to it. If more than one app is running, portless shows a selector page the first time you visit the hostname, including host, port, PID, git branch, folder, and command details for each app. Your choice is stored in a host-scoped cookie so page loads, assets, API requests, and WebSockets keep going to the selected app. HTML responses also get a collapsed portless switcher that follows the system theme. Expand it to change or clear the selected app and inspect the same details.
+
 ## Git Worktrees
 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
@@ -345,6 +357,7 @@ portless proxy start --lan       # Start in LAN mode (mDNS .local for devices)
 portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
+portless proxy start --multiplex # Allow multiple apps to share one hostname
 portless proxy stop              # Stop the proxy
 
 # OS startup service
@@ -366,6 +379,7 @@ portless service uninstall       # Remove the startup service
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--multiplex                      Allow multiple apps to share one hostname
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --tailscale                      Share the app on your Tailscale network (tailnet)
@@ -384,6 +398,7 @@ PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
+PORTLESS_MULTIPLEX=1             Allow multiple apps to share one hostname
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)

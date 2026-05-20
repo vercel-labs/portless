@@ -133,6 +133,18 @@ portless docs.myapp next dev     # https://docs.myapp.localhost
 
 By default, only explicitly registered subdomains are routed (strict mode). Start the proxy with `--wildcard` to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app). Exact matches always take priority over wildcards.
 
+### Multiplexed hostnames
+
+By default, duplicate hostnames conflict. Start the proxy with `--multiplex` when multiple apps should intentionally share one hostname:
+
+```bash
+portless proxy start --multiplex
+portless myapp next dev
+portless myapp vite dev
+```
+
+When one app is registered for the hostname, portless routes directly to it. When multiple apps are registered, portless shows a selector page with host, port, PID, git branch, folder, and command details for each app, then stores the selection in a host-scoped cookie. HTML responses include a collapsed switcher that follows the system theme. Expand it to change or clear the selected app and inspect the same details. Use `PORTLESS_MULTIPLEX=1` to make this the default proxy mode.
+
 ### Git worktrees
 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain prefix so each worktree gets a unique URL:
@@ -179,6 +191,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. Overri
 | `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                  |
 | `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                           |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent          |
+| `PORTLESS_MULTIPLEX`  | Set to `1` to allow multiple apps to share the same hostname                |
 | `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
 | `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)  |
 | `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`) |
@@ -276,6 +289,7 @@ The service uses the default clean URL behavior: HTTPS on port 443 with `.localh
 | `portless proxy start --tld test`      | Use .test instead of .localhost                                |
 | `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                  |
 | `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
+| `portless proxy start --multiplex`     | Allow multiple apps to share the same hostname                 |
 | `portless proxy stop`                  | Stop the proxy                                                 |
 | `portless service install`             | Start the HTTPS proxy when the OS starts                       |
 | `portless service status`              | Show service and proxy status                                  |

@@ -1,7 +1,13 @@
 /** Route info used by the proxy server to map hostnames to ports. */
 export interface RouteInfo {
+  id?: string;
   hostname: string;
   port: number;
+  pid?: number;
+  cwd?: string;
+  folder?: string;
+  gitBranch?: string;
+  command?: string;
 }
 
 export interface ProxyServerOptions {
@@ -17,6 +23,8 @@ export interface ProxyServerOptions {
    * Defaults to true.
    */
   strict?: boolean;
+  /** When true, duplicate hostnames show an app selector instead of conflicting. */
+  multiplex?: boolean;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
   /** When provided, enables HTTP/2 over TLS (HTTPS). */
