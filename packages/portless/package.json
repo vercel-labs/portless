@@ -18,7 +18,7 @@
     "dist"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "os": [
     "darwin",
@@ -53,7 +53,7 @@
     "url": "https://github.com/vercel-labs/portless/issues"
   },
   "devDependencies": {
-    "@types/node": "^20.11.0",
+    "@types/node": "^24.12.4",
     "@vitest/coverage-v8": "^4.0.18",
     "eslint": "^9.39.2",
     "tsup": "^8.0.1",

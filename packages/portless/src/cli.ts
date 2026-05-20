@@ -1441,6 +1441,9 @@ ${colors.bold("Install:")}
   ${colors.cyan("npm install -g portless")}          Global (recommended)
   ${colors.cyan("npm install -D portless")}          Project dev dependency
 
+${colors.bold("Requirements:")}
+  Node.js 24+
+
 ${colors.bold("Usage:")}
   ${colors.cyan("portless")}                         Run dev script through proxy
   ${colors.cyan("portless")}                         From monorepo root: run all workspace packages

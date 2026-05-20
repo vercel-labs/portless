@@ -428,7 +428,7 @@ Requires the Tailscale CLI to be installed (https://tailscale.com/download) and 
 
 ### Requirements
 
-- Node.js 20+
+- Node.js 24+
 - macOS, Linux, or Windows
 - `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions; on Windows, install via `winget install -e --id ShiningLight.OpenSSL.Dev` or use the copy bundled with Git for Windows)
 - `tailscale` CLI (optional, for `--tailscale` and `--funnel`)

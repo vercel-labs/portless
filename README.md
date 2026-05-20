@@ -460,6 +460,8 @@ Portless detects this misconfiguration and responds with `508 Loop Detected` alo
 
 This repo is a pnpm workspace monorepo using [Turborepo](https://turbo.build). The publishable package lives in `packages/portless/`.
 
+Use Node.js 24+ and pnpm 11 for repository development. The `.node-version` file pins the Node major for version managers.
+
 ```bash
 pnpm install          # Install all dependencies
 pnpm build            # Build all packages
@@ -472,6 +474,6 @@ pnpm format           # Format all files with Prettier
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 24+
 - macOS, Linux, or Windows
 - Tailscale CLI (optional, for `--tailscale` and `--funnel`)
