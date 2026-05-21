@@ -305,6 +305,16 @@ portless myapp --tailscale next dev     # -> https://devbox.ts.net
 portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
 ```
 
+Use `--tailscale-service` to share through a [Tailscale Service](https://tailscale.com/docs/features/tailscale-services) with a stable Service MagicDNS name. The Service name defaults to the same inferred base name as the local route:
+
+```bash
+portless os --tailscale-service --app-port 3000 -- pnpm --filter os-web-app dev:app
+# -> https://os.localhost                (local)
+# -> https://os.yourteam.ts.net          (tailnet)
+```
+
+Service mode always advertises HTTPS on the Service's port 443, so multiple apps can use clean names without rotating `:8443` style ports. Use `--tailscale-service=<name>` when the Service name should differ from the app name. The Service must already exist in Tailscale, this device must use a tag-based identity, and an admin may need to approve the host advertisement in the Tailscale admin console. When approval is required, portless prints the Service URL as pending because MagicDNS will not resolve it until the Service host is approved. Service mode cannot be combined with `--funnel`.
+
 Use `--funnel` to expose your dev server to the public internet via [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
 
 ```bash
@@ -314,7 +324,7 @@ portless myapp --funnel next dev
 
 Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
 
-Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
+Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. Set `PORTLESS_TAILSCALE_SERVICE=1` in a package script or local env file to use inferred Service names without repeating the flag, or set `PORTLESS_TAILSCALE_SERVICE=<name>` to use a specific Service name. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
 
 Requires the Tailscale CLI to be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled.
 
@@ -369,6 +379,7 @@ portless service uninstall       # Remove the startup service
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --tailscale                      Share the app on your Tailscale network (tailnet)
+--tailscale-service[=<name>]     Share the app through a Tailscale Service
 --funnel                         Share the app publicly via Tailscale Funnel
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
@@ -386,6 +397,10 @@ PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
+PORTLESS_TAILSCALE_SERVICE=1
+                                  Share apps on your Tailscale network with inferred Service hostnames and no port
+PORTLESS_TAILSCALE_SERVICE=<name>
+                                  Share apps on your Tailscale network with a specific Service hostname and no port
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 

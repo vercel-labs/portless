@@ -15,12 +15,16 @@ import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
+  formatTailscaleServiceUrl,
   formatTailscaleUrl,
   getUsedServePorts,
+  normalizeServiceName,
   registerFunnel,
   registerServe,
+  registerTailscaleService,
   unregisterTailscale,
 } from "./tailscale.js";
+import type { TailscaleServiceName } from "./tailscale.js";
 import {
   inferProjectName,
   detectWorktreePrefix,
@@ -812,7 +816,11 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
       `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}`
     );
     if (route.tailscaleUrl) {
-      const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
+      const tsLabel = route.tailscaleServiceName
+        ? "tailscale service"
+        : route.tailscaleFunnel
+          ? "funnel"
+          : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
     }
   }
@@ -982,25 +990,51 @@ async function runApp(
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = process.env.PORTLESS_FUNNEL === "1" || process.env.PORTLESS_FUNNEL === "true";
+  const serviceNameFromEnv = tailscaleServiceNameForApp(name, autoInfo);
+  let tailscaleService: TailscaleServiceName | undefined;
+  if (serviceNameFromEnv) {
+    try {
+      tailscaleService = normalizeServiceName(serviceNameFromEnv);
+    } catch (err) {
+      console.error(colors.red(`Error: ${(err as Error).message}`));
+      process.exit(1);
+    }
+  }
   const wantsTailscale =
+    Boolean(tailscaleService) ||
     wantsFunnel ||
     process.env.PORTLESS_TAILSCALE === "1" ||
     process.env.PORTLESS_TAILSCALE === "true";
   let tsBaseUrl: string | undefined;
+  let tsMagicDnsSuffix: string | undefined;
 
   if (wantsTailscale) {
+    if (wantsFunnel && tailscaleService) {
+      console.error(colors.red("Error: --funnel cannot be combined with --tailscale-service."));
+      console.error(
+        colors.blue(
+          "Use --tailscale-service for tailnet-only sharing or --funnel for public sharing."
+        )
+      );
+      process.exit(1);
+    }
     try {
       const tsReady = ensureTailscaleReady({
         requireFunnel: wantsFunnel,
         requireHttps: true,
+        requireServiceHost: Boolean(tailscaleService),
       });
       tsBaseUrl = tsReady.baseUrl;
+      tsMagicDnsSuffix = tsReady.magicDnsSuffix;
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
       if (message.includes("not found")) {
         console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
-      } else if (!message.includes("not enabled on your tailnet")) {
+      } else if (
+        !message.includes("not enabled on your tailnet") &&
+        !message.includes("tag-based identity")
+      ) {
         console.error(colors.blue("Make sure Tailscale is connected:"));
         console.error(colors.cyan("  tailscale up"));
       }
@@ -1108,35 +1142,67 @@ async function runApp(
   // Readiness was already checked at the top of runApp().
   let tailscaleHttpsPort: number | undefined;
   let tailscaleUrl: string | undefined;
+  let tailscaleServiceApprovalRequired = false;
 
   if (wantsTailscale && tsBaseUrl) {
-    const maxAttempts = 3;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const usedPorts = getUsedServePorts();
-      tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
+    if (tailscaleService) {
+      tailscaleHttpsPort = 443;
       try {
-        if (wantsFunnel) {
-          registerFunnel(port, tailscaleHttpsPort);
-        } else {
-          registerServe(port, tailscaleHttpsPort);
-        }
-        break;
+        tailscaleServiceApprovalRequired = registerTailscaleService(
+          tailscaleService,
+          port,
+          tailscaleHttpsPort
+        );
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        const isConflict = message.includes("already in use");
-        if (isConflict && attempt < maxAttempts) continue;
         console.error(colors.red(`Error: ${message}`));
         process.exit(1);
       }
+      tailscaleUrl = formatTailscaleServiceUrl(tailscaleService.displayName, tsMagicDnsSuffix!);
+    } else {
+      const maxAttempts = 3;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        const usedPorts = getUsedServePorts();
+        tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
+        try {
+          if (wantsFunnel) {
+            registerFunnel(port, tailscaleHttpsPort);
+          } else {
+            registerServe(port, tailscaleHttpsPort);
+          }
+          break;
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          const isConflict = message.includes("already in use");
+          if (isConflict && attempt < maxAttempts) continue;
+          console.error(colors.red(`Error: ${message}`));
+          process.exit(1);
+        }
+      }
+      tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
     }
 
     // tailscaleHttpsPort is always assigned: the loop either breaks after
     // a successful register or exits the process on final failure.
-    tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
-    const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
+    const label = tailscaleService
+      ? "Tailscale Service"
+      : wantsFunnel
+        ? "Funnel (public)"
+        : "Tailscale";
     console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
     if (wantsFunnel) {
       console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+    } else if (tailscaleServiceApprovalRequired) {
+      console.log(
+        chalk.yellow("  (pending admin approval in Tailscale; DNS will not resolve yet)")
+      );
+      console.log(
+        chalk.gray(
+          `  Define or approve ${tailscaleService?.serviceId ?? "the service"} at https://login.tailscale.com/admin/services\n`
+        )
+      );
+    } else if (tailscaleService) {
+      console.log(chalk.gray("  (accessible from your tailnet via its Service name)\n"));
     } else {
       console.log(chalk.gray("  (accessible from your tailnet)\n"));
     }
@@ -1146,6 +1212,8 @@ async function runApp(
         tailscaleUrl: tailscaleUrl,
         tailscaleHttpsPort,
         tailscaleFunnel: wantsFunnel || undefined,
+        tailscaleServiceId: tailscaleService?.serviceId,
+        tailscaleServiceName: tailscaleService?.displayName,
       });
     } catch {
       // Non-fatal: route display metadata only
@@ -1215,6 +1283,7 @@ async function runApp(
         unregisterTailscale({
           tailscaleHttpsPort,
           tailscaleFunnel: wantsFunnel || undefined,
+          tailscaleServiceId: tailscaleService?.serviceId,
         });
       } catch {
         // Best-effort cleanup; non-fatal
@@ -1284,6 +1353,54 @@ function applyTailscaleFlag(flag: string): boolean {
   return false;
 }
 
+function baseServiceNameForApp(
+  name: string,
+  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string }
+): string {
+  if (!autoInfo?.prefix) return name;
+  const prefix = `${autoInfo.prefix}.`;
+  return name.startsWith(prefix) ? name.slice(prefix.length) : name;
+}
+
+function tailscaleServiceNameForApp(
+  name: string,
+  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string }
+): string | undefined {
+  const inferredName = baseServiceNameForApp(name, autoInfo);
+  const serviceName = process.env.PORTLESS_TAILSCALE_SERVICE?.trim();
+  if (!serviceName || serviceName === "0" || serviceName.toLowerCase() === "false")
+    return undefined;
+  if (serviceName === "1" || serviceName.toLowerCase() === "true") return inferredName;
+  return serviceName;
+}
+
+function applyTailscaleServiceFlag(value?: string): void {
+  const serviceName = value?.trim();
+  if (serviceName === "") {
+    console.error(colors.red("Error: --tailscale-service= requires a service name."));
+    console.error(colors.cyan("  portless --tailscale-service=<name> <app> <command...>"));
+    process.exit(1);
+  }
+  if (serviceName) {
+    process.env.PORTLESS_TAILSCALE_SERVICE = serviceName;
+  } else {
+    process.env.PORTLESS_TAILSCALE_SERVICE = "1";
+  }
+}
+
+function applyTailscaleServiceArg(arg: string): boolean {
+  const prefix = "--tailscale-service=";
+  if (arg.startsWith(prefix)) {
+    applyTailscaleServiceFlag(arg.slice(prefix.length));
+    return true;
+  }
+  if (arg === "--tailscale-service") {
+    applyTailscaleServiceFlag();
+    return true;
+  }
+  return false;
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -1315,6 +1432,9 @@ ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --tailscale-service[=<name>]
+                        Share via a Tailscale Service name
+                        Defaults to the inferred base name
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1333,6 +1453,8 @@ ${colors.bold("Examples:")}
   portless run --name myapp next dev  # -> https://myapp.localhost
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
+  portless run --tailscale-service next dev
+  portless run --tailscale-service=api next dev
 `);
       process.exit(0);
     } else if (args[i] === "--force") {
@@ -1340,6 +1462,8 @@ ${colors.bold("Examples:")}
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleServiceArg(args[i])) {
+      // handled
     } else if (args[i] === "--name") {
       i++;
       if (!args[i] || args[i].startsWith("-")) {
@@ -1353,7 +1477,9 @@ ${colors.bold("Examples:")}
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --name, --force, --app-port, --tailscale, --funnel, --help")
+        colors.blue(
+          "Known flags: --name, --force, --app-port, --tailscale, --tailscale-service, --funnel, --help"
+        )
       );
       process.exit(1);
     }
@@ -1387,11 +1513,15 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleServiceArg(args[i])) {
+      // handled
     } else if (applyTailscaleFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(
+        colors.blue("Known flags: --force, --app-port, --tailscale, --tailscale-service, --funnel")
+      );
       process.exit(1);
     }
     i++;
@@ -1411,11 +1541,15 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (applyTailscaleServiceArg(args[i])) {
+      // handled
     } else if (applyTailscaleFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(
+        colors.blue("Known flags: --force, --app-port, --tailscale, --tailscale-service, --funnel")
+      );
       process.exit(1);
     }
     i++;
@@ -1473,6 +1607,8 @@ ${colors.bold("Examples:")}
   portless service install            # Start HTTPS proxy on OS startup
   portless get backend                # -> https://backend.localhost
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
+  portless myapp --tailscale-service next dev
+                                      # -> also https://myapp.<tailnet>.ts.net
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
 
 ${colors.bold("Configuration (portless.json):")}
@@ -1528,11 +1664,19 @@ ${colors.bold("Tailscale sharing:")}
   Use --tailscale to share your dev server with teammates on your tailnet.
   Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
   8444, etc.) so no basePath configuration is needed.
+  Use --tailscale-service to share through a Tailscale Service at
+  https://<name>.<tailnet>. The Service name defaults to the inferred base
+  name. Use --tailscale-service=<name> to override it. The Service must
+  already exist, this device must use a tag-based identity, and an admin
+  may need to approve the host advertisement in the Tailscale admin console.
+  When approval is required, MagicDNS will not resolve the Service name yet.
   Use --funnel to expose your dev server to the public internet via
   Tailscale Funnel. Requires Tailscale CLI to be installed and connected,
   with Tailscale HTTPS certificates enabled. Funnel must also be enabled
   on your tailnet.
   ${colors.cyan("portless myapp --tailscale next dev")}
+  ${colors.cyan("portless myapp --tailscale-service next dev")}
+  ${colors.cyan("portless myapp --tailscale-service=api next dev")}
   ${colors.cyan("portless myapp --funnel next dev")}
 
 ${colors.bold("Options:")}
@@ -1552,6 +1696,7 @@ ${colors.bold("Options:")}
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
+  --tailscale-service[=<name>]  Share the app through a Tailscale Service
   --funnel                      Share the app publicly via Tailscale Funnel
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
@@ -1566,6 +1711,10 @@ ${colors.bold("Environment variables:")}
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
+  PORTLESS_TAILSCALE_SERVICE=1
+                                Share apps through inferred Tailscale Service names
+  PORTLESS_TAILSCALE_SERVICE=<name>
+                                Share apps through a specific Tailscale Service
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
@@ -1713,7 +1862,11 @@ ${colors.bold("Options:")}
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
-        console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
+        if (route.tailscaleServiceId) {
+          console.log(colors.green(`Removed tailscale service ${route.tailscaleServiceId}.`));
+        } else {
+          console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
+        }
       } catch {
         // Tailscale may not be installed; non-fatal
       }
@@ -1800,9 +1953,10 @@ ${colors.bold("Options:")}
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
-        console.log(
-          `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
-        );
+        const removed = route.tailscaleServiceId
+          ? `removed tailscale service ${route.tailscaleServiceId}`
+          : `removed tailscale serve on port ${route.tailscaleHttpsPort}`;
+        console.log(`  ${route.hostname} - ${removed}`);
       } catch {
         // Tailscale CLI may not be installed; non-fatal during prune
       }
@@ -3415,6 +3569,17 @@ async function main() {
     return value;
   };
 
+  const stripGlobalEqualsFlag = (flag: string): string | null => {
+    const sep = args.indexOf("--");
+    const end = sep === -1 ? args.length : sep;
+    const prefix = `${flag}=`;
+    const idx = args.findIndex((arg, index) => index < end && arg.startsWith(prefix));
+    if (idx === -1) return null;
+    const value = args[idx].slice(prefix.length);
+    args.splice(idx, 1);
+    return value;
+  };
+
   if (stripGlobalFlag("--lan", false)) {
     process.env.PORTLESS_LAN = "1";
   }
@@ -3440,6 +3605,12 @@ async function main() {
 
   if (stripGlobalFlag("--tailscale", false)) {
     process.env.PORTLESS_TAILSCALE = "1";
+  }
+  const tailscaleServiceValue = stripGlobalEqualsFlag("--tailscale-service");
+  if (tailscaleServiceValue !== null) {
+    applyTailscaleServiceFlag(tailscaleServiceValue);
+  } else if (stripGlobalFlag("--tailscale-service", false)) {
+    applyTailscaleServiceFlag();
   }
   if (stripGlobalFlag("--funnel", false)) {
     process.env.PORTLESS_FUNNEL = "1";
