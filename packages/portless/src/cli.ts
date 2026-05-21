@@ -1236,6 +1236,8 @@ interface ParsedRunArgs {
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
+  /** Custom TLD for the proxy. */
+  tld?: string;
   /** Override the inferred base name (from --name flag). */
   name?: string;
   /** The child command and its arguments, passed through untouched. */
@@ -1271,6 +1273,20 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+function parseTldFlag(value: string | undefined): string {
+  if (!value || value.startsWith("-")) {
+    console.error(colors.red("Error: --tld requires a TLD value (e.g. test, local.example.dev)."));
+    process.exit(1);
+  }
+  const tld = value.trim().toLowerCase();
+  const err = validateTld(tld);
+  if (err) {
+    console.error(colors.red(`Error: ${err}`));
+    process.exit(1);
+  }
+  return tld;
+}
+
 function applyTailscaleFlag(flag: string): boolean {
   if (flag === "--tailscale") {
     process.env.PORTLESS_TAILSCALE = "1";
@@ -1287,13 +1303,14 @@ function applyTailscaleFlag(flag: string): boolean {
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
- * `--name`, `--force`, and `--app-port` are recognized. `--` stops flag
+ * `--name`, `--force`, `--app-port`, and `--tld` are recognized. `--` stops flag
  * parsing. Everything after the flag region is the child command, passed
  * through untouched.
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
+  let tld: string | undefined;
   let name: string | undefined;
   let i = 0;
 
@@ -1315,6 +1332,7 @@ ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --tld <tld>            Use a custom TLD instead of .localhost
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1331,6 +1349,7 @@ ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
+  portless run --tld local.example.dev next dev
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
 `);
@@ -1340,6 +1359,9 @@ ${colors.bold("Examples:")}
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--tld") {
+      i++;
+      tld = parseTldFlag(args[i]);
     } else if (args[i] === "--name") {
       i++;
       if (!args[i] || args[i].startsWith("-")) {
@@ -1353,7 +1375,9 @@ ${colors.bold("Examples:")}
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --name, --force, --app-port, --tailscale, --funnel, --help")
+        colors.blue(
+          "Known flags: --name, --force, --app-port, --tld, --tailscale, --funnel, --help"
+        )
       );
       process.exit(1);
     }
@@ -1362,19 +1386,20 @@ ${colors.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, tld, name, commandArgs: args.slice(i) };
 }
 
 /**
  * Parse named-mode arguments: `[--force] <name> [--force] [--] <command...>`
  *
- * `--force` is recognized before and after the name. `--` stops flag
+ * `--force`, `--app-port`, and `--tld` are recognized before and after the name. `--` stops flag
  * parsing. Everything after the flag region is the child command.
  * Unrecognized `--` flags are rejected to catch typos.
  */
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let tld: string | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -1387,11 +1412,14 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--tld") {
+      i++;
+      tld = parseTldFlag(args[i]);
     } else if (applyTailscaleFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(colors.blue("Known flags: --force, --app-port, --tld, --tailscale, --funnel"));
       process.exit(1);
     }
     i++;
@@ -1411,11 +1439,14 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--tld") {
+      i++;
+      tld = parseTldFlag(args[i]);
     } else if (applyTailscaleFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --force, --app-port, --tailscale, --funnel"));
+      console.error(colors.blue("Known flags: --force, --app-port, --tld, --tailscale, --funnel"));
       process.exit(1);
     }
     i++;
@@ -1423,7 +1454,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, tld, name, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,7 +1579,7 @@ ${colors.bold("Options:")}
   --cert <path>                 Use a custom TLS certificate
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
+  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, local.example.dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
@@ -1562,7 +1593,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
-  PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
+  PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, local.example.dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
@@ -2120,7 +2151,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
-  ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
+  ${colors.cyan("portless proxy start --tld local.test")}   Use .local.test instead of .localhost
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
@@ -3245,6 +3276,9 @@ async function runWithDirectSpawn(
 
 async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
   const parsed = parseRunArgs(args);
+  if (parsed.tld) {
+    process.env.PORTLESS_TLD = parsed.tld;
+  }
 
   const appConfig = loadAppConfig();
 
@@ -3317,6 +3351,9 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
 
 async function handleNamedMode(args: string[]): Promise<void> {
   const parsed = parseAppArgs(args);
+  if (parsed.tld) {
+    process.env.PORTLESS_TLD = parsed.tld;
+  }
 
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
@@ -3454,6 +3491,13 @@ async function main() {
     process.exit(1);
   }
   const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
+
+  // --tld can be used as a leading global flag before `run`, named mode, or
+  // proxy commands. Mode-specific parsers also accept it after the command.
+  if (args[0] === "--tld") {
+    process.env.PORTLESS_TLD = parseTldFlag(args[1]);
+    args.splice(0, 2);
+  }
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved

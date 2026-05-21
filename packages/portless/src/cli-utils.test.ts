@@ -747,6 +747,11 @@ describe("getDefaultTld", () => {
     expect(getDefaultTld()).toBe("test");
   });
 
+  it("returns multi-segment PORTLESS_TLD when set", () => {
+    process.env.PORTLESS_TLD = "local.example.dev";
+    expect(getDefaultTld()).toBe("local.example.dev");
+  });
+
   it("lowercases the value", () => {
     process.env.PORTLESS_TLD = "TEST";
     expect(getDefaultTld()).toBe("test");
@@ -817,6 +822,19 @@ describe("buildProxyStartConfig", () => {
     ).toEqual({
       effectiveTld: "test",
       args: ["--no-tls", "--tld", "test"],
+    });
+  });
+
+  it("keeps multi-segment custom TLDs outside LAN mode", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: false,
+        tld: "local.example.dev",
+      })
+    ).toEqual({
+      effectiveTld: "local.example.dev",
+      args: ["--no-tls", "--tld", "local.example.dev"],
     });
   });
 });
@@ -911,6 +929,11 @@ describe("validateTld", () => {
     expect(validateTld("localhost")).toBeNull();
     expect(validateTld("test")).toBeNull();
     expect(validateTld("internal")).toBeNull();
+    expect(validateTld("x")).toBeNull();
+    expect(validateTld("a.example.dev")).toBeNull();
+    expect(validateTld("local.example.dev")).toBeNull();
+    expect(validateTld("dev.receipts.beauty")).toBeNull();
+    expect(validateTld("my-tld.example")).toBeNull();
   });
 
   it("rejects empty string", () => {
@@ -918,10 +941,13 @@ describe("validateTld", () => {
   });
 
   it("rejects TLDs with invalid characters", () => {
-    expect(validateTld("my-tld")).toMatch(/must contain only/);
-    expect(validateTld("my.tld")).toMatch(/must contain only/);
-    expect(validateTld("MY_TLD")).toMatch(/must contain only/);
-    expect(validateTld("tld!")).toMatch(/must contain only/);
+    expect(validateTld("MY_TLD")).toMatch(/labels must contain only/);
+    expect(validateTld("tld!")).toMatch(/labels must contain only/);
+    expect(validateTld("foo..bar")).toMatch(/labels cannot be empty/);
+    expect(validateTld("-foo.bar")).toMatch(/labels must contain only/);
+    expect(validateTld("foo.bar-")).toMatch(/labels must contain only/);
+    expect(validateTld(`${"a".repeat(64)}.bar`)).toMatch(/exceeds 63-character/);
+    expect(validateTld(`${"a".repeat(250)}.bar`)).toMatch(/exceeds 253-character/);
   });
 
   it("allows public TLDs (they produce warnings elsewhere)", () => {
