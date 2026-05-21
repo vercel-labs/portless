@@ -30,6 +30,7 @@ interface TailscaleStatusJson {
     DNSName?: string;
     HostName?: string;
     ID?: string;
+    Tags?: string[];
   };
   CurrentTailnet?: {
     MagicDNSSuffix?: string;
@@ -38,12 +39,14 @@ interface TailscaleStatusJson {
 
 export interface TailscaleReadyResult {
   dnsName: string;
+  magicDnsSuffix: string;
   baseUrl: string;
 }
 
 export interface EnsureTailscaleReadyOptions {
   requireFunnel?: boolean;
   requireHttps?: boolean;
+  requireServiceHost?: boolean;
   runner?: TailscaleCommandRunner;
 }
 
@@ -121,6 +124,22 @@ function statusToDnsName(status: TailscaleStatusJson): string {
   );
 }
 
+function statusToMagicDnsSuffix(status: TailscaleStatusJson, dnsName: string): string {
+  const suffix = status.CurrentTailnet?.MagicDNSSuffix;
+  if (typeof suffix === "string" && suffix.length > 0) {
+    return trimDot(suffix);
+  }
+
+  const labels = dnsName.split(".");
+  if (labels.length > 1) {
+    return labels.slice(1).join(".");
+  }
+
+  throw new Error(
+    "Could not determine Tailscale MagicDNS suffix from `tailscale status --json`. Is MagicDNS enabled?"
+  );
+}
+
 function isFunnelCapability(value: string): boolean {
   const normalized = value.toLowerCase();
   return normalized === "funnel" || normalized.endsWith("/funnel");
@@ -172,6 +191,13 @@ function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
   );
 }
 
+function throwServiceHostNotTagged(): never {
+  throw new Error(
+    "Tailscale Services require this device to use a tag-based identity. " +
+      "Tag this device in Tailscale, then run portless again, or use --tailscale for node-based sharing."
+  );
+}
+
 /**
  * Verify that the Tailscale CLI is installed and the node is connected.
  * Returns the node's DNS name and base URL.
@@ -184,14 +210,22 @@ export function ensureTailscaleReady(
   const statusResult = runOrThrow(["status", "--json"], "read tailscale status", runner);
   const status = parseStatusJson(statusResult.stdout);
   const dnsName = statusToDnsName(status);
+  const magicDnsSuffix = statusToMagicDnsSuffix(status, dnsName);
   if (options.requireHttps && !hasHttpsCapability(status)) {
     throwHttpsNotEnabled();
   }
   if (options.requireFunnel && !hasFunnelCapability(status)) {
     throwFunnelNotEnabled(status);
   }
+  if (
+    options.requireServiceHost &&
+    (!Array.isArray(status.Self?.Tags) || status.Self.Tags.length === 0)
+  ) {
+    throwServiceHostNotTagged();
+  }
   return {
     dnsName,
+    magicDnsSuffix,
     baseUrl: `https://${dnsName}`,
   };
 }
@@ -301,6 +335,11 @@ export interface RegisterServeOptions {
   runner?: TailscaleCommandRunner;
 }
 
+export interface TailscaleServiceName {
+  displayName: string;
+  serviceId: string;
+}
+
 const CONFLICT_MESSAGES: Record<TailscaleMode, string> = {
   serve: "Stop the existing serve or let portless auto-assign a different port.",
   funnel: "Tailscale Funnel supports ports 443, 8443, and 10000.",
@@ -348,6 +387,66 @@ function register(
   }
 }
 
+const SERVICE_NAME_PATTERN = /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/;
+
+export function normalizeServiceName(input: string): TailscaleServiceName {
+  const displayName = input.trim().replace(/^svc:/i, "").toLowerCase();
+  if (!SERVICE_NAME_PATTERN.test(displayName)) {
+    throw new Error(
+      `Invalid Tailscale Service name "${input}". Use a DNS label with lowercase letters, digits, and hyphens.`
+    );
+  }
+  return {
+    displayName,
+    serviceId: `svc:${displayName}`,
+  };
+}
+
+function registerService(
+  service: TailscaleServiceName,
+  localPort: number,
+  httpsPort: number,
+  runner: TailscaleCommandRunner
+): boolean {
+  const target = `http://127.0.0.1:${localPort}`;
+  const result = runner([
+    "serve",
+    "--yes",
+    `--service=${service.serviceId}`,
+    `--https=${httpsPort}`,
+    target,
+  ]);
+  if (result.error) {
+    const errno = result.error as NodeJS.ErrnoException;
+    if (errno.code === "ENOENT") {
+      throw new Error(
+        "Tailscale CLI not found. Install Tailscale (https://tailscale.com/download) and ensure `tailscale` is on PATH."
+      );
+    }
+    throw new Error(
+      `Failed to register tailscale service ${service.serviceId}: ${result.error.message}`
+    );
+  }
+  if (result.status !== 0) {
+    if (isConflictError(result.stderr, result.stdout)) {
+      throw new Error(
+        `Tailscale Service ${service.serviceId} HTTPS port ${httpsPort} is already in use. ` +
+          "Choose a different service name or remove the existing service mapping."
+      );
+    }
+    const details = normalizeSpace(result.stderr || result.stdout);
+    throw new Error(
+      `Failed to register tailscale service ${service.serviceId} on port ${httpsPort}: ${details || "unknown tailscale error"}`
+    );
+  }
+  return isServiceApprovalRequired(result);
+}
+
+function isServiceApprovalRequired(result: TailscaleCommandResult): boolean {
+  const text = `${result.stderr}\n${result.stdout}`.toLowerCase();
+  return text.includes("approval from an admin is required") || text.includes("approval required");
+}
+
 function unregister(
   mode: TailscaleMode,
   httpsPort: number,
@@ -375,12 +474,54 @@ function unregister(
   }
 }
 
+function unregisterService(
+  serviceId: string,
+  httpsPort: number,
+  options?: { ignoreMissing?: boolean; runner?: TailscaleCommandRunner }
+): void {
+  const runner = options?.runner ?? defaultRunner;
+  const result = runner([
+    "serve",
+    "--yes",
+    `--service=${serviceId}`,
+    `--https=${httpsPort}`,
+    "off",
+  ]);
+  if (result.error) {
+    const errno = result.error as NodeJS.ErrnoException;
+    if (errno.code === "ENOENT") return;
+    throw new Error(`Failed to remove tailscale service ${serviceId}: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    const text = `${result.stderr}\n${result.stdout}`.toLowerCase();
+    const looksLikeMissing =
+      text.includes("not found") ||
+      text.includes("no serve config") ||
+      text.includes("nothing to remove") ||
+      text.includes("does not exist");
+    if (options?.ignoreMissing && looksLikeMissing) return;
+    const details = normalizeSpace(result.stderr || result.stdout);
+    throw new Error(
+      `Failed to remove tailscale service ${serviceId} on port ${httpsPort}: ${details || "unknown tailscale error"}`
+    );
+  }
+}
+
 export function registerServe(
   localPort: number,
   httpsPort: number,
   options?: RegisterServeOptions
 ): void {
   register("serve", localPort, httpsPort, options?.runner ?? defaultRunner);
+}
+
+export function registerTailscaleService(
+  service: TailscaleServiceName,
+  localPort: number,
+  httpsPort: number,
+  options?: RegisterServeOptions
+): boolean {
+  return registerService(service, localPort, httpsPort, options?.runner ?? defaultRunner);
 }
 
 export function registerFunnel(
@@ -409,13 +550,24 @@ export function unregisterFunnel(
  * Best-effort cleanup of a tailscale serve or funnel registration from a
  * route's metadata. Picks the right subcommand based on `tailscaleFunnel`.
  */
-export function unregisterTailscale(route: {
-  tailscaleHttpsPort?: number;
-  tailscaleFunnel?: boolean;
-}): void {
+export function unregisterTailscale(
+  route: {
+    tailscaleHttpsPort?: number;
+    tailscaleFunnel?: boolean;
+    tailscaleServiceId?: string;
+  },
+  options?: { runner?: TailscaleCommandRunner }
+): void {
   if (!route.tailscaleHttpsPort) return;
+  if (route.tailscaleServiceId) {
+    unregisterService(route.tailscaleServiceId, route.tailscaleHttpsPort, {
+      ignoreMissing: true,
+      runner: options?.runner,
+    });
+    return;
+  }
   const mode: TailscaleMode = route.tailscaleFunnel ? "funnel" : "serve";
-  unregister(mode, route.tailscaleHttpsPort, { ignoreMissing: true });
+  unregister(mode, route.tailscaleHttpsPort, { ignoreMissing: true, runner: options?.runner });
 }
 
 // ---------------------------------------------------------------------------
@@ -427,4 +579,8 @@ export function formatTailscaleUrl(baseUrl: string, httpsPort: number): string {
   const trimmed = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
   if (httpsPort === 443) return trimmed;
   return `${trimmed}:${httpsPort}`;
+}
+
+export function formatTailscaleServiceUrl(serviceName: string, magicDnsSuffix: string): string {
+  return `https://${serviceName}.${trimDot(magicDnsSuffix)}`;
 }

@@ -2,10 +2,13 @@ import { describe, it, expect } from "vitest";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
+  formatTailscaleServiceUrl,
   formatTailscaleUrl,
   getUsedServePorts,
+  normalizeServiceName,
   registerFunnel,
   registerServe,
+  registerTailscaleService,
   unregisterFunnel,
   unregisterServe,
   unregisterTailscale,
@@ -57,6 +60,7 @@ describe("tailscale", () => {
       });
       const ready = ensureTailscaleReady({ runner });
       expect(ready.dnsName).toBe("devbox.example.ts.net");
+      expect(ready.magicDnsSuffix).toBe("example.ts.net");
       expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
     });
 
@@ -73,6 +77,22 @@ describe("tailscale", () => {
       });
       const ready = ensureTailscaleReady({ runner });
       expect(ready.dnsName).toBe("devbox.example.ts.net");
+      expect(ready.magicDnsSuffix).toBe("example.ts.net");
+    });
+
+    it("prefers CurrentTailnet MagicDNSSuffix when present", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: { DNSName: "devbox.device.example.ts.net." },
+            CurrentTailnet: { MagicDNSSuffix: "example.ts.net." },
+          }),
+        },
+      });
+      const ready = ensureTailscaleReady({ runner });
+      expect(ready.magicDnsSuffix).toBe("example.ts.net");
     });
 
     it("throws when Funnel is required but not enabled on the tailnet", () => {
@@ -125,6 +145,61 @@ describe("tailscale", () => {
       expect(() => ensureTailscaleReady({ runner, requireHttps: true })).toThrow(
         "Tailscale HTTPS is not enabled on your tailnet"
       );
+    });
+
+    it("throws when Service host mode is required but the device is untagged", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              DNSName: "devbox.example.ts.net.",
+              Capabilities: ["https"],
+              Tags: [],
+            },
+          }),
+        },
+      });
+      expect(() => ensureTailscaleReady({ runner, requireServiceHost: true })).toThrow(
+        "tag-based identity"
+      );
+    });
+
+    it("throws when Service host mode is required but tag data is missing", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              DNSName: "devbox.example.ts.net.",
+              Capabilities: ["https"],
+            },
+          }),
+        },
+      });
+      expect(() => ensureTailscaleReady({ runner, requireServiceHost: true })).toThrow(
+        "tag-based identity"
+      );
+    });
+
+    it("allows Service host mode when the device is tagged", () => {
+      const runner = createRunner({
+        version: { status: 0 },
+        "status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            Self: {
+              DNSName: "devbox.example.ts.net.",
+              Capabilities: ["https"],
+              Tags: ["tag:dev"],
+            },
+          }),
+        },
+      });
+      const ready = ensureTailscaleReady({ runner, requireServiceHost: true });
+      expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
     });
 
     it("allows HTTPS when the node has an HTTPS capability", () => {
@@ -307,6 +382,24 @@ describe("tailscale", () => {
   // registerServe / unregisterServe
   // -----------------------------------------------------------------------
 
+  describe("normalizeServiceName", () => {
+    it("normalizes plain and svc-prefixed service names", () => {
+      expect(normalizeServiceName("os")).toEqual({
+        displayName: "os",
+        serviceId: "svc:os",
+      });
+      expect(normalizeServiceName("svc:My-App")).toEqual({
+        displayName: "my-app",
+        serviceId: "svc:my-app",
+      });
+    });
+
+    it("rejects invalid service names", () => {
+      expect(() => normalizeServiceName("bad.name")).toThrow("Invalid Tailscale Service name");
+      expect(() => normalizeServiceName("-bad")).toThrow("Invalid Tailscale Service name");
+    });
+  });
+
   describe("registerServe", () => {
     it("calls tailscale serve with correct args", () => {
       const calls: string[][] = [];
@@ -403,6 +496,54 @@ describe("tailscale", () => {
         "serve --yes --https=443 off": { status: null, error: enoent },
       });
       expect(() => unregisterServe(443, { runner })).not.toThrow();
+    });
+  });
+
+  describe("registerTailscaleService", () => {
+    it("calls tailscale serve with service args", () => {
+      const calls: string[][] = [];
+      const service = normalizeServiceName("os");
+      const runner = createRunner(
+        {
+          "serve --yes --service=svc:os --https=443 http://127.0.0.1:4123": { status: 0 },
+        },
+        calls
+      );
+      const approvalRequired = registerTailscaleService(service, 4123, 443, { runner });
+      expect(calls[0]).toEqual([
+        "serve",
+        "--yes",
+        "--service=svc:os",
+        "--https=443",
+        "http://127.0.0.1:4123",
+      ]);
+      expect(approvalRequired).toBe(false);
+    });
+
+    it("detects service host registrations that are pending approval", () => {
+      const service = normalizeServiceName("os");
+      const runner = createRunner({
+        "serve --yes --service=svc:os --https=443 http://127.0.0.1:4123": {
+          status: 0,
+          stdout:
+            "This machine is configured as a service proxy for svc:os, but approval from an admin is required.",
+        },
+      });
+      const approvalRequired = registerTailscaleService(service, 4123, 443, { runner });
+      expect(approvalRequired).toBe(true);
+    });
+
+    it("throws with service context on non-conflict failure", () => {
+      const service = normalizeServiceName("os");
+      const runner = createRunner({
+        "serve --yes --service=svc:os --https=443 http://127.0.0.1:4123": {
+          status: 1,
+          stderr: "approval required",
+        },
+      });
+      expect(() => registerTailscaleService(service, 4123, 443, { runner })).toThrow(
+        "approval required"
+      );
     });
   });
 
@@ -513,6 +654,16 @@ describe("tailscale", () => {
     it("is a no-op when tailscaleHttpsPort is missing", () => {
       expect(() => unregisterTailscale({ tailscaleFunnel: true })).not.toThrow();
     });
+
+    it("uses service-specific cleanup when service metadata exists", () => {
+      const calls: string[][] = [];
+      const runner = createRunner(
+        { "serve --yes --service=svc:os --https=443 off": { status: 0 } },
+        calls
+      );
+      unregisterTailscale({ tailscaleHttpsPort: 443, tailscaleServiceId: "svc:os" }, { runner });
+      expect(calls[0]).toEqual(["serve", "--yes", "--service=svc:os", "--https=443", "off"]);
+    });
   });
 
   // -----------------------------------------------------------------------
@@ -536,6 +687,10 @@ describe("tailscale", () => {
       expect(formatTailscaleUrl("https://devbox.example.ts.net/", 443)).toBe(
         "https://devbox.example.ts.net"
       );
+    });
+
+    it("formats service URLs with the MagicDNS suffix", () => {
+      expect(formatTailscaleServiceUrl("os", "example.ts.net.")).toBe("https://os.example.ts.net");
     });
   });
 });

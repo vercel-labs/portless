@@ -26,7 +26,20 @@ export interface RouteMapping extends RouteInfo {
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
+  tailscaleServiceId?: string;
+  tailscaleServiceName?: string;
 }
+
+type RouteMetadataUpdate = Partial<
+  Pick<
+    RouteMapping,
+    | "tailscaleUrl"
+    | "tailscaleHttpsPort"
+    | "tailscaleFunnel"
+    | "tailscaleServiceId"
+    | "tailscaleServiceName"
+  >
+>;
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
@@ -299,10 +312,7 @@ export class RouteStore {
    * Update metadata on an existing route entry. Only provided fields are
    * merged; the route must already exist (matched by hostname).
    */
-  updateRoute(
-    hostname: string,
-    fields: Partial<Pick<RouteMapping, "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel">>
-  ): void {
+  updateRoute(hostname: string, fields: RouteMetadataUpdate): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -315,6 +325,10 @@ export class RouteStore {
       if (fields.tailscaleHttpsPort !== undefined)
         route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
       if (fields.tailscaleFunnel !== undefined) route.tailscaleFunnel = fields.tailscaleFunnel;
+      if (fields.tailscaleServiceId !== undefined)
+        route.tailscaleServiceId = fields.tailscaleServiceId;
+      if (fields.tailscaleServiceName !== undefined)
+        route.tailscaleServiceName = fields.tailscaleServiceName;
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

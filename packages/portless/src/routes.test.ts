@@ -426,6 +426,20 @@ describe("RouteStore", () => {
       expect(routes[0].tailscaleFunnel).toBe(true);
     });
 
+    it("persists Tailscale Service metadata via updateRoute", () => {
+      store.addRoute("os.localhost", 3000, process.pid);
+      store.updateRoute("os.localhost", {
+        tailscaleUrl: "https://os.example.ts.net",
+        tailscaleHttpsPort: 443,
+        tailscaleServiceId: "svc:os",
+        tailscaleServiceName: "os",
+      });
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].tailscaleServiceId).toBe("svc:os");
+      expect(routes[0].tailscaleServiceName).toBe("os");
+    });
+
     it("loads routes without tailscale fields (backward compat)", () => {
       store.addRoute("legacy.localhost", 4000, process.pid);
       const routes = store.loadRoutes();

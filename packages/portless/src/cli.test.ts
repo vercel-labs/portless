@@ -1370,8 +1370,10 @@ describe("CLI", () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
       expect(stdout).toContain("--tailscale");
+      expect(stdout).toContain("--tailscale-service[=<name>]");
       expect(stdout).toContain("--funnel");
       expect(stdout).toContain("PORTLESS_TAILSCALE");
+      expect(stdout).toContain("PORTLESS_TAILSCALE_SERVICE");
     });
 
     it("fails with actionable message when tailscale is not installed", () => {
@@ -1385,6 +1387,44 @@ describe("CLI", () => {
     it("fails with --funnel when tailscale is not installed", () => {
       const { status, stderr } = run(["--funnel", "myapp", "echo", "hello"], {
         env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("fails with --tailscale-service when tailscale is not installed", () => {
+      const { status, stderr } = run(["myapp", "--tailscale-service", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale-service=<name> override syntax", () => {
+      const { status, stderr } = run(["myapp", "--tailscale-service=os", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("rejects an empty --tailscale-service= override", () => {
+      const { status, stderr } = run(["--tailscale-service="]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("--tailscale-service= requires a service name");
+    });
+
+    it("rejects invalid PORTLESS_TAILSCALE_SERVICE values before tailscale preflight", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: { PORTLESS_TAILSCALE_SERVICE: "bad.name" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid Tailscale Service name");
+    });
+
+    it("accepts PORTLESS_TAILSCALE_SERVICE=1 as inferred service mode", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: { PORTLESS_TAILSCALE_SERVICE: "1", PATH: "/tmp/portless-no-ts-path" },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("Tailscale");
@@ -1411,6 +1451,21 @@ describe("CLI", () => {
       try {
         fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
         const { status, stderr } = run(["run", "--tailscale", "echo", "hello"], {
+          cwd: tmpDir,
+          env: { PATH: "/tmp/portless-no-ts-path" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain("Tailscale");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("accepts --tailscale-service in run subcommand", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-service-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run", "--tailscale-service", "echo", "hello"], {
           cwd: tmpDir,
           env: { PATH: "/tmp/portless-no-ts-path" },
         });
