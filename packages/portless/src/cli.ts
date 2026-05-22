@@ -641,6 +641,7 @@ function startProxyServer(
     setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
   };
 
+  process.on("SIGHUP", cleanup);
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
@@ -3134,6 +3135,7 @@ async function runWithTurbo(
     removeManifest();
   };
 
+  process.on("SIGHUP", cleanup);
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
@@ -3220,6 +3222,7 @@ async function runWithDirectSpawn(
     }
   };
 
+  process.on("SIGHUP", cleanup);
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
 
