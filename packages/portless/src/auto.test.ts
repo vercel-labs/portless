@@ -361,6 +361,8 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
       "user.name=Test",
       "-c",
       "user.email=t@t",
+      "-c",
+      "commit.gpgsign=false",
       "commit",
       "--allow-empty",
       "-m",

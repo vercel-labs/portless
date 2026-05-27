@@ -1,8 +1,31 @@
 # Changelog
 
-## 0.13.0
+## 0.13.1
 
 <!-- release:start -->
+
+### New Features
+
+- **Configurable startup services**: `portless service install` now persists proxy options such as `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, `--key`, and `--state-dir` into launchd, systemd, and Task Scheduler. `portless service status` now reports the installed service port, HTTPS mode, TLD, LAN mode, wildcard mode, and state directory.
+
+### Bug Fixes
+
+- **Service reinstall port changes**: Reinstalling the startup service with a different port now stops any existing proxy on the previous port before starting the new service.
+- **Service install validation**: LAN service installs now fail early on platforms that cannot publish mDNS records, and service paths such as `~` are normalized before writing native service files.
+
+### Requirements
+
+- **Node.js 24**: The published package now requires Node.js 24 or newer, and repository development uses pnpm 11 with a minimum release age policy. (#307)
+
+### Contributors
+
+- @ctate
+- @skaldebane
+- @ItalianScallian
+- @neefrehman
+<!-- release:end -->
+
+## 0.13.0
 
 ### New Features
 
@@ -16,7 +39,6 @@
 
 - @ctate
 - @Anshuman71
-<!-- release:end -->
 
 ## 0.12.0
 
