@@ -191,6 +191,25 @@ function getFlagValue(args: string[], index: number, flag: string): string {
   return value;
 }
 
+function resolveServicePath(value: string): string {
+  const expanded =
+    value === "~"
+      ? os.homedir()
+      : value.startsWith("~/") || value.startsWith("~\\")
+        ? path.join(os.homedir(), value.slice(2))
+        : value;
+  return path.resolve(expanded);
+}
+
+function normalizeServiceInstallPaths(config: ServiceInstallConfig): ServiceInstallConfig {
+  return {
+    ...config,
+    stateDir: config.stateDir ? resolveServicePath(config.stateDir) : undefined,
+    customCertPath: config.customCertPath ? resolveServicePath(config.customCertPath) : null,
+    customKeyPath: config.customKeyPath ? resolveServicePath(config.customKeyPath) : null,
+  };
+}
+
 function collectServiceExtraEnv(
   env: NodeJS.ProcessEnv | Record<string, string>
 ): Record<string, string> {
@@ -605,13 +624,22 @@ export function buildServiceSpec(options: {
 
 function currentServiceSpec(
   entryScript: string,
-  installConfig: ServiceInstallConfig = parseServiceInstallConfig(["service", "install"])
+  installConfig?: ServiceInstallConfig
 ): ServiceSpec {
   if (!isSupportedPlatform(process.platform)) {
     throw new Error(`Unsupported platform: ${process.platform}`);
   }
 
   const user = resolveUserContext(process.platform);
+  const stateDir =
+    installConfig?.stateDir ||
+    process.env.PORTLESS_STATE_DIR ||
+    defaultStateDir(process.platform, user.home);
+  const config = installConfig ?? {
+    ...DEFAULT_SERVICE_CONFIG,
+    stateDir,
+    extraEnv: collectServiceExtraEnv(process.env),
+  };
   return buildServiceSpec({
     platform: process.platform,
     nodePath: process.execPath,
@@ -620,13 +648,10 @@ function currentServiceSpec(
     uid: user.uid,
     gid: user.gid,
     username: user.username,
-    stateDir:
-      installConfig.stateDir ||
-      process.env.PORTLESS_STATE_DIR ||
-      defaultStateDir(process.platform, user.home),
+    stateDir,
     pathEnv: process.env.PATH,
     programData: process.env.ProgramData,
-    installConfig,
+    installConfig: config,
   });
 }
 
@@ -919,7 +944,7 @@ async function installService(
   runner: CommandRunner,
   args: string[]
 ): Promise<void> {
-  const installConfig = parseServiceInstallConfig(args);
+  const installConfig = normalizeServiceInstallPaths(parseServiceInstallConfig(args));
   requireUnixElevation([entryScript, ...args], runner);
   const spec = currentServiceSpec(entryScript, installConfig);
   prepareServiceState(spec.stateDir);

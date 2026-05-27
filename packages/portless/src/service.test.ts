@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as path from "node:path";
 import {
   buildServiceSpec,
   buildServiceUninstallSudoArgs,
@@ -34,7 +35,7 @@ vi.mock("./utils.js", () => ({
   fixOwnership: vi.fn(),
 }));
 
-const { existsSync, readFileSync, rmSync } = await import("node:fs");
+const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
 
 const originalPlatform = process.platform;
 const originalGetuid = process.getuid;
@@ -63,8 +64,10 @@ afterEach(() => {
     value: originalGetuid,
   });
   vi.mocked(existsSync).mockRestore();
+  vi.mocked(mkdirSync).mockRestore();
   vi.mocked(readFileSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
+  vi.mocked(writeFileSync).mockRestore();
 });
 
 describe("buildServiceSpec", () => {
@@ -425,6 +428,80 @@ describe("handleService", () => {
       command: process.execPath,
       args: ["/fake/cli.js", "proxy", "stop", "--port", "8443"],
     });
+  });
+
+  it("does not validate proxy env while uninstalling", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    const originalPort = process.env.PORTLESS_PORT;
+    const originalTld = process.env.PORTLESS_TLD;
+    process.env.PORTLESS_PORT = "abc";
+    process.env.PORTLESS_TLD = "bad-name";
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    try {
+      await handleService(["service", "uninstall"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      });
+    } finally {
+      if (originalPort === undefined) {
+        delete process.env.PORTLESS_PORT;
+      } else {
+        process.env.PORTLESS_PORT = originalPort;
+      }
+      if (originalTld === undefined) {
+        delete process.env.PORTLESS_TLD;
+      } else {
+        process.env.PORTLESS_TLD = originalTld;
+      }
+    }
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(runner).toHaveBeenCalledWith("systemctl", ["disable", "--now", "portless.service"]);
+  });
+
+  it("normalizes relative install paths before writing the Linux service", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    await handleService(
+      [
+        "service",
+        "install",
+        "--state-dir",
+        "relative-state",
+        "--cert",
+        "cert.pem",
+        "--key",
+        "key.pem",
+      ],
+      {
+        entryScript: "/fake/cli.js",
+        runner,
+      }
+    );
+
+    const stateDir = path.resolve("relative-state");
+    const certPath = path.resolve("cert.pem");
+    const keyPath = path.resolve("key.pem");
+    const unitWrite = vi
+      .mocked(writeFileSync)
+      .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service");
+    const unit = String(unitWrite?.[1] ?? "");
+
+    expect(mkdirSync).toHaveBeenCalledWith(stateDir, { recursive: true });
+    expect(unit).toContain(`Environment=PORTLESS_STATE_DIR="${stateDir}"`);
+    expect(unit).toContain(`"--cert" "${certPath}" "--key" "${keyPath}"`);
   });
 
   it("prints installed service config from a Linux unit", async () => {
