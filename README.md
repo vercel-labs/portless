@@ -255,11 +255,16 @@ Install the proxy as an OS startup service so clean HTTPS URLs are available aft
 
 ```bash
 portless service install
+portless service install --lan
+portless service install --wildcard
+PORTLESS_STATE_DIR=~/.portless-lan PORTLESS_LAN=1 portless service install
 portless service status
 portless service uninstall
 ```
 
-The service uses portless defaults: HTTPS on port 443 with `.localhost` names. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
+The service uses portless defaults unless install options or `PORTLESS_*` environment variables are provided: HTTPS on port 443 with `.localhost` names. `service install` accepts the proxy options you would use with `proxy start`, including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+
+The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLD, LAN mode, wildcard mode, and state directory. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
 ## LAN mode
 
@@ -349,6 +354,8 @@ portless proxy stop              # Stop the proxy
 
 # OS startup service
 portless service install         # Start HTTPS proxy when the OS starts
+portless service install --lan   # Start service in LAN mode
+portless service install --wildcard  # Persist wildcard routing in the service
 portless service status          # Show service and proxy status
 portless service uninstall       # Remove the startup service
 ```
@@ -366,6 +373,7 @@ portless service uninstall       # Remove the startup service
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--state-dir <path>               Use a custom state directory with service install
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --tailscale                      Share the app on your Tailscale network (tailnet)
@@ -382,6 +390,7 @@ PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
+PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode
 PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)

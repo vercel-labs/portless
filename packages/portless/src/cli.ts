@@ -1471,6 +1471,8 @@ ${colors.bold("Examples:")}
   portless run next dev               # -> https://<project>.localhost
   portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
   portless service install            # Start HTTPS proxy on OS startup
+  portless service install --lan      # Persist LAN mode in the startup service
+  portless service install --wildcard # Persist wildcard routing in the startup service
   portless get backend                # -> https://backend.localhost
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
@@ -1550,6 +1552,7 @@ ${colors.bold("Options:")}
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
   --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
@@ -1562,6 +1565,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
+  PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>            Use a custom TLD (e.g. test, dev; default: localhost)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)

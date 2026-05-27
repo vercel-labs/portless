@@ -9,14 +9,16 @@ import {
   DEFAULT_TLD,
   getProtocolPort,
   isProxyRunning,
+  validateTld,
 } from "./cli-utils.js";
 import { fixOwnership } from "./utils.js";
 
-const SERVICE_PORT = getProtocolPort(true);
+const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
 const SYSTEMD_SERVICE = "portless.service";
 const WINDOWS_TASK_NAME = "Portless Proxy";
 const INTERNAL_ELEVATED_ENV = "PORTLESS_INTERNAL_SERVICE_ELEVATED";
+const SERVICE_ENV_KEYS = new Set(["PORTLESS_SYNC_HOSTS"]);
 
 type SupportedPlatform = "darwin" | "linux" | "win32";
 
@@ -46,6 +48,38 @@ type ServiceContext = {
   user: UserContext;
   pathEnv: string;
   programData: string;
+  config: NormalizedServiceConfig;
+};
+
+export type ServiceInstallConfig = {
+  stateDir?: string;
+  proxyPort: number;
+  useHttps: boolean;
+  customCertPath: string | null;
+  customKeyPath: string | null;
+  lanMode: boolean;
+  lanIp: string | null;
+  lanIpExplicit: boolean;
+  tld: string;
+  useWildcard: boolean;
+  extraEnv: Record<string, string>;
+};
+
+export type NormalizedServiceConfig = ServiceInstallConfig & {
+  stateDir: string;
+};
+
+const DEFAULT_SERVICE_CONFIG: ServiceInstallConfig = {
+  proxyPort: DEFAULT_SERVICE_PORT,
+  useHttps: true,
+  customCertPath: null,
+  customKeyPath: null,
+  lanMode: false,
+  lanIp: null,
+  lanIpExplicit: false,
+  tld: DEFAULT_TLD,
+  useWildcard: false,
+  extraEnv: {},
 };
 
 export type ServiceSpec =
@@ -55,6 +89,7 @@ export type ServiceSpec =
       plistPath: string;
       plist: string;
       stateDir: string;
+      config: NormalizedServiceConfig;
       programArguments: string[];
     }
   | {
@@ -63,12 +98,14 @@ export type ServiceSpec =
       unitPath: string;
       unit: string;
       stateDir: string;
+      config: NormalizedServiceConfig;
       execStart: string[];
     }
   | {
       platform: "win32";
       taskName: string;
       stateDir: string;
+      config: NormalizedServiceConfig;
       scriptDir: string;
       scriptPath: string;
       script: string;
@@ -83,6 +120,7 @@ type ServiceStatus = {
   installed: boolean;
   managerState: string;
   proxyRunning: boolean;
+  config: NormalizedServiceConfig;
   details?: string;
 };
 
@@ -119,6 +157,176 @@ function systemdEscape(value: string): string {
 
 function windowsQuote(value: string): string {
   return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function xmlUnescape(value: string): string {
+  return value
+    .replace(/&apos;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, ">")
+    .replace(/&lt;/g, "<")
+    .replace(/&amp;/g, "&");
+}
+
+function parseBooleanEnv(value: string | undefined): boolean | null {
+  if (value === undefined) return null;
+  if (value === "1" || value === "true") return true;
+  if (value === "0" || value === "false") return false;
+  return null;
+}
+
+function parsePortValue(value: string, source: string): number {
+  const port = parseInt(value, 10);
+  if (isNaN(port) || port < 1 || port > 65535) {
+    throw new Error(`${source} must be a number between 1 and 65535.`);
+  }
+  return port;
+}
+
+function getFlagValue(args: string[], index: number, flag: string): string {
+  const value = args[index + 1];
+  if (!value || value.startsWith("-")) {
+    throw new Error(`${flag} requires a value.`);
+  }
+  return value;
+}
+
+function collectServiceExtraEnv(
+  env: NodeJS.ProcessEnv | Record<string, string>
+): Record<string, string> {
+  const extraEnv: Record<string, string> = {};
+  for (const key of SERVICE_ENV_KEYS) {
+    const value = env[key];
+    if (value) extraEnv[key] = value;
+  }
+  return extraEnv;
+}
+
+function parseServiceInstallConfig(
+  args: string[],
+  env: NodeJS.ProcessEnv | Record<string, string> = process.env,
+  options: { allowRuntimeFlags?: boolean } = {}
+): ServiceInstallConfig {
+  const config: ServiceInstallConfig = {
+    ...DEFAULT_SERVICE_CONFIG,
+    extraEnv: collectServiceExtraEnv(env),
+  };
+
+  if (env.PORTLESS_STATE_DIR) {
+    config.stateDir = env.PORTLESS_STATE_DIR;
+  }
+
+  const envHttps = parseBooleanEnv(env.PORTLESS_HTTPS);
+  if (envHttps !== null) {
+    config.useHttps = envHttps;
+  }
+
+  const envLan = parseBooleanEnv(env.PORTLESS_LAN);
+  if (envLan !== null) {
+    config.lanMode = envLan;
+  }
+
+  if (env.PORTLESS_LAN_IP) {
+    config.lanMode = true;
+    config.lanIp = env.PORTLESS_LAN_IP;
+    config.lanIpExplicit = true;
+  }
+
+  if (env.PORTLESS_TLD) {
+    const tld = env.PORTLESS_TLD.trim().toLowerCase();
+    const err = validateTld(tld);
+    if (err) throw new Error(`PORTLESS_TLD: ${err}`);
+    config.tld = tld;
+  }
+
+  const envWildcard = parseBooleanEnv(env.PORTLESS_WILDCARD);
+  if (envWildcard !== null) {
+    config.useWildcard = envWildcard;
+  }
+
+  if (env.PORTLESS_PORT) {
+    config.proxyPort = parsePortValue(env.PORTLESS_PORT, "PORTLESS_PORT");
+  } else {
+    config.proxyPort = getProtocolPort(config.useHttps);
+  }
+
+  const tokens = args[0] === "service" ? args.slice(2) : args;
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    switch (token) {
+      case "-p":
+      case "--port":
+        config.proxyPort = parsePortValue(getFlagValue(tokens, i, token), token);
+        i += 1;
+        break;
+      case "--https":
+        config.useHttps = true;
+        break;
+      case "--no-tls":
+        config.useHttps = false;
+        break;
+      case "--lan":
+        config.lanMode = true;
+        break;
+      case "--ip":
+        config.lanMode = true;
+        config.lanIp = getFlagValue(tokens, i, token);
+        config.lanIpExplicit = true;
+        i += 1;
+        break;
+      case "--tld": {
+        const tld = getFlagValue(tokens, i, token).trim().toLowerCase();
+        const err = validateTld(tld);
+        if (err) throw new Error(err);
+        config.tld = tld;
+        i += 1;
+        break;
+      }
+      case "--wildcard":
+        config.useWildcard = true;
+        break;
+      case "--cert":
+        config.customCertPath = getFlagValue(tokens, i, token);
+        config.useHttps = true;
+        i += 1;
+        break;
+      case "--key":
+        config.customKeyPath = getFlagValue(tokens, i, token);
+        config.useHttps = true;
+        i += 1;
+        break;
+      case "--state-dir":
+        config.stateDir = getFlagValue(tokens, i, token);
+        i += 1;
+        break;
+      case "--foreground":
+      case "--skip-trust":
+        if (!options.allowRuntimeFlags) {
+          throw new Error(`Unknown service install option "${token}".`);
+        }
+        break;
+      default:
+        throw new Error(`Unknown service install option "${token}".`);
+    }
+  }
+
+  if (
+    (config.customCertPath && !config.customKeyPath) ||
+    (!config.customCertPath && config.customKeyPath)
+  ) {
+    throw new Error("--cert and --key must be used together.");
+  }
+
+  if (!env.PORTLESS_PORT && !tokens.includes("--port") && !tokens.includes("-p")) {
+    config.proxyPort = getProtocolPort(config.useHttps);
+  }
+
+  if (!config.lanMode) {
+    config.lanIp = null;
+    config.lanIpExplicit = false;
+  }
+
+  return config;
 }
 
 function readPasswdHome(username: string): string | null {
@@ -165,23 +373,43 @@ function resolveUserContext(platform: SupportedPlatform): UserContext {
   };
 }
 
-function buildProxyCommand(entryScript: string): string[] {
-  const config = buildProxyStartConfig({
-    useHttps: true,
-    lanMode: false,
-    tld: DEFAULT_TLD,
+function buildProxyCommand(entryScript: string, serviceConfig: ServiceInstallConfig): string[] {
+  const proxyConfig = buildProxyStartConfig({
+    useHttps: serviceConfig.useHttps,
+    customCertPath: serviceConfig.customCertPath,
+    customKeyPath: serviceConfig.customKeyPath,
+    lanMode: serviceConfig.lanMode,
+    lanIp: serviceConfig.lanIp,
+    lanIpExplicit: serviceConfig.lanIpExplicit,
+    tld: serviceConfig.tld,
+    useWildcard: serviceConfig.useWildcard,
     foreground: true,
     includePort: true,
-    proxyPort: SERVICE_PORT,
+    proxyPort: serviceConfig.proxyPort,
     skipTrust: true,
   });
-  return [entryScript, "proxy", "start", ...config.args];
+  return [entryScript, "proxy", "start", ...proxyConfig.args];
 }
 
 function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
   const env: Record<string, string> = {
     PORTLESS_STATE_DIR: ctx.stateDir,
+    PORTLESS_PORT: ctx.config.proxyPort.toString(),
+    PORTLESS_HTTPS: ctx.config.useHttps ? "1" : "0",
+    PORTLESS_LAN: ctx.config.lanMode ? "1" : "0",
+    PORTLESS_WILDCARD: ctx.config.useWildcard ? "1" : "0",
+    ...ctx.config.extraEnv,
   };
+
+  if (ctx.config.lanMode && ctx.config.lanIpExplicit && ctx.config.lanIp) {
+    env.PORTLESS_LAN_IP = ctx.config.lanIp;
+  }
+
+  if (ctx.config.lanMode) {
+    env.PORTLESS_TLD = "local";
+  } else if (ctx.config.tld !== DEFAULT_TLD) {
+    env.PORTLESS_TLD = ctx.config.tld;
+  }
 
   if (ctx.platform === "win32") {
     env.USERPROFILE = ctx.user.home;
@@ -284,12 +512,26 @@ export function buildServiceSpec(options: {
   stateDir?: string;
   pathEnv?: string;
   programData?: string;
+  installConfig?: Partial<ServiceInstallConfig>;
 }): ServiceSpec {
+  const installConfig: ServiceInstallConfig = {
+    ...DEFAULT_SERVICE_CONFIG,
+    ...options.installConfig,
+    extraEnv: options.installConfig?.extraEnv ?? {},
+  };
+  const stateDir =
+    options.stateDir ||
+    installConfig.stateDir ||
+    defaultStateDir(options.platform, options.userHome);
+  const normalizedConfig: NormalizedServiceConfig = {
+    ...installConfig,
+    stateDir,
+  };
   const ctx: ServiceContext = {
     platform: options.platform,
     nodePath: options.nodePath,
     entryScript: options.entryScript,
-    stateDir: options.stateDir || defaultStateDir(options.platform, options.userHome),
+    stateDir,
     user: {
       home: options.userHome,
       uid: options.uid,
@@ -298,8 +540,9 @@ export function buildServiceSpec(options: {
     },
     pathEnv: options.pathEnv || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     programData: options.programData || "C:\\ProgramData",
+    config: normalizedConfig,
   };
-  const proxyCommand = buildProxyCommand(ctx.entryScript);
+  const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
 
   if (ctx.platform === "darwin") {
     const programArguments = [ctx.nodePath, ...proxyCommand];
@@ -309,6 +552,7 @@ export function buildServiceSpec(options: {
       plistPath: `/Library/LaunchDaemons/${SERVICE_LABEL}.plist`,
       plist: buildLaunchdPlist(ctx, programArguments),
       stateDir: ctx.stateDir,
+      config: ctx.config,
       programArguments,
     };
   }
@@ -321,6 +565,7 @@ export function buildServiceSpec(options: {
       unitPath: `/etc/systemd/system/${SYSTEMD_SERVICE}`,
       unit: buildSystemdUnit(ctx, execStart),
       stateDir: ctx.stateDir,
+      config: ctx.config,
       execStart,
     };
   }
@@ -333,6 +578,7 @@ export function buildServiceSpec(options: {
     platform: "win32",
     taskName: WINDOWS_TASK_NAME,
     stateDir: ctx.stateDir,
+    config: ctx.config,
     scriptDir,
     scriptPath,
     script,
@@ -357,7 +603,10 @@ export function buildServiceSpec(options: {
   };
 }
 
-function currentServiceSpec(entryScript: string): ServiceSpec {
+function currentServiceSpec(
+  entryScript: string,
+  installConfig: ServiceInstallConfig = parseServiceInstallConfig(["service", "install"])
+): ServiceSpec {
   if (!isSupportedPlatform(process.platform)) {
     throw new Error(`Unsupported platform: ${process.platform}`);
   }
@@ -371,10 +620,159 @@ function currentServiceSpec(entryScript: string): ServiceSpec {
     uid: user.uid,
     gid: user.gid,
     username: user.username,
-    stateDir: process.env.PORTLESS_STATE_DIR || defaultStateDir(process.platform, user.home),
+    stateDir:
+      installConfig.stateDir ||
+      process.env.PORTLESS_STATE_DIR ||
+      defaultStateDir(process.platform, user.home),
     pathEnv: process.env.PATH,
     programData: process.env.ProgramData,
+    installConfig,
   });
+}
+
+type InstalledServiceSnapshot = {
+  command: string[];
+  env: Record<string, string>;
+};
+
+function parseQuotedWords(input: string, options: { unescapeBackslash?: boolean } = {}): string[] {
+  const words: string[] = [];
+  let current = "";
+  let inQuote = false;
+  let inWord = false;
+  const unescapeBackslash = options.unescapeBackslash ?? true;
+
+  for (let i = 0; i < input.length; i += 1) {
+    const char = input[i];
+    if (char === '"') {
+      inQuote = !inQuote;
+      inWord = true;
+      continue;
+    }
+    if (
+      char === "\\" &&
+      i + 1 < input.length &&
+      (input[i + 1] === '"' || (unescapeBackslash && input[i + 1] === "\\"))
+    ) {
+      current += input[i + 1];
+      inWord = true;
+      i += 1;
+      continue;
+    }
+    if (/\s/.test(char) && !inQuote) {
+      if (inWord) {
+        words.push(current);
+        current = "";
+        inWord = false;
+      }
+      continue;
+    }
+    current += char;
+    inWord = true;
+  }
+
+  if (inWord) {
+    words.push(current);
+  }
+
+  return words;
+}
+
+function parsePlistStrings(block: string): string[] {
+  return [...block.matchAll(/<string>([\s\S]*?)<\/string>/g)].map((match) => xmlUnescape(match[1]));
+}
+
+function parsePlistEnv(block: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const match of block.matchAll(/<key>([\s\S]*?)<\/key>\s*<string>([\s\S]*?)<\/string>/g)) {
+    env[xmlUnescape(match[1])] = xmlUnescape(match[2]);
+  }
+  return env;
+}
+
+function readInstalledServiceSnapshot(spec: ServiceSpec): InstalledServiceSnapshot | null {
+  try {
+    if (spec.platform === "darwin") {
+      if (!fs.existsSync(spec.plistPath)) return null;
+      const plist = fs.readFileSync(spec.plistPath, "utf-8");
+      const argsBlock = plist.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+      const envBlock = plist.match(/<key>EnvironmentVariables<\/key>\s*<dict>([\s\S]*?)<\/dict>/);
+      if (!argsBlock) return null;
+      return {
+        command: parsePlistStrings(argsBlock[1]),
+        env: envBlock ? parsePlistEnv(envBlock[1]) : {},
+      };
+    }
+
+    if (spec.platform === "linux") {
+      if (!fs.existsSync(spec.unitPath)) return null;
+      const unit = fs.readFileSync(spec.unitPath, "utf-8");
+      const env: Record<string, string> = {};
+      let command: string[] | null = null;
+      for (const line of unit.split("\n")) {
+        if (line.startsWith("Environment=")) {
+          const entry = line.slice("Environment=".length);
+          const eq = entry.indexOf("=");
+          if (eq > 0) {
+            const key = entry.slice(0, eq);
+            const value = parseQuotedWords(entry.slice(eq + 1))[0] ?? "";
+            env[key] = value;
+          }
+        } else if (line.startsWith("ExecStart=")) {
+          command = parseQuotedWords(line.slice("ExecStart=".length));
+        }
+      }
+      return command ? { command, env } : null;
+    }
+
+    if (!fs.existsSync(spec.scriptPath)) return null;
+    const script = fs.readFileSync(spec.scriptPath, "utf-8");
+    const env: Record<string, string> = {};
+    let commandLine: string | null = null;
+    for (const rawLine of script.split(/\r?\n/)) {
+      const line = rawLine.trim();
+      if (!line || line.toLowerCase() === "@echo off") continue;
+      const envMatch = line.match(/^set "([^=]+)=(.*)"$/);
+      if (envMatch) {
+        env[envMatch[1]] = envMatch[2].replace(/%%/g, "%");
+        continue;
+      }
+      commandLine = line;
+    }
+    return commandLine
+      ? { command: parseQuotedWords(commandLine, { unescapeBackslash: false }), env }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function installedConfigFromSnapshot(
+  snapshot: InstalledServiceSnapshot,
+  fallback: NormalizedServiceConfig
+): NormalizedServiceConfig | null {
+  const proxyIndex = snapshot.command.findIndex(
+    (arg, index) => arg === "proxy" && snapshot.command[index + 1] === "start"
+  );
+  if (proxyIndex === -1) return null;
+
+  try {
+    const parsed = parseServiceInstallConfig(
+      ["service", "install", ...snapshot.command.slice(proxyIndex + 2)],
+      snapshot.env,
+      { allowRuntimeFlags: true }
+    );
+    const stateDir = parsed.stateDir || snapshot.env.PORTLESS_STATE_DIR || fallback.stateDir;
+    return { ...parsed, stateDir };
+  } catch {
+    return null;
+  }
+}
+
+function readInstalledServiceConfig(spec: ServiceSpec): NormalizedServiceConfig | null {
+  const snapshot = readInstalledServiceSnapshot(spec);
+  if (!snapshot) return null;
+  return installedConfigFromSnapshot(snapshot, spec.config);
 }
 
 function collectPortlessEnvArgs(
@@ -476,19 +874,22 @@ function isPermissionError(err: unknown): boolean {
   );
 }
 
-function stopExistingProxy(entryScript: string, runner: CommandRunner): void {
+function stopExistingProxy(entryScript: string, runner: CommandRunner, proxyPort: number): void {
   runRequired(runner, process.execPath, [
     entryScript,
     "proxy",
     "stop",
     "--port",
-    SERVICE_PORT.toString(),
+    proxyPort.toString(),
   ]);
 }
 
-function prepareTrust(stateDir: string): void {
+function prepareServiceState(stateDir: string): void {
   fs.mkdirSync(stateDir, { recursive: true });
   fixOwnership(stateDir);
+}
+
+function prepareTrust(stateDir: string): void {
   try {
     ensureCerts(stateDir);
   } catch (err) {
@@ -513,14 +914,23 @@ function prepareTrust(stateDir: string): void {
   console.warn(colors.yellow("Run `portless trust` if browsers show certificate warnings."));
 }
 
-async function installService(entryScript: string, runner: CommandRunner): Promise<void> {
-  requireUnixElevation([entryScript, "service", "install"], runner);
-  const spec = currentServiceSpec(entryScript);
-  prepareTrust(spec.stateDir);
+async function installService(
+  entryScript: string,
+  runner: CommandRunner,
+  args: string[]
+): Promise<void> {
+  const installConfig = parseServiceInstallConfig(args);
+  requireUnixElevation([entryScript, ...args], runner);
+  const spec = currentServiceSpec(entryScript, installConfig);
+  prepareServiceState(spec.stateDir);
+
+  if (spec.config.useHttps && !spec.config.customCertPath) {
+    prepareTrust(spec.stateDir);
+  }
 
   if (spec.platform === "darwin") {
     runOptional(runner, "launchctl", ["bootout", "system", spec.plistPath]);
-    stopExistingProxy(entryScript, runner);
+    stopExistingProxy(entryScript, runner, spec.config.proxyPort);
     fs.writeFileSync(spec.plistPath, spec.plist);
     fs.chmodSync(spec.plistPath, 0o644);
     runRequired(runner, "chown", ["root:wheel", spec.plistPath]);
@@ -529,7 +939,7 @@ async function installService(entryScript: string, runner: CommandRunner): Promi
     runRequired(runner, "launchctl", ["kickstart", "-k", `system/${spec.label}`]);
   } else if (spec.platform === "linux") {
     runOptional(runner, "systemctl", ["disable", "--now", spec.serviceName]);
-    stopExistingProxy(entryScript, runner);
+    stopExistingProxy(entryScript, runner, spec.config.proxyPort);
     fs.writeFileSync(spec.unitPath, spec.unit);
     fs.chmodSync(spec.unitPath, 0o644);
     runRequired(runner, "systemctl", ["daemon-reload"]);
@@ -537,7 +947,7 @@ async function installService(entryScript: string, runner: CommandRunner): Promi
     runRequired(runner, "systemctl", ["restart", spec.serviceName]);
   } else {
     runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
-    stopExistingProxy(entryScript, runner);
+    stopExistingProxy(entryScript, runner, spec.config.proxyPort);
     fs.mkdirSync(spec.scriptDir, { recursive: true });
     fs.writeFileSync(spec.scriptPath, spec.script);
     runRequired(runner, "schtasks", spec.createArgs);
@@ -546,6 +956,7 @@ async function installService(entryScript: string, runner: CommandRunner): Promi
 
   console.log(colors.green("Portless service installed."));
   console.log(colors.gray(`State directory: ${spec.stateDir}`));
+  console.log(colors.gray(`Proxy port: ${spec.config.proxyPort}`));
 }
 
 async function uninstallService(entryScript: string, runner: CommandRunner): Promise<void> {
@@ -617,7 +1028,8 @@ async function getServiceStatus(
   runner: CommandRunner
 ): Promise<ServiceStatus> {
   const spec = currentServiceSpec(entryScript);
-  const proxyRunning = await isProxyRunning(SERVICE_PORT);
+  const installedConfig = readInstalledServiceConfig(spec) ?? spec.config;
+  const proxyRunning = await isProxyRunning(installedConfig.proxyPort, installedConfig.useHttps);
 
   if (spec.platform === "darwin") {
     const installed = fs.existsSync(spec.plistPath);
@@ -629,7 +1041,13 @@ async function getServiceStatus(
         : installed
           ? "installed"
           : "not installed";
-    return { installed, managerState, proxyRunning, details: spec.plistPath };
+    return {
+      installed,
+      managerState,
+      proxyRunning,
+      config: installedConfig,
+      details: spec.plistPath,
+    };
   }
 
   if (spec.platform === "linux") {
@@ -642,6 +1060,7 @@ async function getServiceStatus(
       managerState:
         active.status === 0 ? activeText || "active" : installed ? "installed" : "not installed",
       proxyRunning,
+      config: installedConfig,
       details: spec.unitPath,
     };
   }
@@ -654,18 +1073,28 @@ async function getServiceStatus(
     installed,
     managerState: installed ? stateMatch?.[1]?.trim() || "installed" : "not installed",
     proxyRunning,
+    config: installedConfig,
     details: spec.taskName,
   };
 }
 
 async function printServiceStatus(entryScript: string, runner: CommandRunner): Promise<void> {
-  const spec = currentServiceSpec(entryScript);
   const status = await getServiceStatus(entryScript, runner);
+  const config = status.config;
   console.log(colors.bold("portless service"));
   console.log(`  Manager state: ${status.managerState}`);
   console.log(`  Installed: ${status.installed ? "yes" : "no"}`);
-  console.log(`  Proxy on 443: ${status.proxyRunning ? "responding" : "not responding"}`);
-  console.log(`  State directory: ${spec.stateDir}`);
+  console.log(
+    `  Proxy on ${config.proxyPort}: ${status.proxyRunning ? "responding" : "not responding"}`
+  );
+  console.log(`  HTTPS: ${config.useHttps ? "yes" : "no"}`);
+  console.log(`  TLD: ${config.lanMode ? "local" : config.tld}`);
+  console.log(`  LAN mode: ${config.lanMode ? "yes" : "no"}`);
+  if (config.lanIpExplicit && config.lanIp) {
+    console.log(`  LAN IP: ${config.lanIp}`);
+  }
+  console.log(`  Wildcard: ${config.useWildcard ? "yes" : "no"}`);
+  console.log(`  State directory: ${config.stateDir}`);
   if (status.details) {
     console.log(`  Service entry: ${status.details}`);
   }
@@ -676,12 +1105,27 @@ export function printServiceHelp(): void {
 ${colors.bold("portless service")} - Start portless automatically when the OS starts.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless service install")}      Install and start the HTTPS service on port 443
-  ${colors.cyan("portless service uninstall")}    Stop and remove the startup service
-  ${colors.cyan("portless service status")}       Show service and proxy status
+  ${colors.cyan("portless service install")}             Install and start the HTTPS service on port 443
+  ${colors.cyan("portless service install --lan")}       Enable LAN mode for the startup service
+  ${colors.cyan("portless service install -p 8443")}     Use a custom proxy port
+  ${colors.cyan("portless service uninstall")}           Stop and remove the startup service
+  ${colors.cyan("portless service status")}              Show service and proxy status
+
+${colors.bold("Install options:")}
+  -p, --port <number>              Port for the proxy service
+  --no-tls                         Disable HTTPS
+  --https                          Enable HTTPS
+  --lan                            Enable LAN mode
+  --ip <address>                   Pin a specific LAN IP
+  --tld <tld>                      Use a custom TLD outside LAN mode
+  --wildcard                       Allow subdomain fallback
+  --cert <path>                    Use a custom TLS certificate
+  --key <path>                     Use a custom TLS private key
+  --state-dir <path>               Use a custom service state directory
 
 ${colors.bold("Notes:")}
-  The service uses the default clean URL mode: HTTPS on port 443.
+  The service uses the default clean URL mode unless options or PORTLESS_*
+  environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.
   Windows installs a Task Scheduler startup task that runs as SYSTEM.
 `);
@@ -701,7 +1145,7 @@ export async function handleService(
 
   try {
     if (action === "install") {
-      await installService(options.entryScript, runner);
+      await installService(options.entryScript, runner, args);
       return;
     }
     if (action === "uninstall") {

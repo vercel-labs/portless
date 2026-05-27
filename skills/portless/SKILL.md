@@ -177,6 +177,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. Overri
 | `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                         |
 | `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)             |
 | `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                  |
+| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                          |
 | `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                           |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent          |
 | `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
@@ -246,11 +247,16 @@ Use the service command when users want the proxy to start automatically after r
 
 ```bash
 portless service install
+portless service install --lan
+portless service install --wildcard
+PORTLESS_STATE_DIR=~/.portless-lan PORTLESS_LAN=1 portless service install
 portless service status
 portless service uninstall
 ```
 
-The service uses the default clean URL behavior: HTTPS on port 443 with `.localhost` names. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
+The service uses portless defaults unless install options or `PORTLESS_*` environment variables are provided: HTTPS on port 443 with `.localhost` names. `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+
+The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLD, LAN mode, wildcard mode, and state directory. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
 ## CLI Reference
 
@@ -278,6 +284,8 @@ The service uses the default clean URL behavior: HTTPS on port 443 with `.localh
 | `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
 | `portless proxy stop`                  | Stop the proxy                                                 |
 | `portless service install`             | Start the HTTPS proxy when the OS starts                       |
+| `portless service install --lan`       | Start the service in LAN mode                                  |
+| `portless service install --wildcard`  | Persist wildcard routing in the startup service                |
 | `portless service status`              | Show service and proxy status                                  |
 | `portless service uninstall`           | Remove the startup service                                     |
 | `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)           |
