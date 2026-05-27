@@ -3343,6 +3343,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     .split(".")
     .map((label) => truncateLabel(label))
     .join(".");
+  parseHostname(safeName, DEFAULT_TLD);
 
   const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {

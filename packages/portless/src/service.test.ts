@@ -575,14 +575,17 @@ describe("handleService", () => {
     const stateDir = path.resolve("relative-state");
     const certPath = path.resolve("cert.pem");
     const keyPath = path.resolve("key.pem");
+    const systemdStateDir = stateDir.replace(/\\/g, "\\\\");
+    const systemdCertPath = certPath.replace(/\\/g, "\\\\");
+    const systemdKeyPath = keyPath.replace(/\\/g, "\\\\");
     const unitWrite = vi
       .mocked(writeFileSync)
       .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service");
     const unit = String(unitWrite?.[1] ?? "");
 
     expect(mkdirSync).toHaveBeenCalledWith(stateDir, { recursive: true });
-    expect(unit).toContain(`Environment=PORTLESS_STATE_DIR="${stateDir}"`);
-    expect(unit).toContain(`"--cert" "${certPath}" "--key" "${keyPath}"`);
+    expect(unit).toContain(`Environment=PORTLESS_STATE_DIR="${systemdStateDir}"`);
+    expect(unit).toContain(`"--cert" "${systemdCertPath}" "--key" "${systemdKeyPath}"`);
   });
 
   it("prints installed service config from a Linux unit", async () => {
