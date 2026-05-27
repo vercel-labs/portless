@@ -35,7 +35,12 @@ vi.mock("./utils.js", () => ({
   fixOwnership: vi.fn(),
 }));
 
+vi.mock("./mdns.js", () => ({
+  isMdnsSupported: vi.fn(() => ({ supported: true })),
+}));
+
 const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+const { isMdnsSupported } = await import("./mdns.js");
 
 const originalPlatform = process.platform;
 const originalGetuid = process.getuid;
@@ -68,6 +73,7 @@ afterEach(() => {
   vi.mocked(readFileSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
   vi.mocked(writeFileSync).mockRestore();
+  vi.mocked(isMdnsSupported).mockReturnValue({ supported: true });
 });
 
 describe("buildServiceSpec", () => {
@@ -379,6 +385,29 @@ describe("handleService", () => {
     expect(exitSpy).toHaveBeenCalledWith(1);
     const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
     expect(output).toContain("bogus");
+  });
+
+  it("rejects unsupported LAN service installs before writing a Windows task", async () => {
+    setPlatform("win32");
+    vi.mocked(isMdnsSupported).mockReturnValue({
+      supported: false,
+      reason: "mDNS publishing is not supported on this platform",
+    });
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    await expect(
+      handleService(["service", "install", "--lan"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      })
+    ).rejects.toThrow("process.exit");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(runner).not.toHaveBeenCalled();
+    expect(mkdirSync).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
+    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+    expect(output).toContain("LAN mode requires mDNS publishing");
   });
 
   it("stops an existing proxy before restarting the Linux service", async () => {

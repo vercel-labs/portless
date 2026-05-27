@@ -11,6 +11,7 @@ import {
   isProxyRunning,
   validateTld,
 } from "./cli-utils.js";
+import { isMdnsSupported } from "./mdns.js";
 import { fixOwnership } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
@@ -939,12 +940,24 @@ function prepareTrust(stateDir: string): void {
   console.warn(colors.yellow("Run `portless trust` if browsers show certificate warnings."));
 }
 
+function ensureServiceConfigSupported(config: ServiceInstallConfig): void {
+  if (!config.lanMode) return;
+  const mdnsSupport = isMdnsSupported();
+  if (mdnsSupport.supported) return;
+
+  const reason = mdnsSupport.reason ? `\n${mdnsSupport.reason}` : "";
+  throw new Error(
+    `LAN mode requires mDNS publishing, which is not supported on this platform.${reason}`
+  );
+}
+
 async function installService(
   entryScript: string,
   runner: CommandRunner,
   args: string[]
 ): Promise<void> {
   const installConfig = normalizeServiceInstallPaths(parseServiceInstallConfig(args));
+  ensureServiceConfigSupported(installConfig);
   requireUnixElevation([entryScript, ...args], runner);
   const spec = currentServiceSpec(entryScript, installConfig);
   prepareServiceState(spec.stateDir);
