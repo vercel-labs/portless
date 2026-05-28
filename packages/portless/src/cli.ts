@@ -22,6 +22,7 @@ import {
   parseHostname,
   parseHostnames,
 } from "./utils.js";
+import { getUrl } from "./api.js";
 import {
   checkHostResolution,
   getManagedHostnames,
@@ -2323,12 +2324,7 @@ ${colors.bold("Examples:")}
   }
 
   const name = positional[0];
-  const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
-
-  const { port, tls, tlds } = await discoverState();
-  const hostname = buildHostnames(effectiveName, tlds)[0]!;
-  const url = formatUrl(hostname, port, tls);
+  const { url } = await getUrl(name, { worktree: !skipWorktree });
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
