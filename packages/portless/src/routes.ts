@@ -26,6 +26,7 @@ export interface RouteMapping extends RouteInfo {
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
+  netbirdUrl?: string;
 }
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
@@ -301,7 +302,9 @@ export class RouteStore {
    */
   updateRoute(
     hostname: string,
-    fields: Partial<Pick<RouteMapping, "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel">>
+    fields: Partial<
+      Pick<RouteMapping, "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel" | "netbirdUrl">
+    >
   ): void {
     this.ensureDir();
     if (!this.acquireLock()) {
@@ -315,6 +318,7 @@ export class RouteStore {
       if (fields.tailscaleHttpsPort !== undefined)
         route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
       if (fields.tailscaleFunnel !== undefined) route.tailscaleFunnel = fields.tailscaleFunnel;
+      if (fields.netbirdUrl !== undefined) route.netbirdUrl = fields.netbirdUrl;
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

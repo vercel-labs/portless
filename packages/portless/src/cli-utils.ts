@@ -332,6 +332,14 @@ export function isLanEnvEnabled(): boolean {
 }
 
 /**
+ * Return whether NetBird sharing is requested via the PORTLESS_NETBIRD env var.
+ */
+export function isNetbirdEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_NETBIRD;
+  return val === "1" || val === "true";
+}
+
+/**
  * Read the last-known proxy configuration from the state directory on disk.
  * Unlike {@link discoverState}, this does not check whether the proxy is
  * actually running. It simply reads whatever state files exist so a
@@ -955,7 +963,8 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
     // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
     if (isExpoLan) return;
-    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
+    const netbirdShared = isNetbirdEnvEnabled();
+    const hostValue = basename === "expo" ? "localhost" : netbirdShared ? "0.0.0.0" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
 }
