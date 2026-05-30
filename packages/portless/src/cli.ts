@@ -1550,7 +1550,7 @@ ${colors.bold("Options:")}
   --cert <path>                 Use a custom TLS certificate
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
+  --tld <tld>                   Use a custom TLD instead of .localhost. Single-label (e.g. test) or multi-label DNS name (e.g. dev.example.com) for own-domain routing
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)

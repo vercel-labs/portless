@@ -907,10 +907,22 @@ describe("readTldFromDir / writeTldFile", () => {
 });
 
 describe("validateTld", () => {
-  it("returns null for valid TLDs", () => {
+  it("returns null for valid single-label TLDs", () => {
     expect(validateTld("localhost")).toBeNull();
     expect(validateTld("test")).toBeNull();
     expect(validateTld("internal")).toBeNull();
+  });
+
+  it("returns null for valid multi-label TLDs (user-owned domains)", () => {
+    expect(validateTld("my.tld")).toBeNull();
+    expect(validateTld("example.com")).toBeNull();
+    expect(validateTld("dev.example.com")).toBeNull();
+    expect(validateTld("a.b.c.d.e")).toBeNull();
+  });
+
+  it("returns null for labels containing hyphens (not at the edges)", () => {
+    expect(validateTld("my-tld")).toBeNull();
+    expect(validateTld("multi-word.example.com")).toBeNull();
   });
 
   it("rejects empty string", () => {
@@ -918,10 +930,34 @@ describe("validateTld", () => {
   });
 
   it("rejects TLDs with invalid characters", () => {
-    expect(validateTld("my-tld")).toMatch(/must contain only/);
-    expect(validateTld("my.tld")).toMatch(/must contain only/);
-    expect(validateTld("MY_TLD")).toMatch(/must contain only/);
-    expect(validateTld("tld!")).toMatch(/must contain only/);
+    expect(validateTld("MY_TLD")).toMatch(/lowercase letters, digits, and hyphens/);
+    expect(validateTld("tld!")).toMatch(/lowercase letters, digits, and hyphens/);
+    expect(validateTld("UPPERCASE")).toMatch(/lowercase letters, digits, and hyphens/);
+  });
+
+  it("rejects labels with leading or trailing hyphens", () => {
+    expect(validateTld("-leading")).toMatch(/lowercase letters, digits, and hyphens/);
+    expect(validateTld("trailing-")).toMatch(/lowercase letters, digits, and hyphens/);
+    expect(validateTld("ok.-mid")).toMatch(/lowercase letters, digits, and hyphens/);
+  });
+
+  it("rejects empty labels (leading, trailing, or consecutive dots)", () => {
+    expect(validateTld(".start")).toMatch(/empty label/);
+    expect(validateTld("end.")).toMatch(/empty label/);
+    expect(validateTld("a..b")).toMatch(/empty label/);
+  });
+
+  it("rejects labels longer than 63 characters", () => {
+    const tooLong = "a".repeat(64);
+    expect(validateTld(tooLong)).toMatch(/exceeds 63 characters/);
+    expect(validateTld(`ok.${tooLong}`)).toMatch(/exceeds 63 characters/);
+  });
+
+  it("rejects TLDs longer than 253 characters", () => {
+    // 4 labels of 63 chars + 3 dots = 255 chars total
+    const tld = ["a".repeat(63), "b".repeat(63), "c".repeat(63), "d".repeat(63)].join(".");
+    expect(tld.length).toBeGreaterThan(253);
+    expect(validateTld(tld)).toMatch(/exceeds 253 characters/);
   });
 
   it("allows public TLDs (they produce warnings elsewhere)", () => {

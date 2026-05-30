@@ -171,20 +171,20 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. Overri
 
 ### Environment variables
 
-| Variable              | Description                                                                 |
-| --------------------- | --------------------------------------------------------------------------- |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)       |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                         |
-| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)             |
-| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                  |
-| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                          |
-| `PORTLESS_TLD`        | Use a custom TLD instead of localhost (e.g. test)                           |
-| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent          |
-| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
-| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)  |
-| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`) |
-| `PORTLESS_STATE_DIR`  | Override the state directory                                                |
-| `PORTLESS=0`          | Bypass the proxy, run the command directly                                  |
+| Variable              | Description                                                                                                              |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------ |
+| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)                                                    |
+| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                                                                      |
+| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                                                          |
+| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                                                               |
+| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                                                                       |
+| `PORTLESS_TLD`        | Use a custom TLD instead of localhost. Single-label (`test`, `internal`) or multi-label DNS hostname (`dev.example.com`) |
+| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent                                                       |
+| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)                                                            |
+| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)                                               |
+| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)                                              |
+| `PORTLESS_STATE_DIR`  | Override the state directory                                                                                             |
+| `PORTLESS=0`          | Bypass the proxy, run the command directly                                                                               |
 
 ### HTTP/2 + HTTPS
 
@@ -260,48 +260,49 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 ## CLI Reference
 
-| Command                                | Description                                                    |
-| -------------------------------------- | -------------------------------------------------------------- |
-| `portless`                             | Run dev script through proxy                                   |
-| `portless`                             | From monorepo root: run all workspace packages                 |
-| `portless --script <name>`             | Run a specific package.json script (default: dev)              |
-| `portless run [cmd] [args...]`         | Infer name from project, run through proxy (auto-starts)       |
-| `portless run --name <name> <cmd>`     | Override inferred base name (worktree prefix still applies)    |
-| `portless <name> <cmd> [args...]`      | Run app at `https://<name>.localhost` (auto-starts proxy)      |
-| `portless get <name>`                  | Print URL for a service (for cross-service wiring)             |
-| `portless get <name> --no-worktree`    | Print URL without worktree prefix                              |
-| `portless list`                        | Show active routes                                             |
-| `portless trust`                       | Add local CA to system trust store (for HTTPS)                 |
-| `portless clean`                       | Remove state, CA trust entry, and /etc/hosts block             |
-| `portless prune`                       | Kill orphaned dev servers from crashed sessions                |
-| `portless prune --force`               | Kill orphans with SIGKILL instead of SIGTERM                   |
-| `portless proxy start`                 | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
-| `portless proxy start --no-tls`        | Start without HTTPS (plain HTTP on port 80)                    |
-| `portless proxy start --lan`           | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
-| `portless proxy start -p <number>`     | Start the proxy on a custom port                               |
-| `portless proxy start --tld test`      | Use .test instead of .localhost                                |
-| `portless proxy start --foreground`    | Start the proxy in foreground (for debugging)                  |
-| `portless proxy start --wildcard`      | Allow unregistered subdomains to fall back to parent route     |
-| `portless proxy stop`                  | Stop the proxy                                                 |
-| `portless service install`             | Start the HTTPS proxy when the OS starts                       |
-| `portless service install --lan`       | Start the service in LAN mode                                  |
-| `portless service install --wildcard`  | Persist wildcard routing in the startup service                |
-| `portless service status`              | Show service and proxy status                                  |
-| `portless service uninstall`           | Remove the startup service                                     |
-| `portless alias <name> <port>`         | Register a static route (e.g. for Docker containers)           |
-| `portless alias <name> <port> --force` | Overwrite an existing route                                    |
-| `portless alias --remove <name>`       | Remove a static route                                          |
-| `portless hosts sync`                  | Add routes to /etc/hosts (fixes Safari)                        |
-| `portless hosts clean`                 | Remove portless entries from /etc/hosts                        |
-| `portless <name> --app-port <n> <cmd>` | Use a fixed port for the app instead of auto-assignment        |
-| `portless <name> --tailscale <cmd>`    | Share the app on your Tailscale network (tailnet)              |
-| `portless <name> --funnel <cmd>`       | Share the app publicly via Tailscale Funnel                    |
-| `portless <name> --force <cmd>`        | Kill the existing process and take over its route              |
-| `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
-| `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |
-| `portless --help` / `-h`               | Show help                                                      |
-| `portless run --help`                  | Show help for a subcommand (also: alias, hosts, clean)         |
-| `portless --version` / `-v`            | Show version                                                   |
+| Command                                      | Description                                                    |
+| -------------------------------------------- | -------------------------------------------------------------- |
+| `portless`                                   | Run dev script through proxy                                   |
+| `portless`                                   | From monorepo root: run all workspace packages                 |
+| `portless --script <name>`                   | Run a specific package.json script (default: dev)              |
+| `portless run [cmd] [args...]`               | Infer name from project, run through proxy (auto-starts)       |
+| `portless run --name <name> <cmd>`           | Override inferred base name (worktree prefix still applies)    |
+| `portless <name> <cmd> [args...]`            | Run app at `https://<name>.localhost` (auto-starts proxy)      |
+| `portless get <name>`                        | Print URL for a service (for cross-service wiring)             |
+| `portless get <name> --no-worktree`          | Print URL without worktree prefix                              |
+| `portless list`                              | Show active routes                                             |
+| `portless trust`                             | Add local CA to system trust store (for HTTPS)                 |
+| `portless clean`                             | Remove state, CA trust entry, and /etc/hosts block             |
+| `portless prune`                             | Kill orphaned dev servers from crashed sessions                |
+| `portless prune --force`                     | Kill orphans with SIGKILL instead of SIGTERM                   |
+| `portless proxy start`                       | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
+| `portless proxy start --no-tls`              | Start without HTTPS (plain HTTP on port 80)                    |
+| `portless proxy start --lan`                 | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
+| `portless proxy start -p <number>`           | Start the proxy on a custom port                               |
+| `portless proxy start --tld test`            | Use .test instead of .localhost                                |
+| `portless proxy start --tld dev.example.com` | Use a domain you own (e.g. for tailnet/LAN access)             |
+| `portless proxy start --foreground`          | Start the proxy in foreground (for debugging)                  |
+| `portless proxy start --wildcard`            | Allow unregistered subdomains to fall back to parent route     |
+| `portless proxy stop`                        | Stop the proxy                                                 |
+| `portless service install`                   | Start the HTTPS proxy when the OS starts                       |
+| `portless service install --lan`             | Start the service in LAN mode                                  |
+| `portless service install --wildcard`        | Persist wildcard routing in the startup service                |
+| `portless service status`                    | Show service and proxy status                                  |
+| `portless service uninstall`                 | Remove the startup service                                     |
+| `portless alias <name> <port>`               | Register a static route (e.g. for Docker containers)           |
+| `portless alias <name> <port> --force`       | Overwrite an existing route                                    |
+| `portless alias --remove <name>`             | Remove a static route                                          |
+| `portless hosts sync`                        | Add routes to /etc/hosts (fixes Safari)                        |
+| `portless hosts clean`                       | Remove portless entries from /etc/hosts                        |
+| `portless <name> --app-port <n> <cmd>`       | Use a fixed port for the app instead of auto-assignment        |
+| `portless <name> --tailscale <cmd>`          | Share the app on your Tailscale network (tailnet)              |
+| `portless <name> --funnel <cmd>`             | Share the app publicly via Tailscale Funnel                    |
+| `portless <name> --force <cmd>`              | Kill the existing process and take over its route              |
+| `portless --name <name> <cmd>`               | Force `<name>` as app name (bypasses subcommand dispatch)      |
+| `portless <name> -- <cmd> [args...]`         | Stop flag parsing; everything after `--` is passed to child    |
+| `portless --help` / `-h`                     | Show help                                                      |
+| `portless run --help`                        | Show help for a subcommand (also: alias, hosts, clean)         |
+| `portless --version` / `-v`                  | Show version                                                   |
 
 **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 

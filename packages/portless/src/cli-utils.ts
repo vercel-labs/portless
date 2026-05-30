@@ -247,12 +247,29 @@ export const RISKY_TLDS = new Map<string, string>([
 
 /**
  * Validate a TLD string. Returns an error message if invalid, or null if OK.
+ * Accepts single-label TLDs (e.g. `localhost`, `test`) and multi-label DNS
+ * names (e.g. `dev.example.com`) so users with their own domain can route
+ * tailnet or LAN traffic through portless under a memorable hostname.
+ * Each label must be a valid DNS label: lowercase letters, digits, hyphens,
+ * no leading/trailing hyphens, 63 chars max; total length 253 chars max.
  * Does not check for risky TLDs (those produce warnings, not errors).
  */
 export function validateTld(tld: string): string | null {
   if (!tld) return "TLD cannot be empty";
-  if (!/^[a-z0-9]+$/.test(tld)) {
-    return `Invalid TLD "${tld}": must contain only lowercase letters and digits`;
+  if (tld.length > 253) {
+    return `Invalid TLD "${tld}": exceeds 253 characters`;
+  }
+  const labels = tld.split(".");
+  for (const label of labels) {
+    if (label.length === 0) {
+      return `Invalid TLD "${tld}": empty label (leading, trailing, or consecutive dots)`;
+    }
+    if (label.length > 63) {
+      return `Invalid TLD "${tld}": label "${label}" exceeds 63 characters`;
+    }
+    if (!/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label)) {
+      return `Invalid TLD "${tld}": label "${label}" must be lowercase letters, digits, and hyphens (not at the start or end)`;
+    }
   }
   return null;
 }

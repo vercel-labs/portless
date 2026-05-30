@@ -212,6 +212,18 @@ The proxy auto-syncs `/etc/hosts` for route hostnames (including `.test`), so th
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
+### Multi-label TLDs (own-domain access from tailnet, LAN, intranet)
+
+The `--tld` value accepts any valid DNS hostname (single-label or multi-label), so a domain you own can be used as the "TLD":
+
+```bash
+portless proxy start --tld dev.example.com
+portless myapp next dev
+# -> https://myapp.dev.example.com
+```
+
+This is useful when serving the proxy on a tailnet/LAN IP and resolving the hostname via your own DNS (wildcard A record pointing at that IP, no `/etc/hosts` edit required on devices). Each label must follow DNS rules: lowercase letters, digits, hyphens (not at the edges), 63 chars per label, 253 chars total.
+
 ## How it works
 
 ```mermaid
