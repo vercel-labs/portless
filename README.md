@@ -255,7 +255,7 @@ The documentation site at [portless.dev](https://portless.dev) includes an AI ch
 ```
 DOCS_CHAT_MODEL=anthropic/claude-haiku-4.5    # Default (Anthropic)
 DOCS_CHAT_MODEL=openai/gpt-4o-mini            # OpenAI
-DOCS_CHAT_MODEL=minimax/MiniMax-M2.7          # MiniMax
+DOCS_CHAT_MODEL=minimax/MiniMax-M3             # MiniMax
 ```
 
 For MiniMax, set the API key:
@@ -265,7 +265,7 @@ MINIMAX_API_KEY=<your-key>
 MINIMAX_BASE_URL=https://api.minimax.io/v1    # Default (global); use https://api.minimaxi.com/v1 for China
 ```
 
-Available MiniMax models: `MiniMax-M2.7` (default, latest flagship with enhanced reasoning and coding), `MiniMax-M2.7-highspeed` (high-speed version for low-latency scenarios), `MiniMax-M2.5` (204K context), and `MiniMax-M2.5-highspeed` (faster).
+Available MiniMax models: `MiniMax-M3` (default, 512K context, up to 128K output, supports image input), `MiniMax-M2.7` (previous flagship), and `MiniMax-M2.7-highspeed` (high-speed version for low-latency scenarios).
 
 ## Requirements
 
