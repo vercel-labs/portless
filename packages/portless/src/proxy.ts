@@ -9,6 +9,46 @@ import { ARROW_SVG, renderPage } from "./pages.js";
 export const PORTLESS_HEADER = "X-Portless";
 
 /**
+ * Dial options that make upstream loopback connections family-agnostic.
+ *
+ * Dev servers that bind `localhost` can end up listening on IPv6 `::1` only:
+ * Node 17+ resolves `localhost` to `::1` first, and frameworks like Vite
+ * default `server.host` to `localhost` (flag injection cannot reach them when
+ * the dev command goes through a package.json script). A hardcoded
+ * `127.0.0.1` dial gets ECONNREFUSED from such servers even though the app
+ * is healthy.
+ *
+ * The fixed lookup result keeps behavior deterministic regardless of how the
+ * OS resolves `localhost`: IPv4 is tried first (preserving prior behavior)
+ * and `autoSelectFamily` falls back to `::1`. Refused connections fail
+ * instantly on loopback, so the fallback adds no measurable latency.
+ *
+ * `hostname` (used by `http.request`) and `host` (used by
+ * `net.createConnection`) must be a name, not an IP literal, or the custom
+ * lookup is bypassed.
+ */
+export const LOOPBACK_DIAL_OPTIONS = {
+  hostname: "localhost",
+  host: "localhost",
+  autoSelectFamily: true,
+  lookup: ((_hostname, _options, callback) => {
+    callback(null, [
+      { address: "127.0.0.1", family: 4 },
+      { address: "::1", family: 6 },
+    ]);
+  }) as net.LookupFunction,
+} as const;
+
+/**
+ * Format a dial error for logging. When both loopback families are refused,
+ * the error is an AggregateError whose `message` is empty but whose `code`
+ * is set (e.g. ECONNREFUSED).
+ */
+function dialErrorMessage(err: NodeJS.ErrnoException): string {
+  return err.message || err.code || "connection failed";
+}
+
+/**
  * HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2 responses.
  * These must be stripped when proxying an HTTP/1.1 backend response
  * back to an HTTP/2 client.
@@ -192,7 +232,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const proxyReq = http.request(
       {
-        hostname: "127.0.0.1",
+        ...LOOPBACK_DIAL_OPTIONS,
         port: route.port,
         path: req.url,
         method: req.method,
@@ -222,7 +262,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     );
 
     proxyReq.on("error", (err) => {
-      onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
+      onError(`Proxy error for ${getRequestHost(req)}: ${dialErrorMessage(err)}`);
       if (!res.headersSent) {
         const errWithCode = err as NodeJS.ErrnoException;
         const detail =
@@ -299,7 +339,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
 
     const proxyReq = http.request({
-      hostname: "127.0.0.1",
+      ...LOOPBACK_DIAL_OPTIONS,
       port: route.port,
       path: req.url,
       method: req.method,
@@ -337,7 +377,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
+      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${dialErrorMessage(err)}`);
       socket.destroy();
     });
 
