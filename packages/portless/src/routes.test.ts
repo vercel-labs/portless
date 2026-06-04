@@ -458,6 +458,22 @@ describe("RouteStore", () => {
       expect(routes[0].ngrokPid).toBe(12345);
     });
 
+    it("clears ngrok fields via updateRoute", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      store.updateRoute("myapp.localhost", {
+        ngrokUrl: "https://abc123.ngrok.app",
+        ngrokPid: 12345,
+      });
+      store.updateRoute("myapp.localhost", {
+        ngrokUrl: null,
+        ngrokPid: null,
+      });
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].ngrokUrl).toBeUndefined();
+      expect(routes[0].ngrokPid).toBeUndefined();
+    });
+
     it("loads routes without ngrok fields", () => {
       store.addRoute("legacy.localhost", 4000, process.pid);
       const routes = store.loadRoutes();

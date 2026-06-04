@@ -410,6 +410,12 @@ function isEnabledEnv(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | null): string {
+  if (signal) return ` (signal ${signal})`;
+  if (code !== null) return ` (exit ${code})`;
+  return "";
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -1129,6 +1135,36 @@ async function runApp(
   let tailscaleUrl: string | undefined;
   let ngrokUrl: string | undefined;
   let ngrokProcess: Awaited<ReturnType<typeof startNgrok>> | undefined;
+  let stoppingNgrok = false;
+  let ngrokRouteReady = false;
+  let ngrokExitHandled = false;
+  let pendingNgrokExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+
+  const handleNgrokExit = (code: number | null, signal: NodeJS.Signals | null) => {
+    if (stoppingNgrok || ngrokExitHandled) return;
+    if (!ngrokRouteReady) {
+      pendingNgrokExit = { code, signal };
+      return;
+    }
+    ngrokExitHandled = true;
+    ngrokUrl = undefined;
+    console.warn(
+      colors.yellow(
+        `Warning: ngrok tunnel for ${hostname} stopped${formatProcessExitSuffix(
+          code,
+          signal
+        )}. Removing its public URL from the route list.`
+      )
+    );
+    try {
+      store.updateRoute(hostname, {
+        ngrokUrl: null,
+        ngrokPid: null,
+      });
+    } catch {
+      // Best-effort cleanup; non-fatal
+    }
+  };
 
   if (wantsTailscale && tsBaseUrl) {
     const maxAttempts = 3;
@@ -1175,7 +1211,10 @@ async function runApp(
 
   if (wantsNgrok) {
     try {
-      ngrokProcess = await startNgrok(port);
+      ngrokProcess = await startNgrok(port, {
+        hostHeader: hostname,
+        onExit: handleNgrokExit,
+      });
       ngrokUrl = ngrokProcess.url;
       console.log(chalk.green(`  ngrok -> ${ngrokUrl}`));
       console.log(chalk.gray("  (accessible from the public internet via ngrok)\n"));
@@ -1187,6 +1226,12 @@ async function runApp(
         });
       } catch {
         // Non-fatal: route display metadata only
+      } finally {
+        ngrokRouteReady = true;
+        if (pendingNgrokExit) {
+          handleNgrokExit(pendingNgrokExit.code, pendingNgrokExit.signal);
+          pendingNgrokExit = undefined;
+        }
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -1274,6 +1319,7 @@ async function runApp(
       ...caEnv,
     },
     onCleanup: () => {
+      stoppingNgrok = true;
       stopNgrokProcess(ngrokProcess?.child);
       try {
         unregisterTailscale({

@@ -30,6 +30,14 @@ export interface RouteMapping extends RouteInfo {
   ngrokPid?: number;
 }
 
+type RouteMetadataPatch = {
+  tailscaleUrl?: string | null;
+  tailscaleHttpsPort?: number | null;
+  tailscaleFunnel?: boolean | null;
+  ngrokUrl?: string | null;
+  ngrokPid?: number | null;
+};
+
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
   return (
@@ -301,15 +309,7 @@ export class RouteStore {
    * Update metadata on an existing route entry. Only provided fields are
    * merged; the route must already exist (matched by hostname).
    */
-  updateRoute(
-    hostname: string,
-    fields: Partial<
-      Pick<
-        RouteMapping,
-        "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel" | "ngrokUrl" | "ngrokPid"
-      >
-    >
-  ): void {
+  updateRoute(hostname: string, fields: RouteMetadataPatch): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -318,12 +318,28 @@ export class RouteStore {
       const routes = this.loadRoutes(true);
       const route = routes.find((r) => r.hostname === hostname);
       if (!route) return;
-      if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
-      if (fields.tailscaleHttpsPort !== undefined)
-        route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
-      if (fields.tailscaleFunnel !== undefined) route.tailscaleFunnel = fields.tailscaleFunnel;
-      if (fields.ngrokUrl !== undefined) route.ngrokUrl = fields.ngrokUrl;
-      if (fields.ngrokPid !== undefined) route.ngrokPid = fields.ngrokPid;
+      if ("tailscaleUrl" in fields) {
+        if (fields.tailscaleUrl === null) delete route.tailscaleUrl;
+        else if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
+      }
+      if ("tailscaleHttpsPort" in fields) {
+        if (fields.tailscaleHttpsPort === null) delete route.tailscaleHttpsPort;
+        else if (fields.tailscaleHttpsPort !== undefined)
+          route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
+      }
+      if ("tailscaleFunnel" in fields) {
+        if (fields.tailscaleFunnel === null) delete route.tailscaleFunnel;
+        else if (fields.tailscaleFunnel !== undefined)
+          route.tailscaleFunnel = fields.tailscaleFunnel;
+      }
+      if ("ngrokUrl" in fields) {
+        if (fields.ngrokUrl === null) delete route.ngrokUrl;
+        else if (fields.ngrokUrl !== undefined) route.ngrokUrl = fields.ngrokUrl;
+      }
+      if ("ngrokPid" in fields) {
+        if (fields.ngrokPid === null) delete route.ngrokPid;
+        else if (fields.ngrokPid !== undefined) route.ngrokPid = fields.ngrokPid;
+      }
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

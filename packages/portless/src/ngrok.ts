@@ -26,6 +26,8 @@ interface NgrokCommandResult {
 export type NgrokCommandRunner = (args: string[]) => NgrokCommandResult;
 
 export interface StartNgrokOptions {
+  hostHeader?: string;
+  onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   spawner?: NgrokSpawner;
   timeoutMs?: number;
 }
@@ -130,8 +132,14 @@ export function extractNgrokUrl(output: string): string | null {
   return null;
 }
 
-export function buildNgrokArgs(localPort: number): string[] {
-  return ["http", "--log=stdout", "--log-format=logfmt", `http://127.0.0.1:${localPort}`];
+export function buildNgrokArgs(localPort: number, hostHeader = "rewrite"): string[] {
+  return [
+    "http",
+    "--log=stdout",
+    "--log-format=logfmt",
+    `--host-header=${hostHeader}`,
+    `http://127.0.0.1:${localPort}`,
+  ];
 }
 
 export function startNgrok(
@@ -140,7 +148,7 @@ export function startNgrok(
 ): Promise<StartedNgrok> {
   const spawner = options.spawner ?? defaultSpawner;
   const timeoutMs = options.timeoutMs ?? NGROK_START_TIMEOUT_MS;
-  const args = buildNgrokArgs(localPort);
+  const args = buildNgrokArgs(localPort, options.hostHeader);
 
   let child: NgrokChildProcess;
   try {
@@ -151,6 +159,7 @@ export function startNgrok(
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let started = false;
     let output = "";
 
     const settle = (fn: () => void) => {
@@ -168,7 +177,10 @@ export function startNgrok(
       }
       const url = extractNgrokUrl(output);
       if (url) {
-        settle(() => resolve({ url, pid: child.pid, child }));
+        settle(() => {
+          started = true;
+          resolve({ url, pid: child.pid, child });
+        });
       }
     };
 
@@ -193,6 +205,10 @@ export function startNgrok(
       settle(() => reject(formatSpawnError(err)));
     });
     child.on("exit", (code, signal) => {
+      if (settled) {
+        if (started) options.onExit?.(code, signal);
+        return;
+      }
       settle(() => {
         const suffix = signal ? ` (signal ${signal})` : code !== null ? ` (exit ${code})` : "";
         const error = formatOutputError(output);

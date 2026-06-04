@@ -68,11 +68,22 @@ describe("ngrok", () => {
   });
 
   describe("buildNgrokArgs", () => {
-    it("forwards HTTP traffic to the local app port", () => {
+    it("forwards HTTP traffic to the local app port with host rewriting", () => {
       expect(buildNgrokArgs(4123)).toEqual([
         "http",
         "--log=stdout",
         "--log-format=logfmt",
+        "--host-header=rewrite",
+        "http://127.0.0.1:4123",
+      ]);
+    });
+
+    it("uses the requested upstream host header", () => {
+      expect(buildNgrokArgs(4123, "myapp.localhost")).toEqual([
+        "http",
+        "--log=stdout",
+        "--log-format=logfmt",
+        "--host-header=myapp.localhost",
         "http://127.0.0.1:4123",
       ]);
     });
@@ -112,8 +123,32 @@ describe("ngrok", () => {
         pid: 12345,
       });
       expect(calls).toEqual([
-        ["http", "--log=stdout", "--log-format=logfmt", "http://127.0.0.1:4123"],
+        [
+          "http",
+          "--log=stdout",
+          "--log-format=logfmt",
+          "--host-header=rewrite",
+          "http://127.0.0.1:4123",
+        ],
       ]);
+    });
+
+    it("notifies when ngrok exits after startup", async () => {
+      const child = new MockNgrokChild();
+      const exits: Array<{ code: number | null; signal: NodeJS.Signals | null }> = [];
+      const promise = startNgrok(4123, {
+        onExit: (code, signal) => exits.push({ code, signal }),
+        spawner: createSpawner(child),
+        timeoutMs: 1000,
+      });
+
+      child.stdout.write("Forwarding https://abc123.ngrok.app -> http://127.0.0.1:4123\n");
+
+      await expect(promise).resolves.toMatchObject({
+        url: "https://abc123.ngrok.app",
+      });
+      child.emit("exit", 0, null);
+      expect(exits).toEqual([{ code: 0, signal: null }]);
     });
 
     it("throws an install hint when the ngrok CLI is missing", async () => {
