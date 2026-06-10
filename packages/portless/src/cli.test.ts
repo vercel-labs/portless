@@ -309,7 +309,7 @@ describe("CLI", () => {
 
     it("hoists multiple assignments and keeps the rest of the command intact", () => {
       const { status, stdout } = run(
-        ["myapp", "A=1", "B=2", "node", "-e", "console.log(process.env.A + process.env.B)"],
+        ["myapp", "A=1", "B=2", "node", "-e", "process.stdout.write(process.env.A+process.env.B)"],
         { env: { PORTLESS: "0" } }
       );
       expect(status).toBe(0);
