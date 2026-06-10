@@ -850,8 +850,9 @@ export function spawnCommand(
   // On Unix, spawn detached so the child gets its own process group. This
   // lets us kill the entire tree (shell + grandchild dev server) with a
   // single process.kill(-pid, signal) instead of only the immediate child.
+  const windowsCommand = commandArgs.map(cmdEscape).join(" ");
   const child = isWindows
-    ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.map(cmdEscape).join(" ")], {
+    ? spawn("cmd.exe", ["/d", "/s", "/c", `"${windowsCommand}"`], {
         stdio: "inherit",
         env,
       })
