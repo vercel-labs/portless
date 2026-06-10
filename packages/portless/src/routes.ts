@@ -346,13 +346,21 @@ export class RouteStore {
     }
   }
 
-  removeRoute(hostname: string): void {
+  /**
+   * Remove a route by hostname. When `ownerPid` is provided, the entry is
+   * only removed while it is still owned by that pid. Exit cleanups must
+   * pass their own pid: after a `--force` takeover the killed process would
+   * otherwise deregister the route the new owner just registered.
+   */
+  removeRoute(hostname: string, ownerPid?: number): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
-      const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
+      const routes = this.loadRoutes(true).filter(
+        (r) => r.hostname !== hostname || (ownerPid !== undefined && r.pid !== ownerPid)
+      );
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

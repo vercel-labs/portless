@@ -1122,6 +1122,59 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(result.protocol).toBe("h2");
   });
 
+  it("forwards the :authority hostname as Host to the backend (h2 -> HTTP/1.1)", async () => {
+    let receivedHost = "";
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        receivedHost = req.headers.host || "";
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+      // Real h2 clients (browsers, curl) send only :authority — no Host header.
+      const req = client.request({
+        ":method": "GET",
+        ":path": "/",
+        ":authority": "myapp.localhost",
+      });
+      req.on("response", (headers) => {
+        const s = headers[":status"] as number;
+        req.resume();
+        req.on("end", () => {
+          client.close();
+          resolve(s);
+        });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(status).toBe(200);
+    expect(receivedHost).toBe("myapp.localhost");
+  });
+
   it("still accepts HTTP/1.1 connections over TLS (allowHTTP1)", async () => {
     const routes: RouteInfo[] = [];
     const server = trackServer(

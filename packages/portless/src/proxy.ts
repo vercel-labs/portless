@@ -189,6 +189,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         delete proxyReqHeaders[key];
       }
     }
+    // HTTP/2 carries the hostname only in :authority (stripped above); restore
+    // it as Host so Host-dependent backends (multi-tenant vhosts, framework
+    // host allow-lists) see the original hostname instead of 127.0.0.1.
+    if (!proxyReqHeaders.host) {
+      proxyReqHeaders.host = getRequestHost(req);
+    }
 
     const proxyReq = http.request(
       {
@@ -296,6 +302,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       if (key.startsWith(":")) {
         delete proxyReqHeaders[key];
       }
+    }
+    // HTTP/2 carries the hostname only in :authority (stripped above); restore
+    // it as Host so Host-dependent backends (multi-tenant vhosts, framework
+    // host allow-lists) see the original hostname instead of 127.0.0.1.
+    if (!proxyReqHeaders.host) {
+      proxyReqHeaders.host = getRequestHost(req);
     }
 
     const proxyReq = http.request({

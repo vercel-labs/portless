@@ -1251,7 +1251,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid);
       } catch {
         // Best-effort cleanup; non-fatal
       }
@@ -1330,7 +1330,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -1573,7 +1573,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless run")}                     Same as above
   ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
-  ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon)
+  ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
   ${colors.cyan("portless proxy stop")}              Stop the proxy
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
@@ -2983,7 +2983,7 @@ async function spawnProxiedApp(
     }
     if (capturedStore && capturedHostname) {
       try {
-        capturedStore.removeRoute(capturedHostname);
+        capturedStore.removeRoute(capturedHostname, process.pid);
       } catch {
         // non-fatal
       }
@@ -3270,7 +3270,7 @@ async function runWithTurbo(
 
     for (const { hostname } of routes) {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid);
       } catch {
         // non-fatal
       }
@@ -3357,7 +3357,7 @@ async function runWithDirectSpawn(
 
     for (const { store, hostname } of routeEntries) {
       try {
-        store.removeRoute(hostname);
+        store.removeRoute(hostname, process.pid);
       } catch {
         // non-fatal
       }
