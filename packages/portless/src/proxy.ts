@@ -33,6 +33,18 @@ function getRequestHost(req: http.IncomingMessage): string {
 }
 
 /**
+ * Whether the client expects an HTML error page. Browsers send
+ * `Accept: text/html` on navigation; non-browser clients (curl, fetch,
+ * coding agents) do not and get a compact plain-text response instead of
+ * the styled HTML pages, which inline fonts and run to hundreds of
+ * kilobytes.
+ */
+function wantsHtml(req: http.IncomingMessage): boolean {
+  const accept = req.headers.accept;
+  return typeof accept === "string" && accept.includes("text/html");
+}
+
+/**
  * Detect whether a request arrived over an encrypted (TLS) connection.
  * Works for both native TLS sockets and HTTP/2 streams.
  */
@@ -140,6 +152,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           `This usually means a backend is proxying back through portless without rewriting ` +
           `the Host header. If you use Vite/webpack proxy, set changeOrigin: true.`
       );
+      if (!wantsHtml(req)) {
+        res.writeHead(508, { "Content-Type": "text/plain" });
+        res.end(
+          `508 Loop Detected: this request has passed through portless ${hops} times. A dev server (Vite, webpack, etc.) is likely proxying back through portless without rewriting the Host header. Fix: set changeOrigin: true in your dev server proxy config.\n`
+        );
+        return;
+      }
       res.writeHead(508, { "Content-Type": "text/html" });
       res.end(
         renderPage(
@@ -159,9 +178,20 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const route = findRoute(routes, host, strict);
 
     if (!route) {
+      const strippedHostPlain = host.endsWith(tldSuffix) ? host.slice(0, -tldSuffix.length) : host;
+      if (!wantsHtml(req)) {
+        const routeLines =
+          routes.length > 0
+            ? `Active apps:\n${routes.map((r) => `  ${formatUrl(r.hostname, proxyPort, reqTls)} -> 127.0.0.1:${r.port}`).join("\n")}`
+            : "No apps running.";
+        res.writeHead(404, { "Content-Type": "text/plain" });
+        res.end(
+          `404 Not Found: no app registered for ${host}\n\n${routeLines}\n\nRegister this app: portless ${strippedHostPlain} <command>\n`
+        );
+        return;
+      }
       const safeHost = escapeHtml(host);
-      const strippedHost = host.endsWith(tldSuffix) ? host.slice(0, -tldSuffix.length) : host;
-      const safeSuggestion = escapeHtml(strippedHost);
+      const safeSuggestion = escapeHtml(strippedHostPlain);
       const routesList =
         routes.length > 0
           ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
@@ -235,6 +265,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           errWithCode.code === "ECONNREFUSED"
             ? "The target app is not responding. It may have crashed."
             : "The target app may not be running.";
+        if (!wantsHtml(req)) {
+          res.writeHead(502, { "Content-Type": "text/plain" });
+          res.end(
+            `502 Bad Gateway: ${host} is routed to 127.0.0.1:${route.port}, but ${detail.charAt(0).toLowerCase()}${detail.slice(1)}\nInspect routes with: portless list\n`
+          );
+          return;
+        }
         res.writeHead(502, { "Content-Type": "text/html" });
         res.end(
           renderPage(

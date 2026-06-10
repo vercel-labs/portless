@@ -26,11 +26,13 @@ import {
   readLanMarker,
   readPersistedProxyState,
   readTldFromDir,
+  readWildcardMarker,
   resolveStateDir,
   validateTld,
   writeLanMarker,
   writeTldFile,
   writeTlsMarker,
+  writeWildcardMarker,
 } from "./cli-utils.js";
 
 describe("findFreePort", () => {
@@ -871,6 +873,32 @@ describe("readLanMarker / writeLanMarker", () => {
   });
 });
 
+describe("readWildcardMarker / writeWildcardMarker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-wildcard-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("writes and reads wildcard mode", () => {
+    writeWildcardMarker(tmpDir, true);
+    expect(readWildcardMarker(tmpDir)).toBe(true);
+  });
+
+  it("removes the file when disabled", () => {
+    writeWildcardMarker(tmpDir, true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.wildcard"))).toBe(true);
+
+    writeWildcardMarker(tmpDir, false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.wildcard"))).toBe(false);
+    expect(readWildcardMarker(tmpDir)).toBe(false);
+  });
+});
+
 describe("readTldFromDir / writeTldFile", () => {
   let tmpDir: string;
 
@@ -993,17 +1021,27 @@ describe("readPersistedProxyState", () => {
     expect(state!.lanMode).toBe(true);
   });
 
+  it("reads wildcard mode from persisted state", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    writeWildcardMarker(tmpDir, true);
+    const state = readPersistedProxyState();
+    expect(state).not.toBeNull();
+    expect(state!.useWildcard).toBe(true);
+  });
+
   it("returns full previous config for a custom proxy setup", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
     writeTlsMarker(tmpDir, true);
     writeTldFile(tmpDir, "local");
     writeLanMarker(tmpDir, "192.168.1.42");
+    writeWildcardMarker(tmpDir, true);
     const state = readPersistedProxyState();
     expect(state).toEqual({
       port: 1355,
       tls: true,
       tld: "local",
       lanMode: true,
+      useWildcard: true,
     });
   });
 });

@@ -41,6 +41,13 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
   if (env.npm_command === "exec") {
     delete env.npm_command;
   }
+  if (process.platform === "win32" && "PATH" in env) {
+    for (const key of Object.keys(env)) {
+      if (key !== "PATH" && key.toUpperCase() === "PATH") {
+        delete env[key];
+      }
+    }
+  }
   const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf-8",
     timeout: 10_000,
@@ -52,6 +59,14 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+function inheritedPath(): string {
+  return process.env.PATH ?? process.env.Path ?? "";
+}
+
+function prependPath(dir: string): string {
+  return `${dir}${path.delimiter}${inheritedPath()}`;
 }
 
 function writeExpoShim(dir: string): void {
@@ -285,6 +300,183 @@ describe("CLI", () => {
       });
       expect(status).toBe(0);
       expect(stdout.trim()).toBe("hello");
+    });
+  });
+
+  describe("env assignments before the child command", () => {
+    it("hoists VAR=val tokens into the child environment (named mode)", () => {
+      const { status, stdout } = run(
+        ["myapp", "GREETING=hi", "node", "-e", "console.log(process.env.GREETING)"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("hi");
+    });
+
+    it("hoists VAR=val tokens in run mode", () => {
+      const { status, stdout } = run(
+        ["run", "GREETING=hello", "node", "-e", "console.log(process.env.GREETING)"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("hello");
+    });
+
+    it("hoists multiple assignments and keeps the rest of the command intact", () => {
+      const { status, stdout } = run(
+        ["myapp", "A=1", "B=2", "node", "-e", "process.stdout.write(process.env.A+process.env.B)"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("12");
+    });
+
+    it("does not apply PORTLESS_* child assignments to portless itself", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-env-scope-"));
+      const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-fake-tailscale-"));
+      const proxyPort = await getFreePort();
+      const fakeMessage = "fake tailscale should not run";
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: String(proxyPort),
+        PORTLESS_HTTPS: "0",
+        PATH: prependPath(fakeBinDir),
+      };
+
+      try {
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            path.join(fakeBinDir, "tailscale.cmd"),
+            `@echo off\r\necho ${fakeMessage} 1>&2\r\nexit /b 42\r\n`
+          );
+        } else {
+          const shimPath = path.join(fakeBinDir, "tailscale");
+          fs.writeFileSync(shimPath, `#!/bin/sh\necho "${fakeMessage}" >&2\nexit 42\n`);
+          fs.chmodSync(shimPath, 0o755);
+        }
+
+        const { status, stdout, stderr } = run(
+          [
+            "myapp",
+            "PORTLESS_TAILSCALE=1",
+            "node",
+            "-e",
+            "process.stdout.write(process.env.PORTLESS_TAILSCALE)",
+          ],
+          { env }
+        );
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("1");
+        expect(stderr).not.toContain(fakeMessage);
+      } finally {
+        run(["proxy", "stop"], { env });
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        fs.rmSync(fakeBinDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not hoist after an explicit -- separator", () => {
+      const { stdout } = run(["myapp", "--", "C=3", "echo", "untouched"], {
+        env: { PORTLESS: "0" },
+      });
+      // The command after -- is passed through literally, so the first token
+      // is executed as a (nonexistent) program instead of being hoisted.
+      expect(stdout.trim()).not.toBe("untouched");
+    });
+  });
+
+  describe("command aliases", () => {
+    it("treats ls as list", () => {
+      expect(run(["ls"]).status).toBe(0);
+    });
+
+    it("treats status as list", () => {
+      expect(run(["status"]).status).toBe(0);
+    });
+
+    it("treats url as get", () => {
+      const { status, stdout } = run(["url", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless get");
+    });
+
+    it("still runs an app named ls when a command follows", () => {
+      const { status, stdout } = run(["ls", "echo", "app-named-ls"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("app-named-ls");
+    });
+
+    it("still runs an app named url when a command follows", () => {
+      const { status, stdout } = run(["url", "echo", "app-named-url"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("app-named-url");
+    });
+
+    it("still runs an app named url with a one token command when that command exists", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-url-alias-state-"));
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-url-alias-bin-"));
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const commandName = "portless-url-command";
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            path.join(shimDir, `${commandName}.cmd`),
+            "@echo off\r\necho app-named-url-single\r\n"
+          );
+        } else {
+          const shimPath = path.join(shimDir, commandName);
+          fs.writeFileSync(shimPath, "#!/bin/sh\necho app-named-url-single\n");
+          fs.chmodSync(shimPath, 0o755);
+        }
+
+        const { status, stdout } = run(["url", commandName], {
+          env: {
+            PATH: prependPath(shimDir),
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("app-named-url-single");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("--wildcard misplacement hint", () => {
+    it("redirects --wildcard to proxy start in named mode", () => {
+      const { status, stderr } = run(["myapp", "--wildcard", "echo", "x"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("proxy start --wildcard");
+    });
+
+    it("redirects --wildcard to proxy start in run mode", () => {
+      const { status, stderr } = run(["run", "--wildcard", "echo", "x"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("proxy start --wildcard");
     });
   });
 
@@ -580,6 +772,39 @@ describe("CLI", () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it("does not warn when a running proxy is already using wildcard mode", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-wildcard-proxy-"));
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.wildcard"), "1");
+
+        const { status, stdout, stderr } = run(["proxy", "start", "--wildcard"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("Proxy is already running on port");
+        expect(stderr).not.toContain("requested wildcard subdomain routing");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("persisted LAN marker", () => {
@@ -728,7 +953,7 @@ describe("CLI", () => {
 
         const { status } = run(["run", "--name", "mobile", "--app-port", "4567", "expo", "start"], {
           env: {
-            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PATH: prependPath(shimDir),
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
             PORTLESS_HTTPS: "0",
@@ -825,7 +1050,7 @@ describe("CLI", () => {
 
         const { status } = run(["run", "--name", "myapp", "--app-port", "4567", "rsbuild", "dev"], {
           env: {
-            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PATH: prependPath(shimDir),
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
             PORTLESS_HTTPS: "0",
@@ -1008,6 +1233,24 @@ describe("CLI", () => {
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("accepts --no-worktree before the name through the url alias", () => {
+      const { status, stdout } = run(["url", "--no-worktree", "backend"], { env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
+    });
+
+    it("accepts --no-worktree after the name through the url alias", () => {
+      const { status, stdout } = run(["url", "backend", "--no-worktree"], { env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
+    });
+
+    it("reports missing service name through the url alias", () => {
+      const { status, stderr } = run(["url", "--no-worktree"], { env: getEnv() });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Missing service name");
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);
@@ -1139,6 +1382,18 @@ describe("CLI", () => {
       expect(start2.stdout).toContain("already running");
     });
 
+    it("clears wildcard mode marker when the proxy stops", () => {
+      const markerPath = path.join(tmpDir, "proxy.wildcard");
+      const start = run(["proxy", "start", "--wildcard"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      expect(fs.existsSync(markerPath)).toBe(true);
+
+      const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      expect(stop.stdout).toContain("Proxy stopped");
+      expect(fs.existsSync(markerPath)).toBe(false);
+    });
+
     it("stops proxy using explicit -p flag instead of env var", () => {
       const start = run(["proxy", "start"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -1186,7 +1441,7 @@ describe("CLI", () => {
           PORTLESS_PORT: String(testPort),
           PORTLESS_STATE_DIR: tmpDir,
           // Put fake security first in PATH; real openssl is still reachable
-          PATH: `${fakeBinDir}:${process.env.PATH}`,
+          PATH: prependPath(fakeBinDir),
         };
 
         // HTTPS is on by default (no PORTLESS_HTTPS=0), so this exercises

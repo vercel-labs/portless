@@ -197,6 +197,32 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/** Name of the marker file that indicates wildcard subdomain fallback is enabled. */
+const WILDCARD_MARKER_FILE = "proxy.wildcard";
+
+/** Read the wildcard marker from a state directory. */
+export function readWildcardMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, WILDCARD_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+/** Write or remove the wildcard marker in the state directory. */
+export function writeWildcardMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, WILDCARD_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
 /**
  * Name of the marker file that remembers LAN mode across proxy restarts.
  * While the proxy is running, the file stores the last known LAN IP.
@@ -344,6 +370,7 @@ export function readPersistedProxyState(): {
   tls: boolean;
   tld: string;
   lanMode: boolean;
+  useWildcard: boolean;
 } | null {
   const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
   const port = readPortFromDir(dir);
@@ -351,7 +378,8 @@ export function readPersistedProxyState(): {
     const tls = readTlsMarker(dir);
     const tld = readTldFromDir(dir);
     const lanIp = readLanMarker(dir);
-    return { port, tls, tld, lanMode: lanIp !== null || tld === "local" };
+    const useWildcard = readWildcardMarker(dir);
+    return { port, tls, tld, lanMode: lanIp !== null || tld === "local", useWildcard };
   }
 
   return null;

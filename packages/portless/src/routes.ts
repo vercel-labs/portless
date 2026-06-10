@@ -38,6 +38,11 @@ type RouteMetadataPatch = {
   ngrokPid?: number | null;
 };
 
+function isRetryableLockError(err: unknown): boolean {
+  if (!isErrnoException(err)) return false;
+  return err.code === "EEXIST" || err.code === "EPERM" || err.code === "EACCES";
+}
+
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
   return (
@@ -124,12 +129,14 @@ export class RouteStore {
         fs.mkdirSync(this.lockPath);
         return true;
       } catch (err: unknown) {
-        if (isErrnoException(err) && err.code === "EEXIST") {
+        if (isRetryableLockError(err)) {
           try {
-            const stat = fs.statSync(this.lockPath);
-            if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
-              fs.rmSync(this.lockPath, { recursive: true });
-              continue;
+            if (fs.existsSync(this.lockPath)) {
+              const stat = fs.statSync(this.lockPath);
+              if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
+                fs.rmSync(this.lockPath, { recursive: true, force: true });
+                continue;
+              }
             }
           } catch {
             continue;
@@ -147,7 +154,7 @@ export class RouteStore {
 
   private releaseLock(): void {
     try {
-      fs.rmSync(this.lockPath, { recursive: true });
+      fs.rmSync(this.lockPath, { recursive: true, force: true });
     } catch {
       // Lock may already be removed; non-fatal
     }

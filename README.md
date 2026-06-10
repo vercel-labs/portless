@@ -276,7 +276,7 @@ portless proxy start --lan --ip 192.168.1.42
 
 `--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
 
-Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. All proxy settings (port, TLS, TLD, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. All proxy settings (port, TLS, TLD, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN, TLS, TLD, or wildcard settings, portless warns and asks you to stop it first.
 
 LAN mode depends on the system mDNS tools that portless already spawns: macOS ships with `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s equivalent). If the command is missing or your network isn’t reachable, `portless proxy start --lan` prints the relevant error and exits.
 
@@ -344,10 +344,15 @@ portless                        # Run dev script through proxy
 portless                        # From monorepo root: run all workspace packages
 portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
+portless <name> VAR=val <cmd>    # Apply env assignments to the child command
+portless get <name>              # Print URL for a service
+portless url <name>              # Alias for portless get
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
+portless ls                      # Alias for portless list
+portless status                  # Alias for portless list
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
 portless prune                   # Kill orphaned dev servers from crashed sessions
@@ -374,6 +379,8 @@ portless service status          # Show service and proxy status
 portless service uninstall       # Remove the startup service
 ```
 
+`portless url <name>` is a convenience alias for `portless get <name>`. If the single argument after `url` is an installed command, portless treats it as an app named `url` instead. Use `portless get <name>` when a service name also matches a command.
+
 ### Options
 
 ```
@@ -386,7 +393,7 @@ portless service uninstall       # Remove the startup service
 --key <path>                     Use a custom TLS private key
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
---wildcard                       Allow unregistered subdomains to fall back to parent route
+--wildcard                       Allow unregistered subdomains to fall back to parent route (proxy start / service install only)
 --state-dir <path>               Use a custom state directory with service install
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)

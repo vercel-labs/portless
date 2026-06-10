@@ -12,6 +12,7 @@ const PORTLESS_STATE_FILES = [
   "proxy.tls",
   "proxy.tld",
   "proxy.lan",
+  "proxy.wildcard",
   "ca-key.pem",
   "ca.pem",
   "server-key.pem",

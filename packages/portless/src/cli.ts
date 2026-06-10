@@ -56,6 +56,7 @@ import {
   readPersistedProxyState,
   readTldFromDir,
   readTlsMarker,
+  readWildcardMarker,
   resolveStateDir,
   spawnCommand,
   augmentedPath,
@@ -64,6 +65,7 @@ import {
   writeLanMarker,
   writeTldFile,
   writeTlsMarker,
+  writeWildcardMarker,
 } from "./cli-utils.js";
 import { collectStateDirsForCleanup, removePortlessStateFiles } from "./clean-utils.js";
 import {
@@ -241,7 +243,7 @@ function readCurrentProxyConfig(dir: string): ProxyConfig {
     lanIp,
     lanIpExplicit: false,
     tld,
-    useWildcard: false,
+    useWildcard: readWildcardMarker(dir),
   };
 }
 
@@ -277,6 +279,14 @@ function getProxyConfigMismatchMessages(
   if (explicit.tld && desiredConfig.tld !== actualConfig.tld) {
     messages.push(
       `requested .${desiredConfig.tld}, but the running proxy is using .${actualConfig.tld}`
+    );
+  }
+
+  if (explicit.useWildcard && desiredConfig.useWildcard !== actualConfig.useWildcard) {
+    messages.push(
+      desiredConfig.useWildcard
+        ? "requested wildcard subdomain routing, but the running proxy is using strict matching"
+        : "requested strict subdomain matching, but the running proxy is using wildcard routing"
     );
   }
 
@@ -588,6 +598,7 @@ function startProxyServer(
     writeTlsMarker(store.dir, isTls);
     writeTldFile(store.dir, tld);
     writeLanMarker(store.dir, activeLanIp);
+    writeWildcardMarker(store.dir, strict === false);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
     const proto = isTls ? "HTTPS/2" : "HTTP";
     const tldLabel = tld !== DEFAULT_TLD ? ` (TLD: .${tld})` : "";
@@ -643,9 +654,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    writeTlsMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetProxyRuntimeMarkers(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
@@ -677,6 +686,13 @@ function sudoStopOrHint(port: number): void {
   }
 }
 
+function resetProxyRuntimeMarkers(dir: string): void {
+  writeTlsMarker(dir, false);
+  writeTldFile(dir, DEFAULT_TLD);
+  writeLanMarker(dir, null);
+  writeWildcardMarker(dir, false);
+}
+
 async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
 
@@ -695,9 +711,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           } catch {
             // Port file may already be absent; non-fatal
           }
-          writeTlsMarker(store.dir, false);
-          writeTldFile(store.dir, DEFAULT_TLD);
-          writeLanMarker(store.dir, null);
+          resetProxyRuntimeMarkers(store.dir);
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
@@ -735,9 +749,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     if (isNaN(pid)) {
       console.error(colors.red("Corrupted PID file. Removing it."));
       fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
+      resetProxyRuntimeMarkers(store.dir);
       return;
     }
 
@@ -756,9 +768,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       } catch {
         // Port file may already be absent; non-fatal
       }
-      writeTlsMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
+      resetProxyRuntimeMarkers(store.dir);
       return;
     }
 
@@ -773,9 +783,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       );
       console.log(colors.yellow("Removing stale PID file."));
       fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
+      resetProxyRuntimeMarkers(store.dir);
       return;
     }
 
@@ -786,9 +794,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     } catch {
       // Port file may already be removed; non-fatal
     }
-    writeTlsMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetProxyRuntimeMarkers(store.dir);
     console.log(colors.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
@@ -902,6 +908,9 @@ async function ensureProxyRunning(
     if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
       startConfig.lanMode = persisted.lanMode;
     }
+    if (!explicit.useWildcard && persisted.useWildcard !== desiredConfig.useWildcard) {
+      startConfig.useWildcard = persisted.useWildcard;
+    }
     const envPort = getDefaultPort(startConfig.useHttps);
     if (persisted.port !== envPort) {
       startPort = persisted.port;
@@ -988,7 +997,8 @@ async function runApp(
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  childEnv: Record<string, string> = {}
 ) {
   let store = initialStore;
   console.log(chalk.blue.bold(`\nportless\n`));
@@ -1281,12 +1291,10 @@ async function runApp(
   // Server Components) trust portless-proxied HTTPS services. Node.js does
   // not use the system trust store, so without this env var it rejects the
   // portless CA as "self-signed certificate in certificate chain".
-  // Respect any value the user already set. Note: we check process.env here
-  // rather than the constructed child env because the child env inherits from
-  // process.env via spread. If a future code path injects NODE_EXTRA_CA_CERTS
-  // into the child env independently, this guard would need updating.
+  // Respect any value the user already set, including child scoped assignments.
   const caEnv: Record<string, string> = {};
-  if (tls && !process.env.NODE_EXTRA_CA_CERTS) {
+  const childBaseEnv = { ...process.env, ...childEnv };
+  if (tls && !childBaseEnv.NODE_EXTRA_CA_CERTS) {
     const caPath = path.join(stateDir, "ca.pem");
     if (fs.existsSync(caPath)) {
       caEnv.NODE_EXTRA_CA_CERTS = caPath;
@@ -1306,6 +1314,7 @@ async function runApp(
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
+      ...childEnv,
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
       PORTLESS_URL: finalUrl,
@@ -1348,6 +1357,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** Environment assignments applied only to the child process. */
+  childEnv: Record<string, string>;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -1381,6 +1392,26 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+/**
+ * Pull leading `VAR=val` tokens out of a child command.
+ * Without this the first token would be executed as a program literally named
+ * `API_URL=x`. The assignments are kept out of process.env so they cannot
+ * configure portless itself before the child process starts.
+ */
+function hoistEnvAssignments(commandArgs: string[]): {
+  commandArgs: string[];
+  childEnv: Record<string, string>;
+} {
+  let i = 0;
+  const childEnv: Record<string, string> = {};
+  while (i < commandArgs.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(commandArgs[i])) {
+    const eq = commandArgs[i].indexOf("=");
+    childEnv[commandArgs[i].slice(0, eq)] = commandArgs[i].slice(eq + 1);
+    i++;
+  }
+  return { commandArgs: commandArgs.slice(i), childEnv };
+}
+
 function applySharingFlag(flag: string): boolean {
   if (flag === "--tailscale") {
     process.env.PORTLESS_TAILSCALE = "1";
@@ -1398,6 +1429,68 @@ function applySharingFlag(flag: string): boolean {
   return false;
 }
 
+function isExecutableFile(filePath: string): boolean {
+  try {
+    const stat = fs.statSync(filePath);
+    if (!stat.isFile()) return false;
+    if (isWindows) return true;
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function commandExists(command: string): boolean {
+  if (!command || command.includes("/") || command.includes("\\")) {
+    return isExecutableFile(path.resolve(command));
+  }
+
+  const pathValue = augmentedPath(process.env);
+  const extensions = isWindows
+    ? ["", ...(process.env.PATHEXT || ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)].map(
+        (ext) => ext.toLowerCase()
+      )
+    : [""];
+
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    for (const ext of extensions) {
+      const candidate = path.join(dir, isWindows ? command + ext : command);
+      if (isExecutableFile(candidate)) return true;
+    }
+  }
+
+  return false;
+}
+
+function isUrlGetAliasShape(args: string[]): boolean {
+  if (args[0] !== "url") return false;
+
+  const rest = args.slice(1);
+  if (rest.length === 0) return true;
+  if (rest.includes("--help") || rest.includes("-h")) return true;
+
+  let positionals = 0;
+  let serviceName: string | undefined;
+  let hasGetFlag = false;
+  for (const arg of rest) {
+    if (arg === "--no-worktree") {
+      hasGetFlag = true;
+      continue;
+    }
+    if (arg.startsWith("-")) return false;
+    serviceName = arg;
+    positionals++;
+  }
+
+  if (positionals === 0) return true;
+  if (positionals > 1) return false;
+  if (hasGetFlag) return true;
+
+  return serviceName === undefined || !commandExists(serviceName);
+}
+
 /**
  * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
  *
@@ -1409,10 +1502,12 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let passthrough = false;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
     if (args[i] === "--") {
+      passthrough = true;
       i++;
       break;
     } else if (args[i] === "--help" || args[i] === "-h") {
@@ -1467,6 +1562,14 @@ ${colors.bold("Examples:")}
       name = args[i];
     } else if (applySharingFlag(args[i])) {
       // handled
+    } else if (args[i] === "--wildcard") {
+      console.error(colors.red(`Error: "--wildcard" is a proxy-level option, not a per-app flag.`));
+      console.error(
+        colors.blue(
+          "Enable it on the proxy: portless proxy stop && portless proxy start --wildcard"
+        )
+      );
+      process.exit(1);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
@@ -1481,7 +1584,12 @@ ${colors.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  // An explicit `--` means "pass everything through untouched" — skip env
+  // assignment hoisting so the documented escape hatch stays literal.
+  const parsedCommand = passthrough
+    ? { commandArgs: args.slice(i), childEnv: {} }
+    : hoistEnvAssignments(args.slice(i));
+  return { force, appPort, name, ...parsedCommand };
 }
 
 /**
@@ -1494,11 +1602,13 @@ ${colors.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let passthrough = false;
   let i = 0;
 
   // Consume leading flags before name
   while (i < args.length && args[i].startsWith("-")) {
     if (args[i] === "--") {
+      passthrough = true;
       i++;
       break;
     } else if (args[i] === "--force") {
@@ -1508,6 +1618,14 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       appPort = parseAppPort(args[i]);
     } else if (applySharingFlag(args[i])) {
       // handled
+    } else if (args[i] === "--wildcard") {
+      console.error(colors.red(`Error: "--wildcard" is a proxy-level option, not a per-app flag.`));
+      console.error(
+        colors.blue(
+          "Enable it on the proxy: portless proxy stop && portless proxy start --wildcard"
+        )
+      );
+      process.exit(1);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
@@ -1525,6 +1643,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
   while (i < args.length && args[i].startsWith("--")) {
     if (args[i] === "--") {
+      passthrough = true;
       i++;
       break;
     } else if (args[i] === "--force") {
@@ -1534,6 +1653,14 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       appPort = parseAppPort(args[i]);
     } else if (applySharingFlag(args[i])) {
       // handled
+    } else if (args[i] === "--wildcard") {
+      console.error(colors.red(`Error: "--wildcard" is a proxy-level option, not a per-app flag.`));
+      console.error(
+        colors.blue(
+          "Enable it on the proxy: portless proxy stop && portless proxy start --wildcard"
+        )
+      );
+      process.exit(1);
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
@@ -1546,7 +1673,12 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  // An explicit `--` means "pass everything through untouched" — skip env
+  // assignment hoisting so the documented escape hatch stays literal.
+  const parsedCommand = passthrough
+    ? { commandArgs: args.slice(i), childEnv: {} }
+    : hoistEnvAssignments(args.slice(i));
+  return { force, appPort, name, ...parsedCommand };
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,13 +1705,14 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless run")}                     Same as above
   ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
+  ${colors.cyan("portless <name> VAR=val <cmd>")}    Apply env assignments to the child command
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
   ${colors.cyan("portless proxy stop")}              Stop the proxy
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
-  ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
+  ${colors.cyan("portless get <name>")}              Print URL for a service; alias: url
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
-  ${colors.cyan("portless list")}                    Show active routes
+  ${colors.cyan("portless list")}                    Show active routes; aliases: ls, status
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
@@ -1591,12 +1724,14 @@ ${colors.bold("Examples:")}
   portless                            # From monorepo root: start all apps
   portless --script start             # Run "start" script instead of "dev"
   portless myapp next dev             # -> https://myapp.localhost
+  portless myapp API_URL=x next dev   # API_URL is set for the child command
   portless run next dev               # -> https://<project>.localhost
   portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
   portless service install            # Start HTTPS proxy on OS startup
   portless service install --lan      # Persist LAN mode in the startup service
   portless service install --wildcard # Persist wildcard routing in the startup service
   portless get backend                # -> https://backend.localhost
+  portless url backend                # Alias for "portless get backend"
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
@@ -1680,7 +1815,7 @@ ${colors.bold("Options:")}
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev)
-  --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --wildcard                    Allow unregistered subdomains to fall back to parent route (proxy start / service install only)
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
@@ -2011,6 +2146,11 @@ ${colors.bold("Examples:")}
   portless get backend                  # -> https://backend.localhost
   portless get backend                  # in worktree -> https://auth.backend.localhost
   portless get backend --no-worktree    # -> https://backend.localhost (skip worktree)
+
+${colors.bold("Alias note:")}
+  "url" is a convenience alias for "get". If the single argument is an
+  installed command, portless treats it as an app named "url" instead.
+  Use "portless get <name>" when a service name also matches a command.
 `);
     process.exit(0);
   }
@@ -2404,6 +2544,9 @@ ${colors.bold("LAN mode (--lan):")}
     tld,
     useWildcard,
   });
+  if (!explicit.useWildcard) {
+    desiredConfig.useWildcard = readWildcardMarker(stateDir);
+  }
   const lanMode = desiredConfig.lanMode;
   useHttps = desiredConfig.useHttps;
   customCertPath = desiredConfig.customCertPath;
@@ -3455,7 +3598,8 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    parsed.childEnv
   );
 }
 
@@ -3501,7 +3645,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     undefined,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    parsed.childEnv
   );
 }
 
@@ -3618,12 +3763,12 @@ async function main() {
       process.env.PORTLESS === "false" ||
       process.env.PORTLESS === "skip";
     if (skipPortless) {
-      const { commandArgs } = parseAppArgs(args);
-      if (commandArgs.length === 0) {
+      const parsed = parseAppArgs(args);
+      if (parsed.commandArgs.length === 0) {
         console.error(colors.red("Error: No command provided."));
         process.exit(1);
       }
-      spawnCommand(commandArgs);
+      spawnCommand(parsed.commandArgs, { env: { ...process.env, ...parsed.childEnv } });
       return;
     }
     await handleNamedMode(args);
@@ -3658,7 +3803,7 @@ async function main() {
       console.error(colors.red("Error: No command provided."));
       process.exit(1);
     }
-    spawnCommand(commandArgs);
+    spawnCommand(commandArgs, { env: { ...process.env, ...parsed.childEnv } });
     return;
   }
 
@@ -3693,11 +3838,18 @@ async function main() {
       await handlePrune(args);
       return;
     }
-    if (args[0] === "list") {
+    // `ls`, `status`, and `url` are aliases for `list` and `get`, but only
+    // when the argument shape matches the subcommand — `portless ls next dev`
+    // is an app named "ls" running a command, and existing workflows built on
+    // those names keep working.
+    if (
+      args[0] === "list" ||
+      ((args[0] === "ls" || args[0] === "status") && args.slice(1).every((a) => a.startsWith("-")))
+    ) {
       await handleList();
       return;
     }
-    if (args[0] === "get") {
+    if (args[0] === "get" || isUrlGetAliasShape(args)) {
       await handleGet(args);
       return;
     }
