@@ -319,6 +319,35 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
+## Programmatic API
+
+For Node-based config files (Playwright, Vite proxy, `next.config.js`, etc.) `import { getUrl } from "portless"` to resolve service URLs without spawning the CLI:
+
+```ts
+import { getUrl } from "portless";
+
+const cms = await getUrl("cms");
+// cms.url      -> "https://cms.localhost"
+//                  ("https://feature-x.cms.localhost" in a linked worktree)
+// cms.hostname -> "cms.localhost"
+// cms.port     -> 443
+// cms.tls      -> true
+// cms.tld      -> "localhost"
+
+// toString() coerces to the URL string:
+await fetch(`${cms}/api/health`);
+
+// Skip the worktree prefix for OAuth callbacks etc.:
+const stable = await getUrl("cms", { worktree: false });
+```
+
+Same defaults as `portless get`: worktree prefix applied by default in linked worktrees, reads persisted markers under `~/.portless/proxy.{port,tls,tld}`. The returned `ServiceUrl` JSON-serializes to `{ url, hostname, port, tls, tld }`.
+
+| Option     | Default         | Description                                      |
+| ---------- | --------------- | ------------------------------------------------ |
+| `worktree` | `true`          | When `false`, skip git worktree prefix detection |
+| `cwd`      | `process.cwd()` | Working directory used for worktree detection    |
+
 ## portless.json
 
 Optional config file. Portless looks for it in the current directory.

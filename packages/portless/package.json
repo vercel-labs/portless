@@ -3,12 +3,12 @@
   "version": "0.14.0",
   "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
   "type": "module",
-  "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/api.js",
+  "types": "./dist/api.d.ts",
   "exports": {
     ".": {
-      "import": "./dist/index.js",
-      "types": "./dist/index.d.ts"
+      "import": "./dist/api.js",
+      "types": "./dist/api.d.ts"
     }
   },
   "bin": {
