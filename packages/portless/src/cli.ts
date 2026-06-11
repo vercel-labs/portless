@@ -1435,7 +1435,7 @@ ${colors.bold("Options:")}
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
-  1. portless.json "name" field
+  1. portless config "name" field
   2. package.json "name" field (walks up directories)
   3. Git repo root directory name
   4. Current directory basename
@@ -1601,9 +1601,9 @@ ${colors.bold("Examples:")}
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
 
-${colors.bold("Configuration (portless.json):")}
+${colors.bold("Configuration (portless.json or .config/portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
-  from package.json. Use portless.json to override defaults.
+  from package.json. Use a portless config file to override defaults.
 
   Override name:   { "name": "myapp" }
   Override script: { "name": "myapp", "script": "start" }
@@ -2740,14 +2740,14 @@ ${colors.bold("LAN mode (--lan):")}
 }
 
 /**
- * Load the effective AppConfig for the current directory from portless.json.
+ * Load the effective AppConfig for the current directory from the portless config.
  * Handles both single-app (top-level fields) and monorepo (apps map) configs.
  */
 function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
   try {
     const loaded = loadConfig(cwd);
     if (!loaded) return null;
-    return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    return resolveAppConfig(loaded.config, loaded.configBaseDir, cwd);
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -2764,8 +2764,8 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
  * Activates when:
  * - At a workspace root (pnpm, npm, yarn, or bun) -> multi-app mode
  * - In any directory with a package.json that has the target script -> single-app mode
- * Config (portless.json / package.json "portless" key) is loaded for overrides
- * but is not required.
+ * Config (portless.json / .config/portless.json / package.json "portless" key)
+ * is loaded for overrides but is not required.
  */
 async function handleDefaultMode(
   globalScript?: string,
@@ -2828,7 +2828,7 @@ async function handleDefaultSingle(
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = "portless config";
   } else {
     const inferred = inferProjectName(cwd);
     baseName = inferred.name;
@@ -3072,7 +3072,9 @@ async function handleDefaultMulti(
 
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
-    const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
+    const rootOverride = loaded
+      ? resolveAppConfig(loaded.config, loaded.configBaseDir, pkg.dir)
+      : null;
     let pkgConfig: AppConfig | null;
     try {
       pkgConfig = loadPackagePortlessConfig(pkg.dir);
@@ -3084,7 +3086,7 @@ async function handleDefaultMulti(
       throw err;
     }
 
-    // Merge (closest wins): package.json "portless" > portless.json app entry > defaults
+    // Merge (closest wins): package.json "portless" > portless config app entry > defaults
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
       ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
@@ -3425,7 +3427,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = "portless config";
   } else {
     const inferred = inferProjectName();
     baseName = inferred.name;
