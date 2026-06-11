@@ -1625,7 +1625,7 @@ ${colors.bold("How it works:")}
      (apps get a random port in the 4000-4999 range via PORT)
   3. Access via https://<name>.localhost
   4. .localhost domains auto-resolve to 127.0.0.1
-  5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
+  5. Frameworks that ignore PORT (Vite, VitePlus, VitePress, Astro, React Router, Angular,
      Expo, React Native) get --port and, when needed, --host flags
      injected automatically
 
