@@ -348,6 +348,9 @@ portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
+portless list --json             # Show active routes as JSON (for agents/scripts)
+portless get <name>              # Print URL for a service
+portless get <name> --json       # Print service info as JSON (for agents/scripts)
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
 portless prune                   # Kill orphaned dev servers from crashed sessions

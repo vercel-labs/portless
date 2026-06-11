@@ -283,7 +283,9 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless <name> <cmd> [args...]`      | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                  | Print URL for a service (for cross-service wiring)             |
 | `portless get <name> --no-worktree`    | Print URL without worktree prefix                              |
+| `portless get <name> --json`           | Print service info as JSON (name, hostname, url, port, tls)    |
 | `portless list`                        | Show active routes                                             |
+| `portless list --json`                 | Show active routes as a JSON array (for agents/scripts)        |
 | `portless trust`                       | Add local CA to system trust store (for HTTPS)                 |
 | `portless clean`                       | Remove state, CA trust entry, and /etc/hosts block             |
 | `portless prune`                       | Kill orphaned dev servers from crashed sessions                |

@@ -95,6 +95,20 @@ BACKEND_URL=$(portless get backend)
 
 Applies worktree prefix detection by default. Use `--no-worktree` to skip it.
 
+Pass `--json` to print a JSON object for scripts and agents:
+
+```bash
+portless get backend --json
+# {
+#   "name": "backend",
+#   "hostname": "backend.localhost",
+#   "url": "https://backend.localhost",
+#   "proxy_port": 443,
+#   "tls": true,
+#   "tld": "localhost"
+# }
+```
+
 ## Alias (static routes)
 
 ```bash
@@ -118,6 +132,21 @@ portless list
 ```
 
 Shows active routes and their assigned ports.
+
+Pass `--json` to print a JSON array for scripts and agents:
+
+```bash
+portless list --json
+# [
+#   {
+#     "hostname": "myapp.localhost",
+#     "url": "https://myapp.localhost",
+#     "target_port": 4321,
+#     "pid": 12345,
+#     "kind": "app"
+#   }
+# ]
+```
 
 ## Trust the CA
 
