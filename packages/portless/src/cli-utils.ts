@@ -858,7 +858,7 @@ export function spawnCommand(
 // ---------------------------------------------------------------------------
 
 /**
- * Frameworks that ignore the `PORT` env var. Maps framework key to the
+ * Frameworks that ignore the `PORT` env var. Maps command basename to the
  * flags needed. `strictPort` indicates whether `--strictPort` is supported
  * (prevents the framework from silently picking a different port).
  *
@@ -887,10 +887,10 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
 };
 
 /**
- * Find the framework key inside `commandArgs`, looking
+ * Find the basename of the framework command inside `commandArgs`, looking
  * past known package runners (npx, bunx, yarn dlx, …) and their flags.
  */
-function findFrameworkKey(commandArgs: string[]): string | null {
+function findFrameworkBasename(commandArgs: string[]): string | null {
   if (commandArgs.length === 0) return null;
 
   const first = path.basename(commandArgs[0]);
@@ -947,10 +947,10 @@ function findFrameworkKey(commandArgs: string[]): string | null {
  * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
-  const frameworkKey = findFrameworkKey(commandArgs);
-  if (!frameworkKey) return;
+  const basename = findFrameworkBasename(commandArgs);
+  if (!basename) return;
 
-  const framework = FRAMEWORKS_NEEDING_PORT[frameworkKey];
+  const framework = FRAMEWORKS_NEEDING_PORT[basename];
 
   if (!commandArgs.includes("--port")) {
     commandArgs.push("--port", port.toString());
@@ -962,9 +962,9 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   if (!commandArgs.includes("--host")) {
     // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
     // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
-    const isExpoLan = frameworkKey === "expo" && isLanEnvEnabled();
+    const isExpoLan = basename === "expo" && isLanEnvEnabled();
     if (isExpoLan) return;
-    const hostValue = frameworkKey === "expo" ? "localhost" : "127.0.0.1";
+    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
 }
