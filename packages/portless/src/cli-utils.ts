@@ -858,7 +858,7 @@ export function spawnCommand(
 // ---------------------------------------------------------------------------
 
 /**
- * Frameworks that ignore the `PORT` env var. Maps command basename to the
+ * Frameworks that ignore the `PORT` env var. Maps framework key to the
  * flags needed. `strictPort` indicates whether `--strictPort` is supported
  * (prevents the framework from silently picking a different port).
  *
@@ -872,6 +872,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   rsbuild: { strictPort: false },
   astro: { strictPort: false },
   ng: { strictPort: false },
+  "laravel-artisan": { strictPort: false },
   "react-native": { strictPort: false },
   expo: { strictPort: false },
 };
@@ -886,13 +887,21 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
 };
 
 /**
- * Find the basename of the framework command inside `commandArgs`, looking
+ * Find the framework key inside `commandArgs`, looking
  * past known package runners (npx, bunx, yarn dlx, …) and their flags.
  */
-function findFrameworkBasename(commandArgs: string[]): string | null {
+function findFrameworkKey(commandArgs: string[]): string | null {
   if (commandArgs.length === 0) return null;
 
   const first = path.basename(commandArgs[0]);
+  if (
+    first === "php" &&
+    path.basename(commandArgs[1] ?? "") === "artisan" &&
+    commandArgs[2] === "serve"
+  ) {
+    return "laravel-artisan";
+  }
+
   if (FRAMEWORKS_NEEDING_PORT[first]) return first;
 
   const subcommands = PACKAGE_RUNNERS[first];
@@ -938,10 +947,10 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): void {
-  const basename = findFrameworkBasename(commandArgs);
-  if (!basename) return;
+  const frameworkKey = findFrameworkKey(commandArgs);
+  if (!frameworkKey) return;
 
-  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  const framework = FRAMEWORKS_NEEDING_PORT[frameworkKey];
 
   if (!commandArgs.includes("--port")) {
     commandArgs.push("--port", port.toString());
@@ -953,9 +962,9 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
   if (!commandArgs.includes("--host")) {
     // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
     // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
-    const isExpoLan = basename === "expo" && isLanEnvEnabled();
+    const isExpoLan = frameworkKey === "expo" && isLanEnvEnabled();
     if (isExpoLan) return;
-    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
+    const hostValue = frameworkKey === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
 }

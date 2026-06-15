@@ -409,6 +409,12 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["ng", "serve", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
+  it("injects for laravel artisan serve without --strictPort", () => {
+    const args = ["php", "artisan", "serve"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["php", "artisan", "serve", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
   it("injects for react-native without --strictPort", () => {
     const args = ["react-native", "start"];
     injectFrameworkFlags(args, 4567);

@@ -261,4 +261,4 @@ Portless stores state (routes, PID file, port file, TLS marker) in `~/.portless`
 
 ## Port assignment
 
-Apps get a random port in the 4000--4999 range. Portless sets `PORT` and usually `HOST` before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
+Apps get a random port in the 4000 to 4999 range. Portless sets `PORT` and usually `HOST` before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, Astro, React Router, Angular, Laravel (`php artisan serve`), Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
