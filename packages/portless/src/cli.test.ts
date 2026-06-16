@@ -213,6 +213,24 @@ describe("CLI", () => {
     });
   });
 
+  describe("bg", () => {
+    it("prints bg help", () => {
+      const { status, stdout } = run(["bg", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless bg");
+      expect(stdout).toContain("bg start");
+      expect(stdout).toContain("bg stop");
+    });
+
+    it("still dispatches bg help when PORTLESS=0", () => {
+      const { status, stdout } = run(["bg", "--help"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless bg");
+    });
+  });
+
   describe("error: no command provided", () => {
     it("exits 1 when only a name is given without a command", () => {
       const { status, stderr } = run(["myapp"]);
