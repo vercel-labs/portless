@@ -21,7 +21,13 @@ import {
   registerServe,
   unregisterTailscale,
 } from "./tailscale.js";
-import { ensureNgrokAvailable, startNgrok, stopNgrok, stopNgrokProcess } from "./ngrok.js";
+import {
+  ensureNgrokAvailable,
+  normalizeNgrokUrl,
+  startNgrok,
+  stopNgrok,
+  stopNgrokProcess,
+} from "./ngrok.js";
 import {
   inferProjectName,
   detectWorktreePrefix,
@@ -997,7 +1003,11 @@ async function runApp(
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
   const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
-  const wantsNgrok = isEnabledEnv(process.env.PORTLESS_NGROK);
+  // PORTLESS_NGROK is a boolean (0/1, true/false) or a fixed URL to pin the tunnel.
+  const ngrokValue = (process.env.PORTLESS_NGROK?.trim() ?? "").toLowerCase();
+  const wantsNgrok = ngrokValue !== "" && ngrokValue !== "0" && ngrokValue !== "false";
+  let ngrokUrl =
+    wantsNgrok && !isEnabledEnv(ngrokValue) ? normalizeNgrokUrl(ngrokValue) : undefined;
   let tsBaseUrl: string | undefined;
 
   if (wantsTailscale) {
@@ -1133,7 +1143,6 @@ async function runApp(
   // Readiness was already checked at the top of runApp().
   let tailscaleHttpsPort: number | undefined;
   let tailscaleUrl: string | undefined;
-  let ngrokUrl: string | undefined;
   let ngrokProcess: Awaited<ReturnType<typeof startNgrok>> | undefined;
   let stoppingNgrok = false;
   let ngrokRouteReady = false;
@@ -1213,6 +1222,7 @@ async function runApp(
     try {
       ngrokProcess = await startNgrok(port, {
         hostHeader: hostname,
+        url: ngrokUrl,
         onExit: handleNgrokExit,
       });
       ngrokUrl = ngrokProcess.url;
@@ -1431,7 +1441,7 @@ ${colors.bold("Options:")}
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
-  --ngrok                Share the app publicly via ngrok
+  --ngrok <url>          Share the app publicly via ngrok (random URL, or a fixed one if given)
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1600,6 +1610,7 @@ ${colors.bold("Examples:")}
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
+  portless myapp --ngrok=my-app.ngrok.dev next dev # -> also https://my-app.ngrok.dev (public)
 
 ${colors.bold("Configuration (portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
@@ -1665,6 +1676,10 @@ ${colors.bold("ngrok sharing:")}
   Use --ngrok to expose your dev server to the public internet with ngrok.
   Requires the ngrok CLI to be installed and authenticated.
   ${colors.cyan("portless myapp --ngrok next dev")}
+  Pass a URL to --ngrok to bind a fixed (reserved) ngrok URL instead of a random one.
+  The --ngrok=<url> form may omit the scheme; a space-separated URL must include it.
+  ${colors.cyan("portless myapp --ngrok=my-app.ngrok.dev next dev")}
+  ${colors.cyan("portless myapp --ngrok https://my-app.ngrok.dev next dev")}
 
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
@@ -1685,7 +1700,7 @@ ${colors.bold("Options:")}
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
-  --ngrok                       Share the app publicly via ngrok
+  --ngrok <url>                 Share publicly via ngrok (random URL, or a fixed one if given)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -1701,7 +1716,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
-  PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
+  PORTLESS_NGROK=1|<url>        Share apps publicly via ngrok; a URL pins a fixed tunnel (same as --ngrok)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
@@ -3590,8 +3605,40 @@ async function main() {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
   }
-  if (stripGlobalFlag("--ngrok", false)) {
-    process.env.PORTLESS_NGROK = "1";
+  // --ngrok enables ngrok sharing; an optional URL pins the tunnel. It may be
+  // attached (--ngrok=<url>) or space-separated (--ngrok <url>); a space-separated
+  // value is only consumed when it is an http(s) URL, so `--ngrok next dev` keeps
+  // `next dev` as the child command.
+  {
+    const sep = args.indexOf("--");
+    const end = sep === -1 ? args.length : sep;
+    for (let i = 0; i < end; i++) {
+      const arg = args[i];
+      if (arg !== "--ngrok" && !arg.startsWith("--ngrok=")) continue;
+
+      let url: string | undefined;
+      if (arg.startsWith("--ngrok=")) {
+        url = arg.slice("--ngrok=".length);
+        args.splice(i, 1);
+      } else if (i + 1 < end && /^https?:\/\//i.test(args[i + 1])) {
+        url = args[i + 1];
+        args.splice(i, 2);
+      } else {
+        args.splice(i, 1);
+      }
+
+      if (url === undefined) {
+        process.env.PORTLESS_NGROK = "1";
+      } else if (url.trim() === "") {
+        console.error(
+          colors.red("Error: --ngrok requires a URL (e.g. --ngrok https://my-app.ngrok.dev).")
+        );
+        process.exit(1);
+      } else {
+        process.env.PORTLESS_NGROK = url.trim();
+      }
+      break;
+    }
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

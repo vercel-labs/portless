@@ -1472,5 +1472,65 @@ describe("CLI", () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it("shows the optional ngrok URL in help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--ngrok <url>");
+    });
+
+    it("enables ngrok when --ngrok <url> is passed (space-separated)", () => {
+      const { status, stderr } = run(
+        ["myapp", "--ngrok", "https://my-app.ngrok.dev", "echo", "hello"],
+        { env: { PATH: "/tmp/portless-no-ngrok-path" } }
+      );
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("still accepts the --ngrok=<url> form", () => {
+      const { status, stderr } = run(
+        ["myapp", "--ngrok=https://my-app.ngrok.dev", "echo", "hello"],
+        { env: { PATH: "/tmp/portless-no-ngrok-path" } }
+      );
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("accepts a scheme-less URL via the --ngrok=<url> form", () => {
+      const { status, stderr } = run(["myapp", "--ngrok=my-app.ngrok.dev", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ngrok-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("treats a non-URL token after --ngrok as the command, not the URL", () => {
+      // `next` is not a URL, so --ngrok stays bare and `next dev` is the command.
+      const { status, stderr } = run(["myapp", "--ngrok", "next", "dev"], {
+        env: { PATH: "/tmp/portless-no-ngrok-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("enables ngrok when PORTLESS_NGROK is set to a URL", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: {
+          PORTLESS_NGROK: "https://my-app.ngrok.dev",
+          PATH: "/tmp/portless-no-ngrok-path",
+        },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("rejects --ngrok= with an empty URL", () => {
+      const { status, stderr } = run(["myapp", "--ngrok=", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ngrok-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("--ngrok");
+    });
   });
 });

@@ -72,6 +72,10 @@ portless docs.myapp next dev
       <td>`--ngrok`</td>
       <td>Share the app publicly via ngrok.</td>
     </tr>
+    <tr>
+      <td>`--ngrok=<url>`</td>
+      <td>Share via ngrok on a fixed URL (e.g. `my-app.ngrok.dev`).</td>
+    </tr>
   </tbody>
 </table>
 
@@ -79,6 +83,7 @@ portless docs.myapp next dev
 portless myapp --tailscale next dev
 portless myapp --funnel next dev
 portless myapp --ngrok next dev
+portless myapp --ngrok=my-app.ngrok.dev next dev
 ```
 
 ## Get a service URL

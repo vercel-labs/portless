@@ -27,6 +27,7 @@ export type NgrokCommandRunner = (args: string[]) => NgrokCommandResult;
 
 export interface StartNgrokOptions {
   hostHeader?: string;
+  url?: string;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   spawner?: NgrokSpawner;
   timeoutMs?: number;
@@ -132,12 +133,17 @@ export function extractNgrokUrl(output: string): string | null {
   return null;
 }
 
-export function buildNgrokArgs(localPort: number, hostHeader = "rewrite"): string[] {
+export function normalizeNgrokUrl(url: string): string {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(url) ? url : `https://${url}`;
+}
+
+export function buildNgrokArgs(localPort: number, hostHeader = "rewrite", url?: string): string[] {
   return [
     "http",
     "--log=stdout",
     "--log-format=logfmt",
     `--host-header=${hostHeader}`,
+    ...(url ? [`--url=${url}`] : []),
     `http://127.0.0.1:${localPort}`,
   ];
 }
@@ -148,7 +154,7 @@ export function startNgrok(
 ): Promise<StartedNgrok> {
   const spawner = options.spawner ?? defaultSpawner;
   const timeoutMs = options.timeoutMs ?? NGROK_START_TIMEOUT_MS;
-  const args = buildNgrokArgs(localPort, options.hostHeader);
+  const args = buildNgrokArgs(localPort, options.hostHeader, options.url);
 
   let child: NgrokChildProcess;
   try {

@@ -330,10 +330,22 @@ Expose your dev server to the public internet with [ngrok](https://ngrok.com):
 ```bash
 portless myapp --ngrok next dev
 # -> https://myapp.localhost           (local)
-# -> https://abc123.ngrok.app          (public)
+# -> https://random-name.ngrok.app     (public)
 ```
 
-Set `PORTLESS_NGROK=1` in your shell profile or `.env` to enable ngrok by default when portless runs an app. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up automatically when the app exits.
+Pass a reserved URL to `--ngrok` to keep a stable address across restarts:
+
+```bash
+portless myapp --ngrok=my-app.ngrok.dev next dev
+# -> https://myapp.localhost           (local)
+# -> https://my-app.ngrok.dev          (public, fixed)
+```
+
+The `--ngrok=<url>` form may omit the scheme (`my-app.ngrok.dev` becomes `https://my-app.ngrok.dev`). With a space-separated value, include the scheme: `--ngrok https://my-app.ngrok.dev`.
+
+The URL must be a domain you have reserved in your ngrok account.
+
+Set `PORTLESS_NGROK=1` in your shell profile or `.env` to enable ngrok by default when portless runs an app, or `PORTLESS_NGROK=my-app.ngrok.dev` to also pin the URL. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up automatically when the app exits.
 
 Requires the ngrok CLI to be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again.
 
@@ -392,7 +404,7 @@ portless service uninstall       # Remove the startup service
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --tailscale                      Share the app on your Tailscale network (tailnet)
 --funnel                         Share the app publicly via Tailscale Funnel
---ngrok                          Share the app publicly via ngrok
+--ngrok <url>                    Share publicly via ngrok (random URL, or a fixed one if given)
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
@@ -411,7 +423,7 @@ PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to p
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
-PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)
+PORTLESS_NGROK=1|<url>           Share apps publicly via ngrok; a URL pins a fixed tunnel (same as --ngrok)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
