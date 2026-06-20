@@ -1476,7 +1476,7 @@ describe("CLI", () => {
     it("shows the optional ngrok URL in help output", () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
-      expect(stdout).toContain("--ngrok <url>");
+      expect(stdout).toContain("--ngrok [<url>]");
     });
 
     it("enables ngrok when --ngrok <url> is passed (space-separated)", () => {

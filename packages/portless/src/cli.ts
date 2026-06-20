@@ -1441,7 +1441,7 @@ ${colors.bold("Options:")}
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
-  --ngrok <url>          Share the app publicly via ngrok (random URL, or a fixed one if given)
+  --ngrok [<url>]        Share the app publicly via ngrok (random URL, or a fixed one if given)
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1700,7 +1700,7 @@ ${colors.bold("Options:")}
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
-  --ngrok <url>                 Share publicly via ngrok (random URL, or a fixed one if given)
+  --ngrok [<url>]               Share publicly via ngrok (random URL, or a fixed one if given)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
