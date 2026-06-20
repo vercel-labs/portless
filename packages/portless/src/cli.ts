@@ -3605,10 +3605,7 @@ async function main() {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
   }
-  // --ngrok enables ngrok sharing; an optional URL pins the tunnel. It may be
-  // attached (--ngrok=<url>) or space-separated (--ngrok <url>); a space-separated
-  // value is only consumed when it is an http(s) URL, so `--ngrok next dev` keeps
-  // `next dev` as the child command.
+
   {
     const sep = args.indexOf("--");
     const end = sep === -1 ? args.length : sep;

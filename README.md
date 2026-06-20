@@ -330,7 +330,7 @@ Expose your dev server to the public internet with [ngrok](https://ngrok.com):
 ```bash
 portless myapp --ngrok next dev
 # -> https://myapp.localhost           (local)
-# -> https://random-name.ngrok.app     (public)
+# -> https://<random-name>.ngrok.app     (public)
 ```
 
 Pass a reserved URL to `--ngrok` to keep a stable address across restarts:
@@ -404,7 +404,7 @@ portless service uninstall       # Remove the startup service
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --tailscale                      Share the app on your Tailscale network (tailnet)
 --funnel                         Share the app publicly via Tailscale Funnel
---ngrok <url>                    Share publicly via ngrok (random URL, or a fixed one if given)
+--ngrok <url>                    Share the app publicly via ngrok (random URL, or a fixed one if given)
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
