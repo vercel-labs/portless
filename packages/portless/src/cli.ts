@@ -97,6 +97,7 @@ import {
 } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
 import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
+import { handleBg } from "./bg.js";
 
 const chalk = colors;
 
@@ -1575,6 +1576,8 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
   ${colors.cyan("portless proxy stop")}              Stop the proxy
+  ${colors.cyan("portless bg start")}                Start an app in the background
+  ${colors.cyan("portless bg stop [name]")}          Stop a background app
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
@@ -1727,8 +1730,8 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, trust, clean, prune, proxy, service are subcommands and
-  cannot be used as app names directly. Use "portless run" to infer the name,
+  run, get, alias, hosts, list, trust, clean, prune, proxy, service, bg are subcommands
+  and cannot be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
   process.exit(0);
@@ -3605,7 +3608,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, trust, clean, prune, proxy, service).
+  // subcommand (run, alias, hosts, list, trust, clean, prune, proxy, service, bg).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {
@@ -3644,7 +3647,11 @@ async function main() {
     skipPortless &&
     (isRunCommand ||
       args.length === 0 ||
-      (args.length >= 2 && args[0] !== "proxy" && args[0] !== "clean" && args[0] !== "service"))
+      (args.length >= 2 &&
+        args[0] !== "proxy" &&
+        args[0] !== "clean" &&
+        args[0] !== "service" &&
+        args[0] !== "bg"))
   ) {
     const parsed = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
     let commandArgs = parsed.commandArgs;
@@ -3662,7 +3669,7 @@ async function main() {
     return;
   }
 
-  // Global dispatch: help, version, trust, clean, prune, list, alias, hosts, proxy, service
+  // Global dispatch: help, version, trust, clean, prune, list, alias, hosts, proxy, service, bg
   // When `run` is used, skip these so args like "list" or "--help" are treated
   // as child-command tokens, not portless subcommands.
   if (!isRunCommand) {
@@ -3715,6 +3722,10 @@ async function main() {
     }
     if (args[0] === "service") {
       await handleService(args, { entryScript: getEntryScript() });
+      return;
+    }
+    if (args[0] === "bg") {
+      await handleBg(args, { entryScript: getEntryScript() });
       return;
     }
   }

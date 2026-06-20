@@ -254,6 +254,32 @@ portless myapp --ngrok next dev
 
 Set `PORTLESS_NGROK=1` to enable ngrok by default when portless runs an app. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
 
+## Background apps
+
+Use `portless bg` when agents or humans need a dev server to keep running after the command returns:
+
+```bash
+portless bg start --wait
+portless bg start --name web --wait pnpm dev
+portless bg status web
+portless bg logs web --tail 200
+portless bg restart web --wait
+portless bg stop web
+```
+
+Prefer `portless bg start --wait` for persistent local dev servers. It backgrounds `portless run`, preserving Portless name inference, route registration, TLS setup, and sharing behavior. `--wait` waits for the Portless URL, defaulting to 30 seconds. Add `--keep` if a timeout should not kill the background process.
+
+Logs are in the active Portless state directory, usually `~/.portless/bg/logs`:
+
+```bash
+portless bg logs web              # stdout, last 100 lines
+portless bg logs web --errors     # stderr
+portless bg logs web --bg         # background lifecycle log
+portless bg logs web --follow     # follow stdout
+```
+
+Background app management supports macOS and Linux. From a monorepo root, start one app from its package directory or pass an explicit name and command.
+
 ## OS startup service
 
 Use the service command when users want the proxy to start automatically after reboot:
@@ -288,6 +314,14 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless clean`                       | Remove state, CA trust entry, and /etc/hosts block             |
 | `portless prune`                       | Kill orphaned dev servers from crashed sessions                |
 | `portless prune --force`               | Kill orphans with SIGKILL instead of SIGTERM                   |
+| `portless bg start --wait`             | Start the current app in the background and wait for its URL   |
+| `portless bg status [name]`            | Show background app and route status                           |
+| `portless bg logs [name]`              | Show background app stdout logs                                |
+| `portless bg logs [name] --errors`     | Show background app stderr logs                                |
+| `portless bg logs [name] --bg`         | Show background lifecycle logs                                 |
+| `portless bg restart [name] --wait`    | Restart a background app and wait for its URL                  |
+| `portless bg stop [name]`              | Stop a background app                                          |
+| `portless bg clean --all`              | Remove dead background entries and logs                        |
 | `portless proxy start`                 | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
 | `portless proxy start --no-tls`        | Start without HTTPS (plain HTTP on port 80)                    |
 | `portless proxy start --lan`           | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
@@ -317,7 +351,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless run --help`                  | Show help for a subcommand (also: alias, hosts, clean)         |
 | `portless --version` / `-v`            | Show version                                                   |
 
-**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, `service`, and `bg` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## portless.json
 

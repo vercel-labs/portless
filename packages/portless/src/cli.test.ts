@@ -213,6 +213,60 @@ describe("CLI", () => {
     });
   });
 
+  describe("bg", () => {
+    it("prints bg help", () => {
+      const { status, stdout } = run(["bg", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless bg");
+      expect(stdout).toContain("bg start");
+      expect(stdout).toContain("bg stop");
+    });
+
+    it("still dispatches bg help when PORTLESS=0", () => {
+      const { status, stdout } = run(["bg", "--help"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless bg");
+    });
+
+    it("prints nothing for bg logs with --tail 0", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bg-tail-zero-"));
+      try {
+        const bgDir = path.join(tmpDir, "bg");
+        const logsDir = path.join(bgDir, "logs");
+        fs.mkdirSync(logsDir, { recursive: true });
+        fs.writeFileSync(
+          path.join(bgDir, "registry.json"),
+          JSON.stringify({
+            web: {
+              name: "web",
+              pid: process.pid,
+              cwd: tmpDir,
+              startedAt: new Date().toISOString(),
+              intent: {
+                name: "web",
+                commandArgs: ["pnpm", "dev"],
+                explicitCommand: true,
+              },
+            },
+          })
+        );
+        fs.writeFileSync(path.join(logsDir, "web.stdout.log"), "one\ntwo\n");
+
+        const { status, stdout, stderr } = run(["bg", "logs", "web", "--tail", "0"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toBe("");
+        expect(stderr).toBe("");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("error: no command provided", () => {
     it("exits 1 when only a name is given without a command", () => {
       const { status, stderr } = run(["myapp"]);

@@ -32,12 +32,14 @@ describe("removePortlessStateFiles", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("removes allowlisted files and host-certs directory", () => {
+  it("removes allowlisted files and generated state directories", () => {
     fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
     fs.writeFileSync(path.join(tmpDir, "ca.pem"), "pem");
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
     fs.mkdirSync(path.join(tmpDir, "host-certs"));
     fs.writeFileSync(path.join(tmpDir, "host-certs", "x.pem"), "x");
+    fs.mkdirSync(path.join(tmpDir, "bg"));
+    fs.writeFileSync(path.join(tmpDir, "bg", "registry.json"), "{}");
 
     fs.writeFileSync(path.join(tmpDir, "user-notes.txt"), "keep me");
 
@@ -46,6 +48,7 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "ca.pem"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "host-certs"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "bg"))).toBe(false);
     expect(fs.readFileSync(path.join(tmpDir, "user-notes.txt"), "utf-8")).toBe("keep me");
   });
 

@@ -140,6 +140,32 @@ Turbo runs each package's `dev` script, which invokes portless. Portless reads t
 
 `pnpm dev` at the root works through turbo as usual. People without portless can run `pnpm run dev:app` directly.
 
+## Background apps
+
+Use `portless bg` when you want a Portless-managed dev server to keep running after the command returns:
+
+```bash
+portless bg start --wait
+portless bg start --name web --wait pnpm dev
+portless bg status web
+portless bg logs web --tail 200
+portless bg restart web --wait
+portless bg stop web
+```
+
+`bg start` backgrounds `portless run`, so it keeps the same name inference, route registration, TLS setup, and sharing behavior as foreground Portless. With no explicit command, it runs the configured script, defaulting to `dev`. `--wait` waits for Portless to print the app URL, defaulting to 30 seconds. Use `--keep` to leave the process running if waiting times out.
+
+Logs live under the active Portless state directory, usually `~/.portless/bg/logs`:
+
+```bash
+portless bg logs web              # stdout, last 100 lines
+portless bg logs web --errors     # stderr
+portless bg logs web --bg         # background lifecycle log
+portless bg logs web --follow     # follow stdout
+```
+
+Background app management is currently supported on macOS and Linux. From a monorepo root, start one app from its package directory or pass an explicit name and command.
+
 ## Use in package.json
 
 You can still use portless in `package.json` scripts:
@@ -351,11 +377,25 @@ portless list                    # Show active routes
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
 portless prune                   # Kill orphaned dev servers from crashed sessions
+portless bg start --wait         # Start an app in the background and wait for its URL
+portless bg status               # Show background app status for the current project
+portless bg logs                 # Show background app logs for the current project
+portless bg restart              # Restart the current background app
+portless bg stop                 # Stop the current background app
 portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
 
 # Disable portless (run command directly)
 PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
+
+# Background app control
+portless bg start --name web --wait pnpm dev  # Start and wait up to 30s for URL
+portless bg logs web --tail 200               # Show recent stdout logs
+portless bg logs web --errors                 # Show stderr logs
+portless bg logs web --bg                     # Show background lifecycle log
+portless bg restart web --wait                # Restart and wait for URL
+portless bg stop web                          # Stop gracefully
+portless bg clean --all                       # Remove dead bg entries and logs
 
 # Proxy control
 portless proxy start             # Start the HTTPS proxy (port 443, daemon)
@@ -395,6 +435,9 @@ portless service uninstall       # Remove the startup service
 --ngrok                          Share the app publicly via ngrok
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
+--wait [seconds]                 With bg start/restart, wait for the Portless URL (default: 30)
+--keep                           With bg --wait, keep the process running on timeout
+--json                           Print machine-readable bg command output
 ```
 
 ### Environment variables
@@ -423,7 +466,7 @@ PORTLESS_NGROK_URL               ngrok URL of the app (when --ngrok is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
-> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, `prune`, `proxy`, `service`, and `bg` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Uninstall / reset
 
