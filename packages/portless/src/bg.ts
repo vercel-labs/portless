@@ -536,6 +536,7 @@ function parseRestartArgs(tokens: string[]): { name?: string; options: BgRestart
 }
 
 function readLastLines(filePath: string, count: number): string[] {
+  if (count <= 0) return [];
   if (!fs.existsSync(filePath)) return [];
   try {
     const content = fs.readFileSync(filePath, "utf-8");
