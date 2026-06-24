@@ -2284,6 +2284,16 @@ function checkPathWritable(targetPath: string): boolean {
   }
 }
 
+function findExistingAncestor(targetPath: string): string | null {
+  let current = targetPath;
+  for (;;) {
+    if (fs.existsSync(current)) return current;
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
 function checkCommandAvailable(command: string, args: string[]): boolean {
   const result = spawnSync(command, args, {
     stdio: "ignore",
@@ -2404,11 +2414,21 @@ ${colors.bold("Options:")}
       add("fail", `Could not inspect state directory: ${message}`);
     }
   } else {
-    const parentDir = path.dirname(state.dir);
-    if (checkPathWritable(parentDir)) {
-      add("info", `State directory has not been created yet: ${state.dir}`);
+    const ancestor = findExistingAncestor(path.dirname(state.dir));
+    if (!ancestor) {
+      add(
+        "fail",
+        `State directory does not exist and no writable ancestor was found: ${state.dir}`
+      );
     } else {
-      add("fail", `State directory does not exist and parent is not writable: ${parentDir}`);
+      const ancestorStat = fs.statSync(ancestor);
+      if (!ancestorStat.isDirectory()) {
+        add("fail", `State directory does not exist and ancestor is not a directory: ${ancestor}`);
+      } else if (checkPathWritable(ancestor)) {
+        add("info", `State directory has not been created yet: ${state.dir}`);
+      } else {
+        add("fail", `State directory does not exist and ancestor is not writable: ${ancestor}`);
+      }
     }
   }
 

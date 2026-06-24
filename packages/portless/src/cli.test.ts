@@ -252,6 +252,27 @@ describe("CLI", () => {
       }
     });
 
+    it("does not fail for a missing nested state directory with a writable ancestor", async () => {
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-nested-"));
+      const proxyPort = await getFreePort();
+      const stateDir = path.join(tmpRoot, "missing", "state");
+      try {
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: stateDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain(`State directory has not been created yet: ${stateDir}`);
+        expect(stdout).toContain("Summary: 0 failures");
+      } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    });
+
     it("does not require OpenSSL when persisted proxy state is HTTP", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-http-"));
       const proxyPort = await getFreePort();
