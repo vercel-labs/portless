@@ -2354,6 +2354,7 @@ ${colors.bold("Options:")}
   const portListening = proxyRunning ? true : await isPortListening(probePort);
   const proxyPort = proxyRunning || portListening || hasPortFile ? probePort : configuredPort;
   const proxyTls = proxyRunning || portListening || hasPortFile ? probeTls : configuredTls;
+  const currentProxyStateIsHttp = (proxyRunning || portListening || hasPortFile) && !proxyTls;
   const stateExists = fs.existsSync(state.dir);
 
   console.log(colors.blue.bold("\nportless doctor\n"));
@@ -2418,10 +2419,25 @@ ${colors.bold("Options:")}
       const pid = parseInt(rawPid, 10);
       if (isNaN(pid) || pid <= 0) {
         add("fail", `Proxy PID file is invalid: ${store.pidPath}`);
-      } else if (isProcessAliveForDoctor(pid)) {
-        add("ok", `Proxy PID file points to a running process: ${pid}`);
-      } else {
+      } else if (!isProcessAliveForDoctor(pid)) {
         add("warn", `Proxy PID file is stale: ${pid}`, "Run: portless proxy stop");
+      } else if (!proxyRunning) {
+        add(
+          "warn",
+          `Proxy PID file points to PID ${pid}, but no portless proxy is responding on port ${proxyPort}.`,
+          "Run: portless proxy stop"
+        );
+      } else {
+        const portPid = findPidOnPort(proxyPort);
+        if (portPid !== null && portPid !== pid) {
+          add(
+            "warn",
+            `Proxy PID file points to PID ${pid}, but port ${proxyPort} is owned by PID ${portPid}.`,
+            "Run: portless proxy stop"
+          );
+        } else {
+          add("ok", `Proxy PID file points to the responding proxy process: ${pid}`);
+        }
       }
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
@@ -2431,7 +2447,7 @@ ${colors.bold("Options:")}
     add("warn", `Proxy is running but the PID file is missing: ${store.pidPath}`);
   }
 
-  if (proxyTls || !isHttpsEnvDisabled()) {
+  if (proxyTls || (!currentProxyStateIsHttp && !isHttpsEnvDisabled())) {
     if (checkCommandAvailable("openssl", ["version"])) {
       add("ok", "OpenSSL is available for certificate generation.");
     } else {

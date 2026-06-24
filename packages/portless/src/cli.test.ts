@@ -252,6 +252,27 @@ describe("CLI", () => {
       }
     });
 
+    it("does not require OpenSSL when persisted proxy state is HTTP", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-http-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PATH: tmpDir,
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("HTTPS is disabled for the current proxy state.");
+        expect(stdout).not.toContain("OpenSSL is not available");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("exits 1 when the proxy port is occupied by a non-portless process", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-conflict-"));
       const server = http.createServer((_req, res) => {
@@ -281,6 +302,53 @@ describe("CLI", () => {
         expect(stdout).toContain("Summary: 1 failure");
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("warns when routes.json is corrupted", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-routes-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "routes.json"), "{");
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("Corrupted routes file (invalid JSON)");
+        expect(stdout).toContain("Summary: 0 failures");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not report an alive stale PID file as healthy", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-pid-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.pid"), process.pid.toString());
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain(
+          `Proxy PID file points to PID ${process.pid}, but no portless proxy is responding on port ${proxyPort}.`
+        );
+        expect(stdout).not.toContain("Proxy PID file points to a running process");
+        expect(stdout).not.toContain("Proxy PID file points to the responding proxy process");
+      } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });

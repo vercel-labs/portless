@@ -265,13 +265,17 @@ export class RouteStore {
       try {
         parsed = JSON.parse(raw);
       } catch {
+        this.onWarning?.(`Corrupted routes file (invalid JSON): ${this.routesPath}`);
         return [];
       }
       if (!Array.isArray(parsed)) {
+        this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
         return [];
       }
       return parsed.filter(isValidRoute);
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.onWarning?.(`Could not read routes file: ${message}`);
       return [];
     }
   }
