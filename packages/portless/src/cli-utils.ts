@@ -173,6 +173,7 @@ export function readPortFromDir(dir: string): number | null {
 
 /** Name of the marker file that indicates the proxy is running with TLS. */
 const TLS_MARKER_FILE = "proxy.tls";
+const CUSTOM_CERT_MARKER_FILE = "proxy.custom-cert";
 
 /** Read the TLS marker from a state directory. */
 export function readTlsMarker(dir: string): boolean {
@@ -186,6 +187,27 @@ export function readTlsMarker(dir: string): boolean {
 /** Write or remove the TLS marker in the state directory. */
 export function writeTlsMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, TLS_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
+export function readCustomCertMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, CUSTOM_CERT_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+export function writeCustomCertMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, CUSTOM_CERT_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
   } else {

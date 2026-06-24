@@ -273,6 +273,32 @@ describe("CLI", () => {
       }
     });
 
+    it("does not require generated CA checks when proxy state uses a custom certificate", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-custom-cert-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+        fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PATH: tmpDir,
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("Proxy is configured with a custom TLS certificate.");
+        expect(stdout).toContain("Generated local CA is not required for custom TLS certificates.");
+        expect(stdout).not.toContain("OpenSSL is not available");
+        expect(stdout).not.toContain("Generated CA file is missing");
+        expect(stdout).not.toContain("Local CA has not been generated");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("exits 1 when the proxy port is occupied by a non-portless process", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-conflict-"));
       const server = http.createServer((_req, res) => {

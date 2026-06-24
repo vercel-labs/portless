@@ -36,6 +36,7 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
     fs.writeFileSync(path.join(tmpDir, "ca.pem"), "pem");
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
+    fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
     fs.mkdirSync(path.join(tmpDir, "host-certs"));
     fs.writeFileSync(path.join(tmpDir, "host-certs", "x.pem"), "x");
 
@@ -45,6 +46,7 @@ describe("removePortlessStateFiles", () => {
 
     expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "ca.pem"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.custom-cert"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "host-certs"))).toBe(false);
     expect(fs.readFileSync(path.join(tmpDir, "user-notes.txt"), "utf-8")).toBe("keep me");
   });

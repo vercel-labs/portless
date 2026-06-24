@@ -59,6 +59,7 @@ import {
   isWindows,
   killTree,
   readLanMarker,
+  readCustomCertMarker,
   readPersistedProxyState,
   readTldFromDir,
   readTlsMarker,
@@ -67,6 +68,7 @@ import {
   augmentedPath,
   validateTld,
   waitForProxy,
+  writeCustomCertMarker,
   writeLanMarker,
   writeTldFile,
   writeTlsMarker,
@@ -432,7 +434,8 @@ function startProxyServer(
   tld: string,
   tlsOptions?: { cert: Buffer; key: Buffer },
   lanIp?: string | null,
-  strict?: boolean
+  strict?: boolean,
+  customCert = false
 ): void {
   store.ensureDir();
 
@@ -592,6 +595,7 @@ function startProxyServer(
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     writeTlsMarker(store.dir, isTls);
+    writeCustomCertMarker(store.dir, isTls && customCert);
     writeTldFile(store.dir, tld);
     writeLanMarker(store.dir, activeLanIp);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
@@ -604,7 +608,7 @@ function startProxyServer(
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
       console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
-      if (isTls) {
+      if (isTls && !customCert) {
         console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
         console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
       }
@@ -650,6 +654,7 @@ function startProxyServer(
       // Port file may already be removed; non-fatal
     }
     writeTlsMarker(store.dir, false);
+    writeCustomCertMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
     writeLanMarker(store.dir, null);
     if (autoSyncHosts) cleanHostsFile();
@@ -702,6 +707,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
             // Port file may already be absent; non-fatal
           }
           writeTlsMarker(store.dir, false);
+          writeCustomCertMarker(store.dir, false);
           writeTldFile(store.dir, DEFAULT_TLD);
           writeLanMarker(store.dir, null);
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
@@ -742,6 +748,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       console.error(colors.red("Corrupted PID file. Removing it."));
       fs.unlinkSync(pidPath);
       writeTlsMarker(store.dir, false);
+      writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
       return;
@@ -763,6 +770,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
         // Port file may already be absent; non-fatal
       }
       writeTlsMarker(store.dir, false);
+      writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
       return;
@@ -780,6 +788,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       console.log(colors.yellow("Removing stale PID file."));
       fs.unlinkSync(pidPath);
       writeTlsMarker(store.dir, false);
+      writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
       return;
@@ -793,6 +802,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       // Port file may already be removed; non-fatal
     }
     writeTlsMarker(store.dir, false);
+    writeCustomCertMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
     writeLanMarker(store.dir, null);
     console.log(colors.green("Proxy stopped."));
@@ -2355,6 +2365,7 @@ ${colors.bold("Options:")}
   const proxyPort = proxyRunning || portListening || hasPortFile ? probePort : configuredPort;
   const proxyTls = proxyRunning || portListening || hasPortFile ? probeTls : configuredTls;
   const currentProxyStateIsHttp = (proxyRunning || portListening || hasPortFile) && !proxyTls;
+  const proxyUsesCustomCert = proxyTls && readCustomCertMarker(state.dir);
   const stateExists = fs.existsSync(state.dir);
 
   console.log(colors.blue.bold("\nportless doctor\n"));
@@ -2447,7 +2458,9 @@ ${colors.bold("Options:")}
     add("warn", `Proxy is running but the PID file is missing: ${store.pidPath}`);
   }
 
-  if (proxyTls || (!currentProxyStateIsHttp && !isHttpsEnvDisabled())) {
+  if (proxyUsesCustomCert) {
+    add("ok", "Proxy is configured with a custom TLS certificate.");
+  } else if (proxyTls || (!currentProxyStateIsHttp && !isHttpsEnvDisabled())) {
     if (checkCommandAvailable("openssl", ["version"])) {
       add("ok", "OpenSSL is available for certificate generation.");
     } else {
@@ -2463,7 +2476,9 @@ ${colors.bold("Options:")}
     add("info", "HTTPS is disabled, so OpenSSL is not required for this run.");
   }
 
-  if (proxyTls) {
+  if (proxyTls && proxyUsesCustomCert) {
+    add("info", "Generated local CA is not required for custom TLS certificates.");
+  } else if (proxyTls) {
     const caPath = path.join(state.dir, "ca.pem");
     if (fs.existsSync(caPath)) {
       if (isCATrusted(state.dir)) {
@@ -3035,7 +3050,15 @@ ${colors.bold("LAN mode (--lan):")}
   // Foreground mode: run the proxy directly in this process
   if (isForeground) {
     console.log(chalk.blue.bold("\nportless proxy\n"));
-    startProxyServer(store, proxyPort, tld, tlsOptions, lanIp, desiredWildcard ? false : undefined);
+    startProxyServer(
+      store,
+      proxyPort,
+      tld,
+      tlsOptions,
+      lanIp,
+      desiredWildcard ? false : undefined,
+      !!(customCertPath && customKeyPath)
+    );
     return;
   }
 
