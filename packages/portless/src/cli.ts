@@ -39,6 +39,7 @@ import {
   detectWorktreePrefix,
   truncateLabel,
   sanitizeForHostname,
+  applyWorktreeNameTemplate,
 } from "./auto.js";
 import {
   buildProxyStartConfig,
@@ -1007,7 +1008,12 @@ async function runApp(
   tls: boolean,
   tld: string,
   force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  autoInfo?: {
+    nameSource: string;
+    baseName?: string;
+    prefix?: string;
+    prefixSource?: string;
+  },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
@@ -1115,7 +1121,8 @@ async function runApp(
     console.log(chalk.gray(`-- ${hostname} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
+    const baseName =
+      autoInfo.baseName ?? (autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name);
     console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
@@ -2065,7 +2072,10 @@ ${colors.bold("Examples:")}
 
   const name = positional[0];
   const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const appConfig = worktree ? loadAppConfig() : null;
+  const effectiveName = worktree
+    ? applyWorktreeNameTemplate(name, worktree.prefix, appConfig?.worktreeNameTemplate)
+    : name;
 
   const { port, tls, tld } = await discoverState();
   const hostname = parseHostname(effectiveName, tld);
@@ -3258,7 +3268,9 @@ async function handleDefaultSingle(
   }
 
   const worktree = detectWorktreePrefix(cwd);
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const effectiveName = worktree
+    ? applyWorktreeNameTemplate(baseName, worktree.prefix, appConfig?.worktreeNameTemplate)
+    : baseName;
 
   const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3273,7 +3285,12 @@ async function handleDefaultSingle(
     tls,
     tld,
     false,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    {
+      nameSource,
+      baseName,
+      prefix: worktree?.prefix,
+      prefixSource: worktree?.source,
+    },
     appConfig?.appPort,
     lanMode,
     lanIp
@@ -3859,7 +3876,9 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   }
 
   const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const effectiveName = worktree
+    ? applyWorktreeNameTemplate(baseName, worktree.prefix, appConfig?.worktreeNameTemplate)
+    : baseName;
 
   const { dir, port, tls, tld, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3874,7 +3893,12 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     tls,
     tld,
     parsed.force,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    {
+      nameSource,
+      baseName,
+      prefix: worktree?.prefix,
+      prefixSource: worktree?.source,
+    },
     parsed.appPort,
     lanMode,
     lanIp

@@ -8,6 +8,7 @@ import {
   truncateLabel,
   inferProjectName,
   detectWorktreePrefix,
+  applyWorktreeNameTemplate,
 } from "./auto.js";
 
 // ---------------------------------------------------------------------------
@@ -105,6 +106,32 @@ describe("truncateLabel", () => {
     expect(result.length).toBeLessThanOrEqual(63);
     // Should not have double hyphens from trailing-hyphen stripping + hash separator
     expect(result).not.toMatch(/--/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyWorktreeNameTemplate
+// ---------------------------------------------------------------------------
+
+describe("applyWorktreeNameTemplate", () => {
+  it("formats worktree names with default and custom templates", () => {
+    expect(applyWorktreeNameTemplate("myapp", "fix-ui")).toBe("fix-ui.myapp");
+    expect(
+      applyWorktreeNameTemplate(
+        "fronttest.labs.local.hunet",
+        "fix-ui",
+        "fronttest.{worktree}.labs.local.hunet"
+      )
+    ).toBe("fronttest.fix-ui.labs.local.hunet");
+    expect(applyWorktreeNameTemplate("myapp", "fix-ui", "{name}.{worktree}")).toBe("myapp.fix-ui");
+  });
+
+  it("truncates labels after placeholder replacement", () => {
+    const longWorktree = "feature-" + "a".repeat(80);
+    const result = applyWorktreeNameTemplate("myapp", longWorktree);
+
+    expect(result.split(".")[0].length).toBeLessThanOrEqual(63);
+    expect(result.endsWith(".myapp")).toBe(true);
   });
 });
 

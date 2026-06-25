@@ -119,7 +119,12 @@ describe("loadConfig", () => {
   });
 
   it("loads config with all fields", () => {
-    const config = { name: "myapp", script: "start", appPort: 3000 };
+    const config = {
+      name: "myapp",
+      script: "start",
+      appPort: 3000,
+      worktreeNameTemplate: "{name}.{worktree}",
+    };
     fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify(config));
     const result = loadConfig(tmpDir);
     expect(result!.config).toEqual(config);
@@ -157,12 +162,16 @@ describe("loadConfig", () => {
   it("loads config from package.json portless key", () => {
     fs.writeFileSync(
       path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: { name: "myapp", script: "dev" } })
+      JSON.stringify({
+        name: "test",
+        portless: { name: "myapp", script: "dev", worktreeNameTemplate: "{worktree}.{name}" },
+      })
     );
     const result = loadConfig(tmpDir);
     expect(result).not.toBeNull();
     expect(result!.config.name).toBe("myapp");
     expect(result!.config.script).toBe("dev");
+    expect(result!.config.worktreeNameTemplate).toBe("{worktree}.{name}");
     expect(result!.configDir).toBe(tmpDir);
   });
 
@@ -267,6 +276,17 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("validates worktreeNameTemplate", () => {
+    for (const config of [
+      { worktreeNameTemplate: 42 },
+      { worktreeNameTemplate: "{name}.dev" },
+      { worktreeNameTemplate: "{branch}.{name}" },
+    ]) {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify(config));
+      expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+    }
+  });
+
   it("accepts turbo as a boolean", () => {
     fs.writeFileSync(
       path.join(tmpDir, "portless.json"),
@@ -306,9 +326,19 @@ describe("loadConfig validation", () => {
 
 describe("resolveAppConfig", () => {
   it("returns top-level fields when no apps key", () => {
-    const config = { name: "myapp", script: "dev" };
+    const config = {
+      name: "myapp",
+      script: "dev",
+      worktreeNameTemplate: "{name}.{worktree}",
+    };
     const result = resolveAppConfig(config, "/repo", "/repo");
-    expect(result).toEqual({ name: "myapp", script: "dev", appPort: undefined, proxy: undefined });
+    expect(result).toEqual({
+      name: "myapp",
+      script: "dev",
+      appPort: undefined,
+      proxy: undefined,
+      worktreeNameTemplate: "{name}.{worktree}",
+    });
   });
 
   it("returns proxy field from top-level config", () => {
@@ -320,11 +350,12 @@ describe("resolveAppConfig", () => {
   it("returns proxy field from apps entry", () => {
     const config = {
       apps: {
-        "apps/gen": { name: "gen", proxy: false },
+        "apps/gen": { name: "gen", proxy: false, worktreeNameTemplate: "{worktree}.{name}" },
       },
     };
     const result = resolveAppConfig(config, "/repo", "/repo/apps/gen");
     expect(result.proxy).toBe(false);
+    expect(result.worktreeNameTemplate).toBe("{worktree}.{name}");
   });
 
   it("matches exact path in apps map", () => {
@@ -479,10 +510,21 @@ describe("loadPackagePortlessConfig", () => {
   it("returns config from package.json portless key", () => {
     fs.writeFileSync(
       path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: { name: "myapp", script: "start" } })
+      JSON.stringify({
+        name: "test",
+        portless: {
+          name: "myapp",
+          script: "start",
+          worktreeNameTemplate: "{name}.{worktree}",
+        },
+      })
     );
     const result = loadPackagePortlessConfig(tmpDir);
-    expect(result).toEqual({ name: "myapp", script: "start" });
+    expect(result).toEqual({
+      name: "myapp",
+      script: "start",
+      worktreeNameTemplate: "{name}.{worktree}",
+    });
   });
 
   it("returns config from string shorthand", () => {

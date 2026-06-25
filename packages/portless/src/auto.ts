@@ -159,6 +159,21 @@ export interface WorktreePrefix {
   source: string;
 }
 
+const DEFAULT_WORKTREE_NAME_TEMPLATE = "{worktree}.{name}";
+
+export function applyWorktreeNameTemplate(
+  baseName: string,
+  worktreePrefix: string,
+  template = DEFAULT_WORKTREE_NAME_TEMPLATE
+): string {
+  return template
+    .replace(/\{name\}/g, baseName)
+    .replace(/\{worktree\}/g, worktreePrefix)
+    .split(".")
+    .map((label) => truncateLabel(label))
+    .join(".");
+}
+
 /** Branch names that represent the default/primary checkout — no prefix needed. */
 const DEFAULT_BRANCHES = new Set(["main", "master"]);
 

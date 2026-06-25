@@ -13,6 +13,7 @@ export interface AppConfig {
   script?: string;
   appPort?: number;
   proxy?: boolean;
+  worktreeNameTemplate?: string;
 }
 
 export interface PortlessConfig extends AppConfig {
@@ -125,7 +126,13 @@ export function resolveAppConfig(
     }
     return {};
   }
-  return { name: config.name, script: config.script, appPort: config.appPort, proxy: config.proxy };
+  return {
+    name: config.name,
+    script: config.script,
+    appPort: config.appPort,
+    proxy: config.proxy,
+    worktreeNameTemplate: config.worktreeNameTemplate,
+  };
 }
 
 /**
@@ -294,8 +301,17 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo"]);
-const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy"]);
+const KNOWN_TOP_KEYS = new Set([
+  "name",
+  "script",
+  "appPort",
+  "proxy",
+  "worktreeNameTemplate",
+  "apps",
+  "turbo",
+]);
+const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktreeNameTemplate"]);
+const TEMPLATE_PLACEHOLDER_RE = /\{([^}]+)\}/g;
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) {
@@ -334,6 +350,8 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
       throw new ConfigValidationError(`"proxy" in ${configPath} must be a boolean.`);
     }
   }
+
+  validateWorktreeNameTemplate(obj.worktreeNameTemplate, "worktreeNameTemplate", configPath);
 
   if (obj.turbo !== undefined) {
     if (typeof obj.turbo !== "boolean") {
@@ -389,7 +407,32 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
     }
   }
 
+  validateWorktreeNameTemplate(
+    obj.worktreeNameTemplate,
+    `${prefix}.worktreeNameTemplate`,
+    configPath
+  );
+
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
+}
+
+function validateWorktreeNameTemplate(value: unknown, label: string, configPath: string): void {
+  if (value === undefined) return;
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ConfigValidationError(`"${label}" in ${configPath} must be a non-empty string.`);
+  }
+  if (!value.includes("{worktree}")) {
+    throw new ConfigValidationError(`"${label}" in ${configPath} must include "{worktree}".`);
+  }
+  for (const match of value.matchAll(TEMPLATE_PLACEHOLDER_RE)) {
+    const placeholder = match[1];
+    if (placeholder !== "name" && placeholder !== "worktree") {
+      throw new ConfigValidationError(
+        `"${label}" in ${configPath} contains unknown placeholder "{${placeholder}}". ` +
+          `Supported placeholders: "{name}", "{worktree}".`
+      );
+    }
+  }
 }
 
 function warnUnknownKeys(

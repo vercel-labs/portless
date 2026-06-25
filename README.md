@@ -82,14 +82,15 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 
 ### Config fields
 
-| Field     | Type    | Default  | Description                                               |
-| --------- | ------- | -------- | --------------------------------------------------------- |
-| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
-| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
-| `appPort` | number  | auto     | Fixed port for the child process.                         |
-| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
-| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
-| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+| Field                  | Type    | Default             | Description                                               |
+| ---------------------- | ------- | ------------------- | --------------------------------------------------------- |
+| `name`                 | string  | inferred            | Base app name. Worktree prefix still applies.             |
+| `script`               | string  | `"dev"`             | Name of a `package.json` script to run.                   |
+| `appPort`              | number  | auto                | Fixed port for the child process.                         |
+| `proxy`                | boolean | auto                | Whether to route through the proxy. Auto-detected.        |
+| `worktreeNameTemplate` | string  | `{worktree}.{name}` | Template used for linked worktree hostnames.              |
+| `apps`                 | object  |                     | Overrides for workspace packages, keyed by relative path. |
+| `turbo`                | boolean | `true`              | Set `false` to use direct spawning instead of turborepo.  |
 
 ### package.json "portless" key
 
@@ -102,7 +103,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktreeNameTemplate`):
 
 ```json
 {
@@ -197,6 +198,20 @@ portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+
+Use `worktreeNameTemplate` when the branch label needs to appear somewhere other than the first subdomain. The template applies only to linked worktrees and supports `{name}` and `{worktree}` placeholders:
+
+```json
+{
+  "name": "tenant.app",
+  "worktreeNameTemplate": "tenant.{worktree}.app"
+}
+```
+
+```bash
+PORTLESS_TLD=test portless run next dev
+# -> https://tenant.fix-ui.app.test
+```
 
 ## Custom TLD
 
