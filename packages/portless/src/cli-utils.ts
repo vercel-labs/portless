@@ -894,6 +894,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
   rsbuild: { strictPort: false },
   astro: { strictPort: false },
   ng: { strictPort: false },
+  "laravel-artisan": { strictPort: false },
   "react-native": { strictPort: false },
   expo: { strictPort: false },
 };
@@ -915,6 +916,14 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
   if (commandArgs.length === 0) return null;
 
   const first = path.basename(commandArgs[0]);
+  if (
+    first === "php" &&
+    path.basename(commandArgs[1] ?? "") === "artisan" &&
+    commandArgs[2] === "serve"
+  ) {
+    return "laravel-artisan";
+  }
+
   if (FRAMEWORKS_NEEDING_PORT[first]) return first;
 
   const subcommands = PACKAGE_RUNNERS[first];
