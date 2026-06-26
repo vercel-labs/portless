@@ -55,8 +55,9 @@ export function removeBlock(content: string): string {
  * Build a portless-managed block for the given hostnames.
  */
 export function buildBlock(hostnames: string[]): string {
+  const validHostnames = hostnames.filter((h) => /^[a-zA-Z0-9.-]+$/.test(h));
   if (hostnames.length === 0) return "";
-  const entries = hostnames.map((h) => `127.0.0.1 ${h}`).join("\n");
+  const entries = validHostnames.map((h) => `127.0.0.1 ${h}`).join("\n");
   return `${MARKER_START}\n${entries}\n${MARKER_END}`;
 }
 
