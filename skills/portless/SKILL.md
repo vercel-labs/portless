@@ -183,7 +183,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. Overri
 | `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
 | `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)  |
 | `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`) |
-| `PORTLESS_NGROK`      | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)             |
+| `PORTLESS_NGROK`      | Set to `1` to share apps via ngrok, or a URL to pin it (same as `--ngrok`)  |
 | `PORTLESS_STATE_DIR`  | Override the state directory                                                |
 | `PORTLESS=0`          | Bypass the proxy, run the command directly                                  |
 
@@ -252,7 +252,16 @@ portless myapp --ngrok next dev
 # -> https://abc123.ngrok.app          (public internet)
 ```
 
-Set `PORTLESS_NGROK=1` to enable ngrok by default when portless runs an app. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
+Pass a reserved URL to `--ngrok` to bind a fixed address instead of a random one (the URL must be a domain reserved in your ngrok account):
+
+```bash
+portless myapp --ngrok=my-app.ngrok.dev next dev
+# -> https://my-app.ngrok.dev          (public internet, fixed)
+```
+
+The `--ngrok=<url>` form may omit the scheme (`my-app.ngrok.dev` becomes `https://my-app.ngrok.dev`). With a space-separated value, include the scheme: `--ngrok https://my-app.ngrok.dev`.
+
+Set `PORTLESS_NGROK=1` to enable ngrok by default when portless runs an app, or `PORTLESS_NGROK=my-app.ngrok.dev` to also pin the URL. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
 
 ## OS startup service
 
@@ -311,6 +320,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless <name> --tailscale <cmd>`    | Share the app on your Tailscale network (tailnet)              |
 | `portless <name> --funnel <cmd>`       | Share the app publicly via Tailscale Funnel                    |
 | `portless <name> --ngrok <cmd>`        | Share the app publicly via ngrok                               |
+| `portless <name> --ngrok=<url> <cmd>`  | Share via ngrok on a fixed URL (e.g. my-app.ngrok.dev)         |
 | `portless <name> --force <cmd>`        | Kill the existing process and take over its route              |
 | `portless --name <name> <cmd>`         | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`   | Stop flag parsing; everything after `--` is passed to child    |

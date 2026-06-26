@@ -5,6 +5,7 @@ import {
   buildNgrokArgs,
   ensureNgrokAvailable,
   extractNgrokUrl,
+  normalizeNgrokUrl,
   startNgrok,
   stopNgrokProcess,
   type NgrokCommandRunner,
@@ -87,6 +88,36 @@ describe("ngrok", () => {
         "http://127.0.0.1:4123",
       ]);
     });
+
+    it("binds a fixed public URL when one is requested", () => {
+      expect(buildNgrokArgs(4123, "myapp.localhost", "https://my-app.ngrok.dev")).toEqual([
+        "http",
+        "--log=stdout",
+        "--log-format=logfmt",
+        "--host-header=myapp.localhost",
+        "--url=https://my-app.ngrok.dev",
+        "http://127.0.0.1:4123",
+      ]);
+    });
+
+    it("omits the --url flag when no URL is requested", () => {
+      expect(buildNgrokArgs(4123)).not.toContain("--url=");
+      expect(buildNgrokArgs(4123).some((arg) => arg.startsWith("--url"))).toBe(false);
+    });
+  });
+
+  describe("normalizeNgrokUrl", () => {
+    it("prefixes https:// when the value has no scheme", () => {
+      expect(normalizeNgrokUrl("my-app.ngrok.dev")).toBe("https://my-app.ngrok.dev");
+      // A port is not a scheme, so host:port is still promoted.
+      expect(normalizeNgrokUrl("my-app.ngrok.dev:8443")).toBe("https://my-app.ngrok.dev:8443");
+    });
+
+    it("keeps an existing scheme rather than double-prefixing https://", () => {
+      expect(normalizeNgrokUrl("https://my-app.ngrok.dev")).toBe("https://my-app.ngrok.dev");
+      // An explicit http:// is preserved, not forced to https.
+      expect(normalizeNgrokUrl("http://my-app.ngrok.dev")).toBe("http://my-app.ngrok.dev");
+    });
   });
 
   describe("extractNgrokUrl", () => {
@@ -131,6 +162,21 @@ describe("ngrok", () => {
           "http://127.0.0.1:4123",
         ],
       ]);
+    });
+
+    it("forwards a requested fixed URL to ngrok", async () => {
+      const child = new MockNgrokChild();
+      const calls: string[][] = [];
+      const promise = startNgrok(4123, {
+        url: "https://my-app.ngrok.dev",
+        spawner: createSpawner(child, calls),
+        timeoutMs: 1000,
+      });
+
+      child.stdout.write("Forwarding https://my-app.ngrok.dev -> http://127.0.0.1:4123\n");
+
+      await expect(promise).resolves.toMatchObject({ url: "https://my-app.ngrok.dev" });
+      expect(calls[0]).toContain("--url=https://my-app.ngrok.dev");
     });
 
     it("notifies when ngrok exits after startup", async () => {
