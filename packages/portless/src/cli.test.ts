@@ -1562,6 +1562,96 @@ describe("CLI", () => {
       expect(stdout).toContain("hello");
     });
 
+    it("portless (no args) forwards Vite port flags through bun run dev", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bun-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({
+            name: "test-app",
+            packageManager: "bun@1.3.4",
+            portless: { appPort: 4567 },
+            scripts: { dev: "vite dev --host 127.0.0.1" },
+          })
+        );
+
+        const captureScriptPath = path.join(shimDir, "capture-bun.js");
+        fs.writeFileSync(
+          captureScriptPath,
+          [
+            'const fs = require("node:fs");',
+            "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+            "const payload = {",
+            "  args: process.argv.slice(2),",
+            "  env: {",
+            "    PORT: process.env.PORT,",
+            "    HOST: process.env.HOST,",
+            "    PORTLESS_URL: process.env.PORTLESS_URL,",
+            "  },",
+            "};",
+            "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+          ].join("\n") + "\n"
+        );
+
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            path.join(shimDir, "bun.cmd"),
+            `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+          );
+        } else {
+          const shimPath = path.join(shimDir, "bun");
+          fs.writeFileSync(
+            shimPath,
+            `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`
+          );
+          fs.chmodSync(shimPath, 0o755);
+        }
+
+        const { status } = run([], {
+          cwd: tmpDir,
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["run", "dev", "--port", "4567", "--strictPort"]);
+        expect(capture.env).toMatchObject({
+          PORT: "4567",
+          HOST: "127.0.0.1",
+          PORTLESS_URL: `http://test-app.localhost:${proxyPort}`,
+        });
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+
     it("portless run (no command) with portless.json resolves dev script", () => {
       fs.writeFileSync(
         path.join(tmpDir, "package.json"),
