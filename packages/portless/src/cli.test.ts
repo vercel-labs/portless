@@ -1327,6 +1327,27 @@ describe("CLI", () => {
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("uses configured worktree hostname template", () => {
+      const gitdir = path.join(tmpDir, "fake.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/portless-worktree-test\n");
+      fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ worktree: { hostnameTemplate: "test.{worktree}-local.myapp" } })
+      );
+
+      const { status, stdout } = run(["get", "test.local.myapp"], {
+        cwd: tmpDir,
+        env: getEnv(),
+      });
+
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(
+        /^https?:\/\/test\.portless-worktree-test-local\.myapp\.localhost(:\d+)?$/
+      );
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);

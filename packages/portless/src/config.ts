@@ -13,6 +13,11 @@ export interface AppConfig {
   script?: string;
   appPort?: number;
   proxy?: boolean;
+  worktree?: WorktreeConfig;
+}
+
+export interface WorktreeConfig {
+  hostnameTemplate?: string;
 }
 
 export interface PortlessConfig extends AppConfig {
@@ -26,6 +31,7 @@ export interface LoadedConfig {
 }
 
 const CONFIG_FILENAME = "portless.json";
+export const WORKTREE_PLACEHOLDER = "{worktree}";
 
 /**
  * Load portless config from `cwd`. Checks `portless.json` first, then
@@ -125,7 +131,13 @@ export function resolveAppConfig(
     }
     return {};
   }
-  return { name: config.name, script: config.script, appPort: config.appPort, proxy: config.proxy };
+  return {
+    name: config.name,
+    script: config.script,
+    appPort: config.appPort,
+    proxy: config.proxy,
+    worktree: config.worktree,
+  };
 }
 
 /**
@@ -294,8 +306,9 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo"]);
-const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy"]);
+const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree", "apps", "turbo"]);
+const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree"]);
+const KNOWN_WORKTREE_KEYS = new Set(["hostnameTemplate"]);
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) {
@@ -333,6 +346,10 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
     if (typeof obj.proxy !== "boolean") {
       throw new ConfigValidationError(`"proxy" in ${configPath} must be a boolean.`);
     }
+  }
+
+  if (obj.worktree !== undefined) {
+    validateWorktreeConfig(obj.worktree, "worktree", configPath);
   }
 
   if (obj.turbo !== undefined) {
@@ -389,7 +406,33 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
     }
   }
 
+  if (obj.worktree !== undefined) {
+    validateWorktreeConfig(obj.worktree, `${prefix}.worktree`, configPath);
+  }
+
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
+}
+
+function validateWorktreeConfig(value: unknown, prefix: string, configPath: string): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ConfigValidationError(`"${prefix}" in ${configPath} must be an object.`);
+  }
+
+  const obj = value as Record<string, unknown>;
+  if (obj.hostnameTemplate !== undefined) {
+    if (typeof obj.hostnameTemplate !== "string" || !obj.hostnameTemplate.trim()) {
+      throw new ConfigValidationError(
+        `"${prefix}.hostnameTemplate" in ${configPath} must be a non-empty string.`
+      );
+    }
+    if (!obj.hostnameTemplate.includes(WORKTREE_PLACEHOLDER)) {
+      throw new ConfigValidationError(
+        `"${prefix}.hostnameTemplate" in ${configPath} must include "${WORKTREE_PLACEHOLDER}".`
+      );
+    }
+  }
+
+  warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, prefix);
 }
 
 function warnUnknownKeys(
