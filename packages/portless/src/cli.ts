@@ -107,6 +107,7 @@ import {
   detectPackageManager,
   loadPackagePortlessConfig,
   ConfigValidationError,
+  WORKTREE_PLACEHOLDER,
 } from "./config.js";
 import type { AppConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
@@ -162,6 +163,16 @@ type ProxyConfig = {
   tlds: string[];
   useWildcard: boolean;
 };
+
+function resolveWorktreeName(
+  name: string,
+  worktree: { prefix: string },
+  hostnameTemplate?: string
+): string {
+  return hostnameTemplate
+    ? hostnameTemplate.replaceAll(WORKTREE_PLACEHOLDER, worktree.prefix)
+    : `${worktree.prefix}.${name}`;
+}
 
 function normalizeTlds(tlds: readonly string[]): string[] {
   return [...new Set(tlds.length > 0 ? tlds : [DEFAULT_TLD])];
@@ -1616,7 +1627,7 @@ ${colors.bold("Usage:")}
   from package.json.
 
 ${colors.bold("Options:")}
-  --name <name>          Override the inferred base name (worktree prefix still applies)
+  --name <name>          Override the inferred base name (worktree hostname rules still apply)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -1630,8 +1641,8 @@ ${colors.bold("Name inference (in order):")}
   3. Git repo root directory name
   4. Current directory basename
 
-  Use --name to override the inferred name while keeping worktree prefixes.
-  In git worktrees, the branch name is prepended as a subdomain prefix
+  Use --name to override the inferred name while keeping worktree hostname rules.
+  In git worktrees, the branch name distinguishes hostnames by default
   (e.g. feature-auth.myapp.localhost).
 
 ${colors.bold("Examples:")}
@@ -1867,7 +1878,7 @@ ${colors.bold("ngrok sharing:")}
 
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
-                                Adds worktree prefix in git worktrees
+                                Applies git worktree hostname rules
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo on macOS/Linux
@@ -2209,7 +2220,7 @@ together:
   BACKEND_URL=$(portless get backend)
 
 ${colors.bold("Options:")}
-  --no-worktree          Skip worktree prefix detection
+  --no-worktree          Skip git worktree hostname handling
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2245,8 +2256,10 @@ ${colors.bold("Examples:")}
   }
 
   const name = positional[0];
+  const appConfig = loadAppConfig();
   const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const hostnameTemplate = appConfig?.worktree?.hostnameTemplate;
+  const effectiveName = worktree ? resolveWorktreeName(name, worktree, hostnameTemplate) : name;
 
   const { port, tls, tlds } = await discoverState();
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
@@ -3463,7 +3476,10 @@ async function handleDefaultSingle(
   }
 
   const worktree = detectWorktreePrefix(cwd);
-  const effectiveName = applyWorktreePrefix(baseName, worktree);
+  const hostnameTemplate = appConfig?.worktree?.hostnameTemplate;
+  const effectiveName = worktree
+    ? resolveWorktreeName(baseName, worktree, hostnameTemplate)
+    : baseName;
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3478,7 +3494,11 @@ async function handleDefaultSingle(
     tls,
     tlds,
     false,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    {
+      nameSource,
+      prefix: hostnameTemplate ? undefined : worktree?.prefix,
+      prefixSource: hostnameTemplate ? undefined : worktree?.source,
+    },
     appConfig?.appPort,
     lanMode,
     lanIp
@@ -4057,7 +4077,10 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   }
 
   const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const hostnameTemplate = appConfig?.worktree?.hostnameTemplate;
+  const effectiveName = worktree
+    ? resolveWorktreeName(baseName, worktree, hostnameTemplate)
+    : baseName;
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -4072,7 +4095,11 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     tls,
     tlds,
     parsed.force,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    {
+      nameSource,
+      prefix: hostnameTemplate ? undefined : worktree?.prefix,
+      prefixSource: hostnameTemplate ? undefined : worktree?.source,
+    },
     parsed.appPort,
     lanMode,
     lanIp
