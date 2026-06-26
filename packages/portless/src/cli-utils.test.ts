@@ -21,6 +21,7 @@ import {
   getProtocolPort,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
+  isPortListening,
   isProxyRunning,
   parsePidFromNetstat,
   readLanMarker,
@@ -135,6 +136,45 @@ describe("isProxyRunning", () => {
 
     const result = await isProxyRunning(port);
     expect(result).toBe(false);
+  });
+});
+
+describe("isPortListening", () => {
+  const servers: net.Server[] = [];
+
+  afterEach(async () => {
+    for (const s of servers) {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  function listenOn(host: string): Promise<number> {
+    const server = net.createServer();
+    servers.push(server);
+    return new Promise<number>((resolve) => {
+      server.listen(0, host, () => {
+        const addr = server.address();
+        if (addr && typeof addr !== "string") {
+          resolve(addr.port);
+        }
+      });
+    });
+  }
+
+  it("returns false when nothing is listening", async () => {
+    expect(await isPortListening(19877)).toBe(false);
+  });
+
+  it("detects a listener on IPv4 loopback", async () => {
+    const port = await listenOn("127.0.0.1");
+    expect(await isPortListening(port)).toBe(true);
+  });
+
+  it("detects a listener on IPv6 loopback (::1) only", async () => {
+    // e.g. Vite's default `localhost` host on Node 17+ binds ::1 only
+    const port = await listenOn("::1");
+    expect(await isPortListening(port)).toBe(true);
   });
 });
 

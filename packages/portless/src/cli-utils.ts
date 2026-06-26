@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
-import { PORTLESS_HEADER } from "./proxy.js";
+import { LOOPBACK_DIAL_OPTIONS, PORTLESS_HEADER } from "./proxy.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -624,10 +624,14 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
   });
 }
 
-/** Check whether any process is listening on the given port at 127.0.0.1. */
+/**
+ * Check whether any process is listening on the given port on loopback.
+ * Tries both 127.0.0.1 and ::1 so apps bound to IPv6 loopback only (e.g.
+ * Vite's default `localhost` host on Node 17+) are not reported as dead.
+ */
 export function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = net.createConnection({ ...LOOPBACK_DIAL_OPTIONS, port });
     let settled = false;
 
     const finish = (result: boolean) => {
@@ -950,8 +954,10 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * Handles both direct invocation (`vite dev`) and invocation via package
  * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
  *
- * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
- * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ * We also inject `--host 127.0.0.1` so the bind address is predictable.
+ * (The proxy dials both loopback families, so an IPv6-only `::1` bind still
+ * works — but injection cannot see through package.json scripts, so the
+ * proxy-side fallback is the safety net, not this flag.)
  *
  * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
  * lan|tunnel|localhost). In LAN mode we skip `--host` entirely — Expo defaults

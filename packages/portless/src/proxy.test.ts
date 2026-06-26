@@ -153,6 +153,30 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("hello from backend");
     });
 
+    it("proxies to a backend listening on IPv6 loopback (::1) only", async () => {
+      // Dev servers that bind `localhost` may listen on ::1 only — Node 17+
+      // resolves localhost to ::1 first (e.g. Vite's default server.host).
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("hello from ipv6 backend");
+        })
+      );
+      await new Promise<void>((resolve) => backend.listen(0, "::1", () => resolve()));
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("hello from ipv6 backend");
+    });
+
     it("routes wildcard subdomain to matching parent route when strict is false", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
