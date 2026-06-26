@@ -23,7 +23,7 @@ portless run [--name <name>] [cmd] [args...]
 portless <name> <cmd> [args...]
 ```
 
-`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes.
+`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying git worktree hostname rules.
 
 `portless <name>` uses an explicit name with no inference or prefixing.
 
@@ -46,7 +46,7 @@ portless docs.myapp next dev
   <tbody>
     <tr>
       <td>`--name <name>`</td>
-      <td>Override the inferred base name (worktree prefix still applies). Only for `portless run`.</td>
+      <td>Override the inferred base name (git worktree hostname rules still apply). Only for `portless run`.</td>
     </tr>
     <tr>
       <td>`--script <name>`</td>
@@ -93,7 +93,7 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
-Applies worktree prefix detection by default. Use `--no-worktree` to skip it.
+Applies git worktree hostname rules by default. Use `--no-worktree` to skip them.
 
 ## Alias (static routes)
 
@@ -244,7 +244,7 @@ Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-u
 
 **Framework notes:**
 
-- **Next.js**: Add `allowedDevOrigins: ['myapp.local', '*.myapp.local']` to `next.config.js` so LAN mode requests still work when portless adds a git worktree prefix.
+- **Next.js**: Add `allowedDevOrigins: ['myapp.local', '*.myapp.local']` to `next.config.js` so LAN mode requests still work with git worktree hostnames.
 - **Vite / React Router / SvelteKit / Astro**: Handled automatically via `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`.
 - **Expo / React Native**: Add `NSAllowsLocalNetworking` to your `app.json` for iOS ATS (see [Getting Started](/) for the `.localhost` equivalent using `NSExceptionDomains`):
 
