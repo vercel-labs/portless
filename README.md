@@ -82,14 +82,25 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 
 ### Config fields
 
-| Field     | Type    | Default  | Description                                               |
-| --------- | ------- | -------- | --------------------------------------------------------- |
-| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
-| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
-| `appPort` | number  | auto     | Fixed port for the child process.                         |
-| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
-| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
-| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+| Field      | Type    | Default  | Description                                               |
+| ---------- | ------- | -------- | --------------------------------------------------------- |
+| `name`     | string  | inferred | Base app name. Worktree hostname rules still apply.       |
+| `script`   | string  | `"dev"`  | Name of a `package.json` script to run.                   |
+| `appPort`  | number  | auto     | Fixed port for the child process.                         |
+| `proxy`    | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
+| `worktree` | object  |          | Git worktree hostname options.                            |
+| `apps`     | object  |          | Overrides for workspace packages, keyed by relative path. |
+| `turbo`    | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+
+Use `worktree.hostnameTemplate` to place the worktree label somewhere other than the first subdomain:
+
+```json
+{
+  "worktree": {
+    "hostnameTemplate": "test.{worktree}-local.myapp"
+  }
+}
+```
 
 ### package.json "portless" key
 
@@ -102,7 +113,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
 
 ```json
 {
@@ -190,13 +201,27 @@ portless run next dev   # -> https://myapp.localhost
 portless run next dev   # -> https://fix-ui.myapp.localhost
 ```
 
-Use `--name` to override the inferred base name while keeping the worktree prefix:
+Use `--name` to override the inferred base name while keeping worktree hostname rules:
 
 ```bash
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+
+If a project needs the worktree label somewhere other than the first subdomain, configure a hostname template:
+
+```json
+{
+  "portless": {
+    "worktree": {
+      "hostnameTemplate": "test.{worktree}-local.myapp"
+    }
+  }
+}
+```
+
+Then a linked worktree on branch `fix-ui` uses `https://test.fix-ui-local.myapp.localhost` by default, or `https://test.fix-ui-local.myapp.com` when the proxy TLD is `com`.
 
 ## Custom TLD
 
