@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
 
@@ -38,7 +39,21 @@ export function collectStateDirsForCleanup(): string[] {
   };
   add(USER_STATE_DIR);
   add(LEGACY_SYSTEM_STATE_DIR);
-  add(process.env.PORTLESS_STATE_DIR);
+
+  const envDir = process.env.PORTLESS_STATE_DIR;
+  if (envDir) {
+    const trimmed = envDir.trim();
+    if (trimmed) {
+      const resolved = path.resolve(trimmed);
+      if (fs.existsSync(resolved)) {
+        const home = os.homedir();
+        if (resolved.startsWith(home + path.sep)) {
+          dirs.add(resolved);
+        }
+      }
+    }
+  }
+
   return [...dirs];
 }
 
