@@ -50,6 +50,16 @@ function listen(server: AnyServer): Promise<void> {
   });
 }
 
+async function getUnusedPort(): Promise<number> {
+  const server = http.createServer();
+  await listen(server);
+  const addr = server.address();
+  if (!addr || typeof addr === "string") throw new Error("no addr");
+  const { port } = addr;
+  await new Promise<void>((resolve) => server.close(() => resolve()));
+  return port;
+}
+
 describe("createProxyServer", () => {
   const servers: AnyServer[] = [];
 
@@ -371,7 +381,7 @@ describe("createProxyServer", () => {
   describe("error handling", () => {
     it("returns 502 when backend is not running", async () => {
       const errors: string[] = [];
-      const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: 59999 }];
+      const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: await getUnusedPort() }];
       const server = trackServer(
         createProxyServer({
           getRoutes: () => routes,
