@@ -1,8 +1,19 @@
 # Changelog
 
-## 0.15.0
+## 0.15.1
 
 <!-- release:start -->
+
+### New Features
+
+- **Multi-TLD proxy support**: `--tld` is now repeatable and `PORTLESS_TLD` accepts comma separated values, so one proxy can serve the same app names across multiple TLDs. Routes, TLS, service state, hosts sync, framework environment, and workspace launches now use the full configured TLD list. (#344)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.15.0
 
 ### New Features
 
@@ -16,7 +27,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.14.0
 
