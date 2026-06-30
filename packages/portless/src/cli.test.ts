@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
+const GIT_AVAILABLE = spawnSync("git", ["--version"], { stdio: "ignore" }).status === 0;
 const TEST_CA_PEM = `-----BEGIN CERTIFICATE-----
 MIIDFzCCAf+gAwIBAgIUEVh0YNawusstUaCfwLYo2qUO7D8wDQYJKoZIhvcNAQEL
 BQAwGzEZMBcGA1UEAwwQcG9ydGxlc3MtdGVzdC1jYTAeFw0yNjA1MjAyMTIzNDBa
@@ -37,9 +38,11 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     NO_COLOR: "1",
   };
   // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
-  delete env.PNPM_SCRIPT_SRC_DIR;
-  if (env.npm_command === "exec") {
-    delete env.npm_command;
+  for (const key of Object.keys(env)) {
+    const normalizedKey = key.toLowerCase();
+    if (normalizedKey === "pnpm_script_src_dir" || normalizedKey === "npm_command") {
+      delete env[key];
+    }
   }
   const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
     encoding: "utf-8",
@@ -52,6 +55,17 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
     stdout: result.stdout,
     stderr: result.stderr,
   };
+}
+
+function runGit(cwd: string, args: string[]): void {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf-8",
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} failed: ${result.stderr}`);
+  }
 }
 
 function writeExpoShim(dir: string): void {
@@ -1719,6 +1733,108 @@ describe("CLI", () => {
       });
       expect(stdout).toContain("works");
     });
+
+    it.skipIf(!GIT_AVAILABLE)(
+      "adds worktree prefix to multi-app workspace names",
+      async () => {
+        const repoDir = path.join(tmpDir, "repo");
+        const stateDir = path.join(tmpDir, "state");
+        const shimDir = path.join(tmpDir, "bin");
+        const webDir = path.join(repoDir, "apps", "web");
+        const apiDir = path.join(repoDir, "apps", "api");
+        fs.mkdirSync(webDir, { recursive: true });
+        fs.mkdirSync(apiDir, { recursive: true });
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.mkdirSync(shimDir, { recursive: true });
+        if (process.platform === "win32") {
+          fs.writeFileSync(path.join(shimDir, "npm.cmd"), "@echo off\r\nexit /b 0\r\n");
+          fs.writeFileSync(path.join(shimDir, "pnpm.cmd"), "@echo off\r\nexit /b 0\r\n");
+        } else {
+          const npmShim = path.join(shimDir, "npm");
+          fs.writeFileSync(npmShim, "#!/bin/sh\nexit 0\n");
+          fs.chmodSync(npmShim, 0o755);
+          const pnpmShim = path.join(shimDir, "pnpm");
+          fs.writeFileSync(pnpmShim, "#!/bin/sh\nexit 0\n");
+          fs.chmodSync(pnpmShim, 0o755);
+        }
+
+        fs.writeFileSync(
+          path.join(repoDir, "package.json"),
+          JSON.stringify({
+            name: "sound-lab",
+            packageManager: "pnpm@11.1.3",
+            workspaces: ["apps/*"],
+          })
+        );
+        fs.writeFileSync(
+          path.join(repoDir, "portless.json"),
+          JSON.stringify({ apps: { "apps/api": { name: "api.custom" } } })
+        );
+        fs.writeFileSync(
+          path.join(webDir, "package.json"),
+          JSON.stringify({ name: "web", scripts: { dev: 'node -e "process.exit(0)"' } })
+        );
+        fs.writeFileSync(
+          path.join(apiDir, "package.json"),
+          JSON.stringify({ name: "api", scripts: { dev: 'node -e "process.exit(0)"' } })
+        );
+
+        runGit(repoDir, ["init"]);
+        runGit(repoDir, ["branch", "-M", "main"]);
+        runGit(repoDir, ["add", "."]);
+        runGit(repoDir, [
+          "-c",
+          "user.name=Test",
+          "-c",
+          "user.email=t@t",
+          "-c",
+          "commit.gpgsign=false",
+          "commit",
+          "-m",
+          "init",
+        ]);
+        runGit(repoDir, ["branch", "feature-auth"]);
+        const worktreeDir = path.join(tmpDir, "wt-feature-auth");
+        runGit(repoDir, ["worktree", "add", worktreeDir, "feature-auth"]);
+
+        const server = http.createServer((_req, res) => {
+          res.setHeader("X-Portless", "1");
+          res.end("ok");
+        });
+
+        try {
+          const proxyPort = await new Promise<number>((resolve) => {
+            server.listen(0, "127.0.0.1", () => {
+              const addr = server.address();
+              if (addr && typeof addr !== "string") {
+                resolve(addr.port);
+              }
+            });
+          });
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), proxyPort.toString());
+          const testPath = `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`;
+
+          const { status, stdout, stderr } = run([], {
+            cwd: worktreeDir,
+            env: {
+              PATH: testPath,
+              Path: testPath,
+              PORTLESS_STATE_DIR: stateDir,
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(status, `${stdout}\n${stderr}`).toBe(0);
+          expect(stdout).toContain(`http://feature-auth.api.custom.localhost:${proxyPort}`);
+          expect(stdout).toContain(`http://feature-auth.web.sound-lab.localhost:${proxyPort}`);
+          expect(stdout).not.toContain(`http://api.custom.localhost:${proxyPort}`);
+          expect(stdout).not.toContain(`http://web.sound-lab.localhost:${proxyPort}`);
+        } finally {
+          await new Promise<void>((resolve) => server.close(() => resolve()));
+        }
+      },
+      15_000
+    );
 
     it("portless run with missing script errors clearly", () => {
       fs.writeFileSync(

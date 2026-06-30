@@ -3574,6 +3574,7 @@ async function handleDefaultMulti(
     throw err;
   }
   const packages = discoverWorkspacePackages(wsRoot);
+  const worktree = detectWorktreePrefix(wsRoot);
 
   if (packages.length === 0) {
     console.error(colors.red("Error: No workspace packages found."));
@@ -3647,10 +3648,11 @@ async function handleDefaultMulti(
     let name: string;
     let label: string;
     if (appOverride.name) {
-      name = appOverride.name
+      const baseName = appOverride.name
         .split(".")
         .map((l) => truncateLabel(l))
         .join(".");
+      name = worktree ? `${worktree.prefix}.${baseName}` : baseName;
       label = appOverride.name;
     } else {
       let pkgLabel: string;
@@ -3660,7 +3662,8 @@ async function handleDefaultMulti(
       } else {
         pkgLabel = rel.replace(/\//g, "-");
       }
-      name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
+      const baseName = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
+      name = worktree ? `${worktree.prefix}.${baseName}` : baseName;
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
