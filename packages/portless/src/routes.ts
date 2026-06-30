@@ -7,13 +7,13 @@ import { fixOwnership, isErrnoException } from "./utils.js";
 const STALE_LOCK_THRESHOLD_MS = 10_000;
 
 /** Total time budget (ms) for acquiring the file lock before giving up. */
-const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_TIMEOUT_MS = 15_000;
 
 /** Initial delay (ms) between lock acquisition retries (doubles each attempt). */
 const LOCK_RETRY_BASE_MS = 10;
 
 /** Maximum delay (ms) between lock acquisition retries. */
-const LOCK_RETRY_CAP_MS = 500;
+const LOCK_RETRY_CAP_MS = 100;
 
 /** File permission mode for route and state files. */
 export const FILE_MODE = 0o644;

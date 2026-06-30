@@ -375,7 +375,7 @@ describe("RouteStore", () => {
       const hostnames = raw.map((r: { hostname: string }) => r.hostname).sort();
       const expected = Array.from({ length: count }, (_, i) => `app${i}.localhost`).sort();
       expect(hostnames).toEqual(expected);
-    }, 15_000);
+    }, 30_000);
 
     it("survives sustained lock contention that defeats a naive retry strategy", async () => {
       store.ensureDir();
@@ -383,7 +383,7 @@ describe("RouteStore", () => {
 
       // A child process holds the lock for 1.5s, simulating a slow writer on
       // a loaded machine. The old strategy (20 retries * 50ms = 1s budget)
-      // would time out; exponential backoff with a 5s budget survives.
+      // would time out; exponential backoff with a larger budget survives.
       const holdMs = 1500;
       const holder = spawn(
         process.execPath,
