@@ -885,10 +885,59 @@ export function augmentedPath(env: NodeJS.ProcessEnv | undefined, cwd?: string):
 }
 
 /**
+ * Resolve a command name to an absolute path by walking the supplied PATH
+ * string with each PATHEXT extension (Windows). Returns null when nothing
+ * matches. Used to bypass cmd.exe PATH lookup, which silently ignores any
+ * inherited PATH longer than 8191 characters (Microsoft Learn:
+ * https://learn.microsoft.com/en-us/troubleshoot/windows-client/shell-experience/command-line-string-limitation).
+ *
+ * Absolute paths (or paths containing a separator) are returned as-is if
+ * they exist on disk, with no PATH walk. Within each PATH directory the
+ * literal command name is tried first (so commands that already include an
+ * extension such as "node.exe" or "tool.bat" resolve correctly), then each
+ * PATHEXT extension is appended in turn.
+ */
+export function resolveWindowsExecutable(
+  cmd: string,
+  pathStr: string
+): string | null {
+  if (path.isAbsolute(cmd) || cmd.includes("\\") || cmd.includes("/")) {
+    return fs.existsSync(cmd) ? path.resolve(cmd) : null;
+  }
+  const pathext = process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD";
+  const exts = pathext
+    .split(";")
+    .map((ext) => ext.toLowerCase())
+    .filter((ext) => ext.length > 0);
+  for (const dir of pathStr.split(path.delimiter)) {
+    if (dir.length === 0) continue;
+    // Try literal name first - required when cmd already has a file
+    // extension (e.g. "node.exe", "tool.bat", "script.py"). Mirrors
+    // where.exe / cmd.exe behavior.
+    const literal = path.join(dir, cmd);
+    if (fs.existsSync(literal)) return literal;
+    for (const ext of exts) {
+      const candidate = path.join(dir, cmd + ext);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  }
+  return null;
+}
+
+/**
  * Spawn a command with proper signal forwarding, error handling, and exit
- * code propagation. Uses /bin/sh (Unix) or cmd.exe (Windows) so that shell
- * scripts and version manager shims are resolved. Prepends node_modules/.bin
- * to PATH so local project binaries (e.g. next, vite) are found.
+ * code propagation. Prepends node_modules/.bin to PATH so local project
+ * binaries (e.g. next, vite) are found.
+ *
+ * On Unix, runs the command under /bin/sh so shell scripts and version
+ * manager shims are resolved.
+ *
+ * On Windows, resolves the binary against the augmented PATH using
+ * resolveWindowsExecutable, then spawns it through CreateProcess. This
+ * sidesteps cmd.exe's 8191-character PATH inheritance limit and works
+ * correctly with tool managers (mise, asdf, scoop) that put many install
+ * directories on PATH. Only .cmd and .bat shims require a shell, and even
+ * then we pass the fully resolved path so cmd.exe never walks PATH itself.
  */
 export function spawnCommand(
   commandArgs: string[],
@@ -897,6 +946,11 @@ export function spawnCommand(
     onCleanup?: () => void;
   }
 ): void {
+  if (commandArgs.length === 0) {
+    console.error("spawnCommand called with empty commandArgs");
+    process.exit(1);
+  }
+
   const env: Record<string, string | undefined> = {
     ...(options?.env ?? process.env),
     PATH: augmentedPath(options?.env),
@@ -918,16 +972,50 @@ export function spawnCommand(
   // On Unix, spawn detached so the child gets its own process group. This
   // lets us kill the entire tree (shell + grandchild dev server) with a
   // single process.kill(-pid, signal) instead of only the immediate child.
-  const child = isWindows
-    ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
+  let child: ReturnType<typeof spawn>;
+  if (isWindows) {
+    // Bypass the cmd.exe wrapper when the user command resolves to a real
+    // executable. cmd.exe ignores PATH inherited from the parent process when
+    // PATH exceeds 8191 characters (Microsoft Learn link above), which breaks
+    // common setups where a tool manager such as mise puts many install
+    // directories on PATH. By resolving the binary ourselves and spawning it
+    // through CreateProcess, we sidestep the cmd.exe limit entirely.
+    //
+    // For .cmd and .bat scripts we still need a shell (Node CVE-2024-27980
+    // forbids direct execution of these without `shell: true`), but we pass
+    // the FULLY RESOLVED path to cmd.exe so cmd does not need to walk PATH
+    // itself and never hits the 8191-character limit.
+    const resolved = resolveWindowsExecutable(commandArgs[0]!, env.PATH ?? "");
+    if (resolved === null) {
+      console.error(`Failed to run command: "${commandArgs[0]}" not found in PATH`);
+      console.error(`Is "${commandArgs[0]}" installed and in your PATH?`);
+      process.exit(1);
+    }
+    const ext = path.extname(resolved).toLowerCase();
+    if (ext === ".cmd" || ext === ".bat") {
+      const tail = commandArgs
+        .slice(1)
+        .map((arg) => (/[\s"&|<>^()]/.test(arg) ? `"${arg.replace(/"/g, '\\"')}"` : arg))
+        .join(" ");
+      const cmdline = tail.length > 0 ? `"${resolved}" ${tail}` : `"${resolved}"`;
+      child = spawn("cmd.exe", ["/d", "/s", "/c", cmdline], {
         stdio: "inherit",
         env,
-      })
-    : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
-        stdio: "inherit",
-        env,
-        detached: true,
+        windowsVerbatimArguments: true,
       });
+    } else {
+      child = spawn(resolved, commandArgs.slice(1), {
+        stdio: "inherit",
+        env,
+      });
+    }
+  } else {
+    child = spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
+      stdio: "inherit",
+      env,
+      detached: true,
+    });
+  }
 
   let exiting = false;
 
