@@ -87,6 +87,11 @@ function writeExpoShim(dir: string): void {
   fs.chmodSync(shimPath, 0o755);
 }
 
+function writeJson(filePath: string, value: unknown): void {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, JSON.stringify(value, null, 2) + "\n");
+}
+
 async function getFreePort(): Promise<number> {
   const server = http.createServer();
   try {
@@ -1330,6 +1335,107 @@ describe("CLI", () => {
       });
       expect(status).toBe(0);
       expect(capture.NODE_EXTRA_CA_CERTS).toBe(userCaPath);
+    });
+  });
+
+  describe("default workspace mode", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-workspace-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("adds the worktree prefix to inferred and overridden Turbo workspace app URLs", async () => {
+      const repoDir = path.join(tmpDir, "repo");
+      const worktreeDir = path.join(tmpDir, "issue-502");
+      const stateDir = path.join(tmpDir, "state");
+      const shimDir = path.join(tmpDir, "shim");
+      const pnpmCapturePath = path.join(shimDir, "pnpm-args.txt");
+
+      const git = (args: string[], cwd: string) => {
+        const result = spawnSync("git", args, { cwd, encoding: "utf-8" });
+        expect(result.status, `${args.join(" ")}\n${result.stderr}`).toBe(0);
+      };
+
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        fs.mkdirSync(repoDir, { recursive: true });
+        writeJson(path.join(repoDir, "package.json"), {
+          private: true,
+          packageManager: "pnpm@9.15.4",
+          workspaces: ["apps/*"],
+          scripts: { dev: "turbo run dev" },
+        });
+        fs.writeFileSync(path.join(repoDir, "pnpm-workspace.yaml"), "packages:\n  - apps/*\n");
+        writeJson(path.join(repoDir, "turbo.json"), {});
+        writeJson(path.join(repoDir, "apps/web/package.json"), {
+          name: "@example/web",
+          scripts: { dev: "vite" },
+        });
+        writeJson(path.join(repoDir, "apps/admin/package.json"), {
+          name: "@example/admin",
+          scripts: { dev: "vite" },
+          portless: { name: "control" },
+        });
+
+        git(["init", "-b", "main"], repoDir);
+        git(["config", "user.email", "portless@example.test"], repoDir);
+        git(["config", "user.name", "Portless Test"], repoDir);
+        git(["add", "."], repoDir);
+        git(["commit", "-m", "init"], repoDir);
+        git(["worktree", "add", "-b", "issue-502", worktreeDir], repoDir);
+
+        fs.mkdirSync(stateDir, { recursive: true });
+        fs.mkdirSync(shimDir, { recursive: true });
+
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+        fs.writeFileSync(path.join(stateDir, "proxy.port"), proxyPort.toString());
+
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            path.join(shimDir, "pnpm.cmd"),
+            `@echo off\r\necho %* > "${pnpmCapturePath}"\r\nexit /b 0\r\n`
+          );
+        } else {
+          const pnpmShim = path.join(shimDir, "pnpm");
+          fs.writeFileSync(
+            pnpmShim,
+            `#!/bin/sh\nprintf "%s\\n" "$*" > "${pnpmCapturePath}"\nexit 0\n`
+          );
+          fs.chmodSync(pnpmShim, 0o755);
+        }
+
+        const { status, stdout } = run([], {
+          cwd: worktreeDir,
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: stateDir,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain(`http://issue-502.web.example.localhost:${proxyPort}`);
+        expect(stdout).toContain(`http://issue-502.control.localhost:${proxyPort}`);
+        expect(fs.readFileSync(pnpmCapturePath, "utf-8").trim()).toBe("run dev");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
     });
   });
 

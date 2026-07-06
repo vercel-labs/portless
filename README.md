@@ -80,6 +80,8 @@ The `apps` map is optional and only needed for name overrides. Packages not list
 
 Without an `apps` map, hostnames follow the `<package>.<project>.localhost` convention. The project name comes from the most common npm scope across workspace packages (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it gets the bare `<project>.localhost` without duplication.
 
+In linked git worktrees, monorepo URLs also get the branch prefix. A package that normally uses `web.example.localhost` uses `fix-ui.web.example.localhost` from a `fix-ui` worktree.
+
 ### Config fields
 
 | Field     | Type    | Default  | Description                                               |
@@ -188,6 +190,9 @@ portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
 portless run next dev   # -> https://fix-ui.myapp.localhost
+
+# From a linked monorepo worktree
+portless                # -> https://fix-ui.web.example.localhost
 ```
 
 Use `--name` to override the inferred base name while keeping the worktree prefix:
