@@ -285,7 +285,7 @@ portless proxy start --lan --https
 portless proxy start --lan --ip 192.168.1.42
 ```
 
-`--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
+`--lan` supports custom TLDs too: list values from `--tld` or `PORTLESS_TLD` are preserved and `.local` is added for discovery. Services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
 
 Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. All proxy settings (port, TLS, TLDs, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
@@ -372,7 +372,7 @@ PORTLESS=0 pnpm dev              # Bypasses proxy, uses default port
 # Proxy control
 portless proxy start             # Start the HTTPS proxy (port 443, daemon)
 portless proxy start --no-tls    # Start without HTTPS (port 80)
-portless proxy start --lan       # Start in LAN mode (mDNS .local for devices)
+portless proxy start --lan       # Start in LAN mode (custom TLDs preserved, local for mDNS)
 portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
@@ -392,7 +392,7 @@ portless service uninstall       # Remove the startup service
 -p, --port <number>              Port for the proxy (default: 443, or 80 with --no-tls)
 --no-tls                         Disable HTTPS (use plain HTTP on port 80)
 --https                          Enable HTTPS (default, accepted for compatibility)
---lan                            Enable LAN mode (mDNS .local for real devices)
+--lan                            Enable LAN mode (custom TLDs preserved, local for mDNS)
 --ip <address>                   Pin a specific LAN IP (disables auto-follow; use with --lan)
 --cert <path>                    Use a custom TLS certificate
 --key <path>                     Use a custom TLS private key

@@ -28,6 +28,11 @@ function normalizeTlds(tlds: readonly string[]): string[] {
   return [...new Set(tlds.length > 0 ? tlds : [DEFAULT_TLD])];
 }
 
+function mergeLanTlds(tlds: readonly string[]): string[] {
+  const normalized = normalizeTlds(tlds);
+  return normalized.includes("local") ? normalized : [...normalized, "local"];
+}
+
 function primaryTld(tlds: readonly string[]): string {
   return tlds[0] ?? DEFAULT_TLD;
 }
@@ -246,6 +251,7 @@ function parseServiceInstallConfig(
     ...DEFAULT_SERVICE_CONFIG,
     extraEnv: collectServiceExtraEnv(env),
   };
+  let explicitTld = false;
 
   if (env.PORTLESS_STATE_DIR) {
     config.stateDir = env.PORTLESS_STATE_DIR;
@@ -270,6 +276,7 @@ function parseServiceInstallConfig(
   if (env.PORTLESS_TLD) {
     config.tlds = normalizeTlds(parseTldList(env.PORTLESS_TLD, "PORTLESS_TLD"));
     config.tld = primaryTld(config.tlds);
+    explicitTld = true;
   }
 
   const envWildcard = parseBooleanEnv(env.PORTLESS_WILDCARD);
@@ -312,6 +319,7 @@ function parseServiceInstallConfig(
         const tlds = parseTldList(getFlagValue(tokens, i, token));
         config.tlds = normalizeTlds([...(tldFlagSeen ? config.tlds : []), ...tlds]);
         config.tld = primaryTld(config.tlds);
+        explicitTld = true;
         tldFlagSeen = true;
         i += 1;
         break;
@@ -359,8 +367,12 @@ function parseServiceInstallConfig(
     config.lanIp = null;
     config.lanIpExplicit = false;
   } else {
-    config.tlds = ["local"];
+    config.tlds = explicitTld ? mergeLanTlds(config.tlds) : ["local"];
     config.tld = "local";
+  }
+
+  if (config.lanMode && explicitTld) {
+    config.tld = primaryTld(config.tlds);
   }
 
   return config;
@@ -444,7 +456,7 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
   }
 
   if (ctx.config.lanMode) {
-    env.PORTLESS_TLD = "local";
+    env.PORTLESS_TLD = ctx.config.tlds.join(",");
   } else if (ctx.config.tlds.length > 1 || ctx.config.tld !== DEFAULT_TLD) {
     env.PORTLESS_TLD = ctx.config.tlds.join(",");
   }
@@ -557,12 +569,18 @@ export function buildServiceSpec(options: {
     ...options.installConfig,
     extraEnv: options.installConfig?.extraEnv ?? {},
   };
-  installConfig.tlds = installConfig.lanMode
-    ? ["local"]
-    : normalizeTlds(
-        options.installConfig?.tlds ??
-          (options.installConfig?.tld ? [options.installConfig.tld] : installConfig.tlds)
-      );
+  const installConfigRequestedTlds = normalizeTlds(
+    options.installConfig?.tlds ??
+      (options.installConfig?.tld ? [options.installConfig.tld] : installConfig.tlds)
+  );
+  if (installConfig.lanMode) {
+    installConfig.tlds =
+      installConfigRequestedTlds.length === 1 && installConfigRequestedTlds[0] === DEFAULT_TLD
+        ? ["local"]
+        : mergeLanTlds(installConfigRequestedTlds);
+  } else {
+    installConfig.tlds = installConfigRequestedTlds;
+  }
   installConfig.tld = primaryTld(installConfig.tlds);
   const stateDir =
     options.stateDir ||
