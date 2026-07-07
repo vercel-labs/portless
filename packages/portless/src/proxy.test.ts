@@ -218,6 +218,72 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("exact");
     });
 
+    it("routes requests for tailscale public URL hostnames", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("tailscale routed");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myfeature.myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://example.tailnet.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "example.tailnet.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("tailscale routed");
+    });
+
+    it("matches tailscale hostnames via URL parsing even when exact host isn't in routes", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("tailhost parse");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "other.localhost",
+          port: 4001,
+        },
+        {
+          hostname: "myfeature.myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://node-name.tailnet.ts.net/path",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "node-name.tailnet.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("tailhost parse");
+    });
+
     it("returns 404 when subdomain does not match any route", async () => {
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
       const server = trackServer(

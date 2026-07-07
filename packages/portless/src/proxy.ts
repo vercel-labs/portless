@@ -32,6 +32,14 @@ function getRequestHost(req: http.IncomingMessage): string {
   return req.headers.host || "";
 }
 
+function normalizeTailscaleHost(value: string): string {
+  try {
+    return new URL(value).hostname;
+  } catch {
+    return "";
+  }
+}
+
 /**
  * Detect whether a request arrived over an encrypted (TLS) connection.
  * Works for both native TLS sockets and HTTP/2 streams.
@@ -89,10 +97,22 @@ function findRoute(
   host: string,
   strict?: boolean
 ): { hostname: string; port: number } | undefined {
-  return (
-    routes.find((r) => r.hostname === host) ||
-    (strict ? undefined : routes.find((r) => host.endsWith("." + r.hostname)))
-  );
+  const exactRoute = routes.find((r) => r.hostname === host);
+  if (exactRoute) {
+    return exactRoute;
+  }
+
+  if (!strict) {
+    const wildcardRoute = routes.find((r) => host.endsWith(`.${r.hostname}`));
+    if (wildcardRoute) {
+      return wildcardRoute;
+    }
+  }
+
+  return routes.find((route) => {
+    const tailscaleHost = normalizeTailscaleHost(route.tailscaleUrl || "");
+    return !!tailscaleHost && tailscaleHost === host;
+  });
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */

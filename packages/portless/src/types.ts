@@ -2,6 +2,7 @@
 export interface RouteInfo {
   hostname: string;
   port: number;
+  tailscaleUrl?: string;
 }
 
 export interface ProxyServerOptions {
