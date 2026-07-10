@@ -1854,4 +1854,117 @@ describe("CLI", () => {
       }
     });
   });
+
+  describe("multi-app worktree routing (issue #269)", () => {
+    // Skipped on Windows: multi-app mode spawns the package manager
+    // (`npm run dev`), and spawnChildProcess does not use a shell, so
+    // spawn("npm") fails with ENOENT on Windows (npm is npm.cmd there). That is
+    // a separate limitation of the multi-app spawn path, not the worktree-prefix
+    // logic under test here, which is platform-agnostic and covered
+    // cross-platform by the detectWorktreePrefix unit tests. Runs on macOS/Linux.
+    it.skipIf(process.platform === "win32")(
+      "prefixes every app hostname with the worktree branch",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-wt-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-state-"));
+        const proxyPort = await getFreePort();
+        const capFile = (name: string) => path.join(stateDir, `url-${name}.txt`);
+        const readCap = (name: string) => {
+          try {
+            return fs.readFileSync(capFile(name), "utf-8");
+          } catch {
+            return "";
+          }
+        };
+        let cli: ReturnType<typeof spawn> | undefined;
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+
+          // Fake a git worktree on branch feature-x via the filesystem fallback
+          // (a .git file pointing at a gitdir whose HEAD is the branch ref).
+          const gitdir = path.join(root, "fake-bare.git", "worktrees", "wt");
+          fs.mkdirSync(gitdir, { recursive: true });
+          fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-x\n");
+          fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
+
+          // Each app's dev command records the URL portless assigned it via
+          // PORTLESS_URL, then exits. Reading the captured URL (not routes.json)
+          // is robust: a route is removed when its app exits, but the file stays.
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "capture.cjs"),
+              `require("node:fs").writeFileSync(${JSON.stringify(capFile(name))}, process.env.PORTLESS_URL || "");\n`
+            );
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                version: "0.0.0",
+                scripts: { dev: "node capture.cjs" },
+                portless: { proxy: true },
+              })
+            );
+          }
+
+          // Strip parent-only npm/pnpm vars so the spawned `npm run dev` is real
+          // npm, not the vitest runner's pnpm (npm_execpath).
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_PORT = proxyPort.toString();
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.NO_COLOR = "1";
+
+          let output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          // Poll generously: on slow CI, proxy boot plus two sequential
+          // `npm run dev` spawns can take a while.
+          for (let i = 0; i < 60; i++) {
+            if (readCap("web") && readCap("api")) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          const webUrl = readCap("web");
+          const apiUrl = readCap("api");
+          if (!webUrl || !apiUrl) {
+            throw new Error(
+              `capture incomplete (web=${JSON.stringify(webUrl)}, api=${JSON.stringify(apiUrl)}). CLI output:\n${output}`
+            );
+          }
+          // Routed URL must carry the worktree prefix, in the full multi-app
+          // form <branch>.<pkg>.<project>.<tld>.
+          expect(webUrl).toContain("feature-x.web.myrepo.localhost");
+          expect(apiUrl).toContain("feature-x.api.myrepo.localhost");
+        } finally {
+          if (cli) await stopChild(cli);
+          run(["proxy", "stop"], {
+            env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" },
+          });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+  });
 });
