@@ -932,7 +932,14 @@ export function spawnCommand(
   // lets us kill the entire tree (shell + grandchild dev server) with a
   // single process.kill(-pid, signal) instead of only the immediate child.
   const child = isWindows
-    ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.map(cmdEscape).join(" ")], {
+    ? spawn("cmd.exe", ["/d", "/s", "/c", `"${commandArgs.map(cmdEscape).join(" ")}"`], {
+        // Mirror how Node builds a `shell: true` invocation on Windows: pass the
+        // command line verbatim so Node does not re-escape the quotes cmdEscape
+        // added (its default escaping turns them into `\"`, which cmd.exe does
+        // not understand), and wrap the whole line in an outer pair of quotes so
+        // cmd.exe's `/s` quote-stripping removes those rather than the quotes
+        // around an individual argument.
+        windowsVerbatimArguments: true,
         stdio: "inherit",
         env,
       })
