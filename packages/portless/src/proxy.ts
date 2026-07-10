@@ -76,37 +76,34 @@ const PORTLESS_HOPS_HEADER = "x-portless-hops";
  */
 const MAX_PROXY_HOPS = 5;
 
-/** Extract the hostname from a route's tailscaleUrl, or undefined if unset/invalid. */
-function tailscaleHostname(tailscaleUrl: string | undefined): string | undefined {
+/** Authority (hostname, plus port when non-default) of a route's tailscaleUrl, or undefined if unset or invalid. */
+function tailscaleAuthority(tailscaleUrl: string | undefined): string | undefined {
   if (!tailscaleUrl) return undefined;
   try {
-    return new URL(tailscaleUrl).hostname;
+    return new URL(tailscaleUrl).host;
   } catch {
     return undefined;
   }
 }
 
 /**
- * Find the route matching a given host. Matches exact hostname first, then
- * the hostname of the route's public Tailscale Serve/Funnel URL (so inbound
- * funnel traffic with Host: <device>.<tailnet>.ts.net resolves to the same
- * upstream as the local hostname), then falls back to wildcard subdomain
- * matching (e.g. tenant.myapp.localhost matches a route registered for
- * myapp.localhost).
- *
- * When `strict` is true, only exact matches (local or tailscale hostname)
- * are returned; unregistered subdomain prefixes will not fall back to the
- * base service.
+ * Find the route matching a request's host, which may include a port. Match
+ * order: local hostname, tailscale authority (hostname and port), tailscale
+ * hostname ignoring port, then wildcard subdomain. The authority tier
+ * disambiguates apps sharing a `.ts.net` hostname on different ports; the
+ * hostname tier keeps other-port requests resolving. `strict` drops the wildcard.
  */
 function findRoute(
   routes: { hostname: string; port: number; tailscaleUrl?: string }[],
   host: string,
   strict?: boolean
 ): { hostname: string; port: number } | undefined {
+  const hostname = host.split(":")[0];
   return (
-    routes.find((r) => r.hostname === host) ||
-    routes.find((r) => tailscaleHostname(r.tailscaleUrl) === host) ||
-    (strict ? undefined : routes.find((r) => host.endsWith("." + r.hostname)))
+    routes.find((r) => r.hostname === hostname) ||
+    routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === host) ||
+    routes.find((r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname) ||
+    (strict ? undefined : routes.find((r) => hostname.endsWith("." + r.hostname)))
   );
 }
 
@@ -142,7 +139,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     res.setHeader(PORTLESS_HEADER, "1");
 
     const routes = getRoutes();
-    const host = getRequestHost(req).split(":")[0];
+    const rawHost = getRequestHost(req);
+    const host = rawHost.split(":")[0];
 
     if (!host) {
       res.writeHead(400, { "Content-Type": "text/plain" });
@@ -173,7 +171,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, host, strict);
+    const route = findRoute(routes, rawHost, strict);
 
     if (!route) {
       const safeHost = escapeHtml(host);
@@ -301,8 +299,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
 
     const routes = getRoutes();
-    const host = getRequestHost(req).split(":")[0];
-    const route = findRoute(routes, host, strict);
+    const route = findRoute(routes, getRequestHost(req), strict);
 
     if (!route) {
       socket.destroy();

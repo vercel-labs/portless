@@ -324,6 +324,80 @@ describe("createProxyServer", () => {
       expect(res.status).toBe(404);
     });
 
+    it("matches the tailscale route registered for the request port", async () => {
+      const backendA = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app on :443");
+        })
+      );
+      const backendB = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app on :8443");
+        })
+      );
+      await listen(backendA);
+      await listen(backendB);
+      const addrA = backendA.address();
+      const addrB = backendB.address();
+      if (!addrA || typeof addrA === "string") throw new Error("no addr");
+      if (!addrB || typeof addrB === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "app-a.localhost",
+          port: addrA.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+        {
+          hostname: "app-b.localhost",
+          port: addrB.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net:8443",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const resB = await request(server, { host: "my-device.tail1234.ts.net:8443" });
+      expect(resB.status).toBe(200);
+      expect(resB.body).toBe("app on :8443");
+
+      const resA = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(resA.status).toBe(200);
+      expect(resA.body).toBe("app on :443");
+    });
+
+    it("matches a tailscale route by hostname when the request port differs", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("only app");
+        })
+      );
+      await listen(backend);
+      const addr = backend.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: addr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net:8443",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("only app");
+    });
+
     it("returns 404 for unregistered subdomain prefix by default", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
