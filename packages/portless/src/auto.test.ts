@@ -8,6 +8,7 @@ import {
   truncateLabel,
   inferProjectName,
   detectWorktreePrefix,
+  applyWorktreePrefix,
 } from "./auto.js";
 
 // ---------------------------------------------------------------------------
@@ -456,5 +457,27 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     expect(result).not.toBeNull();
     expect(result!.prefix.length).toBeLessThanOrEqual(63);
     expect(result!.source).toBe("git branch");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyWorktreePrefix
+// ---------------------------------------------------------------------------
+
+describe("applyWorktreePrefix", () => {
+  it("returns the base name unchanged when not in a worktree", () => {
+    expect(applyWorktreePrefix("web.json-render", null)).toBe("web.json-render");
+  });
+
+  it("prepends the worktree prefix as a subdomain (issue #269)", () => {
+    expect(
+      applyWorktreePrefix("web.json-render", { prefix: "feature-x", source: "git branch" })
+    ).toBe("feature-x.web.json-render");
+  });
+
+  it("prefixes a single-label base name too", () => {
+    expect(applyWorktreePrefix("api", { prefix: "feature-x", source: "git branch" })).toBe(
+      "feature-x.api"
+    );
   });
 });

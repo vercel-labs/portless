@@ -38,6 +38,7 @@ import { ensureNgrokAvailable, startNgrok, stopNgrok, stopNgrokProcess } from ".
 import {
   inferProjectName,
   detectWorktreePrefix,
+  applyWorktreePrefix,
   truncateLabel,
   sanitizeForHostname,
 } from "./auto.js";
@@ -3383,7 +3384,7 @@ async function handleDefaultSingle(
   }
 
   const worktree = detectWorktreePrefix(cwd);
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const effectiveName = applyWorktreePrefix(baseName, worktree);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3612,6 +3613,11 @@ async function handleDefaultMulti(
 
   const apps: MultiAppEntry[] = [];
 
+  // In a git worktree, prefix every app's hostname with the branch name so
+  // parallel worktrees of the same monorepo don't collide on <name>.localhost.
+  // Mirrors handleDefaultSingle; single-app mode already does this.
+  const worktree = detectWorktreePrefix(wsRoot);
+
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
@@ -3663,6 +3669,8 @@ async function handleDefaultMulti(
       name = pkgLabel === projectName ? projectName : `${pkgLabel}.${projectName}`;
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
+
+    name = applyWorktreePrefix(name, worktree);
 
     apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
   }
