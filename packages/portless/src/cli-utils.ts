@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { createLoopbackConnection } from "./utils.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -722,10 +723,10 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
   });
 }
 
-/** Check whether any process is listening on the given port at 127.0.0.1. */
+/** Check whether any process is listening on the given port on either loopback family. */
 export function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = createLoopbackConnection(port);
     let settled = false;
 
     const finish = (result: boolean) => {
@@ -1048,8 +1049,10 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * Handles both direct invocation (`vite dev`) and invocation via package
  * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
  *
- * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
- * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ * We also inject `--host 127.0.0.1` so frameworks bind IPv4 loopback
+ * predictably. The proxy itself dials both loopback families (see
+ * createLoopbackConnection), so this is belt-and-suspenders for apps
+ * that honor the flag; apps that ignore it and bind `::1` only still work.
  *
  * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
  * lan|tunnel|localhost). In LAN mode we skip `--host` entirely — Expo defaults

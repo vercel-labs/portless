@@ -153,6 +153,31 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("hello from backend");
     });
 
+    it("proxies to a backend listening on IPv6 loopback only (issue #320)", async (ctx) => {
+      const backend = http.createServer((_req, res) => {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("hello from ipv6 backend");
+      });
+      const ipv6Available = await new Promise<boolean>((resolve) => {
+        backend.once("error", () => resolve(false));
+        backend.listen(0, "::1", () => resolve(true));
+      });
+      if (!ipv6Available) return ctx.skip();
+      trackServer(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("hello from ipv6 backend");
+    });
+
     it("routes wildcard subdomain to matching parent route when strict is false", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {

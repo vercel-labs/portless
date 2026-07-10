@@ -22,6 +22,7 @@ import {
   getProtocolPort,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
+  isPortListening,
   isProxyRunning,
   parsePidFromNetstat,
   parseTldList,
@@ -139,6 +140,35 @@ describe("isProxyRunning", () => {
 
     const result = await isProxyRunning(port);
     expect(result).toBe(false);
+  });
+});
+
+describe("isPortListening", () => {
+  const servers: http.Server[] = [];
+
+  afterEach(async () => {
+    for (const s of servers) {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  it("returns false when nothing is listening", async () => {
+    expect(await isPortListening(19877)).toBe(false);
+  });
+
+  it("detects a server listening on IPv6 loopback only (issue #320)", async (ctx) => {
+    const server = http.createServer((_req, res) => res.end("ok"));
+    const ipv6Available = await new Promise<boolean>((resolve) => {
+      server.once("error", () => resolve(false));
+      server.listen(0, "::1", () => resolve(true));
+    });
+    if (!ipv6Available) return ctx.skip();
+    servers.push(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    expect(await isPortListening(addr.port)).toBe(true);
   });
 });
 

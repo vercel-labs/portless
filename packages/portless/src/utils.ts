@@ -1,4 +1,39 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
+
+/**
+ * Both loopback families, tried in order. Dev servers that bind `localhost`
+ * on Node 17+ resolve it verbatim and may listen on IPv6 `::1` only (Vite's
+ * default host does this), while most others bind IPv4 `127.0.0.1` only.
+ */
+function loopbackLookup(
+  _hostname: string,
+  _options: unknown,
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    addresses: { address: string; family: number }[]
+  ) => void
+): void {
+  callback(null, [
+    { address: "127.0.0.1", family: 4 },
+    { address: "::1", family: 6 },
+  ]);
+}
+
+/**
+ * Open a TCP connection to a local app port, trying both loopback families
+ * instead of hardcoding IPv4. Uses Node's Happy Eyeballs implementation
+ * (`autoSelectFamily`) with a fixed address list, so no DNS lookup happens:
+ * 127.0.0.1 is attempted first and `::1` is tried when it fails (issue #320).
+ */
+export function createLoopbackConnection(port: number): net.Socket {
+  return net.connect({
+    host: "localhost",
+    port,
+    autoSelectFamily: true,
+    lookup: loopbackLookup as net.LookupFunction,
+  });
+}
 
 /**
  * When running under sudo, fix file ownership so the real user can

@@ -2,7 +2,7 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
-import { escapeHtml, formatUrl } from "./utils.js";
+import { createLoopbackConnection, escapeHtml, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
 
 /** Response header used to identify a portless proxy (for health checks). */
@@ -201,8 +201,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const proxyReq = http.request(
       {
-        hostname: "127.0.0.1",
-        port: route.port,
+        // Dial via createLoopbackConnection so ::1-only backends work too.
+        createConnection: () => createLoopbackConnection(route.port),
         path: req.url,
         method: req.method,
         headers: proxyReqHeaders,
@@ -314,8 +314,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
 
     const proxyReq = http.request({
-      hostname: "127.0.0.1",
-      port: route.port,
+      // Dial via createLoopbackConnection so ::1-only backends work too.
+      createConnection: () => createLoopbackConnection(route.port),
       path: req.url,
       method: req.method,
       headers: proxyReqHeaders,
