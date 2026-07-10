@@ -251,6 +251,79 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("matched");
     });
 
+    it("routes requests addressed to a route's tailscale hostname (issue #297)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("funnel hit");
+    });
+
+    it("routes tailscale hostname even when the local hostname is worktree-prefixed (issue #343)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("worktree funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myfeature.myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, strict: true })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("worktree funnel hit");
+    });
+
+    it("does not match tailscale hostname against unrelated hosts", async () => {
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: 4001,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other-device.tail1234.ts.net" });
+      expect(res.status).toBe(404);
+    });
+
     it("returns 404 for unregistered subdomain prefix by default", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {

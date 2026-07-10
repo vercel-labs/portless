@@ -76,21 +76,36 @@ const PORTLESS_HOPS_HEADER = "x-portless-hops";
  */
 const MAX_PROXY_HOPS = 5;
 
+/** Extract the hostname from a route's tailscaleUrl, or undefined if unset/invalid. */
+function tailscaleHostname(tailscaleUrl: string | undefined): string | undefined {
+  if (!tailscaleUrl) return undefined;
+  try {
+    return new URL(tailscaleUrl).hostname;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * Find the route matching a given host. Matches exact hostname first, then
- * falls back to wildcard subdomain matching (e.g. tenant.myapp.localhost
- * matches a route registered for myapp.localhost).
+ * the hostname of the route's public Tailscale Serve/Funnel URL (so inbound
+ * funnel traffic with Host: <device>.<tailnet>.ts.net resolves to the same
+ * upstream as the local hostname), then falls back to wildcard subdomain
+ * matching (e.g. tenant.myapp.localhost matches a route registered for
+ * myapp.localhost).
  *
- * When `strict` is true, only exact matches are returned; unregistered
- * subdomain prefixes will not fall back to the base service.
+ * When `strict` is true, only exact matches (local or tailscale hostname)
+ * are returned; unregistered subdomain prefixes will not fall back to the
+ * base service.
  */
 function findRoute(
-  routes: { hostname: string; port: number }[],
+  routes: { hostname: string; port: number; tailscaleUrl?: string }[],
   host: string,
   strict?: boolean
 ): { hostname: string; port: number } | undefined {
   return (
     routes.find((r) => r.hostname === host) ||
+    routes.find((r) => tailscaleHostname(r.tailscaleUrl) === host) ||
     (strict ? undefined : routes.find((r) => host.endsWith("." + r.hostname)))
   );
 }

@@ -1333,7 +1333,10 @@ async function runApp(
         tailscaleFunnel: wantsFunnel || undefined,
       });
     } catch {
-      // Non-fatal: route display metadata only
+      // Non-fatal: the local hostname keeps routing without it, but the
+      // proxy needs tailscaleUrl to route requests arriving with the
+      // public .ts.net Host header (see findRoute), so the tailscale URL
+      // may 404 until the route is re-registered.
     }
   }
 

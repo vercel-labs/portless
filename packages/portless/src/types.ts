@@ -2,6 +2,12 @@
 export interface RouteInfo {
   hostname: string;
   port: number;
+  /**
+   * Public Tailscale Serve/Funnel URL for this route, when one is active
+   * (e.g. "https://my-device.tail1234.ts.net"). Requests whose Host header
+   * matches this URL's hostname are routed to the same upstream.
+   */
+  tailscaleUrl?: string;
 }
 
 export interface ProxyServerOptions {
