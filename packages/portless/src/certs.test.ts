@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -392,6 +392,36 @@ describe("trustCA", () => {
       } finally {
         process.env.PATH = origPath;
         fs.rmSync(fakeBinDir, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "returns manual setup guidance on NixOS-style Linux distros (#336)",
+    () => {
+      const originalReadFileSync = fs.readFileSync;
+
+      // Generate real certs so trustCA reaches the trust-store branch.
+      ensureCerts(tmpDir);
+
+      const readFileSyncSpy = vi
+        .spyOn(fs, "readFileSync")
+        .mockImplementation((filePath: Parameters<typeof fs.readFileSync>[0], options) => {
+          if (String(filePath) === "/etc/os-release") {
+            return "NAME=NixOS\nID=nixos\n";
+          }
+          return originalReadFileSync(filePath, options as Parameters<typeof fs.readFileSync>[1]);
+        });
+
+      try {
+        const result = trustCA(tmpDir);
+
+        expect(result.trusted).toBe(false);
+        expect(result.error).toContain("NixOS");
+        expect(result.error).toContain("security.pki.certificateFiles");
+        expect(result.error).toContain("sudo nixos-rebuild switch");
+      } finally {
+        readFileSyncSpy.mockRestore();
       }
     }
   );

@@ -526,8 +526,9 @@ function loginKeychainPath(): string {
  * Each entry maps a distro family to its CA certificate directory and update command.
  */
 interface LinuxCATrustConfig {
-  certDir: string;
-  updateCommand: string;
+  certDir?: string;
+  updateCommand?: string;
+  manualSetupMessage?: string;
 }
 
 const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
@@ -547,6 +548,10 @@ const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
     certDir: "/etc/pki/trust/anchors",
     updateCommand: "update-ca-certificates",
   },
+  nixos: {
+    manualSetupMessage:
+      'NixOS does not support automatic CA trust updates via update-ca-certificates. Add the generated CA file to your NixOS config (for example: `security.pki.certificateFiles = ["{CERT_PATH}"];`) and run `sudo nixos-rebuild switch`.',
+  },
 };
 
 /**
@@ -557,6 +562,7 @@ function detectLinuxDistro(): string | undefined {
   try {
     const osRelease = fs.readFileSync("/etc/os-release", "utf-8").toLowerCase();
     // ID_LIKE often lists parent distros (e.g., "ID_LIKE=arch" or "ID_LIKE=debian")
+    if (osRelease.includes("nixos")) return "nixos";
     if (osRelease.includes("arch")) return "arch";
     if (osRelease.includes("fedora") || osRelease.includes("rhel") || osRelease.includes("centos"))
       return "fedora";
@@ -568,6 +574,7 @@ function detectLinuxDistro(): string | undefined {
 
   // Fallback: probe for known update commands
   for (const [distro, config] of Object.entries(LINUX_CA_TRUST_CONFIGS)) {
+    if (!config.updateCommand || !config.certDir) continue;
     try {
       execFileSync("which", [config.updateCommand], { stdio: "pipe", timeout: 5000 });
       if (fs.existsSync(path.dirname(config.certDir))) return distro;
@@ -581,11 +588,21 @@ function detectLinuxDistro(): string | undefined {
 
 /**
  * Get the CA trust config for the current Linux distro.
- * Falls back to Debian layout if detection fails.
+ * Returns undefined when automatic trust is not available.
  */
-function getLinuxCATrustConfig(): LinuxCATrustConfig {
+function getLinuxCATrustConfig(): LinuxCATrustConfig | undefined {
   const distro = detectLinuxDistro();
-  return LINUX_CA_TRUST_CONFIGS[distro ?? "debian"];
+  if (!distro) return undefined;
+  return LINUX_CA_TRUST_CONFIGS[distro];
+}
+
+function linuxCATrustErrorMessage(caCertPath: string, config?: LinuxCATrustConfig): string {
+  const customMessage = config?.manualSetupMessage?.replace("{CERT_PATH}", caCertPath);
+  return (
+    customMessage ||
+    "Portless does not have automatic CA trust wiring for this Linux distribution. " +
+      "Install and trust this CA manually in your distro trust store, then rebuild as needed."
+  );
 }
 
 /**
@@ -594,6 +611,7 @@ function getLinuxCATrustConfig(): LinuxCATrustConfig {
  */
 function isCATrustedLinux(stateDir: string): boolean {
   const config = getLinuxCATrustConfig();
+  if (!config?.certDir) return false;
   const systemCertPath = path.join(config.certDir, "portless-ca.crt");
   if (!fileExists(systemCertPath)) return false;
 
@@ -891,6 +909,9 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       return { trusted: true };
     } else if (process.platform === "linux") {
       const config = getLinuxCATrustConfig();
+      if (!config?.certDir || !config.updateCommand) {
+        return { trusted: false, error: linuxCATrustErrorMessage(caCertPath, config) };
+      }
       if (!fs.existsSync(config.certDir)) {
         fs.mkdirSync(config.certDir, { recursive: true });
       }
@@ -1028,6 +1049,7 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
   let deletedAny = false;
 
   for (const config of Object.values(LINUX_CA_TRUST_CONFIGS)) {
+    if (!config.certDir) continue;
     const dest = path.join(config.certDir, "portless-ca.crt");
     try {
       if (fileExists(dest)) {
@@ -1046,6 +1068,12 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
   if (deletedAny) {
     try {
       const config = getLinuxCATrustConfig();
+      if (!config?.certDir || !config.updateCommand) {
+        return {
+          removed: false,
+          error: linuxCATrustErrorMessage(path.join(stateDir, CA_CERT_FILE), config),
+        };
+      }
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
     } catch (err: unknown) {
       errors.push(err instanceof Error ? err.message : String(err));

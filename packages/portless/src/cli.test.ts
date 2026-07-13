@@ -1231,6 +1231,111 @@ describe("CLI", () => {
         await new Promise<void>((resolve) => server.close(() => resolve()));
       }
     });
+
+    it("adds tailscale wildcard host for vite when tailscale sharing is active", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        const capturePath = path.join(tmpDir, "tailscale-capture.json");
+        const scriptPath = path.join(tmpDir, "capture-vite-hosts.js");
+        const tailBinDir = path.join(tmpDir, "bin");
+        const tailscaleShim = path.join(
+          tailBinDir,
+          process.platform === "win32" ? "tailscale.cmd" : "tailscale"
+        );
+        const tailscaleStatusPayload = JSON.stringify({
+          Self: {
+            DNSName: "my-node.example.ts.net",
+            Capabilities: ["https"],
+          },
+        });
+
+        fs.mkdirSync(tailBinDir, { recursive: true });
+        fs.writeFileSync(
+          scriptPath,
+          [
+            'const fs = require("node:fs");',
+            `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+            "  __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS,",
+            "  PORTLESS_TAILSCALE_URL: process.env.PORTLESS_TAILSCALE_URL,",
+            "}));",
+          ].join("\n") + "\n"
+        );
+
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            tailscaleShim,
+            [
+              "@echo off",
+              'if "%~1"=="version" exit /b 0',
+              'if "%~1"=="status" if "%~2"=="--json" (',
+              `  echo ${tailscaleStatusPayload}`,
+              "  exit /b 0",
+              ")",
+              'if "%~1"=="serve" exit /b 0',
+              "exit /b 0",
+            ].join("\r\n")
+          );
+        } else {
+          fs.writeFileSync(
+            tailscaleShim,
+            [
+              "#!/bin/sh",
+              'if [ "$1" = "version" ]; then',
+              '  echo "1.74.0"',
+              "  exit 0",
+              "fi",
+              'if [ "$1" = "status" ] && [ "$2" = "--json" ]; then',
+              `  echo '${tailscaleStatusPayload}'`,
+              "  exit 0",
+              "fi",
+              'if [ "$1" = "serve" ] && [ "$2" = "status" ] && [ "$3" = "--json" ]; then',
+              "  echo '{\"Web\":{}}'",
+              "  exit 0",
+              "fi",
+              'if [ "$1" = "serve" ] && { [ "$2" = "--bg" ] || [ "$2" = "--yes" ]; }; then',
+              "  exit 0",
+              "fi",
+              "exit 0",
+            ].join("\n") + "\n"
+          );
+          fs.chmodSync(tailscaleShim, 0o755);
+        }
+
+        const { status } = run(["run", "--name", "myapp", "--tailscale", "node", scriptPath], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+            PORTLESS_TAILSCALE: "1",
+            PATH: `${tailBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          },
+        });
+
+        expect(status).toBe(0);
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: string;
+          PORTLESS_TAILSCALE_URL: string;
+        };
+        expect(capture.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toContain(".localhost");
+        expect(capture.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toContain(".ts.net");
+        expect(capture.PORTLESS_TAILSCALE_URL).toContain(".ts.net");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
   });
 
   describe("NODE_EXTRA_CA_CERTS injection", () => {
