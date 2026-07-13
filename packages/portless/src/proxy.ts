@@ -80,10 +80,26 @@ const MAX_PROXY_HOPS = 5;
 function tailscaleAuthority(tailscaleUrl: string | undefined): string | undefined {
   if (!tailscaleUrl) return undefined;
   try {
+    // `URL` lowercases the host and drops the default `:443`, so the value is
+    // already in the normalized form findRoute compares against.
     return new URL(tailscaleUrl).host;
   } catch {
     return undefined;
   }
+}
+
+/**
+ * Normalize a request authority for comparison: lowercase it (Host is
+ * case-insensitive) and drop an explicit `:443`, the default HTTPS port that
+ * `URL` strips from a route's stored tailscale authority. Without this a
+ * mixed-case Host never matches, and an explicit `dev.ts.net:443` misses the
+ * authority tier and falls through to the port-insensitive hostname tier,
+ * resolving to the wrong app when several routes share a `.ts.net` hostname on
+ * different ports.
+ */
+function normalizeAuthority(host: string): string {
+  const lower = host.toLowerCase();
+  return lower.endsWith(":443") ? lower.slice(0, -":443".length) : lower;
 }
 
 /**
@@ -92,18 +108,21 @@ function tailscaleAuthority(tailscaleUrl: string | undefined): string | undefine
  * hostname ignoring port, then wildcard subdomain. The authority tier
  * disambiguates apps sharing a `.ts.net` hostname on different ports; the
  * hostname tier keeps other-port requests resolving. `strict` drops the wildcard.
+ * All comparisons run against the normalized authority so they are
+ * case-insensitive and treat an explicit `:443` as the default HTTPS port.
  */
 function findRoute(
   routes: { hostname: string; port: number; tailscaleUrl?: string }[],
   host: string,
   strict?: boolean
 ): { hostname: string; port: number } | undefined {
-  const hostname = host.split(":")[0];
+  const authority = normalizeAuthority(host);
+  const hostname = authority.split(":")[0];
   return (
-    routes.find((r) => r.hostname === hostname) ||
-    routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === host) ||
+    routes.find((r) => r.hostname.toLowerCase() === hostname) ||
+    routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === authority) ||
     routes.find((r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname) ||
-    (strict ? undefined : routes.find((r) => hostname.endsWith("." + r.hostname)))
+    (strict ? undefined : routes.find((r) => hostname.endsWith("." + r.hostname.toLowerCase())))
   );
 }
 
