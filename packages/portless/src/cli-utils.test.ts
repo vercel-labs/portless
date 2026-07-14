@@ -906,6 +906,15 @@ describe("cmdEscape", () => {
   it("handles the empty argument", () => {
     expect(cmdEscape("")).toBe('^"^"');
   });
+
+  it("escapes long backslash runs in linear time (regex form is quadratic)", () => {
+    const arg = "a " + "\\".repeat(64 * 1024);
+    const start = performance.now();
+    const escaped = cmdEscape(arg);
+    // The old /(\\*)"/g implementation takes >10s here; allow generous CI jitter.
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(escaped).toBe('^"a^ ' + "\\".repeat(128 * 1024) + '^"');
+  });
 });
 
 describe("cmdEscapeCommand", () => {

@@ -861,6 +861,34 @@ const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
 const CMD_SAFE_ARG = /^[^\s()\][%!^"`<>&|;,*?]+$/;
 
 /**
+ * Quote a string per Windows argv rules in a single linear scan: a quote
+ * preceded by N backslashes becomes 2N+1 backslashes plus an escaped quote,
+ * and N trailing backslashes (which precede the closing quote we append)
+ * become 2N. The equivalent regex, /(\\*)"/g, backtracks quadratically on
+ * long backslash runs (cf. cross-spawn's CVE-2024-21538) — and cross-spawn's
+ * patched regex is linear but under-doubles the runs (JS lookaheads are
+ * atomic, so its lazy quantifier captures a single backslash), so neither
+ * regex form is usable here.
+ */
+function windowsArgvQuote(arg: string): string {
+  let out = "";
+  let backslashes = 0;
+  for (const ch of arg) {
+    if (ch === "\\") {
+      backslashes++;
+      continue;
+    }
+    if (ch === '"') {
+      out += "\\".repeat(2 * backslashes + 1) + '"';
+    } else {
+      out += "\\".repeat(backslashes) + ch;
+    }
+    backslashes = 0;
+  }
+  return `"${out}${"\\".repeat(2 * backslashes)}"`;
+}
+
+/**
  * Escape a string so cmd.exe passes it to the child as a single literal
  * argument (the Windows counterpart of shellEscape). Safe arguments stay
  * bare: cmd built-ins (echo, etc.) don't parse an argv and would print any
@@ -871,13 +899,7 @@ const CMD_SAFE_ARG = /^[^\s()\][%!^"`<>&|;,*?]+$/;
  */
 export function cmdEscape(arg: string): string {
   if (CMD_SAFE_ARG.test(arg)) return arg;
-  return (
-    `"${arg
-      // A quote preceded by N backslashes needs 2N+1 backslashes.
-      .replace(/(\\*)"/g, '$1$1\\"')
-      // Trailing backslashes precede the closing quote we add: double them.
-      .replace(/(\\*)$/, "$1$1")}"`.replace(CMD_META_CHARS, "^$1")
-  );
+  return windowsArgvQuote(arg).replace(CMD_META_CHARS, "^$1");
 }
 
 /**
