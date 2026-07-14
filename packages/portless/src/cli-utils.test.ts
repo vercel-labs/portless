@@ -871,8 +871,11 @@ describe("parseTldList", () => {
 });
 
 describe("cmdEscape", () => {
-  it("quotes a plain argument", () => {
-    expect(cmdEscape("dev")).toBe('^"dev^"');
+  it("leaves safe arguments bare (cmd built-ins print added quotes literally)", () => {
+    expect(cmdEscape("dev")).toBe("dev");
+    expect(cmdEscape("--force")).toBe("--force");
+    expect(cmdEscape("--port=3000")).toBe("--port=3000");
+    expect(cmdEscape("C:\\tools\\script.js")).toBe("C:\\tools\\script.js");
   });
 
   it("preserves paths with spaces as a single argument", () => {
@@ -891,9 +894,13 @@ describe("cmdEscape", () => {
     expect(cmdEscape('say "hi"')).toBe('^"say^ \\^"hi\\^"^"');
   });
 
-  it("doubles backslashes before quotes and at the end", () => {
+  it("doubles backslashes before quotes and before the added closing quote", () => {
     expect(cmdEscape('dir\\"x')).toBe('^"dir\\\\\\^"x^"');
-    expect(cmdEscape("trailing\\")).toBe('^"trailing\\\\^"');
+    expect(cmdEscape("trailing \\")).toBe('^"trailing^ \\\\^"');
+  });
+
+  it("leaves a bare trailing backslash alone (no quote added, so no doubling)", () => {
+    expect(cmdEscape("trailing\\")).toBe("trailing\\");
   });
 
   it("handles the empty argument", () => {
@@ -918,6 +925,11 @@ describe("cmdEscapeCommand", () => {
   it("plain-quotes names containing cmd metacharacters", () => {
     expect(cmdEscapeCommand("foo&bar")).toBe('"foo&bar"');
     expect(cmdEscapeCommand("a(b)c")).toBe('"a(b)c"');
+  });
+
+  it("caret-escapes % in bare names (quotes cannot suppress %VAR% expansion)", () => {
+    expect(cmdEscapeCommand("probe%PATH%.cmd")).toBe("probe^%PATH^%.cmd");
+    expect(cmdEscapeCommand("100%.exe")).toBe("100^%.exe");
   });
 });
 

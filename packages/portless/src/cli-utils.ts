@@ -853,13 +853,24 @@ function shellEscape(arg: string): string {
 const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
 
 /**
+ * Arguments matching this need no escaping for cmd.exe: non-empty, no
+ * whitespace, no quotes, and no cmd metacharacters. `=` is deliberately
+ * allowed (e.g. --port=3000) — cmd only treats it specially in the command
+ * token, not in arguments.
+ */
+const CMD_SAFE_ARG = /^[^\s()\][%!^"`<>&|;,*?]+$/;
+
+/**
  * Escape a string so cmd.exe passes it to the child as a single literal
- * argument (the Windows counterpart of shellEscape). Algorithm from
+ * argument (the Windows counterpart of shellEscape). Safe arguments stay
+ * bare: cmd built-ins (echo, etc.) don't parse an argv and would print any
+ * added quotes literally. Everything else uses the algorithm from
  * https://qntm.org/cmd, as used by cross-spawn: quote per Windows argv
  * rules, then caret-escape cmd.exe metacharacters (including the quotes
  * themselves) so cmd's own parser leaves them intact.
  */
 export function cmdEscape(arg: string): string {
+  if (CMD_SAFE_ARG.test(arg)) return arg;
   return (
     `"${arg
       // A quote preceded by N backslashes needs 2N+1 backslashes.
@@ -870,15 +881,28 @@ export function cmdEscape(arg: string): string {
 }
 
 /**
- * Escape the command token (first word) of a cmd.exe command line. Unlike
- * arguments, the command must NOT be caret-escaped or unnecessarily quoted:
- * quoting a bare PATH-resolved name (e.g. "npm") makes cmd resolve %~dp0 to
- * the current directory inside .cmd shims, which breaks npm/pnpm/yarn.
- * Bare names stay bare; anything with whitespace or cmd metacharacters gets
- * plain double quotes (fine for absolute paths, including .cmd files).
+ * Escape the command token (first word) of a cmd.exe command line. The
+ * command needs different treatment from arguments, all verified on Windows:
+ *
+ * - Quoting a bare PATH-resolved name (e.g. "npm") makes cmd resolve %~dp0
+ *   to the current directory inside .cmd shims, breaking npm/pnpm/yarn — so
+ *   bare names must stay bare.
+ * - Caret-escaping spaces (cross-spawn style, C:\Program^ Files\...) makes
+ *   cmd launch the right file, but the child re-parses its argv from the raw
+ *   command line where the space is unquoted, corrupting argv[0] — so paths
+ *   with whitespace need real double quotes.
+ * - Quotes cannot suppress %VAR% expansion, but caret-escaping % can, and it
+ *   keeps both PATH resolution and %~dp0 intact for bare names.
+ *
+ * Unsolved corner: a path containing both whitespace and a %VAR% pattern
+ * matching a defined variable (quotes are required but can't stop the
+ * expansion). The pre-escaping code failed identically.
  */
 export function cmdEscapeCommand(command: string): string {
-  return /[\s()\][%!^"`<>&|;,=*?]/.test(command) ? `"${command}"` : command;
+  if (/[\s()\][!^"`<>&|;,=*?]/.test(command)) {
+    return `"${command}"`;
+  }
+  return command.replace(/%/g, "^%");
 }
 
 /**
