@@ -1,8 +1,22 @@
 # Changelog
 
-## 0.15.1
+## 0.15.2
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Tailscale funnel routing**: Proxy now routes requests addressed to a route's Tailscale funnel or serve hostname, so `--funnel` and `--tailscale` apps reached at `<device>.ts.net` no longer return a 404, including when several apps share one hostname on different ports. (#352)
+- **IPv6-only dev servers return 502**: Proxy now dials upstreams over both loopback families, fixing 502s when a dev server binds `::1` only, such as Vite on Node 17+. (#353)
+- **Worktree prefix in multi-app mode**: Bare `portless` in a monorepo worktree now applies the branch prefix in multi-app mode as it already did for single apps, so hostnames no longer collide across worktrees. (#355)
+
+### Contributors
+
+- @Railly
+- @ahfoysal
+<!-- release:end -->
+
+## 0.15.1
 
 ### New Features
 
@@ -11,7 +25,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.15.0
 
