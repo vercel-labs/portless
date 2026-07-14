@@ -15,6 +15,7 @@ const PORTLESS_STATE_FILES = [
   "proxy.tlds",
   "proxy.lan",
   "ca.trusted",
+  "ca.trust-refresh-pending",
   "ca-key.pem",
   "ca.pem",
   "server-key.pem",
@@ -25,7 +26,7 @@ const PORTLESS_STATE_FILES = [
 ] as const;
 
 const HOST_CERTS_DIR = "host-certs";
-const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem"]);
+const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem", "ca.trust-refresh-pending"]);
 
 export type RemovePortlessStateFilesOptions = {
   preserveCAIdentity?: boolean;

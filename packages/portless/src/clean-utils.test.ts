@@ -40,6 +40,7 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
     fs.writeFileSync(path.join(tmpDir, "ca.pem"), "pem");
     fs.writeFileSync(path.join(tmpDir, "ca.trusted"), "fingerprint");
+    fs.writeFileSync(path.join(tmpDir, "ca.trust-refresh-pending"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
     fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
@@ -53,6 +54,7 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "ca.pem"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "ca.trust-refresh-pending"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.custom-cert"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "host-certs"))).toBe(false);
@@ -68,6 +70,7 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "ca.pem"), "certificate");
     fs.writeFileSync(path.join(tmpDir, "ca-key.pem"), "private key");
     fs.writeFileSync(path.join(tmpDir, "ca.trusted"), "stale marker");
+    fs.writeFileSync(path.join(tmpDir, "ca.trust-refresh-pending"), "1");
     fs.writeFileSync(path.join(tmpDir, "server.pem"), "server certificate");
 
     removePortlessStateFiles(tmpDir, { preserveCAIdentity: true });
@@ -75,6 +78,7 @@ describe("removePortlessStateFiles", () => {
     expect(fs.readFileSync(path.join(tmpDir, "ca.pem"), "utf-8")).toBe("certificate");
     expect(fs.readFileSync(path.join(tmpDir, "ca-key.pem"), "utf-8")).toBe("private key");
     expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+    expect(fs.readFileSync(path.join(tmpDir, "ca.trust-refresh-pending"), "utf-8")).toBe("1");
     expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "server.pem"))).toBe(false);
   });

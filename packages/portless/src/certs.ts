@@ -58,6 +58,7 @@ const CA_CERT_FILE = "ca.pem";
 const SERVER_KEY_FILE = "server-key.pem";
 const SERVER_CERT_FILE = "server.pem";
 const CA_TRUST_MARKER = "ca.trusted";
+const CA_TRUST_REFRESH_PENDING = "ca.trust-refresh-pending";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -91,9 +92,18 @@ function readTrustMarker(stateDir: string): string | null {
   }
 }
 
+function clearTrustRefreshPending(stateDir: string): void {
+  try {
+    fs.unlinkSync(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
+  } catch {
+    // A trust refresh may not be pending; ignore.
+  }
+}
+
 function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
+    clearTrustRefreshPending(stateDir);
     const marker = isWSL() ? `wsl:${fp}` : fp;
     fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
     fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
@@ -522,9 +532,15 @@ function loginKeychainPath(): string {
  * Linux distro CA trust configuration.
  * Each entry maps a distro family to its CA certificate directory and update command.
  */
-interface LinuxCATrustConfig {
+export interface LinuxCATrustConfig {
   certDir: string;
   updateCommand: string;
+}
+
+export interface LinuxCATrustRemovalOptions {
+  configs?: LinuxCATrustConfig[];
+  activeConfig?: LinuxCATrustConfig;
+  runUpdate?: (command: string) => void;
 }
 
 const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
@@ -589,8 +605,10 @@ function getLinuxCATrustConfig(): LinuxCATrustConfig {
  * Check if the CA is trusted on Linux.
  * Supports Debian/Ubuntu, Arch, Fedora/RHEL, and openSUSE.
  */
-function isCATrustedLinux(stateDir: string): boolean {
-  const config = getLinuxCATrustConfig();
+function isCATrustedLinux(
+  stateDir: string,
+  config: LinuxCATrustConfig = getLinuxCATrustConfig()
+): boolean {
   const systemCertPath = path.join(config.certDir, "portless-ca.crt");
   if (!fileExists(systemCertPath)) return false;
 
@@ -1017,19 +1035,34 @@ function isCATrustedMacOSAfterAttempt(caCertPath: string): boolean {
   }
 }
 
-function untrustCALinux(stateDir: string): { removed: boolean; error?: string } {
+export function untrustCALinux(
+  stateDir: string,
+  options: LinuxCATrustRemovalOptions = {}
+): { removed: boolean; error?: string } {
   const errors: string[] = [];
-  let deletedAny = false;
+  const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
+  let refreshNeeded = fileExists(pendingRefreshPath);
+  const configs = options.configs ?? Object.values(LINUX_CA_TRUST_CONFIGS);
+  const activeConfig = options.activeConfig ?? getLinuxCATrustConfig();
+  const runUpdate =
+    options.runUpdate ??
+    ((command: string) => {
+      execFileSync(command, [], { stdio: "pipe", timeout: 30_000 });
+    });
 
-  for (const config of Object.values(LINUX_CA_TRUST_CONFIGS)) {
+  for (const config of configs) {
     const dest = path.join(config.certDir, "portless-ca.crt");
     try {
       if (fileExists(dest)) {
         const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
+          if (!refreshNeeded) {
+            fs.writeFileSync(pendingRefreshPath, "1\n");
+            fixOwnership(pendingRefreshPath);
+            refreshNeeded = true;
+          }
           fs.unlinkSync(dest);
-          deletedAny = true;
         }
       }
     } catch (err: unknown) {
@@ -1037,16 +1070,15 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
     }
   }
 
-  if (deletedAny) {
+  if (refreshNeeded) {
     try {
-      const config = getLinuxCATrustConfig();
-      execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      runUpdate(activeConfig.updateCommand);
     } catch (err: unknown) {
       errors.push(err instanceof Error ? err.message : String(err));
     }
   }
 
-  if (isCATrustedLinux(stateDir)) {
+  if (errors.length > 0 || isCATrustedLinux(stateDir, activeConfig)) {
     return {
       removed: false,
       error:
@@ -1054,6 +1086,8 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
         "CA still trusted (remove portless-ca.crt and run the distro CA update command, often with sudo)",
     };
   }
+
+  clearTrustRefreshPending(stateDir);
   return { removed: true };
 }
 

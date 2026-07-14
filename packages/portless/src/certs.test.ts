@@ -1,11 +1,18 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFileSync } from "node:child_process";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import {
+  createSNICallback,
+  ensureCerts,
+  isCATrusted,
+  trustCA,
+  untrustCA,
+  untrustCALinux,
+} from "./certs.js";
 
 /**
  * Return the signature algorithm string for a PEM cert file using openssl.
@@ -410,5 +417,59 @@ describe("untrustCA", () => {
 
   it("returns removed when ca.pem is missing", () => {
     expect(untrustCA(tmpDir)).toEqual({ removed: true });
+  });
+
+  it("retries a failed Linux trust refresh after the source certificate is gone", () => {
+    const { caPath } = ensureCerts(tmpDir);
+    const trustDir = path.join(tmpDir, "linux-trust");
+    const installedCA = path.join(trustDir, "portless-ca.crt");
+    const config = { certDir: trustDir, updateCommand: "refresh-linux-trust" };
+    fs.mkdirSync(trustDir);
+    fs.copyFileSync(caPath, installedCA);
+
+    const runUpdate = vi
+      .fn<(command: string) => void>()
+      .mockImplementationOnce(() => {
+        throw new Error("trust refresh failed");
+      })
+      .mockImplementationOnce(() => undefined);
+
+    const first = untrustCALinux(tmpDir, {
+      configs: [config],
+      activeConfig: config,
+      runUpdate,
+    });
+
+    expect(first).toEqual({ removed: false, error: "trust refresh failed" });
+    expect(fs.existsSync(installedCA)).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "ca.pem"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "ca-key.pem"))).toBe(true);
+
+    const second = untrustCALinux(tmpDir, {
+      configs: [config],
+      activeConfig: config,
+      runUpdate,
+    });
+
+    expect(second).toEqual({ removed: true });
+    expect(runUpdate).toHaveBeenNthCalledWith(1, "refresh-linux-trust");
+    expect(runUpdate).toHaveBeenNthCalledWith(2, "refresh-linux-trust");
+  });
+
+  it("does not refresh Linux trust when the CA was never installed", () => {
+    ensureCerts(tmpDir);
+    const trustDir = path.join(tmpDir, "linux-trust");
+    const config = { certDir: trustDir, updateCommand: "refresh-linux-trust" };
+    const runUpdate = vi.fn<(command: string) => void>();
+    fs.mkdirSync(trustDir);
+
+    expect(
+      untrustCALinux(tmpDir, {
+        configs: [config],
+        activeConfig: config,
+        runUpdate,
+      })
+    ).toEqual({ removed: true });
+    expect(runUpdate).not.toHaveBeenCalled();
   });
 });
