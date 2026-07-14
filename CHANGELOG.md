@@ -1,8 +1,21 @@
 # Changelog
 
-## 0.15.2
+## 0.15.3
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **State directory under sudo**: Portless now resolves per-user state from the original sudo user's home, so an elevated proxy and unprivileged app processes share the same routes instead of writing to separate state directories. (#357)
+- **Windows and WSL CA trust**: On WSL, `portless trust` now installs the local CA in both Linux and Windows trust stores, while `portless clean` removes the exact certificate from both. Failed trust-store cleanup preserves the CA identity for safe retries, including on native Windows. (#357)
+
+### Contributors
+
+- @ctate
+- @gerardbalaoro
+<!-- release:end -->
+
+## 0.15.2
 
 ### Bug Fixes
 
@@ -14,7 +27,6 @@
 
 - @Railly
 - @ahfoysal
-<!-- release:end -->
 
 ## 0.15.1
 
