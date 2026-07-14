@@ -84,7 +84,7 @@ describe("Windows CA store", () => {
     );
   });
 
-  it("removes a trusted certificate from the Windows user Root store", () => {
+  it("removes the exact certificate by SHA-1 fingerprint", () => {
     let trusted = true;
     const run = vi.fn<WindowsCACommandRunner>((_command, args) => {
       if (args[0] === "-store") return trusted ? fingerprint : "";
@@ -97,7 +97,41 @@ describe("Windows CA store", () => {
     });
     expect(run).toHaveBeenCalledWith(
       "certutil.exe",
-      ["-delstore", "-user", "Root", "portless Local CA"],
+      ["-delstore", "-user", "Root", fingerprint.toLowerCase()],
+      expect.any(Object)
+    );
+  });
+
+  it("reports a Root store query failure instead of successful removal", () => {
+    const run = vi.fn<WindowsCACommandRunner>(() => {
+      throw new Error("certutil query timed out");
+    });
+
+    expect(untrustWindowsCA(caPath, { command: "certutil.exe", run })).toEqual({
+      removed: false,
+      error: "certutil query timed out",
+    });
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a verification query failure after deletion", () => {
+    let storeQueries = 0;
+    const run = vi.fn<WindowsCACommandRunner>((_command, args) => {
+      if (args[0] === "-store") {
+        storeQueries += 1;
+        if (storeQueries === 1) return fingerprint;
+        throw new Error("certutil verification failed");
+      }
+      return "";
+    });
+
+    expect(untrustWindowsCA(caPath, { command: "certutil.exe", run })).toEqual({
+      removed: false,
+      error: "certutil verification failed",
+    });
+    expect(run).toHaveBeenCalledWith(
+      "certutil.exe",
+      ["-delstore", "-user", "Root", fingerprint.toLowerCase()],
       expect.any(Object)
     );
   });

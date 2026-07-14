@@ -424,7 +424,7 @@ This adds the portless local CA to your system trust store. After that, restart 
 portless clean
 ```
 
-Stops the proxy if needed, removes the portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. May require `sudo` on macOS/Linux.
+Stops the proxy if needed, removes the portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. May require `sudo` on macOS/Linux. If trust-store removal fails, portless retains its CA certificate and key so a later `portless clean` can safely retry.
 
 ### Proxy loop (508 Loop Detected)
 

@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { execFileSync, type ExecFileSyncOptionsWithStringEncoding } from "node:child_process";
 
-const WINDOWS_CA_COMMON_NAME = "portless Local CA";
 const WINDOWS_COMMAND_TIMEOUT_MS = 30_000;
 
 export type WindowsCACommandRunner = (
@@ -84,6 +83,16 @@ function storeOptions(options: WindowsCAStoreOptions): {
   };
 }
 
+type ResolvedWindowsCAStoreOptions = ReturnType<typeof storeOptions>;
+
+function storeContainsFingerprint(
+  fingerprint: string,
+  resolved: ResolvedWindowsCAStoreOptions
+): boolean {
+  const listing = resolved.run(resolved.command, ["-store", "-user", "Root"], commandOptions);
+  return listing.replace(/\s/g, "").toLowerCase().includes(fingerprint);
+}
+
 /** Return whether the certificate is present in the Windows user Root store. */
 export function isWindowsCATrusted(
   caCertPath: string,
@@ -92,8 +101,7 @@ export function isWindowsCATrusted(
   try {
     const resolved = storeOptions(options);
     const fingerprint = certificateFingerprint(caCertPath);
-    const listing = resolved.run(resolved.command, ["-store", "-user", "Root"], commandOptions);
-    return listing.replace(/\s/g, "").toLowerCase().includes(fingerprint);
+    return storeContainsFingerprint(fingerprint, resolved);
   } catch {
     return false;
   }
@@ -115,16 +123,13 @@ export function untrustWindowsCA(
   options: WindowsCAStoreOptions = {}
 ): { removed: boolean; error?: string } {
   try {
-    if (!isWindowsCATrusted(caCertPath, options)) return { removed: true };
-
     const resolved = storeOptions(options);
-    resolved.run(
-      resolved.command,
-      ["-delstore", "-user", "Root", WINDOWS_CA_COMMON_NAME],
-      commandOptions
-    );
+    const fingerprint = certificateFingerprint(caCertPath);
+    if (!storeContainsFingerprint(fingerprint, resolved)) return { removed: true };
 
-    return isWindowsCATrusted(caCertPath, options)
+    resolved.run(resolved.command, ["-delstore", "-user", "Root", fingerprint], commandOptions);
+
+    return storeContainsFingerprint(fingerprint, resolved)
       ? { removed: false, error: "certutil could not remove the portless CA from Root" }
       : { removed: true };
   } catch (error: unknown) {

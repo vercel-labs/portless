@@ -807,6 +807,7 @@ describe("CLI", () => {
       expect(status).toBe(0);
       expect(stdout).toContain("portless clean");
       expect(stdout).toContain("trust store");
+      expect(stdout).toContain("retained so clean can safely retry");
     });
 
     it("prints help with -h", () => {

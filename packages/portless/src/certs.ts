@@ -944,11 +944,6 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
   }
 
   const runningInWSL = isWSL();
-  if (!runningInWSL && !isCATrusted(stateDir)) {
-    clearTrustMarker(stateDir);
-    return { removed: true };
-  }
-
   try {
     let result: { removed: boolean; error?: string };
     if (process.platform === "darwin") {

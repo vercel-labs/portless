@@ -447,7 +447,7 @@ To remove portless data from your machine (proxy state under `~/.portless` and t
 portless clean
 ```
 
-macOS/Linux may prompt for `sudo`. Custom certificate paths passed with `--cert` and `--key` are not deleted.
+macOS/Linux may prompt for `sudo`. Custom certificate paths passed with `--cert` and `--key` are not deleted. If trust-store removal fails, portless retains its CA certificate and key so a later `portless clean` can safely retry.
 
 ## Safari / DNS
 
