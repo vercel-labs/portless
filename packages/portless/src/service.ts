@@ -13,7 +13,7 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
-import { fixOwnership } from "./utils.js";
+import { fixOwnership, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
@@ -366,24 +366,9 @@ function parseServiceInstallConfig(
   return config;
 }
 
-function readPasswdHome(username: string): string | null {
-  try {
-    const passwd = fs.readFileSync("/etc/passwd", "utf-8");
-    for (const line of passwd.split("\n")) {
-      const fields = line.split(":");
-      if (fields[0] === username && fields[5]) {
-        return fields[5];
-      }
-    }
-  } catch {
-    // Ignore and fall back to platform conventions.
-  }
-  return null;
-}
-
 function resolveUserContext(platform: SupportedPlatform): UserContext {
   if (platform === "win32") {
-    const home = process.env.USERPROFILE || os.homedir();
+    const home = resolveUserHome({ platform });
     return { home, username: process.env.USERNAME };
   }
 
@@ -391,13 +376,7 @@ function resolveUserContext(platform: SupportedPlatform): UserContext {
   const sudoUid = process.env.SUDO_UID;
   const sudoGid = process.env.SUDO_GID;
   if (sudoUser && sudoUser !== "root") {
-    const home =
-      process.env.HOME && process.env.HOME !== "/var/root" && process.env.HOME !== "/root"
-        ? process.env.HOME
-        : readPasswdHome(sudoUser) ||
-          (platform === "darwin"
-            ? path.posix.join("/Users", sudoUser)
-            : path.posix.join("/home", sudoUser));
+    const home = resolveUserHome({ platform });
     return { home, uid: sudoUid, gid: sudoGid, username: sudoUser };
   }
 

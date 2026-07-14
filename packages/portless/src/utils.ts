@@ -1,5 +1,53 @@
 import * as fs from "node:fs";
 import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
+
+type UserHomeOptions = {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  homedir?: string;
+  passwdHome?: (username: string) => string | null;
+};
+
+function readPasswdHome(username: string): string | null {
+  try {
+    const passwd = fs.readFileSync("/etc/passwd", "utf-8");
+    for (const line of passwd.split("\n")) {
+      const fields = line.split(":");
+      if (fields[0] === username && fields[5]) return fields[5];
+    }
+  } catch {
+    // Fall back to the platform's conventional home directory.
+  }
+  return null;
+}
+
+/**
+ * Resolve the home directory that owns portless state. When sudo changes the
+ * effective user to root, retain the invoking user's home so elevated proxy
+ * processes and unprivileged app processes share the same route store.
+ */
+export function resolveUserHome(options: UserHomeOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const homedir = options.homedir ?? os.homedir();
+
+  if (platform === "win32") return env.USERPROFILE || homedir;
+
+  const sudoUser = env.SUDO_USER;
+  if (!sudoUser || sudoUser === "root") return homedir;
+
+  const home = env.HOME;
+  if (home && home !== "/root" && home !== "/var/root") return home;
+
+  const passwdHome = (options.passwdHome ?? readPasswdHome)(sudoUser);
+  if (passwdHome) return passwdHome;
+
+  return platform === "darwin"
+    ? path.posix.join("/Users", sudoUser)
+    : path.posix.join("/home", sudoUser);
+}
 
 /**
  * Both loopback families, tried in order. Dev servers that bind `localhost`

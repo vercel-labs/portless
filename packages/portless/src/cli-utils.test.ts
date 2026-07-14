@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach, beforeEach } from "vitest";
+import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
@@ -181,6 +181,31 @@ describe("resolveStateDir", () => {
     expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
     expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
   });
+
+  it.skipIf(process.platform === "win32")(
+    "uses the invoking user's home when loaded under sudo",
+    async () => {
+      const originalHome = process.env.HOME;
+      const originalSudoUser = process.env.SUDO_USER;
+      const expectedHome = process.platform === "darwin" ? "/Users/alice" : "/home/alice";
+
+      try {
+        process.env.HOME = process.platform === "darwin" ? "/var/root" : "/root";
+        process.env.SUDO_USER = "alice";
+        vi.resetModules();
+
+        const sudoModule = await import("./cli-utils.js");
+        expect(sudoModule.USER_STATE_DIR).toBe(path.join(expectedHome, ".portless"));
+        expect(sudoModule.resolveStateDir(443)).toBe(path.join(expectedHome, ".portless"));
+      } finally {
+        if (originalHome === undefined) delete process.env.HOME;
+        else process.env.HOME = originalHome;
+        if (originalSudoUser === undefined) delete process.env.SUDO_USER;
+        else process.env.SUDO_USER = originalSudoUser;
+        vi.resetModules();
+      }
+    }
+  );
 });
 
 describe("constants", () => {

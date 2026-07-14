@@ -6,10 +6,55 @@ import {
   isProcessAlive,
   parseHostname,
   parseHostnames,
+  resolveUserHome,
 } from "./utils.js";
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("resolveUserHome", () => {
+  it("uses the invoking user's home under sudo", () => {
+    expect(
+      resolveUserHome({
+        platform: "linux",
+        env: { SUDO_USER: "alice", HOME: "/root" },
+        homedir: "/root",
+        passwdHome: () => "/home/alice",
+      })
+    ).toBe("/home/alice");
+  });
+
+  it("keeps a preserved non-root home under sudo", () => {
+    expect(
+      resolveUserHome({
+        platform: "darwin",
+        env: { SUDO_USER: "alice", HOME: "/Users/alice" },
+        homedir: "/var/root",
+      })
+    ).toBe("/Users/alice");
+  });
+
+  it("uses the effective user's home without sudo", () => {
+    expect(
+      resolveUserHome({
+        platform: "linux",
+        env: { HOME: "/root" },
+        homedir: "/root",
+      })
+    ).toBe("/root");
+  });
+
+  it("falls back to the platform convention when passwd lookup fails", () => {
+    expect(
+      resolveUserHome({
+        platform: "linux",
+        env: { SUDO_USER: "alice", HOME: "/root" },
+        homedir: "/root",
+        passwdHome: () => null,
+      })
+    ).toBe("/home/alice");
+  });
 });
 
 describe("escapeHtml", () => {

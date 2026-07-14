@@ -31,9 +31,13 @@ vi.mock("./certs.js", () => ({
   trustCA: vi.fn(() => ({ trusted: true })),
 }));
 
-vi.mock("./utils.js", () => ({
-  fixOwnership: vi.fn(),
-}));
+vi.mock("./utils.js", async (importOriginal) => {
+  const mod = await importOriginal<typeof import("./utils.js")>();
+  return {
+    ...mod,
+    fixOwnership: vi.fn(),
+  };
+});
 
 vi.mock("./mdns.js", () => ({
   isMdnsSupported: vi.fn(() => ({ supported: true })),

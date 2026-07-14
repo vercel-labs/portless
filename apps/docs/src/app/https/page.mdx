@@ -4,6 +4,8 @@ HTTP/2 + TLS is enabled by default for faster dev server page loads. Browsers li
 
 First run generates a local CA and server certs, then adds the CA to your system trust store. After that, no prompts, no browser warnings.
 
+On WSL, portless updates both the Linux trust store and the Windows current-user Root store. Windows browsers can then verify portless HTTPS certificates served from WSL.
+
 ## Custom certificates
 
 Use your own certs (e.g., from mkcert):
