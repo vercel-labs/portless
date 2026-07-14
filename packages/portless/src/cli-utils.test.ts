@@ -7,6 +7,8 @@ import * as path from "node:path";
 import {
   buildProxyStartConfig,
   BLOCKED_PORTS,
+  cmdEscape,
+  cmdEscapeCommand,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
@@ -865,6 +867,57 @@ describe("parseTldList", () => {
 
   it("rejects empty list entries", () => {
     expect(() => parseTldList("test,")).toThrow("TLD cannot be empty");
+  });
+});
+
+describe("cmdEscape", () => {
+  it("quotes a plain argument", () => {
+    expect(cmdEscape("dev")).toBe('^"dev^"');
+  });
+
+  it("preserves paths with spaces as a single argument", () => {
+    expect(cmdEscape("C:\\Program Files\\nodejs\\node.exe")).toBe(
+      '^"C:\\Program^ Files\\nodejs\\node.exe^"'
+    );
+  });
+
+  it("caret-escapes cmd metacharacters", () => {
+    expect(cmdEscape("console.log(1)")).toBe('^"console.log^(1^)^"');
+    expect(cmdEscape("a&&b")).toBe('^"a^&^&b^"');
+    expect(cmdEscape("%PATH%")).toBe('^"^%PATH^%^"');
+  });
+
+  it("escapes embedded double quotes", () => {
+    expect(cmdEscape('say "hi"')).toBe('^"say^ \\^"hi\\^"^"');
+  });
+
+  it("doubles backslashes before quotes and at the end", () => {
+    expect(cmdEscape('dir\\"x')).toBe('^"dir\\\\\\^"x^"');
+    expect(cmdEscape("trailing\\")).toBe('^"trailing\\\\^"');
+  });
+
+  it("handles the empty argument", () => {
+    expect(cmdEscape("")).toBe('^"^"');
+  });
+});
+
+describe("cmdEscapeCommand", () => {
+  it("leaves bare PATH-resolved names untouched (quoting breaks %~dp0 in .cmd shims)", () => {
+    expect(cmdEscapeCommand("npm")).toBe("npm");
+    expect(cmdEscapeCommand("pnpm")).toBe("pnpm");
+    expect(cmdEscapeCommand("node")).toBe("node");
+    expect(cmdEscapeCommand("C:\\tools\\node.exe")).toBe("C:\\tools\\node.exe");
+  });
+
+  it("plain-quotes (no carets) paths with spaces", () => {
+    expect(cmdEscapeCommand("C:\\Program Files\\nodejs\\node.exe")).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe"'
+    );
+  });
+
+  it("plain-quotes names containing cmd metacharacters", () => {
+    expect(cmdEscapeCommand("foo&bar")).toBe('"foo&bar"');
+    expect(cmdEscapeCommand("a(b)c")).toBe('"a(b)c"');
   });
 });
 

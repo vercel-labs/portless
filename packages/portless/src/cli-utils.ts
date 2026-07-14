@@ -849,6 +849,38 @@ function shellEscape(arg: string): string {
   return `'${arg.replace(/'/g, "'\\''")}'`;
 }
 
+/** cmd.exe metacharacters that require caret-escaping. */
+const CMD_META_CHARS = /([()\][%!^"`<>&|;, *?])/g;
+
+/**
+ * Escape a string so cmd.exe passes it to the child as a single literal
+ * argument (the Windows counterpart of shellEscape). Algorithm from
+ * https://qntm.org/cmd, as used by cross-spawn: quote per Windows argv
+ * rules, then caret-escape cmd.exe metacharacters (including the quotes
+ * themselves) so cmd's own parser leaves them intact.
+ */
+export function cmdEscape(arg: string): string {
+  return (
+    `"${arg
+      // A quote preceded by N backslashes needs 2N+1 backslashes.
+      .replace(/(\\*)"/g, '$1$1\\"')
+      // Trailing backslashes precede the closing quote we add: double them.
+      .replace(/(\\*)$/, "$1$1")}"`.replace(CMD_META_CHARS, "^$1")
+  );
+}
+
+/**
+ * Escape the command token (first word) of a cmd.exe command line. Unlike
+ * arguments, the command must NOT be caret-escaped or unnecessarily quoted:
+ * quoting a bare PATH-resolved name (e.g. "npm") makes cmd resolve %~dp0 to
+ * the current directory inside .cmd shims, which breaks npm/pnpm/yarn.
+ * Bare names stay bare; anything with whitespace or cmd metacharacters gets
+ * plain double quotes (fine for absolute paths, including .cmd files).
+ */
+export function cmdEscapeCommand(command: string): string {
+  return /[\s()\][%!^"`<>&|;,=*?]/.test(command) ? `"${command}"` : command;
+}
+
 /**
  * Walk up from `cwd` to the filesystem root, collecting all
  * `node_modules/.bin` directories that exist. Returns them in
@@ -919,11 +951,28 @@ export function spawnCommand(
   // On Unix, spawn detached so the child gets its own process group. This
   // lets us kill the entire tree (shell + grandchild dev server) with a
   // single process.kill(-pid, signal) instead of only the immediate child.
+  // On Windows, build the cmd.exe line ourselves (escaping each argument and
+  // wrapping the whole command in quotes for /s) and pass it verbatim.
+  // Without windowsVerbatimArguments, libuv would re-quote the payload and
+  // backslash-escape the quote characters our escaping relies on. This
+  // mirrors what Node's own `shell: true` does for cmd.exe.
   const child = isWindows
-    ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
-        stdio: "inherit",
-        env,
-      })
+    ? spawn(
+        "cmd.exe",
+        [
+          "/d",
+          "/s",
+          "/c",
+          `"${[cmdEscapeCommand(commandArgs[0]), ...commandArgs.slice(1).map(cmdEscape)].join(
+            " "
+          )}"`,
+        ],
+        {
+          stdio: "inherit",
+          env,
+          windowsVerbatimArguments: true,
+        }
+      )
     : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
         stdio: "inherit",
         env,
