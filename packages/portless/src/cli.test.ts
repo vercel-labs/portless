@@ -1390,6 +1390,12 @@ describe("CLI", () => {
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("appends the prefix with --path", () => {
+      const { status, stdout } = run(["get", "backend", "--path", "/api"], { env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?\/api$/);
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);
@@ -1450,6 +1456,21 @@ describe("CLI", () => {
       const { status, stderr } = run(["run", "--path"]);
       expect(status).not.toBe(0);
       expect(stderr).toContain("--path requires a path value");
+    });
+
+    it("prints a friendly error for an invalid --path value", () => {
+      const { status, stderr } = run(["get", "backend", "--path", "/api?x=1"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid path prefix");
+      expect(stderr).not.toContain("at ");
+    });
+
+    it("prints a friendly error for an invalid PORTLESS_PATH", () => {
+      const { status, stderr } = run(["myapp"], {
+        env: { PORTLESS_PATH: "/a//b" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid PORTLESS_PATH");
     });
   });
 

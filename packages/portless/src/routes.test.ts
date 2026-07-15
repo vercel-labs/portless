@@ -469,6 +469,36 @@ describe("RouteStore", () => {
       expect(routes[0].pathPrefix).toBe("/settings");
     });
 
+    it("updateRoute targets the entry matching hostname + pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/api");
+      store.updateRoute(
+        "app.localhost",
+        { ngrokUrl: "https://x.ngrok.app", ngrokPid: 123 },
+        "/api"
+      );
+      const routes = store.loadRoutes();
+      const root = routes.find((r) => r.pathPrefix === undefined);
+      const api = routes.find((r) => r.pathPrefix === "/api");
+      expect(root?.ngrokUrl).toBeUndefined();
+      expect(api?.ngrokUrl).toBe("https://x.ngrok.app");
+      expect(api?.ngrokPid).toBe(123);
+    });
+
+    it("removeRoute with ownerPid respects ownership for path routes", () => {
+      store.addRoute("app.localhost", 4002, process.pid, false, "/api");
+      // A different pid must not be able to deregister the route (post-takeover guard).
+      store.removeRoute("app.localhost", process.pid + 1, "/api");
+      expect(store.loadRoutes()).toHaveLength(1);
+      store.removeRoute("app.localhost", process.pid, "/api");
+      expect(store.loadRoutes()).toHaveLength(0);
+    });
+
+    it("RouteConflictError message includes the path prefix", () => {
+      const err = new RouteConflictError("app.localhost", 123, "/api");
+      expect(err.message).toContain('"app.localhost/api"');
+    });
+
     it("loads routes.json with pathPrefix field from disk", () => {
       store.ensureDir();
       const routes = [

@@ -90,8 +90,20 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 | `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
 | `appPort` | number  | auto     | Fixed port for the child process.                         |
 | `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
+| `path`    | string  |          | URL path prefix for path-based routing (e.g. `/api`).     |
 | `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
 | `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+
+Apps sharing a `name` with different `path` values are served under one hostname and dispatched by longest prefix:
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "myapp", "path": "/api" }
+  }
+}
+```
 
 ### package.json "portless" key
 
@@ -104,7 +116,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `path`):
 
 ```json
 {
@@ -212,7 +224,9 @@ portless myapp --path /docs next dev     # serves /docs/*
 
 The proxy uses longest-prefix matching to dispatch requests. The full request path is forwarded to the backend unchanged — `--path /api` does not strip `/api` before proxying, so your app must serve its routes under that prefix (or set a base path). Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain and route by path.
 
-Also available via environment variable: `PORTLESS_PATH=/api`.
+Also available via environment variable: `PORTLESS_PATH=/api`, or per app in `portless.json` (`"path": "/api"`).
+
+Tailscale and ngrok tunnels dial the app's port directly, bypassing the proxy's path dispatch; since the path is never stripped, the shared URL printed for a `--path` app includes the prefix.
 
 ## Custom TLD
 

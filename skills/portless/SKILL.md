@@ -157,7 +157,7 @@ portless myapp --path /api pnpm start        # serves /api/*
 portless myapp --path /docs next dev         # serves /docs/*
 ```
 
-The proxy uses longest-prefix matching. The full request path is forwarded unchanged. Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain. Also available as `PORTLESS_PATH=/api`.
+The proxy uses longest-prefix matching. The full request path is forwarded unchanged. Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain. Also available as `PORTLESS_PATH=/api` or per app in `portless.json` (`"path": "/api"`). Tailscale/ngrok tunnels dial the app's port directly, so shared URLs for a `--path` app include the prefix.
 
 ### Bypassing portless
 
@@ -347,10 +347,11 @@ Optional config file. Portless looks for it in the current directory.
 | `script`  | string  | `"dev"`                    | Name of a package.json script to run                     |
 | `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
 | `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
+| `path`    | string  |                            | URL path prefix for path-based routing (e.g. `/api`)     |
 | `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
 | `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `path`). When `apps` is present, top-level fields apply only in single-app mode. Apps sharing a `name` with different `path` values are served under one hostname and dispatched by longest prefix.
 
 ### package.json "portless" key
 

@@ -59,9 +59,9 @@ export class RouteConflictError extends Error {
   readonly hostname: string;
   readonly existingPid: number;
 
-  constructor(hostname: string, existingPid: number) {
+  constructor(hostname: string, existingPid: number, pathPrefix?: string) {
     super(
-      `"${hostname}" is already registered by a running process (PID ${existingPid}). ` +
+      `"${hostname}${pathPrefix ?? ""}" is already registered by a running process (PID ${existingPid}). ` +
         `Use --force to override.`
     );
     this.name = "RouteConflictError";
@@ -242,7 +242,7 @@ export class RouteStore {
       const existing = routes.find((r) => this.matchesRoute(r, hostname, pathPrefix));
       if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
         if (!force) {
-          throw new RouteConflictError(hostname, existing.pid);
+          throw new RouteConflictError(hostname, existing.pid, pathPrefix);
         }
         // --force: kill the existing process before taking over
         try {

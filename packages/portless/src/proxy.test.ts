@@ -772,6 +772,43 @@ describe("createProxyServer", () => {
         const res = await request(server, { host: "tenant.app.localhost", path: "/settings/foo" });
         expect(res.body).toBe("wildcard-path");
       });
+
+      it("does not crash on a malformed request-target", async () => {
+        const backend = trackServer(
+          http.createServer((_req, res) => {
+            res.writeHead(200);
+            res.end("root");
+          })
+        );
+        await listen(backend);
+        const addr = backend.address() as net.AddressInfo;
+
+        const routes: RouteInfo[] = [{ hostname: "app.localhost", port: addr.port }];
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+        );
+        await listen(server);
+        const proxyAddr = server.address() as net.AddressInfo;
+
+        // "http://[" is not parseable by `new URL()`; the proxy must fall back
+        // to "/" for path matching instead of throwing.
+        const response = await new Promise<string>((resolve, reject) => {
+          const socket = net.connect(proxyAddr.port, "127.0.0.1", () => {
+            socket.write(
+              "GET http://[ HTTP/1.1\r\nHost: app.localhost\r\nConnection: close\r\n\r\n"
+            );
+          });
+          let data = "";
+          socket.on("data", (chunk) => (data += chunk));
+          socket.on("end", () => resolve(data));
+          socket.on("error", reject);
+        });
+        expect(response).toMatch(/^HTTP\/1\.1 \d{3}/);
+
+        // The proxy must still be alive and routing.
+        const res = await request(server, { host: "app.localhost", path: "/" });
+        expect(res.body).toBe("root");
+      });
     });
   });
 
