@@ -2,7 +2,17 @@
 export interface RouteInfo {
   hostname: string;
   port: number;
+  /**
+   * URL path prefix for path-based routing (e.g. "/api"). Routes without a
+   * pathPrefix act as the root catch-all for their hostname.
+   */
   pathPrefix?: string;
+  /**
+   * Public Tailscale Serve/Funnel URL for this route, when one is active
+   * (e.g. "https://my-device.tail1234.ts.net"). Requests whose Host header
+   * matches this URL's hostname are routed to the same upstream.
+   */
+  tailscaleUrl?: string;
 }
 
 export interface ProxyServerOptions {
@@ -12,6 +22,8 @@ export interface ProxyServerOptions {
   proxyPort: number;
   /** TLD suffix used for hostnames (default: "localhost"). */
   tld?: string;
+  /** All TLD suffixes used for hostnames. The first one is used for examples. */
+  tlds?: string[];
   /**
    * When true, only exact hostname matches are used. Unregistered subdomain
    * prefixes return 404 instead of falling back to the base service.

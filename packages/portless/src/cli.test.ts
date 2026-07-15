@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as os from "node:os";
@@ -8,6 +8,26 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
+const TEST_CA_PEM = `-----BEGIN CERTIFICATE-----
+MIIDFzCCAf+gAwIBAgIUEVh0YNawusstUaCfwLYo2qUO7D8wDQYJKoZIhvcNAQEL
+BQAwGzEZMBcGA1UEAwwQcG9ydGxlc3MtdGVzdC1jYTAeFw0yNjA1MjAyMTIzNDBa
+Fw0zNjA1MTcyMTIzNDBaMBsxGTAXBgNVBAMMEHBvcnRsZXNzLXRlc3QtY2EwggEi
+MA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDXVX2d5DSfOOdipeP+k27Omgxd
+UV0C35Yx5wKAQiHVBOWNsLPQVoJzyCASMkroul5idmoSr+9IWDh/oizEqN5iRzzA
+MYGAAaNOXVZHN6Y12p0dFaP77+unD2eOgt4cIqZ2VA7K+j8O1hrLbhQ1Ogiw7Xh0
+WjtgNoge9rv9OIr+2eoQmkJCkY66oa1Pe+lTjjhUcXBCK0j4u/3cTxAzjzLaOnzC
+KDnZU2lZT/1v3Fo8YwB/18eVsoxupMRTsXcai2VnazZMcUwQR5HSa9jJ97Jj5H35
+dRvWFlRU5mqO+0COQUvg0naMvaIGXJG4xBljNAcWbQbW2/bMpfK9Z2c3H8M1AgMB
+AAGjUzBRMB0GA1UdDgQWBBT86mpMdHyIkUBVn+C5r6MGyjFfFjAfBgNVHSMEGDAW
+gBT86mpMdHyIkUBVn+C5r6MGyjFfFjAPBgNVHRMBAf8EBTADAQH/MA0GCSqGSIb3
+DQEBCwUAA4IBAQCM0eVaH2I4PUYB3R8GEpfOzM0nqRkcKz5r3eeGfbYabtdKyurQ
+lTFT75LiGsMmIuTGlDjP7iKxbeY7cYn5gTUttPVQGwYVOY1qKkLHGst4GaBK/w5Y
+9Ag42CGCYhk172EMJ0H5zGqYvU7itOXU5QERDOxAfHWXIBN4Al/fkRUoCWZZIkAM
+2AqvSowxptbcbnlRn8/l+RgKMrG+88Pj8J1ei3PtiUBx2haYSxPkoBcMOLH52Cdx
+KnZk8J8eqG+Nc2L778YxXPRDS4egacbNc3FoEIAN/zBk+RWc22V5bVODCM69I4Qa
+VeuruL5f30jD8PbGa2A91T5e1oaoL5ap6bdl
+-----END CERTIFICATE-----
+`;
 
 /** Run the CLI with the given args and optional env/cwd overrides. */
 function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
@@ -84,6 +104,50 @@ async function getFreePort(): Promise<number> {
   }
 }
 
+async function waitForHttpHeader(
+  port: number,
+  headerName: string,
+  expectedValue: string
+): Promise<void> {
+  for (let i = 0; i < 50; i++) {
+    const matched = await new Promise<boolean>((resolve) => {
+      const req = http.request(
+        {
+          hostname: "127.0.0.1",
+          port,
+          method: "HEAD",
+          timeout: 200,
+        },
+        (res) => {
+          res.resume();
+          resolve(res.headers[headerName.toLowerCase()] === expectedValue);
+        }
+      );
+      req.on("error", () => resolve(false));
+      req.on("timeout", () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
+    });
+    if (matched) return;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`Timed out waiting for ${headerName} on port ${port}`);
+}
+
+async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
+  if (child.exitCode !== null) return;
+  child.kill("SIGTERM");
+  await new Promise<void>((resolve) => {
+    const timeout = setTimeout(resolve, 1000);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve();
+    });
+  });
+}
+
 describe("CLI", () => {
   beforeAll(() => {
     if (!fs.existsSync(CLI_PATH)) {
@@ -99,14 +163,19 @@ describe("CLI", () => {
       expect(stdout).toContain("Usage:");
       expect(stdout).toContain("Examples:");
       expect(stdout).toContain("proxy start");
+      expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
       expect(stdout).toContain("run [--name <name>]");
+      expect(stdout).toContain("portless doctor");
       expect(stdout).toContain("--port");
       expect(stdout).toContain("-p");
       expect(stdout).toContain("--foreground");
       expect(stdout).toContain("PORTLESS_STATE_DIR");
       expect(stdout).toContain("PORTLESS_URL");
+      expect(stdout).toContain("--ngrok");
+      expect(stdout).toContain("PORTLESS_NGROK");
+      expect(stdout).toContain("PORTLESS_NGROK_URL");
       expect(stdout).toContain("portless clean");
     });
 
@@ -153,6 +222,280 @@ describe("CLI", () => {
     });
   });
 
+  describe("doctor", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["doctor", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless doctor");
+      expect(stdout).toContain("state");
+      expect(stdout).toContain("does not start");
+    });
+
+    it("reports a stopped proxy as a warning and exits 0", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-stopped-"));
+      const proxyPort = await getFreePort();
+      try {
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless doctor");
+        expect(stdout).toContain(`Proxy is not running on port ${proxyPort}`);
+        expect(stdout).toContain("Summary: 0 failures");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not fail for a missing nested state directory with a writable ancestor", async () => {
+      const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-nested-"));
+      const proxyPort = await getFreePort();
+      const stateDir = path.join(tmpRoot, "missing", "state");
+      try {
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: stateDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain(`State directory has not been created yet: ${stateDir}`);
+        expect(stdout).toContain("Summary: 0 failures");
+      } finally {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      }
+    });
+
+    it("does not require OpenSSL when persisted proxy state is HTTP", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-http-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PATH: tmpDir,
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("HTTPS is disabled for the current proxy state.");
+        expect(stdout).not.toContain("OpenSSL is not available");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not require generated CA checks when proxy state uses a custom certificate", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-custom-cert-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+        fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PATH: tmpDir,
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("Proxy is configured with a custom TLS certificate.");
+        expect(stdout).toContain("Generated local CA is not required for custom TLS certificates.");
+        expect(stdout).not.toContain("OpenSSL is not available");
+        expect(stdout).not.toContain("Generated CA file is missing");
+        expect(stdout).not.toContain("Local CA has not been generated");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("exits 1 when the proxy port is occupied by a non-portless process", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-conflict-"));
+      const server = http.createServer((_req, res) => {
+        res.end("not portless");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(1);
+        expect(stdout).toContain(`Port ${proxyPort} is in use, but it is not a portless proxy`);
+        expect(stdout).toContain("Summary: 1 failure");
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("warns when routes.json is corrupted", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-routes-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "routes.json"), "{");
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("Corrupted routes file (invalid JSON)");
+        expect(stdout).toContain("Summary: 0 failures");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("warns when a route has an invalid port instead of crashing", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-bad-port-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([{ hostname: "bad.localhost", port: 99999, pid: 0 }])
+        );
+
+        const { status, stdout, stderr } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain("Route bad.localhost has invalid port 99999.");
+        expect(stdout).toContain("Summary: 0 failures");
+        expect(stderr).not.toContain("Port should be");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not report an alive stale PID file as healthy", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-pid-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.pid"), process.pid.toString());
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain(
+          `Proxy PID file points to PID ${process.pid}, but no portless proxy is responding on port ${proxyPort}.`
+        );
+        expect(stdout).not.toContain("Proxy PID file points to a running process");
+        expect(stdout).not.toContain("Proxy PID file points to the responding proxy process");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("reports a responding proxy and registered route", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-healthy-"));
+      const appServer = http.createServer((_req, res) => {
+        res.end("app");
+      });
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      try {
+        const proxyPort = await getFreePort();
+        const proxyScriptPath = path.join(tmpDir, "proxy-server.cjs");
+        fs.writeFileSync(
+          proxyScriptPath,
+          [
+            'const http = require("node:http");',
+            "const server = http.createServer((_req, res) => {",
+            '  res.setHeader("X-Portless", "1");',
+            '  res.end("ok");',
+            "});",
+            `server.listen(${proxyPort}, "127.0.0.1");`,
+            'process.on("SIGTERM", () => server.close(() => process.exit(0)));',
+          ].join("\n") + "\n"
+        );
+        proxyChild = spawn(process.execPath, [proxyScriptPath], {
+          stdio: "ignore",
+        });
+        await waitForHttpHeader(proxyPort, "X-Portless", "1");
+
+        const appPort = await new Promise<number>((resolve) => {
+          appServer.listen(0, "127.0.0.1", () => {
+            const addr = appServer.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([{ hostname: "myapp.localhost", port: appPort, pid: 0 }])
+        );
+
+        const { status, stdout } = run(["doctor"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        expect(stdout).toContain(`Proxy is responding on port ${proxyPort}`);
+        expect(stdout).toContain("Routes: 1 active route");
+        expect(stdout).toContain("Summary: 0 failures");
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+        await new Promise<void>((resolve) => appServer.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not bypass doctor when PORTLESS=0 is set", () => {
+      const { status, stderr } = run(["doctor", "typo"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown argument");
+      expect(stderr).not.toContain("ENOENT");
+    });
+  });
+
   describe("proxy", () => {
     it("shows proxy usage hint for bare 'proxy' command", () => {
       const { status, stdout } = run(["proxy"]);
@@ -166,6 +509,26 @@ describe("CLI", () => {
       const { status, stdout } = run(["proxy", "unknown"]);
       expect(status).toBe(1);
       expect(stdout).toContain("proxy start");
+    });
+  });
+
+  describe("service", () => {
+    it("prints service help", () => {
+      const { status, stdout } = run(["service", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless service");
+      expect(stdout).toContain("service install");
+      expect(stdout).toContain("service uninstall");
+      expect(stdout).toContain("service status");
+    });
+
+    it("still dispatches service help when PORTLESS=0", () => {
+      const { status, stdout } = run(["service", "--help"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless service");
+      expect(stdout).toContain("service install");
     });
   });
 
@@ -444,6 +807,7 @@ describe("CLI", () => {
       expect(status).toBe(0);
       expect(stdout).toContain("portless clean");
       expect(stdout).toContain("trust store");
+      expect(stdout).toContain("retained so clean can safely retry");
     });
 
     it("prints help with -h", () => {
@@ -806,6 +1170,68 @@ describe("CLI", () => {
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     });
+
+    it("registers one app route per configured TLD", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+
+        const capturePath = path.join(tmpDir, "multi-tld-capture.json");
+        const scriptPath = path.join(tmpDir, "capture-routes.js");
+        fs.writeFileSync(
+          scriptPath,
+          [
+            'const fs = require("node:fs");',
+            `const routes = JSON.parse(fs.readFileSync(${JSON.stringify(
+              path.join(tmpDir, "routes.json")
+            )}, "utf-8"));`,
+            `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+            "  PORTLESS_URL: process.env.PORTLESS_URL,",
+            "  __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS,",
+            "  routes,",
+            "}));",
+          ].join("\n") + "\n"
+        );
+
+        const { status } = run(["run", "--name", "myapp", "node", scriptPath], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          PORTLESS_URL: string;
+          __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: string;
+          routes: Array<{ hostname: string; port: number }>;
+        };
+
+        expect(capture.PORTLESS_URL).toBe(`http://myapp.localhost:${proxyPort}`);
+        expect(capture.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS).toBe(".localhost,.test");
+        expect(capture.routes.map((route) => route.hostname).sort()).toEqual([
+          "myapp.localhost",
+          "myapp.test",
+        ]);
+        expect(new Set(capture.routes.map((route) => route.port)).size).toBe(1);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    });
   });
 
   describe("NODE_EXTRA_CA_CERTS injection", () => {
@@ -844,7 +1270,7 @@ describe("CLI", () => {
           fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
         }
         if (opts.writeCaPem !== false) {
-          fs.writeFileSync(path.join(tmpDir, "ca.pem"), "fake-ca-cert");
+          fs.writeFileSync(path.join(tmpDir, "ca.pem"), TEST_CA_PEM);
         }
 
         const capturePath = path.join(tmpDir, "capture.json");
@@ -1348,5 +1774,224 @@ describe("CLI", () => {
       expect(status).toBe(1);
       expect(stderr).toContain("appPort");
     });
+  });
+
+  describe("--tailscale flag", () => {
+    it("shows --tailscale in help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--tailscale");
+      expect(stdout).toContain("--funnel");
+      expect(stdout).toContain("PORTLESS_TAILSCALE");
+    });
+
+    it("fails with actionable message when tailscale is not installed", () => {
+      const { status, stderr } = run(["--tailscale", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("fails with --funnel when tailscale is not installed", () => {
+      const { status, stderr } = run(["--funnel", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts PORTLESS_TAILSCALE=1 env var", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: { PORTLESS_TAILSCALE: "1", PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale after app name", () => {
+      const { status, stderr } = run(["myapp", "--tailscale", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale in run subcommand", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run", "--tailscale", "echo", "hello"], {
+          cwd: tmpDir,
+          env: { PATH: "/tmp/portless-no-ts-path" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain("Tailscale");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("--ngrok flag", () => {
+    it("shows --ngrok in help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--ngrok");
+      expect(stdout).toContain("PORTLESS_NGROK");
+      expect(stdout).toContain("PORTLESS_NGROK_URL");
+    });
+
+    it("fails with actionable message when ngrok is not installed", () => {
+      const { status, stderr } = run(["--ngrok", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ngrok-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("accepts PORTLESS_NGROK=1 env var", () => {
+      const { status, stderr } = run(["myapp", "echo", "hello"], {
+        env: { PORTLESS_NGROK: "1", PATH: "/tmp/portless-no-ngrok-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("accepts --ngrok after app name", () => {
+      const { status, stderr } = run(["myapp", "--ngrok", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ngrok-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("ngrok CLI not found");
+    });
+
+    it("accepts --ngrok in run subcommand", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ngrok-run-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run", "--ngrok", "echo", "hello"], {
+          cwd: tmpDir,
+          env: { PATH: "/tmp/portless-no-ngrok-path" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain("ngrok CLI not found");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("multi-app worktree routing (issue #269)", () => {
+    // Skipped on Windows: multi-app mode spawns the package manager
+    // (`npm run dev`), and spawnChildProcess does not use a shell, so
+    // spawn("npm") fails with ENOENT on Windows (npm is npm.cmd there). That is
+    // a separate limitation of the multi-app spawn path, not the worktree-prefix
+    // logic under test here, which is platform-agnostic and covered
+    // cross-platform by the detectWorktreePrefix unit tests. Runs on macOS/Linux.
+    it.skipIf(process.platform === "win32")(
+      "prefixes every app hostname with the worktree branch",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-wt-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-state-"));
+        const proxyPort = await getFreePort();
+        const capFile = (name: string) => path.join(stateDir, `url-${name}.txt`);
+        const readCap = (name: string) => {
+          try {
+            return fs.readFileSync(capFile(name), "utf-8");
+          } catch {
+            return "";
+          }
+        };
+        let cli: ReturnType<typeof spawn> | undefined;
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+
+          // Fake a git worktree on branch feature-x via the filesystem fallback
+          // (a .git file pointing at a gitdir whose HEAD is the branch ref).
+          const gitdir = path.join(root, "fake-bare.git", "worktrees", "wt");
+          fs.mkdirSync(gitdir, { recursive: true });
+          fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-x\n");
+          fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
+
+          // Each app's dev command records the URL portless assigned it via
+          // PORTLESS_URL, then exits. Reading the captured URL (not routes.json)
+          // is robust: a route is removed when its app exits, but the file stays.
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "capture.cjs"),
+              `require("node:fs").writeFileSync(${JSON.stringify(capFile(name))}, process.env.PORTLESS_URL || "");\n`
+            );
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                version: "0.0.0",
+                scripts: { dev: "node capture.cjs" },
+                portless: { proxy: true },
+              })
+            );
+          }
+
+          // Strip parent-only npm/pnpm vars so the spawned `npm run dev` is real
+          // npm, not the vitest runner's pnpm (npm_execpath).
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_PORT = proxyPort.toString();
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.NO_COLOR = "1";
+
+          let output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          // Poll generously: on slow CI, proxy boot plus two sequential
+          // `npm run dev` spawns can take a while.
+          for (let i = 0; i < 60; i++) {
+            if (readCap("web") && readCap("api")) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          const webUrl = readCap("web");
+          const apiUrl = readCap("api");
+          if (!webUrl || !apiUrl) {
+            throw new Error(
+              `capture incomplete (web=${JSON.stringify(webUrl)}, api=${JSON.stringify(apiUrl)}). CLI output:\n${output}`
+            );
+          }
+          // Routed URL must carry the worktree prefix, in the full multi-app
+          // form <branch>.<pkg>.<project>.<tld>.
+          expect(webUrl).toContain("feature-x.web.myrepo.localhost");
+          expect(apiUrl).toContain("feature-x.api.myrepo.localhost");
+        } finally {
+          if (cli) await stopChild(cli);
+          run(["proxy", "stop"], {
+            env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" },
+          });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
   });
 });

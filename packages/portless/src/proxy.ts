@@ -2,7 +2,7 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions, RouteInfo } from "./types.js";
-import { escapeHtml, formatUrl } from "./utils.js";
+import { createLoopbackConnection, escapeHtml, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
 
 /** Response header used to identify a portless proxy (for health checks). */
@@ -82,12 +82,41 @@ function matchesPathPrefix(prefix: string | undefined, pathname: string): boolea
   return pathname === prefix || pathname.startsWith(prefix + "/");
 }
 
+/** Authority (hostname, plus port when non-default) of a route's tailscaleUrl, or undefined if unset or invalid. */
+function tailscaleAuthority(tailscaleUrl: string | undefined): string | undefined {
+  if (!tailscaleUrl) return undefined;
+  try {
+    // `URL` lowercases the host and drops the default `:443`, so the value is
+    // already in the normalized form findRoute compares against.
+    return new URL(tailscaleUrl).host;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
- * Find the route matching a given host and URL path.
- *
- * Matches exact hostname first, then wildcard subdomain fallback (unless
- * `strict`). Among hostname candidates, selects the longest matching
- * `pathPrefix`. Routes without a `pathPrefix` act as root catch-all.
+ * Normalize a request authority for comparison: lowercase it (Host is
+ * case-insensitive) and drop an explicit `:443`, the default HTTPS port that
+ * `URL` strips from a route's stored tailscale authority. Without this a
+ * mixed-case Host never matches, and an explicit `dev.ts.net:443` misses the
+ * authority tier and falls through to the port-insensitive hostname tier,
+ * resolving to the wrong app when several routes share a `.ts.net` hostname on
+ * different ports.
+ */
+function normalizeAuthority(host: string): string {
+  const lower = host.toLowerCase();
+  return lower.endsWith(":443") ? lower.slice(0, -":443".length) : lower;
+}
+
+/**
+ * Find the route matching a request's host (which may include a port) and URL
+ * path. Match order: local hostname, tailscale authority (hostname and port),
+ * tailscale hostname ignoring port, then wildcard subdomain. `strict` drops
+ * the wildcard tier. Within the local-hostname and wildcard tiers, several
+ * routes may share a hostname and differ only by `pathPrefix`; the longest
+ * matching prefix wins and routes without a `pathPrefix` act as root
+ * catch-all. Tailscale tiers skip path selection: a tailscale URL identifies
+ * a single route and its requests are not path-prefixed.
  */
 function findRoute(
   routes: RouteInfo[],
@@ -95,28 +124,36 @@ function findRoute(
   url: string,
   strict?: boolean
 ): RouteInfo | undefined {
-  const exactRoutes = routes.filter((r) => r.hostname === host);
-  let candidatesRoutes: RouteInfo[];
-
-  if (exactRoutes.length > 0) {
-    candidatesRoutes = exactRoutes;
-  } else if (strict) {
-    candidatesRoutes = [];
-  } else {
-    candidatesRoutes = routes.filter((r) => host.endsWith("." + r.hostname));
+  const authority = normalizeAuthority(host);
+  const hostname = authority.split(":")[0];
+  // A malformed request-target must not crash the proxy; fall back to "/" so
+  // no-prefix (catch-all) routes still match.
+  let pathname = "/";
+  try {
+    pathname = new URL(url, "http://localhost").pathname;
+  } catch {
+    // keep "/"
   }
 
-  if (candidatesRoutes.length === 0) {
-    return undefined;
-  }
+  const pickByPath = (candidates: RouteInfo[]): RouteInfo | undefined => {
+    const [match] = candidates
+      .filter((r) => matchesPathPrefix(r.pathPrefix, pathname))
+      .sort((a, b) => (b.pathPrefix || "/").length - (a.pathPrefix || "/").length);
+    return match;
+  };
 
-  const { pathname } = new URL(url, "http://localhost");
+  const exact = routes.filter((r) => r.hostname.toLowerCase() === hostname);
+  if (exact.length > 0) return pickByPath(exact);
 
-  const [matchRoute] = candidatesRoutes
-    .filter((r) => matchesPathPrefix(r.pathPrefix, pathname))
-    .sort((a, b) => (b.pathPrefix || "/").length - (a.pathPrefix || "/").length);
+  const tsAuthorityMatch = routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === authority);
+  if (tsAuthorityMatch) return tsAuthorityMatch;
+  const tsHostnameMatch = routes.find(
+    (r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname
+  );
+  if (tsHostnameMatch) return tsHostnameMatch;
 
-  return matchRoute;
+  if (strict) return undefined;
+  return pickByPath(routes.filter((r) => hostname.endsWith("." + r.hostname.toLowerCase())));
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
@@ -138,18 +175,21 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     getRoutes,
     proxyPort,
     tld = "localhost",
+    tlds = [tld],
     strict = true,
     onError = (msg: string) => console.error(msg),
     tls,
   } = options;
-  const tldSuffix = `.${tld}`;
+  const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
+  const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
     const reqTls = isEncrypted(req);
     res.setHeader(PORTLESS_HEADER, "1");
 
     const routes = getRoutes();
-    const host = getRequestHost(req).split(":")[0];
+    const rawHost = getRequestHost(req);
+    const host = rawHost.split(":")[0];
     const url = req.url || "/";
 
     if (!host) {
@@ -172,7 +212,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           "Loop Detected",
           `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
   "/api": {
-    target: "${reqTls ? "https" : "http"}://&lt;backend&gt;${escapeHtml(tldSuffix)}${reqTls ? "" : ":&lt;port&gt;"}",
+    target: "${reqTls ? "https" : "http"}://&lt;backend&gt;${escapeHtml(primaryTldSuffix)}${reqTls ? "" : ":&lt;port&gt;"}",
     changeOrigin: true,
   },
 }</pre></div></div>`
@@ -181,11 +221,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, host, url, strict);
+    const route = findRoute(routes, rawHost, url, strict);
 
     if (!route) {
       const safeHost = escapeHtml(host);
-      const strippedHost = host.endsWith(tldSuffix) ? host.slice(0, -tldSuffix.length) : host;
+      const matchedSuffix = tldSuffixes.find((suffix) => host.endsWith(suffix));
+      const strippedHost = matchedSuffix ? host.slice(0, -matchedSuffix.length) : host;
       const safeSuggestion = escapeHtml(strippedHost);
       const routesList =
         routes.length > 0
@@ -221,11 +262,17 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         delete proxyReqHeaders[key];
       }
     }
+    // HTTP/2 carries the hostname only in :authority (stripped above); restore
+    // it as Host so Host-dependent backends (multi-tenant vhosts, framework
+    // host allow-lists) see the original hostname instead of 127.0.0.1.
+    if (!proxyReqHeaders.host) {
+      proxyReqHeaders.host = getRequestHost(req);
+    }
 
     const proxyReq = http.request(
       {
-        hostname: "127.0.0.1",
-        port: route.port,
+        // Dial via createLoopbackConnection so ::1-only backends work too.
+        createConnection: () => createLoopbackConnection(route.port),
         path: url,
         method: req.method,
         headers: proxyReqHeaders,
@@ -309,9 +356,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
 
     const routes = getRoutes();
-    const host = getRequestHost(req).split(":")[0];
     const url = req.url || "/";
-    const route = findRoute(routes, host, url, strict);
+    const route = findRoute(routes, getRequestHost(req), url, strict);
 
     if (!route) {
       socket.destroy();
@@ -330,10 +376,16 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         delete proxyReqHeaders[key];
       }
     }
+    // HTTP/2 carries the hostname only in :authority (stripped above); restore
+    // it as Host so Host-dependent backends (multi-tenant vhosts, framework
+    // host allow-lists) see the original hostname instead of 127.0.0.1.
+    if (!proxyReqHeaders.host) {
+      proxyReqHeaders.host = getRequestHost(req);
+    }
 
     const proxyReq = http.request({
-      hostname: "127.0.0.1",
-      port: route.port,
+      // Dial via createLoopbackConnection so ::1-only backends work too.
+      createConnection: () => createLoopbackConnection(route.port),
       path: url,
       method: req.method,
       headers: proxyReqHeaders,

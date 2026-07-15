@@ -1,11 +1,62 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   escapeHtml,
   formatUrl,
   isErrnoException,
+  isProcessAlive,
   normalizePathPrefix,
   parseHostname,
+  parseHostnames,
+  resolveUserHome,
 } from "./utils.js";
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+describe("resolveUserHome", () => {
+  it("uses the invoking user's home under sudo", () => {
+    expect(
+      resolveUserHome({
+        platform: "linux",
+        env: { SUDO_USER: "alice", HOME: "/root" },
+        homedir: "/root",
+        passwdHome: () => "/home/alice",
+      })
+    ).toBe("/home/alice");
+  });
+
+  it("keeps a preserved non-root home under sudo", () => {
+    expect(
+      resolveUserHome({
+        platform: "darwin",
+        env: { SUDO_USER: "alice", HOME: "/Users/alice" },
+        homedir: "/var/root",
+      })
+    ).toBe("/Users/alice");
+  });
+
+  it("uses the effective user's home without sudo", () => {
+    expect(
+      resolveUserHome({
+        platform: "linux",
+        env: { HOME: "/root" },
+        homedir: "/root",
+      })
+    ).toBe("/root");
+  });
+
+  it("falls back to the platform convention when passwd lookup fails", () => {
+    expect(
+      resolveUserHome({
+        platform: "linux",
+        env: { SUDO_USER: "alice", HOME: "/root" },
+        homedir: "/root",
+        passwdHome: () => null,
+      })
+    ).toBe("/home/alice");
+  });
+});
 
 describe("escapeHtml", () => {
   it("escapes angle brackets", () => {
@@ -112,6 +163,41 @@ describe("normalizePathPrefix", () => {
   it("allows dots within a segment (not standalone ..)", () => {
     expect(normalizePathPrefix("/v1.2.3")).toBe("/v1.2.3");
     expect(normalizePathPrefix("/...")).toBe("/...");
+  });
+});
+
+describe("isProcessAlive", () => {
+  it("returns true when signal 0 succeeds", () => {
+    vi.spyOn(process, "kill").mockImplementation(() => true);
+
+    expect(isProcessAlive(123)).toBe(true);
+  });
+
+  it("treats EPERM as an alive process", () => {
+    const err = new Error("permission denied") as NodeJS.ErrnoException;
+    err.code = "EPERM";
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      throw err;
+    });
+
+    expect(isProcessAlive(123)).toBe(true);
+  });
+
+  it("returns false when the process does not exist", () => {
+    const err = new Error("missing") as NodeJS.ErrnoException;
+    err.code = "ESRCH";
+    vi.spyOn(process, "kill").mockImplementation(() => {
+      throw err;
+    });
+
+    expect(isProcessAlive(123)).toBe(false);
+  });
+
+  it("returns false for non-positive PIDs", () => {
+    const spy = vi.spyOn(process, "kill");
+
+    expect(isProcessAlive(0)).toBe(false);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 
@@ -267,5 +353,25 @@ describe("parseHostname", () => {
     it("works with dev TLD", () => {
       expect(parseHostname("myapp", "dev")).toBe("myapp.dev");
     });
+  });
+});
+
+describe("parseHostnames", () => {
+  it("builds one hostname per TLD", () => {
+    expect(parseHostnames("myapp", ["localhost", "test"])).toEqual([
+      "myapp.localhost",
+      "myapp.test",
+    ]);
+  });
+
+  it("strips an active TLD before building all hostnames", () => {
+    expect(parseHostnames("api.myapp.test", ["localhost", "test"])).toEqual([
+      "api.myapp.localhost",
+      "api.myapp.test",
+    ]);
+  });
+
+  it("deduplicates TLDs", () => {
+    expect(parseHostnames("myapp", ["test", "test"])).toEqual(["myapp.test"]);
   });
 });

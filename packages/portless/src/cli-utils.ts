@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,7 +43,7 @@ export const LEGACY_SYSTEM_STATE_DIR = isWindows
   : "/tmp/portless";
 
 /** Per-user state directory. All proxy state lives here regardless of port. */
-export const USER_STATE_DIR = path.join(os.homedir(), ".portless");
+export const USER_STATE_DIR = path.join(resolveUserHome(), ".portless");
 
 /** Minimum app port when finding a free port. */
 const MIN_APP_PORT = 4000;
@@ -90,6 +91,35 @@ export const SIGNAL_CODES: Record<string, number> = {
   SIGKILL: 9,
   SIGTERM: 15,
 };
+
+/**
+ * Kill a child process and its entire process tree. On Unix, when the child
+ * was spawned with `detached: true`, it leads its own process group and
+ * process.kill(-pid) reaches every descendant. Falls back to killing just
+ * the child on Windows or when the group kill fails.
+ */
+export function killTree(
+  child: ReturnType<typeof spawn>,
+  signal: NodeJS.Signals = "SIGTERM"
+): void {
+  if (!child.pid) {
+    child.kill(signal);
+    return;
+  }
+  if (!isWindows) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch {
+      // Process group may already be gone; fall through
+    }
+  }
+  try {
+    child.kill(signal);
+  } catch {
+    // Already dead
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Port configuration
@@ -144,6 +174,7 @@ export function readPortFromDir(dir: string): number | null {
 
 /** Name of the marker file that indicates the proxy is running with TLS. */
 const TLS_MARKER_FILE = "proxy.tls";
+const CUSTOM_CERT_MARKER_FILE = "proxy.custom-cert";
 
 /** Read the TLS marker from a state directory. */
 export function readTlsMarker(dir: string): boolean {
@@ -157,6 +188,27 @@ export function readTlsMarker(dir: string): boolean {
 /** Write or remove the TLS marker in the state directory. */
 export function writeTlsMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, TLS_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
+export function readCustomCertMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, CUSTOM_CERT_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+export function writeCustomCertMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, CUSTOM_CERT_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
   } else {
@@ -228,11 +280,30 @@ export function validateTld(tld: string): string | null {
   return null;
 }
 
+/** Parse a comma separated TLD list and remove duplicates in order. */
+export function parseTldList(value: string, source = "TLD"): string[] {
+  const trimmed = value.trim();
+  if (!trimmed) return [];
+
+  const tlds: string[] = [];
+  const seen = new Set<string>();
+  for (const rawPart of trimmed.split(",")) {
+    const tld = rawPart.trim().toLowerCase();
+    const err = validateTld(tld);
+    if (err) throw new Error(source === "TLD" ? err : `${source}: ${err}`);
+    if (!seen.has(tld)) {
+      seen.add(tld);
+      tlds.push(tld);
+    }
+  }
+  return tlds;
+}
+
 /** Name of the file that stores the proxy's active TLD. */
 const TLD_FILE = "proxy.tld";
+const TLDS_FILE = "proxy.tlds";
 
-/** Read the TLD from a state directory. Returns DEFAULT_TLD if absent. */
-export function readTldFromDir(dir: string): string {
+function readLegacyTldFromDir(dir: string): string {
   try {
     const raw = fs.readFileSync(path.join(dir, TLD_FILE), "utf-8").trim();
     return raw || DEFAULT_TLD;
@@ -241,30 +312,75 @@ export function readTldFromDir(dir: string): string {
   }
 }
 
-/** Write or remove the TLD file in the state directory. */
-export function writeTldFile(dir: string, tld: string): void {
-  const filePath = path.join(dir, TLD_FILE);
-  if (tld === DEFAULT_TLD) {
+/** Read all TLDs from a state directory. Returns the default TLD if absent. */
+export function readTldsFromDir(dir: string): string[] {
+  try {
+    const raw = fs.readFileSync(path.join(dir, TLDS_FILE), "utf-8").trim();
+    const parsed = raw.startsWith("[")
+      ? JSON.parse(raw)
+      : raw
+          .split(/\r?\n/)
+          .flatMap((line) => line.split(","))
+          .map((line) => line.trim())
+          .filter(Boolean);
+    if (!Array.isArray(parsed)) return [readLegacyTldFromDir(dir)];
+    const tlds = parsed.flatMap((value) => (typeof value === "string" ? parseTldList(value) : []));
+    return tlds.length > 0 ? [...new Set(tlds)] : [DEFAULT_TLD];
+  } catch {
+    return [readLegacyTldFromDir(dir)];
+  }
+}
+
+/** Read the primary TLD from a state directory. Returns DEFAULT_TLD if absent. */
+export function readTldFromDir(dir: string): string {
+  return readTldsFromDir(dir)[0] ?? DEFAULT_TLD;
+}
+
+/** Write or remove the TLD files in the state directory. */
+export function writeTldsFile(dir: string, tlds: readonly string[]): void {
+  const uniqueTlds = [...new Set(tlds)];
+  const tldsPath = path.join(dir, TLDS_FILE);
+  const tldPath = path.join(dir, TLD_FILE);
+
+  if (uniqueTlds.length === 1 && uniqueTlds[0] === DEFAULT_TLD) {
     try {
-      fs.unlinkSync(filePath);
+      fs.unlinkSync(tldsPath);
+    } catch {
+      // File may already be absent; non-fatal
+    }
+    try {
+      fs.unlinkSync(tldPath);
     } catch {
       // File may already be absent; non-fatal
     }
   } else {
-    fs.writeFileSync(filePath, tld, { mode: 0o644 });
+    fs.writeFileSync(tldsPath, uniqueTlds.join("\n") + "\n", { mode: 0o644 });
+    fs.writeFileSync(tldPath, uniqueTlds[0] ?? DEFAULT_TLD, { mode: 0o644 });
   }
 }
 
+/** Write or remove the primary TLD file in the state directory. */
+export function writeTldFile(dir: string, tld: string): void {
+  writeTldsFile(dir, [tld]);
+}
+
 /**
- * Return the effective TLD. Reads the PORTLESS_TLD env var first,
+ * Return the effective TLD list. Reads the PORTLESS_TLD env var first,
  * falling back to DEFAULT_TLD ("localhost"). Throws on invalid values.
  */
-export function getDefaultTld(): string {
+export function getDefaultTlds(): string[] {
   const val = process.env.PORTLESS_TLD?.trim().toLowerCase();
-  if (!val) return DEFAULT_TLD;
-  const err = validateTld(val);
-  if (err) throw new Error(`PORTLESS_TLD: ${err}`);
-  return val;
+  if (!val) return [DEFAULT_TLD];
+  const tlds = parseTldList(val, "PORTLESS_TLD");
+  return tlds.length > 0 ? tlds : [DEFAULT_TLD];
+}
+
+/**
+ * Return the primary effective TLD. Kept for callers that only need the
+ * display or compatibility value.
+ */
+export function getDefaultTld(): string {
+  return getDefaultTlds()[0] ?? DEFAULT_TLD;
 }
 
 /**
@@ -314,15 +430,17 @@ export function readPersistedProxyState(): {
   port: number;
   tls: boolean;
   tld: string;
+  tlds: string[];
   lanMode: boolean;
 } | null {
   const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
   const port = readPortFromDir(dir);
   if (port !== null) {
     const tls = readTlsMarker(dir);
-    const tld = readTldFromDir(dir);
+    const tlds = readTldsFromDir(dir);
+    const tld = tlds[0] ?? DEFAULT_TLD;
     const lanIp = readLanMarker(dir);
-    return { port, tls, tld, lanMode: lanIp !== null || tld === "local" };
+    return { port, tls, tld, tlds, lanMode: lanIp !== null || tlds.includes("local") };
   }
 
   return null;
@@ -336,13 +454,16 @@ export function buildProxyStartConfig(options: {
   lanIp?: string | null;
   lanIpExplicit?: boolean;
   tld: string;
+  tlds?: readonly string[];
   useWildcard?: boolean;
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
   skipTrust?: boolean;
-}): { effectiveTld: string; args: string[] } {
-  const effectiveTld = options.lanMode ? "local" : options.tld;
+}): { effectiveTld: string; effectiveTlds: string[]; args: string[] } {
+  const requestedTlds = options.tlds && options.tlds.length > 0 ? [...options.tlds] : [options.tld];
+  const effectiveTlds = options.lanMode ? ["local"] : [...new Set(requestedTlds)];
+  const effectiveTld = effectiveTlds[0] ?? DEFAULT_TLD;
   const args: string[] = [];
 
   if (options.foreground) {
@@ -372,8 +493,10 @@ export function buildProxyStartConfig(options: {
         args.push(INTERNAL_LAN_IP_FLAG, options.lanIp);
       }
     }
-  } else if (effectiveTld !== DEFAULT_TLD) {
-    args.push("--tld", effectiveTld);
+  } else if (effectiveTlds.length > 1 || effectiveTld !== DEFAULT_TLD) {
+    for (const tld of effectiveTlds) {
+      args.push("--tld", tld);
+    }
   }
 
   if (options.useWildcard) {
@@ -384,7 +507,7 @@ export function buildProxyStartConfig(options: {
     args.push("--skip-trust");
   }
 
-  return { effectiveTld, args };
+  return { effectiveTld, effectiveTlds, args };
 }
 
 /**
@@ -398,6 +521,7 @@ export async function discoverState(): Promise<{
   port: number;
   tls: boolean;
   tld: string;
+  tlds: string[];
   lanMode: boolean;
   lanIp: string | null;
 }> {
@@ -408,15 +532,26 @@ export async function discoverState(): Promise<{
     const lanIp = readLanMarker(dir);
     if ((await isProxyRunning(port)) || (await isPortListening(port))) {
       const tls = readTlsMarker(dir);
-      const tld = readTldFromDir(dir);
-      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
+      const tlds = readTldsFromDir(dir);
+      const tld = tlds[0] ?? DEFAULT_TLD;
+      return {
+        dir,
+        port,
+        tls,
+        tld,
+        tlds,
+        lanMode: lanIp !== null || tlds.includes("local"),
+        lanIp,
+      };
     }
 
+    const tlds = readTldsFromDir(dir);
     return {
       dir,
       port,
       tls: readTlsMarker(dir),
-      tld: readTldFromDir(dir),
+      tld: tlds[0] ?? DEFAULT_TLD,
+      tlds,
       lanMode: lanIp !== null,
       lanIp: null,
     };
@@ -430,14 +565,16 @@ export async function discoverState(): Promise<{
     // avoids TLS handshake timeouts that can cause false negatives.
     if (await isProxyRunning(userPort)) {
       const tls = readTlsMarker(USER_STATE_DIR);
-      const tld = readTldFromDir(USER_STATE_DIR);
+      const tlds = readTldsFromDir(USER_STATE_DIR);
+      const tld = tlds[0] ?? DEFAULT_TLD;
       const lanIp = readLanMarker(USER_STATE_DIR);
       return {
         dir: USER_STATE_DIR,
         port: userPort,
         tls,
         tld,
-        lanMode: lanIp !== null || tld === "local",
+        tlds,
+        lanMode: lanIp !== null || tlds.includes("local"),
         lanIp,
       };
     }
@@ -449,14 +586,16 @@ export async function discoverState(): Promise<{
   if (legacyPort !== null) {
     if (await isProxyRunning(legacyPort)) {
       const tls = readTlsMarker(LEGACY_SYSTEM_STATE_DIR);
-      const tld = readTldFromDir(LEGACY_SYSTEM_STATE_DIR);
+      const tlds = readTldsFromDir(LEGACY_SYSTEM_STATE_DIR);
+      const tld = tlds[0] ?? DEFAULT_TLD;
       const lanIp = readLanMarker(LEGACY_SYSTEM_STATE_DIR);
       return {
         dir: LEGACY_SYSTEM_STATE_DIR,
         port: legacyPort,
         tls,
         tld,
-        lanMode: lanIp !== null || tld === "local",
+        tlds,
+        lanMode: lanIp !== null || tlds.includes("local"),
         lanIp,
       };
     }
@@ -474,18 +613,29 @@ export async function discoverState(): Promise<{
       // When the marker is missing, infer TLS from the port:
       // 443 is always HTTPS, 80 is always HTTP.
       const tls = markerTls || port === getProtocolPort(true);
-      const tld = readTldFromDir(dir);
+      const tlds = readTldsFromDir(dir);
+      const tld = tlds[0] ?? DEFAULT_TLD;
       const lanIp = readLanMarker(dir);
-      return { dir, port, tls, tld, lanMode: lanIp !== null || tld === "local", lanIp };
+      return {
+        dir,
+        port,
+        tls,
+        tld,
+        tlds,
+        lanMode: lanIp !== null || tlds.includes("local"),
+        lanIp,
+      };
     }
   }
 
   const dir = resolveStateDir(configuredPort);
+  const tlds = readTldsFromDir(dir);
   return {
     dir,
     port: configuredPort,
     tls: readTlsMarker(dir),
-    tld: readTldFromDir(dir),
+    tld: tlds[0] ?? DEFAULT_TLD,
+    tlds,
     lanMode: readLanMarker(dir) !== null,
     lanIp: null,
   };
@@ -573,10 +723,10 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
   });
 }
 
-/** Check whether any process is listening on the given port at 127.0.0.1. */
+/** Check whether any process is listening on the given port on either loopback family. */
 export function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: "127.0.0.1", port });
+    const socket = createLoopbackConnection(port);
     let settled = false;
 
     const finish = (result: boolean) => {
@@ -617,6 +767,35 @@ export function parsePidFromNetstat(output: string, port: number): number | null
     }
   }
   return null;
+}
+
+/**
+ * Find all PIDs listening on the given TCP port.
+ * Uses lsof on macOS/Linux and netstat on Windows.
+ */
+export function findPidsOnPort(port: number): number[] {
+  try {
+    if (isWindows) {
+      const output = execSync("netstat -ano -p tcp", {
+        encoding: "utf-8",
+        timeout: PID_LOOKUP_TIMEOUT_MS,
+      });
+      const pid = parsePidFromNetstat(output, port);
+      return pid === null ? [] : [pid];
+    }
+
+    const output = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    return output
+      .trim()
+      .split("\n")
+      .map((s) => parseInt(s, 10))
+      .filter((n) => !isNaN(n) && n > 0);
+  } catch {
+    return [];
+  }
 }
 
 /**
@@ -737,6 +916,9 @@ export function spawnCommand(
     }
   }
 
+  // On Unix, spawn detached so the child gets its own process group. This
+  // lets us kill the entire tree (shell + grandchild dev server) with a
+  // single process.kill(-pid, signal) instead of only the immediate child.
   const child = isWindows
     ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
         stdio: "inherit",
@@ -745,6 +927,7 @@ export function spawnCommand(
     : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
         stdio: "inherit",
         env,
+        detached: true,
       });
 
   let exiting = false;
@@ -758,7 +941,7 @@ export function spawnCommand(
   const handleSignal = (signal: NodeJS.Signals) => {
     if (exiting) return;
     exiting = true;
-    child.kill(signal);
+    killTree(child, signal);
     cleanup();
     process.exit(128 + (SIGNAL_CODES[signal] || 15));
   };
@@ -866,8 +1049,10 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * Handles both direct invocation (`vite dev`) and invocation via package
  * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
  *
- * The portless proxy connects to 127.0.0.1 (IPv4), so we also inject
- * `--host 127.0.0.1` to prevent frameworks from binding to IPv6 `::1`.
+ * We also inject `--host 127.0.0.1` so frameworks bind IPv4 loopback
+ * predictably. The proxy itself dials both loopback families (see
+ * createLoopbackConnection), so this is belt-and-suspenders for apps
+ * that honor the flag; apps that ignore it and bind `::1` only still work.
  *
  * Note: Expo's `--host` flag is *not* a bind address (it is a connection mode:
  * lan|tunnel|localhost). In LAN mode we skip `--host` entirely — Expo defaults

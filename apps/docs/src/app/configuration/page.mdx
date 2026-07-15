@@ -177,13 +177,13 @@ For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.js
     </tr>
     <tr>
       <td>`PORTLESS_TLD`</td>
-      <td>Use a custom TLD instead of `.localhost` (e.g. `test`)</td>
+      <td>Use one or more TLDs (e.g. `localhost,test`)</td>
       <td>`localhost`</td>
     </tr>
     <tr>
       <td>`PORTLESS_APP_PORT`</td>
       <td>Use a fixed port for the app (skip auto-assignment)</td>
-      <td>random 4000--4999</td>
+      <td>random 4000 to 4999</td>
     </tr>
     <tr>
       <td>`PORTLESS_PATH`</td>
@@ -199,6 +199,21 @@ For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.js
       <td>`PORTLESS_STATE_DIR`</td>
       <td>Override the state directory</td>
       <td>`~/.portless`</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_TAILSCALE`</td>
+      <td>Set to `1` to share apps on your Tailscale network</td>
+      <td>off</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_FUNNEL`</td>
+      <td>Set to `1` to share apps publicly via Tailscale Funnel</td>
+      <td>off</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NGROK`</td>
+      <td>Set to `1` to share apps publicly via ngrok</td>
+      <td>off</td>
     </tr>
     <tr>
       <td>`PORTLESS`</td>

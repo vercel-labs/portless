@@ -1,8 +1,142 @@
 # Changelog
 
-## 0.11.0
+## 0.15.3
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **State directory under sudo**: Portless now resolves per-user state from the original sudo user's home, so an elevated proxy and unprivileged app processes share the same routes instead of writing to separate state directories. (#357)
+- **Windows and WSL CA trust**: On WSL, `portless trust` now installs the local CA in both Linux and Windows trust stores, while `portless clean` removes the exact certificate from both. Failed trust-store cleanup preserves the CA identity for safe retries, including on native Windows. (#357)
+
+### Contributors
+
+- @ctate
+- @gerardbalaoro
+<!-- release:end -->
+
+## 0.15.2
+
+### Bug Fixes
+
+- **Tailscale funnel routing**: Proxy now routes requests addressed to a route's Tailscale funnel or serve hostname, so `--funnel` and `--tailscale` apps reached at `<device>.ts.net` no longer return a 404, including when several apps share one hostname on different ports. (#352)
+- **IPv6-only dev servers return 502**: Proxy now dials upstreams over both loopback families, fixing 502s when a dev server binds `::1` only, such as Vite on Node 17+. (#353)
+- **Worktree prefix in multi-app mode**: Bare `portless` in a monorepo worktree now applies the branch prefix in multi-app mode as it already did for single apps, so hostnames no longer collide across worktrees. (#355)
+
+### Contributors
+
+- @Railly
+- @ahfoysal
+
+## 0.15.1
+
+### New Features
+
+- **Multi-TLD proxy support**: `--tld` is now repeatable and `PORTLESS_TLD` accepts comma separated values, so one proxy can serve the same app names across multiple TLDs. Routes, TLS, service state, hosts sync, framework environment, and workspace launches now use the full configured TLD list. (#344)
+
+### Contributors
+
+- @ctate
+
+## 0.15.0
+
+### New Features
+
+- **`portless doctor`**: New read only diagnostics command checks Node.js, the state directory, proxy liveness, route entries, hostname resolution, HTTPS CA trust, and LAN prerequisites, then prints suggested fixes. (#337)
+
+### Bug Fixes
+
+- **HTTP/2 Host forwarding**: Proxy now forwards HTTP/2 `:authority` as `Host` to HTTP/1.1 backends, fixing apps that depend on Host and previously saw `127.0.0.1` for browser traffic. (#328)
+- **`--force` takeover cleanup**: Exit cleanup now removes only routes still owned by the exiting process, so a forced takeover does not deregister the new owner's route. (#328)
+
+### Contributors
+
+- @ctate
+
+## 0.14.0
+
+### New Features
+
+- **ngrok sharing**: New `--ngrok` flag exposes portless apps publicly through ngrok while keeping the local `.localhost` URL. Also configurable with `PORTLESS_NGROK=1`; child processes receive `PORTLESS_NGROK_URL`, and `portless list` shows active ngrok URLs. (#323)
+
+### Improvements
+
+- **ngrok tunnel lifecycle**: Portless now checks for the ngrok CLI before starting an app, surfaces install and authentication guidance, removes stopped ngrok URLs from route state, and terminates tunnel processes during app cleanup. (#323)
+
+### Contributors
+
+- @ctate
+
+## 0.13.1
+
+### New Features
+
+- **Configurable startup services**: `portless service install` now persists proxy options such as `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, `--key`, and `--state-dir` into launchd, systemd, and Task Scheduler. `portless service status` now reports the installed service port, HTTPS mode, TLD, LAN mode, wildcard mode, and state directory.
+
+### Bug Fixes
+
+- **Service reinstall port changes**: Reinstalling the startup service with a different port now stops any existing proxy on the previous port before starting the new service.
+- **Service install validation**: LAN service installs now fail early on platforms that cannot publish mDNS records, and service paths such as `~` are normalized before writing native service files.
+
+### Requirements
+
+- **Node.js 24**: The published package now requires Node.js 24 or newer, and repository development uses pnpm 11 with a minimum release age policy. (#307)
+
+### Contributors
+
+- @ctate
+- @skaldebane
+- @ItalianScallian
+- @neefrehman
+
+## 0.13.0
+
+### New Features
+
+- **OS startup service**: New `portless service install`, `portless service status`, and `portless service uninstall` commands manage a native startup service for the HTTPS proxy across macOS launchd, Linux systemd, and Windows Task Scheduler. The service starts clean `.localhost` URLs after reboot, and `portless clean` removes it during cleanup. (#289)
+
+### Bug Fixes
+
+- **Tailscale readiness preflight**: `--tailscale` and `--funnel` now check Tailscale HTTPS and Funnel prerequisites before starting the child process, surfacing actionable errors instead of hanging during registration. (#282)
+
+### Contributors
+
+- @ctate
+- @Anshuman71
+
+## 0.12.0
+
+### New Features
+
+- **Tailscale sharing**: New `--tailscale` flag shares any portless app over your Tailscale network with zero framework config. Each app is root-mounted on its own Tailscale HTTPS port (443, 8443, 8444, ...) so no `basePath` configuration is needed. Works as a global flag, per-app flag (`portless myapp --tailscale next dev`), or env var (`PORTLESS_TAILSCALE=1`). (#262)
+- **Tailscale Funnel**: New `--funnel` flag exposes apps to the public internet through Tailscale Funnel. Implies `--tailscale`. Also configurable via `PORTLESS_FUNNEL=1`. (#262)
+- **`PORTLESS_TAILSCALE_URL` env var**: Child processes receive `PORTLESS_TAILSCALE_URL` containing the Tailscale HTTPS URL so apps can reference their public address. (#262)
+- **Tailscale URLs in `portless list`**: The list command now shows tailnet URLs alongside local URLs when Tailscale sharing is active. (#262)
+
+### Improvements
+
+- **`portless prune` cleans stale Tailscale registrations**: Prune now removes orphaned `tailscale serve` entries left behind by dead CLI sessions. (#262)
+- **`portless clean` removes Tailscale serve state**: Clean now tears down any Tailscale serve/funnel registrations alongside the usual CA and hosts file cleanup. (#262)
+
+### Contributors
+
+- @ctate
+
+## 0.11.1
+
+### New Features
+
+- **`portless prune` command**: Safety net to find and kill orphaned dev servers left behind by dead CLI sessions. Reads stale route entries, checks if something is still listening on each port, and terminates the orphan.
+
+### Bug Fixes
+
+- **Zombie process orphaning on CLI crash**: Spawn child processes with `detached:true` on Unix so they get their own process group. Signal handlers now kill the entire group instead of just the immediate child, preventing orphaned dev servers from surviving CLI crashes or `kill -9`.
+
+### Contributors
+
+- @ctate
+
+## 0.11.0
 
 ### New Features
 
@@ -29,7 +163,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.10.3
 

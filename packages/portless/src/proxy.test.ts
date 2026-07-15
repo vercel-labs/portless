@@ -169,6 +169,31 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("hello from backend");
     });
 
+    it("proxies to a backend listening on IPv6 loopback only (issue #320)", async (ctx) => {
+      const backend = http.createServer((_req, res) => {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("hello from ipv6 backend");
+      });
+      const ipv6Available = await new Promise<boolean>((resolve) => {
+        backend.once("error", () => resolve(false));
+        backend.listen(0, "::1", () => resolve(true));
+      });
+      if (!ipv6Available) return ctx.skip();
+      trackServer(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("hello from ipv6 backend");
+    });
+
     it("routes wildcard subdomain to matching parent route when strict is false", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
@@ -265,6 +290,225 @@ describe("createProxyServer", () => {
       const res = await request(server, { host: "myapp.localhost:80" });
       expect(res.status).toBe(200);
       expect(res.body).toBe("matched");
+    });
+
+    it("routes requests addressed to a route's tailscale hostname (issue #297)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("funnel hit");
+    });
+
+    it("routes tailscale hostname even when the local hostname is worktree-prefixed (issue #343)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("worktree funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myfeature.myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, strict: true })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("worktree funnel hit");
+    });
+
+    it("does not match tailscale hostname against unrelated hosts", async () => {
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: 4001,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other-device.tail1234.ts.net" });
+      expect(res.status).toBe(404);
+    });
+
+    it("matches the tailscale route registered for the request port", async () => {
+      const backendA = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app on :443");
+        })
+      );
+      const backendB = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app on :8443");
+        })
+      );
+      await listen(backendA);
+      await listen(backendB);
+      const addrA = backendA.address();
+      const addrB = backendB.address();
+      if (!addrA || typeof addrA === "string") throw new Error("no addr");
+      if (!addrB || typeof addrB === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "app-a.localhost",
+          port: addrA.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+        {
+          hostname: "app-b.localhost",
+          port: addrB.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net:8443",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const resB = await request(server, { host: "my-device.tail1234.ts.net:8443" });
+      expect(resB.status).toBe(200);
+      expect(resB.body).toBe("app on :8443");
+
+      const resA = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(resA.status).toBe(200);
+      expect(resA.body).toBe("app on :443");
+    });
+
+    it("matches a tailscale route by hostname when the request port differs", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("only app");
+        })
+      );
+      await listen(backend);
+      const addr = backend.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: addr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net:8443",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("only app");
+    });
+
+    it("routes an explicit :443 tailscale Host to the default-port app when another route shares the hostname (review: ctate)", async () => {
+      const backendDefault = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app on :443");
+        })
+      );
+      const backendAlt = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("app on :8443");
+        })
+      );
+      await listen(backendDefault);
+      await listen(backendAlt);
+      const addrDefault = backendDefault.address();
+      const addrAlt = backendAlt.address();
+      if (!addrDefault || typeof addrDefault === "string") throw new Error("no addr");
+      if (!addrAlt || typeof addrAlt === "string") throw new Error("no addr");
+
+      // The alternate-port route is listed first so a port-insensitive fallback
+      // would resolve the explicit :443 request to the wrong app.
+      const routes: RouteInfo[] = [
+        {
+          hostname: "app-b.localhost",
+          port: addrAlt.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net:8443",
+        },
+        {
+          hostname: "app-a.localhost",
+          port: addrDefault.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net:443" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("app on :443");
+    });
+
+    it("matches a tailscale hostname case-insensitively (review: ctate)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("mixed case funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "My-Device.Tail1234.TS.net" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("mixed case funnel hit");
     });
 
     it("returns 404 for unregistered subdomain prefix by default", async () => {
@@ -1310,6 +1554,59 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
     expect(result.status).toBe(404);
     expect(result.protocol).toBe("h2");
+  });
+
+  it("forwards the :authority hostname as Host to the backend (h2 -> HTTP/1.1)", async () => {
+    let receivedHost = "";
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        receivedHost = req.headers.host || "";
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+      // Real h2 clients (browsers, curl) send only :authority — no Host header.
+      const req = client.request({
+        ":method": "GET",
+        ":path": "/",
+        ":authority": "myapp.localhost",
+      });
+      req.on("response", (headers) => {
+        const s = headers[":status"] as number;
+        req.resume();
+        req.on("end", () => {
+          client.close();
+          resolve(s);
+        });
+      });
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(status).toBe(200);
+    expect(receivedHost).toBe("myapp.localhost");
   });
 
   it("still accepts HTTP/1.1 connections over TLS (allowHTTP1)", async () => {

@@ -1,4 +1,87 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
+import * as os from "node:os";
+import * as path from "node:path";
+
+type UserHomeOptions = {
+  platform?: NodeJS.Platform;
+  env?: NodeJS.ProcessEnv;
+  homedir?: string;
+  passwdHome?: (username: string) => string | null;
+};
+
+function readPasswdHome(username: string): string | null {
+  try {
+    const passwd = fs.readFileSync("/etc/passwd", "utf-8");
+    for (const line of passwd.split("\n")) {
+      const fields = line.split(":");
+      if (fields[0] === username && fields[5]) return fields[5];
+    }
+  } catch {
+    // Fall back to the platform's conventional home directory.
+  }
+  return null;
+}
+
+/**
+ * Resolve the home directory that owns portless state. When sudo changes the
+ * effective user to root, retain the invoking user's home so elevated proxy
+ * processes and unprivileged app processes share the same route store.
+ */
+export function resolveUserHome(options: UserHomeOptions = {}): string {
+  const platform = options.platform ?? process.platform;
+  const env = options.env ?? process.env;
+  const homedir = options.homedir ?? os.homedir();
+
+  if (platform === "win32") return env.USERPROFILE || homedir;
+
+  const sudoUser = env.SUDO_USER;
+  if (!sudoUser || sudoUser === "root") return homedir;
+
+  const home = env.HOME;
+  if (home && home !== "/root" && home !== "/var/root") return home;
+
+  const passwdHome = (options.passwdHome ?? readPasswdHome)(sudoUser);
+  if (passwdHome) return passwdHome;
+
+  return platform === "darwin"
+    ? path.posix.join("/Users", sudoUser)
+    : path.posix.join("/home", sudoUser);
+}
+
+/**
+ * Both loopback families, tried in order. Dev servers that bind `localhost`
+ * on Node 17+ resolve it verbatim and may listen on IPv6 `::1` only (Vite's
+ * default host does this), while most others bind IPv4 `127.0.0.1` only.
+ */
+function loopbackLookup(
+  _hostname: string,
+  _options: unknown,
+  callback: (
+    err: NodeJS.ErrnoException | null,
+    addresses: { address: string; family: number }[]
+  ) => void
+): void {
+  callback(null, [
+    { address: "127.0.0.1", family: 4 },
+    { address: "::1", family: 6 },
+  ]);
+}
+
+/**
+ * Open a TCP connection to a local app port, trying both loopback families
+ * instead of hardcoding IPv4. Uses Node's Happy Eyeballs implementation
+ * (`autoSelectFamily`) with a fixed address list, so no DNS lookup happens:
+ * 127.0.0.1 is attempted first and `::1` is tried when it fails (issue #320).
+ */
+export function createLoopbackConnection(port: number): net.Socket {
+  return net.connect({
+    host: "localhost",
+    port,
+    autoSelectFamily: true,
+    lookup: loopbackLookup as net.LookupFunction,
+  });
+}
 
 /**
  * When running under sudo, fix file ownership so the real user can
@@ -28,6 +111,17 @@ export function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
     "code" in err &&
     typeof (err as Record<string, unknown>).code === "string"
   );
+}
+
+/** Return whether a process exists, treating permission denial as alive. */
+export function isProcessAlive(pid: number): boolean {
+  if (pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return isErrnoException(err) && err.code === "EPERM";
+  }
 }
 
 /**
@@ -137,4 +231,27 @@ export function parseHostname(input: string, tld = "localhost"): string {
   }
 
   return hostname;
+}
+
+/**
+ * Parse a hostname input for every configured TLD. If the input already ends
+ * with one of those TLDs, use the stripped base name for the full set.
+ */
+export function parseHostnames(input: string, tlds: readonly string[] = ["localhost"]): string[] {
+  const uniqueTlds = [...new Set(tlds)];
+  let baseInput = input
+    .trim()
+    .replace(/^https?:\/\//, "")
+    .split("/")[0]
+    .toLowerCase();
+
+  for (const tld of uniqueTlds) {
+    const suffix = `.${tld}`;
+    if (baseInput.endsWith(suffix)) {
+      baseInput = baseInput.slice(0, -suffix.length);
+      break;
+    }
+  }
+
+  return uniqueTlds.map((tld) => parseHostname(baseInput, tld));
 }

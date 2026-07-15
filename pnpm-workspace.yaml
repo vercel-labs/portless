@@ -1,3 +1,15 @@
+minimumReleaseAge: 2880
+
+allowBuilds:
+  "@mongodb-js/zstd": false
+  "@parcel/watcher": false
+  esbuild: false
+  lmdb: false
+  msgpackr-extract: false
+  msw: false
+  node-liblzma: false
+  sharp: false
+
 packages:
   - "packages/*"
   - "apps/*"

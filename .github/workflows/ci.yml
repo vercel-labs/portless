@@ -10,20 +10,20 @@ jobs:
   ci:
     runs-on: ubuntu-latest
 
-    strategy:
-      matrix:
-        node-version: [22, 24]
-
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile
@@ -43,18 +43,18 @@ jobs:
   ci-windows:
     runs-on: windows-latest
 
-    strategy:
-      matrix:
-        node-version: [22, 24]
-
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
 
       - uses: pnpm/action-setup@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node-version }}
+          node-version-file: .node-version
           cache: pnpm
 
       - run: pnpm install --frozen-lockfile

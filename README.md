@@ -34,7 +34,9 @@ HTTPS with HTTP/2 is enabled by default. On first run, portless generates a loca
 
 The proxy auto-starts when you run an app. A random port (4000-4999) is assigned via the `PORT` environment variable. Most frameworks (Next.js, Express, Nuxt, etc.) respect this automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag.
 
-When auto-starting, portless reuses the configuration (port, TLS, TLD) from the most recent proxy run, so a restart or reboot does not silently revert to defaults. Explicit env vars (`PORTLESS_PORT`, `PORTLESS_HTTPS`, etc.) always take priority.
+When auto-starting, portless reuses the configuration (port, TLS, TLDs) from the most recent proxy run, so a restart or reboot does not silently revert to defaults. Explicit env vars (`PORTLESS_PORT`, `PORTLESS_HTTPS`, etc.) always take priority.
+
+Portless stores per-user state in `~/.portless`. When the proxy runs under sudo, it resolves this path from the invoking user's home so the proxy and unprivileged app processes share the same route registrations.
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners like turborepo and CI scripts fail early with a clear message.
 
@@ -224,6 +226,17 @@ portless myapp next dev
 
 The proxy auto-syncs `/etc/hosts` for route hostnames (including `.test`), so those domains resolve on your machine.
 
+Repeat `--tld` to serve the same app names under multiple TLDs from one proxy:
+
+```bash
+portless proxy start --tld localhost --tld test
+portless myapp next dev
+# -> https://myapp.localhost
+# -> https://myapp.test
+```
+
+When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. `PORTLESS_TLD` also accepts a comma separated list, e.g. `PORTLESS_TLD=localhost,test`.
+
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
 ## How it works
@@ -261,7 +274,24 @@ portless proxy start --no-tls
 portless trust
 ```
 
-On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store.
+On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store. On WSL, it updates both the Linux trust store and the Windows current-user Root store so Windows browsers trust portless HTTPS certificates.
+
+## Start at OS startup
+
+Install the proxy as an OS startup service so clean HTTPS URLs are available after reboot without starting the proxy from a terminal:
+
+```bash
+portless service install
+portless service install --lan
+portless service install --wildcard
+PORTLESS_STATE_DIR=~/.portless-lan PORTLESS_LAN=1 portless service install
+portless service status
+portless service uninstall
+```
+
+The service uses portless defaults unless install options or `PORTLESS_*` environment variables are provided: HTTPS on port 443 with `.localhost` names. `service install` accepts the proxy options you would use with `proxy start`, including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+
+The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLDs, LAN mode, wildcard mode, and state directory. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
 ## LAN mode
 
@@ -273,7 +303,7 @@ portless proxy start --lan --ip 192.168.1.42
 
 `--lan` switches the proxy to mDNS discovery: services are advertised as `<name>.local` and reachable from any device on the same network. Portless auto-detects your LAN IP and follows Wi-Fi/IP changes automatically, but you can pin another address with `--ip <address>` or by exporting `PORTLESS_LAN_IP`. Set `PORTLESS_LAN=1` in your shell (0/1 boolean) to make LAN mode the default whenever the proxy starts.
 
-Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. All proxy settings (port, TLS, TLD, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start it again, it stays in LAN mode. All proxy settings (port, TLS, TLDs, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
 LAN mode depends on the system mDNS tools that portless already spawns: macOS ships with `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s equivalent). If the command is missing or your network isn’t reachable, `portless proxy start --lan` prints the relevant error and exits.
 
@@ -290,6 +320,50 @@ LAN mode depends on the system mDNS tools that portless already spawns: macOS sh
 
 - **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`.
 
+## Tailscale sharing
+
+Share your dev server with teammates on your [Tailscale](https://tailscale.com) network:
+
+```bash
+portless myapp --tailscale next dev
+# -> https://myapp.localhost           (local)
+# -> https://devbox.yourteam.ts.net    (tailnet)
+```
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no framework `basePath` configuration is needed. The first app gets port 443, subsequent apps get 8443, 8444, etc.
+
+```bash
+portless myapp --tailscale next dev     # -> https://devbox.ts.net
+portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
+```
+
+Use `--funnel` to expose your dev server to the public internet via [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
+
+```bash
+portless myapp --funnel next dev
+# -> https://devbox.yourteam.ts.net    (public)
+```
+
+Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+
+Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
+
+Requires the Tailscale CLI to be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled.
+
+## ngrok sharing
+
+Expose your dev server to the public internet with [ngrok](https://ngrok.com):
+
+```bash
+portless myapp --ngrok next dev
+# -> https://myapp.localhost           (local)
+# -> https://abc123.ngrok.app          (public)
+```
+
+Set `PORTLESS_NGROK=1` in your shell profile or `.env` to enable ngrok by default when portless runs an app. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up automatically when the app exits.
+
+Requires the ngrok CLI to be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again.
+
 ## Commands
 
 ```bash
@@ -301,8 +375,10 @@ portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes
+portless doctor                  # Check proxy, routes, DNS, and CA trust
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
+portless prune                   # Kill orphaned dev servers from crashed sessions
 portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
 
@@ -317,6 +393,13 @@ portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
 portless proxy stop              # Stop the proxy
+
+# OS startup service
+portless service install         # Start HTTPS proxy when the OS starts
+portless service install --lan   # Start service in LAN mode
+portless service install --wildcard  # Persist wildcard routing in the service
+portless service status          # Show service and proxy status
+portless service uninstall       # Remove the startup service
 ```
 
 ### Options
@@ -330,11 +413,15 @@ portless proxy stop              # Stop the proxy
 --cert <path>                    Use a custom TLS certificate
 --key <path>                     Use a custom TLS private key
 --foreground                     Run proxy in foreground instead of daemon
---tld <tld>                      Use a custom TLD instead of .localhost (e.g. test)
+--tld <tld>                      Use a custom TLD instead of .localhost; repeat for more
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--state-dir <path>               Use a custom state directory with service install
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --path <prefix>                  URL path prefix for path-based routing (e.g. /api)
+--tailscale                      Share the app on your Tailscale network (tailnet)
+--funnel                         Share the app publicly via Tailscale Funnel
+--ngrok                          Share the app publicly via ngrok
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
@@ -347,20 +434,26 @@ PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
 PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
-PORTLESS_TLD=<tld>               Use a custom TLD (e.g. test; default: localhost)
+PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode
+PORTLESS_TLD=<tld>[,<tld>]       Use one or more TLDs (e.g. localhost,test)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_PATH=<path>             Path prefix for path-based routing (e.g. /api)
+PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
+PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
+PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
 PORT                             Ephemeral port the child should listen on
 HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode)
-PORTLESS_URL                     Public URL (e.g. https://myapp.localhost)
+PORTLESS_URL                     Primary public URL (e.g. https://myapp.localhost)
+PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is active)
+PORTLESS_NGROK_URL               ngrok URL of the app (when --ngrok is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
-> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `trust`, `clean`, and `proxy` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## Uninstall / reset
 
@@ -370,7 +463,7 @@ To remove portless data from your machine (proxy state under `~/.portless` and t
 portless clean
 ```
 
-macOS/Linux may prompt for `sudo`. Custom certificate paths passed with `--cert` and `--key` are not deleted.
+macOS/Linux may prompt for `sudo`. Custom certificate paths passed with `--cert` and `--key` are not deleted. If trust-store removal fails, portless retains its CA certificate and key so a later `portless clean` can safely retry.
 
 ## Safari / DNS
 
@@ -384,6 +477,10 @@ portless hosts clean   # Clean up later
 ```
 
 Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLDs, LAN `.local`). Set `PORTLESS_SYNC_HOSTS=0` to disable.
+
+## Troubleshooting
+
+Run `portless doctor` to inspect local health without changing state. It checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
 
 ## Proxying Between Portless Apps
 
@@ -423,6 +520,8 @@ Portless detects this misconfiguration and responds with `508 Loop Detected` alo
 
 This repo is a pnpm workspace monorepo using [Turborepo](https://turbo.build). The publishable package lives in `packages/portless/`.
 
+Use Node.js 24+ and pnpm 11 for repository development. The `.node-version` file pins the Node major for version managers.
+
 ```bash
 pnpm install          # Install all dependencies
 pnpm build            # Build all packages
@@ -435,5 +534,7 @@ pnpm format           # Format all files with Prettier
 
 ## Requirements
 
-- Node.js 20+
+- Node.js 24+
 - macOS, Linux, or Windows
+- Tailscale CLI (optional, for `--tailscale` and `--funnel`)
+- ngrok CLI (optional, for `--ngrok`)

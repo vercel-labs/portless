@@ -56,6 +56,7 @@ export interface ManifestEntry {
   PORT: string;
   HOST: string;
   PORTLESS_URL: string;
+  __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS?: string;
   NODE_EXTRA_CA_CERTS?: string;
 }
 

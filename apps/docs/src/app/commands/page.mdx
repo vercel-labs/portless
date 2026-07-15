@@ -64,8 +64,26 @@ portless docs.myapp next dev
       <td>`--force`</td>
       <td>Override an existing route registered by another process</td>
     </tr>
+    <tr>
+      <td>`--tailscale`</td>
+      <td>Share the app on your Tailscale network.</td>
+    </tr>
+    <tr>
+      <td>`--funnel`</td>
+      <td>Share the app publicly via Tailscale Funnel.</td>
+    </tr>
+    <tr>
+      <td>`--ngrok`</td>
+      <td>Share the app publicly via ngrok.</td>
+    </tr>
   </tbody>
 </table>
+
+```bash
+portless myapp --tailscale next dev
+portless myapp --funnel next dev
+portless myapp --ngrok next dev
+```
 
 ## Get a service URL
 
@@ -105,6 +123,14 @@ portless list
 
 Shows active routes and their assigned ports.
 
+## Doctor
+
+```bash
+portless doctor
+```
+
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
+
 ## Trust the CA
 
 ```bash
@@ -120,6 +146,15 @@ portless clean
 ```
 
 Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed.
+
+## Prune orphans
+
+```bash
+portless prune
+portless prune --force
+```
+
+Finds and kills orphaned dev server processes left behind by crashed portless sessions. When the CLI is killed with `kill -9` or crashes, child dev servers may survive and continue holding their ports. This command checks routes whose owning process is dead but whose port is still in use, terminates the orphans, and removes the stale route entries. Use `--force` to send SIGKILL instead of SIGTERM.
 
 ## Proxy control
 
@@ -159,7 +194,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--tld <tld>`</td>
-      <td>Use a custom TLD instead of `.localhost` (e.g. `test`). Hostnames still sync to `/etc/hosts` by default.</td>
+      <td>Use a custom TLD instead of `.localhost` (e.g. `test`). Repeat for more TLDs. Hostnames still sync to `/etc/hosts` by default.</td>
     </tr>
     <tr>
       <td>`--cert <path>`</td>
@@ -181,6 +216,21 @@ portless proxy start
 ```bash
 portless proxy stop
 ```
+
+## OS startup service
+
+```bash
+portless service install
+portless service install --lan
+portless service install --wildcard
+PORTLESS_STATE_DIR=~/.portless-lan PORTLESS_LAN=1 portless service install
+portless service status
+portless service uninstall
+```
+
+Installs the proxy as an OS startup service. The default is HTTPS on port 443 with `.localhost` names, but `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+
+The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLDs, LAN mode, wildcard mode, and state directory. macOS and Linux use a root-owned service so port 443 can bind at boot. Windows uses a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
 ### LAN mode
 

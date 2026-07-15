@@ -5,6 +5,13 @@ import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fixOwnership } from "./utils.js";
+import {
+  isWSL,
+  isWindowsCATrusted,
+  trustWindowsCA,
+  untrustWindowsCA,
+  wslWindowsCAStoreOptions,
+} from "./windows-ca.js";
 
 /** How long the CA certificate is valid (10 years, in days). */
 const CA_VALIDITY_DAYS = 3650;
@@ -51,6 +58,7 @@ const CA_CERT_FILE = "ca.pem";
 const SERVER_KEY_FILE = "server-key.pem";
 const SERVER_CERT_FILE = "server.pem";
 const CA_TRUST_MARKER = "ca.trusted";
+const CA_TRUST_REFRESH_PENDING = "ca.trust-refresh-pending";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -84,10 +92,20 @@ function readTrustMarker(stateDir: string): string | null {
   }
 }
 
+function clearTrustRefreshPending(stateDir: string): void {
+  try {
+    fs.unlinkSync(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
+  } catch {
+    // A trust refresh may not be pending; ignore.
+  }
+}
+
 function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
-    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), fp + "\n");
+    clearTrustRefreshPending(stateDir);
+    const marker = isWSL() ? `wsl:${fp}` : fp;
+    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
     fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
   }
 }
@@ -442,35 +460,24 @@ export function isCATrusted(stateDir: string): boolean {
   const marker = readTrustMarker(stateDir);
   if (marker) {
     const fp = caFingerprint(stateDir);
-    if (fp && marker === fp) return true;
+    const expected = fp && isWSL() ? `wsl:${fp}` : fp;
+    if (expected && marker === expected) return true;
   }
 
   if (process.platform === "darwin") {
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
-    return isCATrustedLinux(stateDir);
+    if (!isCATrustedLinux(stateDir)) return false;
+    if (!isWSL()) return true;
+    try {
+      return isWindowsCATrusted(caCertPath, wslWindowsCAStoreOptions());
+    } catch {
+      return false;
+    }
   } else if (process.platform === "win32") {
-    return isCATrustedWindows(caCertPath);
+    return isWindowsCATrusted(caCertPath);
   }
   return false;
-}
-
-function isCATrustedWindows(caCertPath: string): boolean {
-  try {
-    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
-      .trim()
-      .replace(/^.*=/, "")
-      .replace(/:/g, "")
-      .toLowerCase();
-    const result = execFileSync("certutil", ["-store", "-user", "Root"], {
-      encoding: "utf-8",
-      timeout: 10_000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    return result.replace(/\s/g, "").toLowerCase().includes(fingerprint);
-  } catch {
-    return false;
-  }
 }
 
 function isCATrustedMacOS(caCertPath: string): boolean {
@@ -525,9 +532,15 @@ function loginKeychainPath(): string {
  * Linux distro CA trust configuration.
  * Each entry maps a distro family to its CA certificate directory and update command.
  */
-interface LinuxCATrustConfig {
+export interface LinuxCATrustConfig {
   certDir: string;
   updateCommand: string;
+}
+
+export interface LinuxCATrustRemovalOptions {
+  configs?: LinuxCATrustConfig[];
+  activeConfig?: LinuxCATrustConfig;
+  runUpdate?: (command: string) => void;
 }
 
 const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
@@ -592,8 +605,10 @@ function getLinuxCATrustConfig(): LinuxCATrustConfig {
  * Check if the CA is trusted on Linux.
  * Supports Debian/Ubuntu, Arch, Fedora/RHEL, and openSUSE.
  */
-function isCATrustedLinux(stateDir: string): boolean {
-  const config = getLinuxCATrustConfig();
+function isCATrustedLinux(
+  stateDir: string,
+  config: LinuxCATrustConfig = getLinuxCATrustConfig()
+): boolean {
   const systemCertPath = path.join(config.certDir, "portless-ca.crt");
   if (!fileExists(systemCertPath)) return false;
 
@@ -750,13 +765,14 @@ export function createSNICallback(
   stateDir: string,
   defaultCert: Buffer,
   defaultKey: Buffer,
-  tld = "localhost",
+  tlds: string | readonly string[] = "localhost",
   caCert?: Buffer
 ): (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void {
   const cache = new Map<string, tls.SecureContext>();
   const pending = new Map<string, Promise<tls.SecureContext>>();
+  const configuredTlds = Array.isArray(tlds) ? tlds : [tlds];
 
-  // Pre-cache the default context for the bare TLD itself.
+  // Pre-cache the default context for the built-in localhost certificate.
   // Include the CA certificate so clients receive the full chain.
   const defaultCtx = tls.createSecureContext({
     cert: caCert ? Buffer.concat([defaultCert, caCert]) : defaultCert,
@@ -764,12 +780,12 @@ export function createSNICallback(
   });
 
   return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
-    // The bare TLD (e.g. "localhost" or "test") uses the default cert.
+    // The bare localhost name uses the default cert.
     // All subdomains need a cert with an exact SAN entry.
     // For .localhost: RFC 2606 §2 designates it as a reserved TLD, so
     // "*.localhost" sits at the public-suffix boundary and TLS specs do
     // not permit wildcard certificates at that level.
-    if (servername === tld) {
+    if (servername === "localhost" && configuredTlds.includes("localhost")) {
       cb(null, defaultCtx);
       return;
     }
@@ -848,7 +864,8 @@ export function createSNICallback(
  *
  * On macOS, adds to the login keychain (no sudo required; the OS shows a
  * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
- * CA directory and runs the appropriate update command (requires sudo).
+ * CA directory and runs the appropriate update command (requires sudo). WSL
+ * also adds the CA to the Windows current-user Root store.
  *
  * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
  */
@@ -896,13 +913,13 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      if (isWSL()) {
+        trustWindowsCA(caCertPath, wslWindowsCAStoreOptions());
+      }
       writeTrustMarker(stateDir);
       return { trusted: true };
     } else if (process.platform === "win32") {
-      execFileSync("certutil", ["-addstore", "-user", "Root", caCertPath], {
-        stdio: "pipe",
-        timeout: 30_000,
-      });
+      trustWindowsCA(caCertPath);
       writeTrustMarker(stateDir);
       return { trusted: true };
     }
@@ -944,19 +961,15 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
     return { removed: true };
   }
 
-  if (!isCATrusted(stateDir)) {
-    clearTrustMarker(stateDir);
-    return { removed: true };
-  }
-
+  const runningInWSL = isWSL();
   try {
     let result: { removed: boolean; error?: string };
     if (process.platform === "darwin") {
       result = untrustCAMacOS(caCertPath);
     } else if (process.platform === "linux") {
-      result = untrustCALinux(stateDir);
+      result = runningInWSL ? untrustCAWSL(stateDir, caCertPath) : untrustCALinux(stateDir);
     } else if (process.platform === "win32") {
-      result = untrustCAWindows(caCertPath);
+      result = untrustWindowsCA(caCertPath);
     } else {
       result = { removed: false, error: `Unsupported platform: ${process.platform}` };
     }
@@ -1022,19 +1035,34 @@ function isCATrustedMacOSAfterAttempt(caCertPath: string): boolean {
   }
 }
 
-function untrustCALinux(stateDir: string): { removed: boolean; error?: string } {
+export function untrustCALinux(
+  stateDir: string,
+  options: LinuxCATrustRemovalOptions = {}
+): { removed: boolean; error?: string } {
   const errors: string[] = [];
-  let deletedAny = false;
+  const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
+  let refreshNeeded = fileExists(pendingRefreshPath);
+  const configs = options.configs ?? Object.values(LINUX_CA_TRUST_CONFIGS);
+  const activeConfig = options.activeConfig ?? getLinuxCATrustConfig();
+  const runUpdate =
+    options.runUpdate ??
+    ((command: string) => {
+      execFileSync(command, [], { stdio: "pipe", timeout: 30_000 });
+    });
 
-  for (const config of Object.values(LINUX_CA_TRUST_CONFIGS)) {
+  for (const config of configs) {
     const dest = path.join(config.certDir, "portless-ca.crt");
     try {
       if (fileExists(dest)) {
         const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
+          if (!refreshNeeded) {
+            fs.writeFileSync(pendingRefreshPath, "1\n");
+            fixOwnership(pendingRefreshPath);
+            refreshNeeded = true;
+          }
           fs.unlinkSync(dest);
-          deletedAny = true;
         }
       }
     } catch (err: unknown) {
@@ -1042,16 +1070,15 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
     }
   }
 
-  if (deletedAny) {
+  if (refreshNeeded) {
     try {
-      const config = getLinuxCATrustConfig();
-      execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      runUpdate(activeConfig.updateCommand);
     } catch (err: unknown) {
       errors.push(err instanceof Error ? err.message : String(err));
     }
   }
 
-  if (isCATrusted(stateDir)) {
+  if (errors.length > 0 || isCATrustedLinux(stateDir, activeConfig)) {
     return {
       removed: false,
       error:
@@ -1059,38 +1086,29 @@ function untrustCALinux(stateDir: string): { removed: boolean; error?: string } 
         "CA still trusted (remove portless-ca.crt and run the distro CA update command, often with sudo)",
     };
   }
+
+  clearTrustRefreshPending(stateDir);
   return { removed: true };
 }
 
-function untrustCAWindows(caCertPath: string): { removed: boolean; error?: string } {
+function untrustCAWSL(stateDir: string, caCertPath: string): { removed: boolean; error?: string } {
+  const linuxResult = untrustCALinux(stateDir);
+  let windowsResult: { removed: boolean; error?: string };
+
   try {
-    const fingerprint = openssl(["x509", "-in", caCertPath, "-noout", "-fingerprint", "-sha1"])
-      .trim()
-      .replace(/^.*=/, "")
-      .replace(/:/g, "")
-      .toLowerCase();
-
-    const storeListing = execFileSync("certutil", ["-store", "-user", "Root"], {
-      encoding: "utf-8",
-      timeout: 10_000,
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const normalized = storeListing.replace(/\s/g, "").toLowerCase();
-    if (!normalized.includes(fingerprint)) {
-      return { removed: true };
-    }
-
-    execFileSync("certutil", ["-delstore", "-user", "Root", "portless Local CA"], {
-      stdio: "pipe",
-      timeout: 30_000,
-    });
-
-    if (isCATrustedWindows(caCertPath)) {
-      return { removed: false, error: "certutil could not remove the portless CA from Root" };
-    }
-    return { removed: true };
+    windowsResult = untrustWindowsCA(caCertPath, wslWindowsCAStoreOptions());
   } catch (err: unknown) {
-    return { removed: false, error: err instanceof Error ? err.message : String(err) };
+    windowsResult = {
+      removed: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
   }
+
+  if (linuxResult.removed && windowsResult.removed) return { removed: true };
+
+  const errors = [linuxResult.error, windowsResult.error].filter(Boolean);
+  return {
+    removed: false,
+    error: errors.join("; ") || "Could not remove the portless CA from every WSL trust store",
+  };
 }
