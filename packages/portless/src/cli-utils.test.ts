@@ -883,14 +883,18 @@ describe("buildProxyStartConfig", () => {
         proxyPort: 8080,
       })
     ).toEqual({
-      effectiveTld: "local",
-      effectiveTlds: ["local"],
+      effectiveTld: "test",
+      effectiveTlds: ["test", "local"],
       args: [
         "--foreground",
         "--port",
         "8080",
         "--https",
         "--lan",
+        "--tld",
+        "test",
+        "--tld",
+        "local",
         "--ip",
         "192.168.1.42",
         "--wildcard",
@@ -940,6 +944,21 @@ describe("buildProxyStartConfig", () => {
       effectiveTld: "localhost",
       effectiveTlds: ["localhost", "test"],
       args: ["--https", "--tld", "localhost", "--tld", "test"],
+    });
+  });
+
+  it("preserves custom LAN TLD list and adds local", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: true,
+        lanMode: true,
+        tld: "localhost",
+        tlds: ["test", "localhost"],
+      })
+    ).toEqual({
+      effectiveTld: "test",
+      effectiveTlds: ["test", "localhost", "local"],
+      args: ["--https", "--lan", "--tld", "test", "--tld", "localhost", "--tld", "local"],
     });
   });
 });

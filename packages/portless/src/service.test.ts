@@ -288,6 +288,27 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain('Environment=PORTLESS_TLD="test"');
     expect(spec.stateDir).toBe("/srv/portless");
   });
+
+  it("persists custom LAN TLD values and local TLD for discovery", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      userHome: "/home/alice",
+      installConfig: {
+        proxyPort: 8443,
+        lanMode: true,
+        tld: "test",
+      },
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    const command = spec.execStart.join(" ");
+    expect(command).toContain("--lan");
+    expect(command).toContain("--tld test --tld local");
+    expect(spec.unit).toContain('Environment=PORTLESS_LAN="1"');
+    expect(spec.unit).toContain('Environment=PORTLESS_TLD="test,local"');
+  });
 });
 
 describe("buildServiceUninstallSudoArgs", () => {

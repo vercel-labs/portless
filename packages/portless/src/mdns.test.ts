@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { startLanIpMonitor } from "./mdns.js";
+import { cleanupAll, getPublished, mdnsFqdn, publish, startLanIpMonitor } from "./mdns.js";
 
 describe("startLanIpMonitor", () => {
   afterEach(() => {
@@ -93,5 +93,37 @@ describe("startLanIpMonitor", () => {
     await vi.advanceTimersByTimeAsync(1000);
 
     expect(onChange).not.toHaveBeenCalled();
+  });
+});
+
+describe("mdnsFqdn", () => {
+  it("returns the hostname unchanged for .local hostnames", () => {
+    expect(mdnsFqdn("myapp.local")).toBe("myapp.local");
+    expect(mdnsFqdn("api.myapp.local")).toBe("api.myapp.local");
+  });
+
+  it("returns null for custom-TLD hostnames instead of appending .local", () => {
+    // Regression: LAN mode with a custom --tld routes apps under both the
+    // custom TLD and .local. Custom-TLD hostnames must not become
+    // doubled-suffix mDNS records (myapp.test -> myapp.test.local).
+    expect(mdnsFqdn("myapp.test")).toBeNull();
+    expect(mdnsFqdn("myapp.localhost")).toBeNull();
+    expect(mdnsFqdn("myapp.internal")).toBeNull();
+  });
+});
+
+describe("publish", () => {
+  afterEach(() => {
+    cleanupAll();
+  });
+
+  it("does not publish (or spawn a publisher for) non-.local hostnames", () => {
+    const onError = vi.fn();
+
+    publish("myapp.test", 3000, "192.168.1.10", onError);
+
+    expect(getPublished()).not.toContain("myapp.test");
+    expect(getPublished()).not.toContain("myapp.test.local");
+    expect(onError).not.toHaveBeenCalled();
   });
 });

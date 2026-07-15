@@ -173,6 +173,11 @@ function formatTldList(tlds: readonly string[]): string {
   return tlds.map((tld) => `.${tld}`).join(", ");
 }
 
+function mergeLanTlds(tlds: readonly string[]): string[] {
+  const normalized = normalizeTlds(tlds);
+  return normalized.includes("local") ? normalized : [...normalized, "local"];
+}
+
 function defaultProxyConfig(
   tlds: readonly string[],
   useHttps: boolean,
@@ -257,8 +262,13 @@ function resolveProxyConfig(options: {
   }
 
   if (config.lanMode) {
-    config.tlds = ["local"];
-    config.tld = "local";
+    if (options.explicit.tlds) {
+      config.tlds = mergeLanTlds(config.tlds);
+      config.tld = primaryTld(config.tlds);
+    } else {
+      config.tlds = ["local"];
+      config.tld = "local";
+    }
     if (!config.lanIpExplicit) {
       config.lanIp = null;
     }
@@ -1776,14 +1786,16 @@ ${colors.bold("HTTP/2 + HTTPS (default):")}
 
 ${colors.bold("LAN mode:")}
   Use --lan to make services accessible from other devices (phones,
-  tablets) on the same WiFi network via mDNS (.local domains).
+  tablets) on the same WiFi network via mDNS (.local domains). Custom TLDs
+  from --tld or PORTLESS_TLD are preserved and .local is added for
+  discovery.
   Useful for testing React Native / Expo apps on real devices.
   Expo keeps Metro's default LAN host behavior in this mode.
   Auto-detected LAN IPs follow network changes automatically.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   All proxy settings are persisted and reused on auto-start unless
   overridden by explicit flags or env vars.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+  Use PORTLESS_LAN=0 for one start to switch back to the non-LAN list.
   If a proxy is already running with different explicit LAN/TLS/TLD settings,
   stop it first.
   ${colors.cyan("portless proxy start --lan")}
@@ -2800,7 +2812,7 @@ ${colors.bold("portless proxy")} - Manage the portless proxy server.
 ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start")}                Start the HTTPS proxy on port 443 (daemon)
   ${colors.cyan("portless proxy start --no-tls")}       Start without HTTPS (port 80)
-  ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
+  ${colors.cyan("portless proxy start --lan")}          Enable LAN mode with .local discovery TLD
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
@@ -2814,7 +2826,7 @@ ${colors.bold("LAN mode (--lan):")}
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+  Use PORTLESS_LAN=0 for one start to switch back to the non-LAN list.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
@@ -2963,17 +2975,6 @@ ${colors.bold("LAN mode (--lan):")}
   if (!hasExplicitPort && runningPort === null) {
     proxyPort = getDefaultPort(useHttps);
     stateDir = resolveStateDir(proxyPort);
-  }
-
-  if (lanMode && tldFlagValues.length > 0) {
-    const userTlds = tldFlagValues.join(", ");
-    if (userTlds !== "local") {
-      console.warn(
-        chalk.yellow(
-          `Warning: --lan forces .local TLD (mDNS requirement). Ignoring --tld ${userTlds}.`
-        )
-      );
-    }
   }
 
   for (const configuredTld of tlds) {

@@ -971,7 +971,7 @@ describe("CLI", () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it.skipIf(process.platform === "win32")("warns when --lan and --tld are both provided", () => {
+    it.skipIf(process.platform === "win32")("keeps custom --tld values in LAN mode", () => {
       // Use an empty PATH so the mDNS check fails early, causing the
       // process to exit without needing a running proxy server (spawnSync
       // blocks the parent event loop, preventing a fake server from responding).
@@ -988,8 +988,8 @@ describe("CLI", () => {
           }
         );
         expect(status).toBe(1);
-        expect(stderr).toContain("--lan forces .local TLD");
-        expect(stderr).toContain("Ignoring --tld test");
+        expect(stderr).not.toContain("--lan forces .local TLD");
+        expect(stderr).not.toContain("Ignoring --tld test");
       } finally {
         fs.rmSync(emptyPath, { recursive: true, force: true });
       }
@@ -997,15 +997,19 @@ describe("CLI", () => {
 
     it.skipIf(process.platform === "win32")(
       "fails early when the mDNS publisher binary is missing",
-      () => {
+      async () => {
         const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
+        const testPort = await getFreePort();
         try {
+          run(["proxy", "stop", "-p", String(testPort)], {
+            env: { PATH: emptyPath, PORTLESS_PORT: String(testPort) },
+          });
           const { status, stderr, stdout } = run(
             ["proxy", "start", "--foreground", "--lan", "--ip", "192.168.1.42"],
             {
               env: {
                 PATH: emptyPath,
-                PORTLESS_PORT: "19876",
+                PORTLESS_PORT: String(testPort),
                 PORTLESS_STATE_DIR: tmpDir,
               },
             }
@@ -1576,7 +1580,14 @@ describe("CLI", () => {
         const start = spawnSync(process.execPath, [CLI_PATH, "proxy", "start"], {
           encoding: "utf-8",
           timeout: 30_000,
-          env: { ...process.env, ...env, NO_COLOR: "1" },
+          env: (() => {
+            const testEnv = { ...process.env, ...env, NO_COLOR: "1" };
+            delete testEnv.PNPM_SCRIPT_SRC_DIR;
+            if (testEnv.npm_command === "exec") {
+              delete testEnv.npm_command;
+            }
+            return testEnv;
+          })(),
         });
 
         // The proxy should start despite the broken security binary.

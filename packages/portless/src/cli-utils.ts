@@ -336,6 +336,11 @@ export function readTldFromDir(dir: string): string {
   return readTldsFromDir(dir)[0] ?? DEFAULT_TLD;
 }
 
+function mergeLanTlds(tlds: readonly string[]): string[] {
+  const normalized = [...new Set(tlds.length > 0 ? tlds : [DEFAULT_TLD])];
+  return normalized.includes("local") ? normalized : [...normalized, "local"];
+}
+
 /** Write or remove the TLD files in the state directory. */
 export function writeTldsFile(dir: string, tlds: readonly string[]): void {
   const uniqueTlds = [...new Set(tlds)];
@@ -462,7 +467,12 @@ export function buildProxyStartConfig(options: {
   skipTrust?: boolean;
 }): { effectiveTld: string; effectiveTlds: string[]; args: string[] } {
   const requestedTlds = options.tlds && options.tlds.length > 0 ? [...options.tlds] : [options.tld];
-  const effectiveTlds = options.lanMode ? ["local"] : [...new Set(requestedTlds)];
+  const hasExplicitLanInput = options.tlds && options.tlds.length > 0;
+  const effectiveTlds = options.lanMode
+    ? hasExplicitLanInput || options.tld !== DEFAULT_TLD
+      ? mergeLanTlds(requestedTlds)
+      : ["local"]
+    : [...new Set(requestedTlds)];
   const effectiveTld = effectiveTlds[0] ?? DEFAULT_TLD;
   const args: string[] = [];
 
@@ -486,6 +496,12 @@ export function buildProxyStartConfig(options: {
 
   if (options.lanMode) {
     args.push("--lan");
+    const hasExplicitTlds = !!(options.tlds && options.tlds.length > 0);
+    if (hasExplicitTlds || options.tld !== DEFAULT_TLD) {
+      for (const tld of effectiveTlds) {
+        args.push("--tld", tld);
+      }
+    }
     if (options.lanIp) {
       if (options.lanIpExplicit) {
         args.push("--ip", options.lanIp);

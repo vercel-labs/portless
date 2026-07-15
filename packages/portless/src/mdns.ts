@@ -131,6 +131,21 @@ function serviceName(hostname: string): string {
 }
 
 /**
+ * Resolve the mDNS FQDN for a route hostname, or `null` when the hostname is
+ * not mDNS-publishable.
+ *
+ * mDNS lives in the `.local` namespace, so only `.local` hostnames may be
+ * published. In LAN mode with a custom TLD, the same app is also routed under
+ * the custom TLD (e.g. `myapp.test` alongside `myapp.local`). Those custom-TLD
+ * hostnames must be skipped here: naively appending `.local` would publish a
+ * doubled-suffix record (`myapp.test.local`) and spawn a spurious publisher
+ * process. The parallel `.local` route still provides LAN discovery.
+ */
+export function mdnsFqdn(hostname: string): string | null {
+  return hostname.endsWith(".local") ? hostname : null;
+}
+
+/**
  * Publish an mDNS record for a hostname.
  *
  * On macOS: spawns `dns-sd -P` which publishes both a DNS-SD service record
@@ -150,7 +165,12 @@ export function publish(
   // Don't double-publish
   if (activePublishers.has(hostname)) return;
 
-  const fqdn = hostname.endsWith(".local") ? hostname : `${hostname}.local`;
+  // Only `.local` hostnames are mDNS-publishable. Skip custom-TLD routes
+  // (e.g. `myapp.test` in LAN mode) so we never spawn a publisher for a
+  // doubled-suffix record like `myapp.test.local`.
+  const fqdn = mdnsFqdn(hostname);
+  if (!fqdn) return;
+
   const name = serviceName(fqdn);
   const publisher = getMdnsPublisher();
   if (!publisher) {
