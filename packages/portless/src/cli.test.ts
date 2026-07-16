@@ -1646,6 +1646,153 @@ describe("CLI", () => {
       expect(stdout).toContain("hello");
     });
 
+    // Run the CLI against a fake package-manager binary (shim) that records
+    // the args and env it was invoked with, so package-script flag forwarding
+    // can be asserted without requiring bun/npm or a real dev server.
+    async function captureScriptDelegation(options: {
+      pm: string;
+      script: string;
+      cliArgs: string[];
+    }): Promise<{
+      status: number | null;
+      proxyPort: number;
+      capture: { args: string[]; env: Record<string, string> };
+    }> {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-pm-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({
+            name: "test-app",
+            packageManager: `${options.pm}@1.0.0`,
+            portless: { appPort: 4567 },
+            scripts: { dev: options.script },
+          })
+        );
+
+        const captureScriptPath = path.join(shimDir, "capture-pm.js");
+        fs.writeFileSync(
+          captureScriptPath,
+          [
+            'const fs = require("node:fs");',
+            "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+            "const payload = {",
+            "  args: process.argv.slice(2),",
+            "  env: {",
+            "    PORT: process.env.PORT,",
+            "    HOST: process.env.HOST,",
+            "    PORTLESS_URL: process.env.PORTLESS_URL,",
+            "  },",
+            "};",
+            "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+          ].join("\n") + "\n"
+        );
+
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            path.join(shimDir, `${options.pm}.cmd`),
+            `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+          );
+        } else {
+          const shimPath = path.join(shimDir, options.pm);
+          fs.writeFileSync(
+            shimPath,
+            `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`
+          );
+          fs.chmodSync(shimPath, 0o755);
+        }
+
+        const { status } = run(options.cliArgs, {
+          cwd: tmpDir,
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+        return { status, proxyPort, capture };
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    }
+
+    it("portless (no args) forwards Vite port flags through bun run dev", async () => {
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "vite dev --host 127.0.0.1",
+        cliArgs: [],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev", "--port", "4567", "--strictPort"]);
+      expect(capture.env).toMatchObject({
+        PORT: "4567",
+        HOST: "127.0.0.1",
+        PORTLESS_URL: `http://test-app.localhost:${proxyPort}`,
+      });
+    });
+
+    // Note: the same forwarding for npm (including the `--` separator) is
+    // covered by unit tests in cli-utils.test.ts — a fake `npm` binary cannot
+    // shadow the real one here because spawnCommand prepends node's own bin
+    // directory (which contains npm) to the child PATH.
+
+    it("portless run <pm> run <script> forwards Vite port flags (explicit delegation)", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "vite dev --host 127.0.0.1",
+        cliArgs: ["run", "bun", "run", "dev"],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev", "--port", "4567", "--strictPort"]);
+    });
+
+    it("does not forward flags when the script already sets --port", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "vite dev --port 5000 --host 127.0.0.1",
+        cliArgs: [],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev"]);
+    });
+
+    it("does not forward flags for non-framework scripts", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: [],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev"]);
+    });
+
     it("portless run (no command) with portless.json resolves dev script", () => {
       fs.writeFileSync(
         path.join(tmpDir, "package.json"),

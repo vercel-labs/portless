@@ -60,6 +60,7 @@ import {
   getDefaultTlds,
   getProxyBindTargets,
   injectFrameworkFlags,
+  injectPackageScriptFrameworkFlags,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -1465,6 +1466,7 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
+  injectPackageScriptFrameworkFlags(commandArgs, port);
   injectFrameworkFlags(commandArgs, port);
 
   // Point Node.js at the portless CA so server-side fetches (e.g. Next.js

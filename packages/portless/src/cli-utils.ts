@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { resolveScript } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -1118,6 +1119,54 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
     const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
+}
+
+/** Package managers whose `<pm> run <script>` delegates to a package.json script. */
+const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+
+/**
+ * When the child command delegates to a package script (`<pm> run <script>`),
+ * the framework command lives inside package.json where injectFrameworkFlags
+ * cannot see it (it only inspects argv). Resolve the script, compute the flags
+ * the underlying framework needs, and forward them through the package manager
+ * so e.g. `bun run dev` becomes `bun run dev --port <n> --strictPort`.
+ *
+ * Covers zero-arg mode (`portless` resolving the dev script) and explicit
+ * delegation (`portless run npm run dev`). The script must exist in
+ * package.json at `packageDir` (the directory the child will run in).
+ */
+export function injectPackageScriptFrameworkFlags(
+  commandArgs: string[],
+  port: number,
+  packageDir: string = process.cwd()
+): void {
+  if (commandArgs.length < 3) return;
+
+  const runner = path.basename(commandArgs[0]);
+  if (!PACKAGE_SCRIPT_MANAGERS.has(runner)) return;
+
+  const [, runSubcommand, scriptName] = commandArgs;
+  // Conservative shape match: `<pm> run <script>`. Runner flags between
+  // `run` and the script name (e.g. `bun run --bun dev`) are left alone.
+  if (runSubcommand !== "run" || scriptName.startsWith("-")) return;
+
+  const rawScript = resolveScript(scriptName, packageDir);
+  if (!rawScript) return;
+
+  // Probe the script plus any user-supplied trailing args so an existing
+  // --port/--host (in either place) suppresses injection.
+  const userExtras = commandArgs.slice(3).filter((arg) => arg !== "--");
+  const probe = [...rawScript, ...userExtras];
+  injectFrameworkFlags(probe, port);
+  const forwardedFlags = probe.slice(rawScript.length + userExtras.length);
+  if (forwardedFlags.length === 0) return;
+
+  // npm requires `--` before arguments meant for the package script.
+  // bun, pnpm, and yarn forward trailing arguments directly.
+  if (runner === "npm" && !commandArgs.includes("--")) {
+    commandArgs.push("--");
+  }
+  commandArgs.push(...forwardedFlags);
 }
 
 /**
