@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
@@ -138,7 +139,9 @@ export type ProxyServer = http.Server | net.Server;
  *
  * When `tls` is provided, creates an HTTP/2 secure server with HTTP/1.1
  * fallback (`allowHTTP1: true`). This enables HTTP/2 multiplexing for
- * browsers while keeping WebSocket upgrades working over HTTP/1.1.
+ * browsers. WebSockets work over both protocol versions: HTTP/1.1 Upgrade
+ * requests are forwarded as-is, and HTTP/2 extended CONNECT (RFC 8441) is
+ * bridged to an HTTP/1.1 handshake against the backend.
  */
 export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const {
@@ -352,7 +355,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       headers: proxyReqHeaders,
     });
 
+    // Whether the backend's handshake answer (101 or a rejection) has been
+    // relayed to the client. Gates the error handler below: before relay a
+    // proper 502 can still be written; after it the stream may carry
+    // WebSocket frames, so the only safe reaction is to drop the socket.
+    let handshakeRelayed = false;
+
     proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+      handshakeRelayed = true;
       // Forward the backend's actual 101 response including Sec-WebSocket-Accept,
       // subprotocol negotiation, and extension headers.
       let response = `HTTP/1.1 101 Switching Protocols\r\n`;
@@ -384,10 +394,26 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     proxyReq.on("error", (err) => {
       onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
-      socket.destroy();
+      // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
+      // dev writes a bare "Unauthorized" with no status line when an Origin
+      // is not allow-listed, which surfaces here as a parse error) would
+      // otherwise close the connection with no response, leaving the client
+      // nothing to diagnose. Answer with a real 502 while that is still safe.
+      if (!handshakeRelayed && socket.writable) {
+        socket.end(
+          "HTTP/1.1 502 Bad Gateway\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "Connection: close\r\n" +
+            "\r\n" +
+            "Bad Gateway: the target app is not responding or sent an invalid response to the WebSocket handshake.\n"
+        );
+      } else {
+        socket.destroy();
+      }
     });
 
     proxyReq.on("response", (res) => {
+      handshakeRelayed = true;
       // The backend responded with a normal HTTP response instead of upgrading.
       // Forward the rejection to the client.
       if (!socket.destroyed) {
@@ -408,11 +434,151 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     proxyReq.end();
   };
 
+  /**
+   * Handle an RFC 8441 extended CONNECT request (WebSocket over HTTP/2).
+   * Browsers open WebSockets this way when the connection is HTTP/2 and the
+   * server advertises SETTINGS_ENABLE_CONNECT_PROTOCOL. The h2 stream is
+   * bridged to a regular HTTP/1.1 Upgrade handshake against the backend:
+   * the client never sends Sec-WebSocket-Key over h2, so one is synthesized
+   * for the backend hop and the backend's Accept answer is dropped.
+   */
+  const handleExtendedConnect = (req: http2.Http2ServerRequest, res: http2.Http2ServerResponse) => {
+    const compatReq = req as unknown as http.IncomingMessage;
+    req.stream.on("error", () => {});
+    res.setHeader(PORTLESS_HEADER, "1");
+
+    // Classic CONNECT tunneling is not a portless feature; only WebSocket
+    // bridging is supported.
+    if (req.headers[":protocol"] !== "websocket") {
+      res.writeHead(501, { "content-type": "text/plain" });
+      res.end("CONNECT is only supported for WebSockets (RFC 8441)\n");
+      return;
+    }
+
+    const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
+    if (hops >= MAX_PROXY_HOPS) {
+      const host = getRequestHost(compatReq).split(":")[0];
+      onError(
+        `WebSocket loop detected for ${host}: request has passed through portless ${hops} times. ` +
+          `Set changeOrigin: true in your proxy config.`
+      );
+      res.writeHead(508, { "content-type": "text/plain" });
+      res.end(
+        "Loop Detected: request has passed through portless too many times.\n" +
+          "Add changeOrigin: true to your dev server proxy config.\n"
+      );
+      return;
+    }
+
+    const route = findRoute(getRoutes(), getRequestHost(compatReq), strict);
+    if (!route) {
+      res.writeHead(404, { "content-type": "text/plain" });
+      res.end(`No app registered for ${getRequestHost(compatReq)}\n`);
+      return;
+    }
+
+    const forwardedHeaders = buildForwardedHeaders(compatReq, isEncrypted(compatReq));
+    const proxyReqHeaders: http.OutgoingHttpHeaders = { ...req.headers };
+    for (const [key, value] of Object.entries(forwardedHeaders)) {
+      proxyReqHeaders[key] = value;
+    }
+    proxyReqHeaders[PORTLESS_HOPS_HEADER] = String(hops + 1);
+    // Remove HTTP/2 pseudo-headers before forwarding to HTTP/1.1 backend
+    for (const key of Object.keys(proxyReqHeaders)) {
+      if (key.startsWith(":")) {
+        delete proxyReqHeaders[key];
+      }
+    }
+    proxyReqHeaders.host = getRequestHost(compatReq);
+    // Translate the extended CONNECT into the HTTP/1.1 Upgrade handshake the
+    // backend expects. Sec-WebSocket-Protocol/-Extensions pass through from
+    // the copied headers so subprotocol and compression negotiation stay
+    // end-to-end between client and backend.
+    proxyReqHeaders.connection = "Upgrade";
+    proxyReqHeaders.upgrade = "websocket";
+    proxyReqHeaders["sec-websocket-key"] = crypto.randomBytes(16).toString("base64");
+    if (!proxyReqHeaders["sec-websocket-version"]) {
+      proxyReqHeaders["sec-websocket-version"] = "13";
+    }
+
+    const proxyReq = http.request({
+      // Dial via createLoopbackConnection so ::1-only backends work too.
+      createConnection: () => createLoopbackConnection(route.port),
+      path: req.url,
+      method: "GET",
+      headers: proxyReqHeaders,
+    });
+
+    proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+      const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
+      for (const h of HOP_BY_HOP_HEADERS) {
+        delete responseHeaders[h];
+      }
+      // The Accept answers the key this proxy synthesized, not anything the
+      // h2 client sent; RFC 8441 has no equivalent handshake header.
+      delete responseHeaders["sec-websocket-accept"];
+      // RFC 8441 signals a successful handshake with :status 200, not 101.
+      res.writeHead(200, responseHeaders);
+      if (proxyHead.length > 0) {
+        res.write(proxyHead);
+      }
+      proxySocket.pipe(res);
+      req.pipe(proxySocket);
+
+      // Tear down both sides when either disconnects. pipe() already
+      // propagates graceful ends; these catch aborts and errors. destroy()
+      // is idempotent, so duplicate calls are harmless.
+      const cleanup = () => {
+        proxySocket.destroy();
+        req.stream.destroy();
+      };
+      proxySocket.on("error", cleanup);
+      proxySocket.on("close", cleanup);
+      req.stream.on("close", cleanup);
+    });
+
+    proxyReq.on("response", (proxyRes) => {
+      // The backend answered with a normal HTTP response instead of
+      // upgrading (auth middleware redirects, 4xx, etc.). Forward it so the
+      // client sees the rejection instead of a hung handshake.
+      const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
+      for (const h of HOP_BY_HOP_HEADERS) {
+        delete responseHeaders[h];
+      }
+      res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+      proxyRes.on("error", () => req.stream.destroy());
+      proxyRes.pipe(res);
+    });
+
+    proxyReq.on("error", (err) => {
+      onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${err.message}`);
+      if (!res.headersSent) {
+        res.writeHead(502, { "content-type": "text/plain" });
+        res.end("Bad Gateway: the target app is not responding\n");
+      } else {
+        req.stream.destroy();
+      }
+    });
+
+    // Abort the backend handshake if the client goes away first.
+    req.stream.on("close", () => {
+      if (!proxyReq.destroyed) {
+        proxyReq.destroy();
+      }
+    });
+
+    proxyReq.end();
+  };
+
   if (tls) {
     const h2Server = http2.createSecureServer({
       cert: tls.ca ? Buffer.concat([tls.cert, tls.ca]) : tls.cert,
       key: tls.key,
       allowHTTP1: true,
+      // Advertise RFC 8441 extended CONNECT so browsers can open WebSockets
+      // over the existing HTTP/2 session (handled below via the 'connect'
+      // event) instead of failing the wss:// handshake.
+      settings: { enableConnectProtocol: true },
       // Tolerate high rates of RST_STREAM from browsers during HMR and
       // page navigations. Without this, Node sends GOAWAY INTERNAL_ERROR
       // after ~1000 cumulative stream resets and kills the session,
@@ -438,6 +604,25 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     h2Server.on("upgrade", (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
       handleUpgrade(req, socket, head);
     });
+    // WebSocket-over-HTTP/2 arrives as an extended CONNECT stream, which the
+    // compat layer surfaces via the 'connect' event (never 'request'; without
+    // a listener Node auto-responds 405 and the handshake dies).
+    h2Server.on(
+      "connect",
+      (
+        req: http2.Http2ServerRequest | http.IncomingMessage,
+        resOrSocket: http2.Http2ServerResponse | net.Socket
+      ) => {
+        // With allowHTTP1, an HTTP/1.1 CONNECT fires this same event with a
+        // (req, socket, head) signature. Classic CONNECT tunneling is not
+        // supported on either protocol version.
+        if (resOrSocket instanceof net.Socket) {
+          resOrSocket.destroy();
+          return;
+        }
+        handleExtendedConnect(req as http2.Http2ServerRequest, resOrSocket);
+      }
+    );
 
     // Plain HTTP on a TLS-enabled port -> 302 redirect to HTTPS.
     // The redirect targets the same port because the wrapper net.Server
@@ -448,12 +633,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       res.writeHead(302, { Location: location, [PORTLESS_HEADER]: "1" });
       res.end();
     });
-    plainServer.on("upgrade", (req: http.IncomingMessage, socket: net.Socket) => {
-      const host = getRequestHost(req);
-      console.warn(
-        `[portless] Dropped plain-HTTP WebSocket upgrade for ${host}; use wss:// instead`
-      );
-      socket.destroy();
+    // WebSocket clients cannot follow the 302 redirect a normal request
+    // gets, so proxy plain-HTTP upgrades directly instead of dropping them.
+    plainServer.on("upgrade", (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
+      handleUpgrade(req, socket, head);
     });
 
     // Wrap both in a net.Server that peeks at the first byte to decide

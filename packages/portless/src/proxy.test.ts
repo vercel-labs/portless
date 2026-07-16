@@ -1105,6 +1105,61 @@ describe("createProxyServer", () => {
       expect(upgraded).toBe(true);
     });
 
+    it("responds 502 when the backend answers the handshake with a non-HTTP response", async () => {
+      const backend = trackServer(http.createServer());
+      backend.on("upgrade", (_req, socket) => {
+        // Next.js dev rejects a WebSocket whose Origin is not in
+        // allowedDevOrigins by writing a bare string with no status line.
+        socket.end("Unauthorized");
+      });
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+        })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const result = await new Promise<{ status?: number; failed: boolean }>((resolve) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/_next/webpack-hmr",
+          headers: {
+            host: "ws.localhost",
+            connection: "Upgrade",
+            upgrade: "websocket",
+            "sec-websocket-version": "13",
+            "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          },
+        });
+        req.on("response", (res) => {
+          res.resume();
+          resolve({ status: res.statusCode, failed: false });
+        });
+        req.on("upgrade", () => resolve({ failed: true }));
+        req.on("error", () => resolve({ failed: true }));
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve({ failed: true });
+        });
+        req.end();
+      });
+
+      // The client gets a diagnosable 502 instead of an abrupt connection close.
+      expect(result.failed).toBe(false);
+      expect(result.status).toBe(502);
+    });
+
     it("forwards backend Sec-WebSocket-Accept and custom headers", async () => {
       const testAcceptValue = "dGhlIHNhbXBsZSBub25jZQ==";
       const testProtocol = "graphql-ws";
@@ -1538,6 +1593,260 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
           upgrade: "websocket",
         },
         rejectUnauthorized: false,
+      });
+      req.on("error", () => resolve(false));
+      req.on("upgrade", () => resolve(true));
+      req.setTimeout(2000, () => {
+        req.destroy();
+        resolve(false);
+      });
+      req.end();
+    });
+
+    expect(upgraded).toBe(true);
+  });
+
+  /** Open an HTTP/2 client session to the proxy and wait for its SETTINGS frame. */
+  function h2Session(
+    server: AnyServer
+  ): Promise<{ client: http2.ClientHttp2Session; settings: http2.Settings }> {
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+    return new Promise((resolve, reject) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, {
+        rejectUnauthorized: false,
+      });
+      client.on("error", reject);
+      client.on("remoteSettings", (settings) => resolve({ client, settings }));
+    });
+  }
+
+  it("proxies WebSocket over HTTP/2 extended CONNECT (RFC 8441)", async () => {
+    const received: http.IncomingHttpHeaders = {};
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (req, socket) => {
+      Object.assign(received, req.headers);
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "Sec-WebSocket-Accept: backend-answer\r\n" +
+          "\r\n"
+      );
+      socket.on("data", (d) => socket.write(`echo:${d}`));
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const { client, settings } = await h2Session(server);
+    try {
+      expect(settings.enableConnectProtocol).toBe(true);
+
+      const result = await new Promise<{
+        status: number;
+        accept?: string;
+        echoed: string;
+      }>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/_next/webpack-hmr",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+          "sec-websocket-version": "13",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          req.write("ping");
+          req.on("data", (d: Buffer) => {
+            resolve({
+              status: headers[":status"] as number,
+              accept: headers["sec-websocket-accept"] as string | undefined,
+              echoed: d.toString(),
+            });
+            req.close();
+          });
+        });
+      });
+
+      // RFC 8441 handshake succeeds with :status 200 and no Accept header.
+      expect(result.status).toBe(200);
+      expect(result.accept).toBeUndefined();
+      expect(result.echoed).toBe("echo:ping");
+      // The backend saw a synthesized HTTP/1.1 handshake.
+      expect(received.connection).toBe("Upgrade");
+      expect(received.upgrade).toBe("websocket");
+      expect(received["sec-websocket-version"]).toBe("13");
+      expect(Buffer.from(String(received["sec-websocket-key"]), "base64")).toHaveLength(16);
+      expect(received.host).toBe("ws.localhost");
+      expect(received["x-portless-hops"]).toBe("1");
+      expect(received["x-forwarded-proto"]).toBe("https");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("forwards backend rejection of an extended CONNECT as an HTTP response", async () => {
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (_req, socket) => {
+      socket.write(
+        "HTTP/1.1 307 Temporary Redirect\r\n" +
+          "Location: /login\r\n" +
+          "Content-Length: 0\r\n" +
+          "\r\n"
+      );
+      socket.end();
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const { client } = await h2Session(server);
+    try {
+      const result = await new Promise<{ status: number; location?: string }>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/_next/webpack-hmr",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          resolve({
+            status: headers[":status"] as number,
+            location: headers.location as string | undefined,
+          });
+          req.close();
+        });
+      });
+
+      expect(result.status).toBe(307);
+      expect(result.location).toBe("/login");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("returns 404 for extended CONNECT to an unknown host", async () => {
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const { client } = await h2Session(server);
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/",
+          ":authority": "unknown.localhost",
+          ":scheme": "https",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          resolve(headers[":status"] as number);
+          req.close();
+        });
+      });
+      expect(status).toBe(404);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("returns 501 for a classic CONNECT without :protocol", async () => {
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const { client } = await h2Session(server);
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":authority": "example.com:443",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          resolve(headers[":status"] as number);
+          req.close();
+        });
+      });
+      expect(status).toBe(501);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("proxies plain-HTTP WebSocket upgrades on the TLS port instead of dropping them", async () => {
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (_req, socket) => {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "\r\n"
+      );
+      socket.end();
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const upgraded = await new Promise<boolean>((resolve) => {
+      const req = http.request({
+        hostname: "127.0.0.1",
+        port: addr.port,
+        path: "/",
+        headers: {
+          host: "ws.localhost",
+          connection: "Upgrade",
+          upgrade: "websocket",
+        },
       });
       req.on("error", () => resolve(false));
       req.on("upgrade", () => resolve(true));
