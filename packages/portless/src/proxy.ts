@@ -355,7 +355,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       headers: proxyReqHeaders,
     });
 
+    // Whether the backend's handshake answer (101 or a rejection) has been
+    // relayed to the client. Gates the error handler below: before relay a
+    // proper 502 can still be written; after it the stream may carry
+    // WebSocket frames, so the only safe reaction is to drop the socket.
+    let handshakeRelayed = false;
+
     proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+      handshakeRelayed = true;
       // Forward the backend's actual 101 response including Sec-WebSocket-Accept,
       // subprotocol negotiation, and extension headers.
       let response = `HTTP/1.1 101 Switching Protocols\r\n`;
@@ -387,10 +394,26 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     proxyReq.on("error", (err) => {
       onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
-      socket.destroy();
+      // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
+      // dev writes a bare "Unauthorized" with no status line when an Origin
+      // is not allow-listed, which surfaces here as a parse error) would
+      // otherwise close the connection with no response, leaving the client
+      // nothing to diagnose. Answer with a real 502 while that is still safe.
+      if (!handshakeRelayed && socket.writable) {
+        socket.end(
+          "HTTP/1.1 502 Bad Gateway\r\n" +
+            "Content-Type: text/plain\r\n" +
+            "Connection: close\r\n" +
+            "\r\n" +
+            "Bad Gateway: the target app is not responding or sent an invalid response to the WebSocket handshake.\n"
+        );
+      } else {
+        socket.destroy();
+      }
     });
 
     proxyReq.on("response", (res) => {
+      handshakeRelayed = true;
       // The backend responded with a normal HTTP response instead of upgrading.
       // Forward the rejection to the client.
       if (!socket.destroyed) {

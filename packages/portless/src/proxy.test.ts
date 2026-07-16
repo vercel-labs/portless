@@ -1105,6 +1105,61 @@ describe("createProxyServer", () => {
       expect(upgraded).toBe(true);
     });
 
+    it("responds 502 when the backend answers the handshake with a non-HTTP response", async () => {
+      const backend = trackServer(http.createServer());
+      backend.on("upgrade", (_req, socket) => {
+        // Next.js dev rejects a WebSocket whose Origin is not in
+        // allowedDevOrigins by writing a bare string with no status line.
+        socket.end("Unauthorized");
+      });
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+        })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const result = await new Promise<{ status?: number; failed: boolean }>((resolve) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/_next/webpack-hmr",
+          headers: {
+            host: "ws.localhost",
+            connection: "Upgrade",
+            upgrade: "websocket",
+            "sec-websocket-version": "13",
+            "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          },
+        });
+        req.on("response", (res) => {
+          res.resume();
+          resolve({ status: res.statusCode, failed: false });
+        });
+        req.on("upgrade", () => resolve({ failed: true }));
+        req.on("error", () => resolve({ failed: true }));
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve({ failed: true });
+        });
+        req.end();
+      });
+
+      // The client gets a diagnosable 502 instead of an abrupt connection close.
+      expect(result.failed).toBe(false);
+      expect(result.status).toBe(502);
+    });
+
     it("forwards backend Sec-WebSocket-Accept and custom headers", async () => {
       const testAcceptValue = "dGhlIHNhbXBsZSBub25jZQ==";
       const testProtocol = "graphql-ws";
