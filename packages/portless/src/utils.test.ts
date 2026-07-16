@@ -269,6 +269,20 @@ describe("parseHostname", () => {
       expect(parseHostname("api.myapp", "test")).toBe("api.myapp.test");
     });
 
+    it("handles multi-segment custom TLDs", () => {
+      expect(parseHostname("myapp", "local.example.dev")).toBe("myapp.local.example.dev");
+      expect(parseHostname("api.myapp", "local.example.dev")).toBe("api.myapp.local.example.dev");
+      expect(parseHostname("myapp.local.example.dev", "local.example.dev")).toBe(
+        "myapp.local.example.dev"
+      );
+    });
+
+    it("rejects a final hostname over 253 characters", () => {
+      const label = "a".repeat(63);
+      const tld = [label, label, label, "b".repeat(60)].join(".");
+      expect(() => parseHostname("myapp", tld)).toThrow("exceeds 253-character DNS limit");
+    });
+
     it("throws on empty input with custom TLD", () => {
       expect(() => parseHostname("", "test")).toThrow("Hostname cannot be empty");
     });
@@ -299,6 +313,13 @@ describe("parseHostnames", () => {
     expect(parseHostnames("api.myapp.test", ["localhost", "test"])).toEqual([
       "api.myapp.localhost",
       "api.myapp.test",
+    ]);
+  });
+
+  it("strips the longest matching TLD when configured TLDs overlap", () => {
+    expect(parseHostnames("app.dev.example.com", ["example.com", "dev.example.com"])).toEqual([
+      "app.example.com",
+      "app.dev.example.com",
     ]);
   });
 

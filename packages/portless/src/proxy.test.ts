@@ -1025,6 +1025,32 @@ describe("createProxyServer", () => {
       expect(res.status).toBe(200);
       expect(res.body).toBe("custom tld hit");
     });
+
+    it("routes requests with multi-segment custom TLD hostnames (issue #260)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("multi-segment tld hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.dev.example.com", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          tlds: ["dev.example.com"],
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.dev.example.com" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("multi-segment tld hit");
+    });
   });
 
   describe("XSS safety", () => {

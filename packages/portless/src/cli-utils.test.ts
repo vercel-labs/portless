@@ -942,6 +942,10 @@ describe("parseTldList", () => {
   it("rejects empty list entries", () => {
     expect(() => parseTldList("test,")).toThrow("TLD cannot be empty");
   });
+
+  it("accepts a mix of single- and multi-segment TLDs", () => {
+    expect(parseTldList("localhost,dev.example.com")).toEqual(["localhost", "dev.example.com"]);
+  });
 });
 
 describe("buildProxyStartConfig", () => {
@@ -1127,10 +1131,41 @@ describe("validateTld", () => {
   });
 
   it("rejects TLDs with invalid characters", () => {
-    expect(validateTld("my-tld")).toMatch(/must contain only/);
-    expect(validateTld("my.tld")).toMatch(/must contain only/);
     expect(validateTld("MY_TLD")).toMatch(/must contain only/);
     expect(validateTld("tld!")).toMatch(/must contain only/);
+    expect(validateTld("my tld")).toMatch(/must contain only/);
+  });
+
+  it("accepts multi-segment TLDs", () => {
+    expect(validateTld("dev.example.com")).toBeNull();
+    expect(validateTld("local.example.dev")).toBeNull();
+    expect(validateTld("a.b.c.d.e")).toBeNull();
+  });
+
+  it("accepts hyphens inside labels", () => {
+    expect(validateTld("my-tld")).toBeNull();
+    expect(validateTld("dev.my-network.com")).toBeNull();
+  });
+
+  it("rejects empty labels", () => {
+    expect(validateTld(".example.com")).toMatch(/labels cannot be empty/);
+    expect(validateTld("example.com.")).toMatch(/labels cannot be empty/);
+    expect(validateTld("example..com")).toMatch(/labels cannot be empty/);
+  });
+
+  it("rejects hyphens at label edges", () => {
+    expect(validateTld("-bad.example.com")).toMatch(/must contain only/);
+    expect(validateTld("bad-.example.com")).toMatch(/must contain only/);
+  });
+
+  it("rejects labels over 63 characters", () => {
+    expect(validateTld(`${"a".repeat(64)}.example.com`)).toMatch(/63-character/);
+  });
+
+  it("rejects TLDs over 253 characters", () => {
+    const label = "a".repeat(63);
+    const long = [label, label, label, label, "example"].join(".");
+    expect(validateTld(long)).toMatch(/253-character/);
   });
 
   it("allows public TLDs (they produce warnings elsewhere)", () => {

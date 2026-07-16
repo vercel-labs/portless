@@ -35,15 +35,15 @@ Any TLD in the Public Suffix List works: `.dev`, `.app`, `.com`, `.io`, etc.
 
 ### Use a domain you own
 
-Bare TLDs like `.dev` mean `myapp.dev` could collide with a real domain. Use a subdomain of a domain you control:
+Bare TLDs like `.dev` mean `myapp.dev` could collide with a real domain. Use a multi-segment TLD under a domain you control, so the app name stays clean and the domain structure lives in the TLD:
 
 ```bash
-portless proxy start --tld dev
-portless myapp.local.yourcompany next dev
+portless proxy start --tld local.yourcompany.dev
+portless myapp next dev
 # -> https://myapp.local.yourcompany.dev
 ```
 
-This ensures no outbound traffic reaches something you don't own. For teams, set a wildcard DNS record (`*.local.yourcompany.dev -> 127.0.0.1`) so every developer gets resolution without `/etc/hosts`.
+This ensures no outbound traffic reaches something you don't own. For teams, set a wildcard DNS record (`*.local.yourcompany.dev -> 127.0.0.1`) so every developer gets resolution without `/etc/hosts`, and every developer shares the same redirect URIs in the provider console.
 
 ## Provider Setup
 

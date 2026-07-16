@@ -199,6 +199,10 @@ export function parseHostname(input: string, tld = "localhost"): string {
     }
   }
 
+  if (hostname.length > 253) {
+    throw new Error(`Invalid hostname "${hostname}": exceeds 253-character DNS limit`);
+  }
+
   return hostname;
 }
 
@@ -214,7 +218,7 @@ export function parseHostnames(input: string, tlds: readonly string[] = ["localh
     .split("/")[0]
     .toLowerCase();
 
-  for (const tld of uniqueTlds) {
+  for (const tld of [...uniqueTlds].sort((a, b) => b.length - a.length)) {
     const suffix = `.${tld}`;
     if (baseInput.endsWith(suffix)) {
       baseInput = baseInput.slice(0, -suffix.length);

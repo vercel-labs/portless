@@ -1878,7 +1878,7 @@ ${colors.bold("Options:")}
   --cert <path>                 Use a custom TLS certificate
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost; repeat for more
+  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
@@ -1895,7 +1895,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
-  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test)
+  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
@@ -2864,6 +2864,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
+  ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
@@ -2951,7 +2952,9 @@ ${colors.bold("LAN mode (--lan):")}
     if (args[i] === "--tld") {
       const tldValue = args[i + 1];
       if (!tldValue || tldValue.startsWith("-")) {
-        console.error(colors.red("Error: --tld requires a TLD value (e.g. test, localhost)."));
+        console.error(
+          colors.red("Error: --tld requires a TLD value (e.g. test, dev.example.com).")
+        );
         process.exit(1);
       }
       tldFlagValues.push(tldValue);
