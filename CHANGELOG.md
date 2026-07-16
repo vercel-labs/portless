@@ -1,8 +1,19 @@
 # Changelog
 
-## 0.15.3
+## 0.15.4
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Loopback-only proxy binding**: Outside LAN mode, the proxy and HTTP redirect listeners now bind only to `127.0.0.1` and `::1`, so Portless routes cannot be reached through LAN, VPN, or other network interfaces. LAN mode still binds to all interfaces explicitly. (#361)
+
+### Contributors
+
+- @ctate
+<!-- release:end -->
+
+## 0.15.3
 
 ### Bug Fixes
 
@@ -13,7 +24,6 @@
 
 - @ctate
 - @gerardbalaoro
-<!-- release:end -->
 
 ## 0.15.2
 
