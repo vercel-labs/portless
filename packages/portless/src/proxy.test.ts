@@ -1,4 +1,5 @@
 import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as http2 from "node:http2";
@@ -1626,11 +1627,15 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     const backend = trackServer(http.createServer());
     backend.on("upgrade", (req, socket) => {
       Object.assign(received, req.headers);
+      const accept = crypto
+        .createHash("sha1")
+        .update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest("base64");
       socket.write(
         "HTTP/1.1 101 Switching Protocols\r\n" +
           "Upgrade: websocket\r\n" +
           "Connection: Upgrade\r\n" +
-          "Sec-WebSocket-Accept: backend-answer\r\n" +
+          `Sec-WebSocket-Accept: ${accept}\r\n` +
           "\r\n"
       );
       socket.on("data", (d) => socket.write(`echo:${d}`));
@@ -1692,6 +1697,61 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       expect(received.host).toBe("ws.localhost");
       expect(received["x-portless-hops"]).toBe("1");
       expect(received["x-forwarded-proto"]).toBe("https");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("answers 502 when the backend's Sec-WebSocket-Accept does not match", async () => {
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (_req, socket) => {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "Sec-WebSocket-Accept: not-the-right-hash\r\n" +
+          "\r\n"
+      );
+      socket.on("data", (d) => socket.write(`leak:${d}`));
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+        onError: () => {},
+      })
+    );
+    await listen(server);
+
+    const { client } = await h2Session(server);
+    try {
+      const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/_next/webpack-hmr",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+          "sec-websocket-version": "13",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          let body = "";
+          req.on("data", (d: Buffer) => (body += d.toString()));
+          req.on("end", () => resolve({ status: headers[":status"] as number, body }));
+        });
+      });
+
+      // The tunnel must not open: no payload from the backend leaks through.
+      expect(result.status).toBe(502);
+      expect(result.body).toContain("invalid response to the WebSocket handshake");
+      expect(result.body).not.toContain("leak:");
     } finally {
       client.close();
     }

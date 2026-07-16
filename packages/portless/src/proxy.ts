@@ -10,6 +10,12 @@ import { ARROW_SVG, renderPage } from "./pages.js";
 export const PORTLESS_HEADER = "X-Portless";
 
 /**
+ * RFC 6455 magic GUID: a compliant WebSocket backend answers an upgrade with
+ * Sec-WebSocket-Accept = base64(sha1(Sec-WebSocket-Key + WS_GUID)).
+ */
+const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+
+/**
  * HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2 responses.
  * These must be stripped when proxying an HTTP/1.1 backend response
  * back to an HTTP/2 client.
@@ -496,7 +502,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     // end-to-end between client and backend.
     proxyReqHeaders.connection = "Upgrade";
     proxyReqHeaders.upgrade = "websocket";
-    proxyReqHeaders["sec-websocket-key"] = crypto.randomBytes(16).toString("base64");
+    const wsKey = crypto.randomBytes(16).toString("base64");
+    proxyReqHeaders["sec-websocket-key"] = wsKey;
     if (!proxyReqHeaders["sec-websocket-version"]) {
       proxyReqHeaders["sec-websocket-version"] = "13";
     }
@@ -510,6 +517,25 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
+      // The h2 client never sees the synthesized key, so this proxy is the
+      // only party that can verify the backend's accept hash. A 101 with the
+      // wrong hash is not a WebSocket server speaking RFC 6455; bridging it
+      // would hand the client a broken tunnel with nothing to diagnose.
+      const expectedAccept = crypto
+        .createHash("sha1")
+        .update(wsKey + WS_GUID)
+        .digest("base64");
+      if (proxyRes.headers["sec-websocket-accept"] !== expectedAccept) {
+        onError(
+          `WebSocket proxy error for ${getRequestHost(compatReq)}: backend answered the handshake with an invalid Sec-WebSocket-Accept`
+        );
+        proxySocket.destroy();
+        res.writeHead(502, { "content-type": "text/plain" });
+        res.end(
+          "Bad Gateway: the target app sent an invalid response to the WebSocket handshake.\n"
+        );
+        return;
+      }
       const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
       for (const h of HOP_BY_HOP_HEADERS) {
         delete responseHeaders[h];
