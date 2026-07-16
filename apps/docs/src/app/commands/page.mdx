@@ -238,6 +238,8 @@ portless proxy start --lan --https
 portless proxy start --lan --ip 192.168.1.42   # manual IP override
 ```
 
+Without LAN mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` and `::1`. LAN mode explicitly binds them to `0.0.0.0` and `::`.
+
 Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
 
 Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-utils`). Not supported on Windows.

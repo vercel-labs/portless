@@ -107,13 +107,14 @@ async function getFreePort(): Promise<number> {
 async function waitForHttpHeader(
   port: number,
   headerName: string,
-  expectedValue: string
+  expectedValue: string,
+  hostname = "127.0.0.1"
 ): Promise<void> {
   for (let i = 0; i < 50; i++) {
     const matched = await new Promise<boolean>((resolve) => {
       const req = http.request(
         {
-          hostname: "127.0.0.1",
+          hostname,
           port,
           method: "HEAD",
           timeout: 200,
@@ -133,7 +134,7 @@ async function waitForHttpHeader(
     if (matched) return;
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`Timed out waiting for ${headerName} on port ${port}`);
+  throw new Error(`Timed out waiting for ${headerName} on ${hostname}:${port}`);
 }
 
 async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
@@ -1502,6 +1503,26 @@ describe("CLI", () => {
       expect(stop.stdout).toContain("Proxy stopped");
     });
 
+    it("accepts connections on IPv6 loopback when available", async (ctx) => {
+      const ipv6Probe = http.createServer();
+      const ipv6Available = await new Promise<boolean>((resolve, reject) => {
+        ipv6Probe.once("error", (err: NodeJS.ErrnoException) => {
+          if (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL") {
+            resolve(false);
+          } else {
+            reject(err);
+          }
+        });
+        ipv6Probe.listen(0, "::1", () => resolve(true));
+      });
+      if (!ipv6Available) return ctx.skip();
+      await new Promise<void>((resolve) => ipv6Probe.close(() => resolve()));
+
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1", "::1");
+    });
+
     it("reports not running when stopped twice", () => {
       const start = run(["proxy", "start"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -1583,7 +1604,7 @@ describe("CLI", () => {
         // Before the fix, the daemon would re-run the failing trust flow,
         // potentially stalling long enough for waitForProxy to time out.
         // After the fix, the parent passes --skip-trust to the daemon.
-        expect(start.status).toBe(0);
+        expect(start.status, start.stdout + start.stderr).toBe(0);
         expect(start.stdout).toContain(`proxy started on port ${testPort}`);
 
         // Parent should warn that trust failed

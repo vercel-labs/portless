@@ -20,10 +20,12 @@ import {
   getDefaultTld,
   getDefaultTlds,
   getProtocolPort,
+  getProxyBindTargets,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
   isPortListening,
   isProxyRunning,
+  listenOnProxyInterface,
   parsePidFromNetstat,
   parseTldList,
   readLanMarker,
@@ -37,6 +39,80 @@ import {
   writeTldsFile,
   writeTlsMarker,
 } from "./cli-utils.js";
+
+describe("proxy listener interface", () => {
+  it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
+    expect(getProxyBindTargets(false)).toEqual([
+      { host: "127.0.0.1" },
+      { host: "::1", ipv6Only: true },
+    ]);
+  });
+
+  it("uses IPv4 and IPv6 unspecified addresses in LAN mode", () => {
+    expect(getProxyBindTargets(true)).toEqual([
+      { host: "0.0.0.0" },
+      { host: "::", ipv6Only: true },
+    ]);
+  });
+
+  it("binds IPv4 loopback outside LAN mode", async () => {
+    const target = getProxyBindTargets(false)[0]!;
+
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      listenOnProxyInterface(server, 0, target, resolve);
+    });
+
+    try {
+      const address = server.address();
+      expect(address && typeof address !== "string" ? address.address : null).toBe("127.0.0.1");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("binds IPv6 loopback outside LAN mode when available", async (ctx) => {
+    const target = getProxyBindTargets(false)[1]!;
+
+    const server = net.createServer();
+    const ipv6Available = await new Promise<boolean>((resolve, reject) => {
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL") {
+          resolve(false);
+        } else {
+          reject(err);
+        }
+      });
+      listenOnProxyInterface(server, 0, target, () => resolve(true));
+    });
+    if (!ipv6Available) return ctx.skip();
+
+    try {
+      const address = server.address();
+      expect(address && typeof address !== "string" ? address.address : null).toBe("::1");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("binds the IPv4 unspecified address in LAN mode", async () => {
+    const target = getProxyBindTargets(true)[0]!;
+
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      listenOnProxyInterface(server, 0, target, resolve);
+    });
+
+    try {
+      const address = server.address();
+      expect(address && typeof address !== "string" ? address.address : null).toBe("0.0.0.0");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
 
 describe("findFreePort", () => {
   it("returns a port in the default range", async () => {

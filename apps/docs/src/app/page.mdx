@@ -130,6 +130,8 @@ Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflic
 
 Portless runs an HTTPS reverse proxy on port 443 by default. Each app registers a route mapping its hostname to an assigned port. Requests to `https://<name>.localhost` are proxied to the app.
 
+The proxy listens only on the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`, by default. Network interfaces are exposed only when LAN mode is explicitly enabled.
+
 ```
 Browser (myapp.localhost) -> proxy (port 443) -> App (random port)
 ```

@@ -34,6 +34,23 @@ export const INTERNAL_LAN_IP_ENV = "PORTLESS_INTERNAL_LAN_IP";
 /** Internal-only flag used to pass an auto-detected LAN IP through re-exec. */
 export const INTERNAL_LAN_IP_FLAG = "--lan-ip-auto";
 
+/** Listener address used when the proxy is only accessible from this machine. */
+export const IPV4_LOOPBACK_PROXY_HOST = "127.0.0.1";
+
+/** IPv6 listener address used when the proxy is only accessible from this machine. */
+export const IPV6_LOOPBACK_PROXY_HOST = "::1";
+
+/** IPv4 listener address used when LAN mode explicitly exposes the proxy. */
+export const IPV4_LAN_PROXY_HOST = "0.0.0.0";
+
+/** IPv6 listener address used when LAN mode explicitly exposes the proxy. */
+export const IPV6_LAN_PROXY_HOST = "::";
+
+export type ProxyBindTarget = {
+  host: string;
+  ipv6Only?: boolean;
+};
+
 /**
  * @deprecated No longer used. All state now lives in USER_STATE_DIR.
  * Kept as a read-only reference for migration and cleanup of old installs.
@@ -91,6 +108,26 @@ export const SIGNAL_CODES: Record<string, number> = {
   SIGKILL: 9,
   SIGTERM: 15,
 };
+
+/** Return explicit IPv4 and IPv6 listener targets for the effective proxy mode. */
+export function getProxyBindTargets(lanMode: boolean): ProxyBindTarget[] {
+  return lanMode
+    ? [{ host: IPV4_LAN_PROXY_HOST }, { host: IPV6_LAN_PROXY_HOST, ipv6Only: true }]
+    : [{ host: IPV4_LOOPBACK_PROXY_HOST }, { host: IPV6_LOOPBACK_PROXY_HOST, ipv6Only: true }];
+}
+
+/**
+ * Start a proxy listener on loopback unless LAN mode explicitly enables
+ * access through the machine's network interfaces.
+ */
+export function listenOnProxyInterface(
+  server: net.Server,
+  port: number,
+  target: ProxyBindTarget,
+  listener?: () => void
+): void {
+  server.listen({ port, host: target.host, ipv6Only: target.ipv6Only }, listener);
+}
 
 /**
  * Kill a child process and its entire process tree. On Unix, when the child
