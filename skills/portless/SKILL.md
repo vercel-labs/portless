@@ -193,7 +193,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### HTTP/2 + HTTPS
 
-HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with many files). First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
+HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with many files). WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441 extended CONNECT), so dev server HMR works through the proxy. First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
 
 ```bash
 portless proxy start --cert ./c.pem --key ./k.pem  # Use custom certs
