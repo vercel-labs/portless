@@ -495,6 +495,12 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "127.0.0.1"]);
   });
 
+  it("skips injection when flags use the --flag=value form", () => {
+    const args = ["vite", "dev", "--port=3000", "--host=0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "dev", "--port=3000", "--host=0.0.0.0"]);
+  });
+
   it("skips --host injection when --host is already present", () => {
     const args = ["vite", "dev", "--host", "0.0.0.0"];
     injectFrameworkFlags(args, 4567);
@@ -926,6 +932,32 @@ describe("injectPackageScriptFrameworkFlags", () => {
     const args = ["npm", "run", "dev", "--", "--port", "3000"];
     injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
     expect(args).toEqual(["npm", "run", "dev", "--", "--port", "3000"]);
+  });
+
+  it("does not duplicate --port=<number> supplied by the script or user", () => {
+    writeScripts({ dev: "vite dev --port=5000 --host=127.0.0.1" });
+    const scriptArgs = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(scriptArgs, 4567, pkgDir);
+    expect(scriptArgs).toEqual(["bun", "run", "dev"]);
+
+    writeScripts({ dev: "vite dev --host=127.0.0.1" });
+    const userArgs = ["bun", "run", "dev", "--port=3000"];
+    injectPackageScriptFrameworkFlags(userArgs, 4567, pkgDir);
+    expect(userArgs).toEqual(["bun", "run", "dev", "--port=3000"]);
+  });
+
+  it("does not forward flags to compound scripts", () => {
+    writeScripts({ dev: "vite dev && node second.js" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("does not forward server flags to framework build commands", () => {
+    writeScripts({ build: "vite build" });
+    const args = ["bun", "run", "build"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "build"]);
   });
 
   it("does not forward for non-framework scripts", () => {

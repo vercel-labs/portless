@@ -1104,14 +1104,14 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
 
-  if (!commandArgs.includes("--port")) {
+  if (!hasCliOption(commandArgs, "--port")) {
     commandArgs.push("--port", port.toString());
     if (framework.strictPort) {
       commandArgs.push("--strictPort");
     }
   }
 
-  if (!commandArgs.includes("--host")) {
+  if (!hasCliOption(commandArgs, "--host")) {
     // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
     // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
@@ -1123,6 +1123,12 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 
 /** Package managers whose `<pm> run <script>` delegates to a package.json script. */
 const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+const NON_SERVER_FRAMEWORK_SUBCOMMANDS = new Set(["build"]);
+const SHELL_CONTROL_OPERATORS = new Set(["&&", "||", ";", "|", "&"]);
+
+function hasCliOption(args: string[], option: string): boolean {
+  return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
+}
 
 /**
  * When the child command delegates to a package script (`<pm> run <script>`),
@@ -1152,10 +1158,13 @@ export function injectPackageScriptFrameworkFlags(
 
   const rawScript = resolveScript(scriptName, packageDir);
   if (!rawScript) return;
+  if (rawScript.some((arg) => SHELL_CONTROL_OPERATORS.has(arg))) return;
+  if (rawScript[1] && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(rawScript[1])) return;
 
   // Probe the script plus any user-supplied trailing args so an existing
   // --port/--host (in either place) suppresses injection.
   const userExtras = commandArgs.slice(3).filter((arg) => arg !== "--");
+  if (hasCliOption([...rawScript, ...userExtras], "--port")) return;
   const probe = [...rawScript, ...userExtras];
   injectFrameworkFlags(probe, port);
   const forwardedFlags = probe.slice(rawScript.length + userExtras.length);
