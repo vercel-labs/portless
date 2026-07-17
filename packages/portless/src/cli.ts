@@ -1825,6 +1825,8 @@ ${colors.bold("How it works:")}
 
 ${colors.bold("HTTP/2 + HTTPS (default):")}
   HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
+  WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441
+  extended CONNECT), so dev server HMR works through the proxy.
   On first use, portless generates a local CA and adds it to your
   system trust store. No browser warnings. Disable with --no-tls.
   On WSL, portless also adds the CA to the Windows user certificate store.
