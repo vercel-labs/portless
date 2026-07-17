@@ -21,6 +21,7 @@ import {
   getDefaultTlds,
   getProtocolPort,
   getProxyBindTargets,
+  getRiskyTldReason,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
   isPortListening,
@@ -1116,6 +1117,39 @@ describe("readTldFromDir / writeTldFile", () => {
   it("handles removing the default TLD file when it does not exist", () => {
     writeTldFile(tmpDir, DEFAULT_TLD);
     expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
+  });
+
+  it("skips invalid persisted entries instead of resetting the whole list", () => {
+    const tooLong = "a".repeat(70);
+    fs.writeFileSync(
+      path.join(tmpDir, "proxy.tlds"),
+      JSON.stringify(["test", tooLong, "internal"])
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(readTldsFromDir(tmpDir)).toEqual(["test", "internal"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("getRiskyTldReason", () => {
+  it("matches exact risky TLDs", () => {
+    expect(getRiskyTldReason("dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("com")).toMatch(/public TLD/);
+  });
+
+  it("matches multi-segment TLDs with a risky suffix", () => {
+    expect(getRiskyTldReason("example.dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("dev.example.com")).toMatch(/public TLD/);
+  });
+
+  it("returns undefined for safe TLDs", () => {
+    expect(getRiskyTldReason("test")).toBeUndefined();
+    expect(getRiskyTldReason("dev.internal")).toBeUndefined();
+    expect(getRiskyTldReason("devx")).toBeUndefined();
   });
 });
 

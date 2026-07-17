@@ -227,7 +227,7 @@ Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflic
 
 ### Multi-segment TLDs
 
-The `--tld` value accepts any valid DNS hostname, so a domain you own can be used as the "TLD". This gives local URLs the same structure as production, which keeps OAuth redirect URIs, cross-subdomain cookies, and host-based routing working the same way in both environments:
+The `--tld` value accepts a lowercase DNS name (one or more dot-separated labels, no trailing dot), so a domain you own can be used as the "TLD". This gives local URLs the same structure as production, which keeps OAuth redirect URIs, cross-subdomain cookies, and host-based routing working the same way in both environments:
 
 ```bash
 portless proxy start --tld dev.example.com
@@ -235,7 +235,7 @@ portless myapp next dev
 # -> https://myapp.dev.example.com
 ```
 
-Each label must follow DNS rules: lowercase letters, digits, and interior hyphens, with at most 63 characters per label and 253 characters total.
+Each label must follow DNS rules: lowercase letters, digits, and interior hyphens, with at most 63 characters per label and 253 characters total. The full hostname (`app.TLD`) is also subject to the 253-character DNS limit.
 
 The proxy auto-syncs `/etc/hosts` for registered hostnames, so `myapp.dev.example.com` resolves to `127.0.0.1` on your machine. To reach the proxy from other devices (a tailnet, LAN, or intranet), point a wildcard DNS record such as `*.dev.example.com` at the machine running the proxy and disable hosts sync with `PORTLESS_SYNC_HOSTS=0` if you prefer DNS-only resolution.
 

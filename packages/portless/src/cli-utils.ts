@@ -306,6 +306,20 @@ export const RISKY_TLDS = new Map<string, string>([
 ]);
 
 /**
+ * Look up the risky-TLD warning for a configured TLD. Matches exact entries
+ * ("dev") and multi-segment TLDs whose public suffix is risky ("example.dev"),
+ * since HSTS preload and public-DNS pitfalls apply to the whole suffix tree.
+ */
+export function getRiskyTldReason(tld: string): string | undefined {
+  const exact = RISKY_TLDS.get(tld);
+  if (exact) return exact;
+  for (const [risky, reason] of RISKY_TLDS) {
+    if (tld.endsWith(`.${risky}`)) return reason;
+  }
+  return undefined;
+}
+
+/**
  * Validate a TLD string. Returns an error message if invalid, or null if OK.
  * Does not check for risky TLDs (those produce warnings, not errors).
  */
@@ -375,7 +389,19 @@ export function readTldsFromDir(dir: string): string[] {
           .map((line) => line.trim())
           .filter(Boolean);
     if (!Array.isArray(parsed)) return [readLegacyTldFromDir(dir)];
-    const tlds = parsed.flatMap((value) => (typeof value === "string" ? parseTldList(value) : []));
+    // Skip invalid persisted entries individually so one bad TLD (e.g. written
+    // before validation tightened) does not silently reset the whole list.
+    const tlds = parsed.flatMap((value) => {
+      if (typeof value !== "string") return [];
+      try {
+        return parseTldList(value);
+      } catch (err) {
+        console.warn(
+          `Warning: ignoring invalid TLD entry in ${TLDS_FILE}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return [];
+      }
+    });
     return tlds.length > 0 ? [...new Set(tlds)] : [DEFAULT_TLD];
   } catch {
     return [readLegacyTldFromDir(dir)];

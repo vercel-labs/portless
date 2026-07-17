@@ -49,7 +49,6 @@ import {
   INTERNAL_LAN_IP_ENV,
   INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
-  RISKY_TLDS,
   WAIT_FOR_PROXY_INTERVAL_MS,
   WAIT_FOR_PROXY_MAX_ATTEMPTS,
   discoverState,
@@ -59,6 +58,7 @@ import {
   getDefaultPort,
   getDefaultTlds,
   getProxyBindTargets,
+  getRiskyTldReason,
   injectFrameworkFlags,
   isHttpsEnvDisabled,
   isPortListening,
@@ -3041,7 +3041,7 @@ ${colors.bold("LAN mode (--lan):")}
   }
 
   for (const configuredTld of tlds) {
-    const riskyReason = RISKY_TLDS.get(configuredTld);
+    const riskyReason = getRiskyTldReason(configuredTld);
     if (riskyReason && !lanMode) {
       console.warn(colors.yellow(`Warning: .${configuredTld}: ${riskyReason}`));
     }
