@@ -40,12 +40,14 @@ type RouteMetadataPatch = {
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
+  const r = value as RouteMapping;
   return (
     typeof value === "object" &&
     value !== null &&
-    typeof (value as RouteMapping).hostname === "string" &&
-    typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
+    typeof r.hostname === "string" &&
+    typeof r.port === "number" &&
+    typeof r.pid === "number" &&
+    (r.pathPrefix === undefined || typeof r.pathPrefix === "string")
   );
 }
 
@@ -57,9 +59,9 @@ export class RouteConflictError extends Error {
   readonly hostname: string;
   readonly existingPid: number;
 
-  constructor(hostname: string, existingPid: number) {
+  constructor(hostname: string, existingPid: number, pathPrefix?: string) {
     super(
-      `"${hostname}" is already registered by a running process (PID ${existingPid}). ` +
+      `"${hostname}${pathPrefix ?? ""}" is already registered by a running process (PID ${existingPid}). ` +
         `Use --force to override.`
     );
     this.name = "RouteConflictError";
@@ -153,6 +155,10 @@ export class RouteStore {
     }
   }
 
+  private matchesRoute(r: RouteMapping, hostname: string, pathPrefix?: string): boolean {
+    return r.hostname === hostname && r.pathPrefix === pathPrefix;
+  }
+
   // Route I/O
   // ---------------------------------------------------------------------------
 
@@ -219,7 +225,13 @@ export class RouteStore {
    * replaced. Returns the PID of the killed process (if any) so the caller can
    * log it.
    */
-  addRoute(hostname: string, port: number, pid: number, force = false): number | undefined {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    pathPrefix?: string
+  ): number | undefined {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -227,10 +239,10 @@ export class RouteStore {
     let killedPid: number | undefined;
     try {
       const routes = this.loadRoutes(true);
-      const existing = routes.find((r) => r.hostname === hostname);
+      const existing = routes.find((r) => this.matchesRoute(r, hostname, pathPrefix));
       if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
         if (!force) {
-          throw new RouteConflictError(hostname, existing.pid);
+          throw new RouteConflictError(hostname, existing.pid, pathPrefix);
         }
         // --force: kill the existing process before taking over
         try {
@@ -240,8 +252,9 @@ export class RouteStore {
           // Process may have exited between the check and the kill; non-fatal
         }
       }
-      const filtered = routes.filter((r) => r.hostname !== hostname);
+      const filtered = routes.filter((r) => !this.matchesRoute(r, hostname, pathPrefix));
       const entry: RouteMapping = { hostname, port, pid };
+      if (pathPrefix) entry.pathPrefix = pathPrefix;
       filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {
@@ -311,16 +324,16 @@ export class RouteStore {
 
   /**
    * Update metadata on an existing route entry. Only provided fields are
-   * merged; the route must already exist (matched by hostname).
+   * merged; the route must already exist (matched by hostname + pathPrefix).
    */
-  updateRoute(hostname: string, fields: RouteMetadataPatch): void {
+  updateRoute(hostname: string, fields: RouteMetadataPatch, pathPrefix?: string): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
       const routes = this.loadRoutes(true);
-      const route = routes.find((r) => r.hostname === hostname);
+      const route = routes.find((r) => this.matchesRoute(r, hostname, pathPrefix));
       if (!route) return;
       if ("tailscaleUrl" in fields) {
         if (fields.tailscaleUrl === null) delete route.tailscaleUrl;
@@ -351,19 +364,22 @@ export class RouteStore {
   }
 
   /**
-   * Remove a route by hostname. When `ownerPid` is provided, the entry is
-   * only removed while it is still owned by that pid. Exit cleanups must
-   * pass their own pid: after a `--force` takeover the killed process would
-   * otherwise deregister the route the new owner just registered.
+   * Remove a route by hostname (+ pathPrefix). When `ownerPid` is provided,
+   * the entry is only removed while it is still owned by that pid. Exit
+   * cleanups must pass their own pid: after a `--force` takeover the killed
+   * process would otherwise deregister the route the new owner just
+   * registered.
    */
-  removeRoute(hostname: string, ownerPid?: number): void {
+  removeRoute(hostname: string, ownerPid?: number, pathPrefix?: string): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
       const routes = this.loadRoutes(true).filter(
-        (r) => r.hostname !== hostname || (ownerPid !== undefined && r.pid !== ownerPid)
+        (r) =>
+          !this.matchesRoute(r, hostname, pathPrefix) ||
+          (ownerPid !== undefined && r.pid !== ownerPid)
       );
       this.saveRoutes(routes);
     } finally {

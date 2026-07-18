@@ -147,6 +147,18 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+### Path-based routing
+
+Route multiple apps under one hostname by URL path:
+
+```bash
+portless myapp vite dev                      # serves /
+portless myapp --path /api pnpm start        # serves /api/*
+portless myapp --path /docs next dev         # serves /docs/*
+```
+
+The proxy uses longest-prefix matching. The full request path is forwarded unchanged. Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain. Also available as `PORTLESS_PATH=/api` or per app in `portless.json` (`"path": "/api"`). Tailscale/ngrok tunnels dial the app's port directly, so shared URLs for a `--path` app include the prefix.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -184,6 +196,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                          |
 | `PORTLESS_TLD`        | Use one or more TLDs (e.g. localhost,test)                                  |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent          |
+| `PORTLESS_PATH`       | Path prefix for path-based routing (e.g. /api)                              |
 | `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)               |
 | `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)  |
 | `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`) |
@@ -312,6 +325,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless alias --remove <name>`                  | Remove a static route                                          |
 | `portless hosts sync`                             | Add routes to /etc/hosts (fixes Safari)                        |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
+| `portless <name> --path /prefix <cmd>`            | Route by URL path prefix (path-based routing)                  |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)              |
 | `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                    |
@@ -335,10 +349,11 @@ Optional config file. Portless looks for it in the current directory.
 | `script`  | string  | `"dev"`                    | Name of a package.json script to run                     |
 | `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
 | `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
+| `path`    | string  |                            | URL path prefix for path-based routing (e.g. `/api`)     |
 | `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
 | `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `path`). When `apps` is present, top-level fields apply only in single-app mode. Apps sharing a `name` with different `path` values are served under one hostname and dispatched by longest prefix.
 
 ### package.json "portless" key
 

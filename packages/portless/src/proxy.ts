@@ -2,7 +2,7 @@ import * as crypto from "node:crypto";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
-import type { ProxyServerOptions } from "./types.js";
+import type { ProxyServerOptions, RouteInfo } from "./types.js";
 import { createLoopbackConnection, escapeHtml, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
 
@@ -83,6 +83,12 @@ const PORTLESS_HOPS_HEADER = "x-portless-hops";
  */
 const MAX_PROXY_HOPS = 5;
 
+/** Test whether a request path matches a route's path prefix at a `/` boundary. */
+function matchesPathPrefix(prefix: string | undefined, pathname: string): boolean {
+  if (!prefix || prefix === "/") return true;
+  return pathname === prefix || pathname.startsWith(prefix + "/");
+}
+
 /** Authority (hostname, plus port when non-default) of a route's tailscaleUrl, or undefined if unset or invalid. */
 function tailscaleAuthority(tailscaleUrl: string | undefined): string | undefined {
   if (!tailscaleUrl) return undefined;
@@ -110,27 +116,51 @@ function normalizeAuthority(host: string): string {
 }
 
 /**
- * Find the route matching a request's host, which may include a port. Match
- * order: local hostname, tailscale authority (hostname and port), tailscale
- * hostname ignoring port, then wildcard subdomain. The authority tier
- * disambiguates apps sharing a `.ts.net` hostname on different ports; the
- * hostname tier keeps other-port requests resolving. `strict` drops the wildcard.
- * All comparisons run against the normalized authority so they are
- * case-insensitive and treat an explicit `:443` as the default HTTPS port.
+ * Find the route matching a request's host (which may include a port) and URL
+ * path. Match order: local hostname, tailscale authority (hostname and port),
+ * tailscale hostname ignoring port, then wildcard subdomain. `strict` drops
+ * the wildcard tier. Within the local-hostname and wildcard tiers, several
+ * routes may share a hostname and differ only by `pathPrefix`; the longest
+ * matching prefix wins and routes without a `pathPrefix` act as root
+ * catch-all. Tailscale tiers skip path selection: a tailscale URL identifies
+ * a single route and its requests are not path-prefixed.
  */
 function findRoute(
-  routes: { hostname: string; port: number; tailscaleUrl?: string }[],
+  routes: RouteInfo[],
   host: string,
+  url: string,
   strict?: boolean
-): { hostname: string; port: number } | undefined {
+): RouteInfo | undefined {
   const authority = normalizeAuthority(host);
   const hostname = authority.split(":")[0];
-  return (
-    routes.find((r) => r.hostname.toLowerCase() === hostname) ||
-    routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === authority) ||
-    routes.find((r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname) ||
-    (strict ? undefined : routes.find((r) => hostname.endsWith("." + r.hostname.toLowerCase())))
+  // A malformed request-target must not crash the proxy; fall back to "/" so
+  // no-prefix (catch-all) routes still match.
+  let pathname = "/";
+  try {
+    pathname = new URL(url, "http://localhost").pathname;
+  } catch {
+    // keep "/"
+  }
+
+  const pickByPath = (candidates: RouteInfo[]): RouteInfo | undefined => {
+    const [match] = candidates
+      .filter((r) => matchesPathPrefix(r.pathPrefix, pathname))
+      .sort((a, b) => (b.pathPrefix || "/").length - (a.pathPrefix || "/").length);
+    return match;
+  };
+
+  const exact = routes.filter((r) => r.hostname.toLowerCase() === hostname);
+  if (exact.length > 0) return pickByPath(exact);
+
+  const tsAuthorityMatch = routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === authority);
+  if (tsAuthorityMatch) return tsAuthorityMatch;
+  const tsHostnameMatch = routes.find(
+    (r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname
   );
+  if (tsHostnameMatch) return tsHostnameMatch;
+
+  if (strict) return undefined;
+  return pickByPath(routes.filter((r) => hostname.endsWith("." + r.hostname.toLowerCase())));
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
@@ -169,6 +199,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const routes = getRoutes();
     const rawHost = getRequestHost(req);
     const host = rawHost.split(":")[0];
+    const url = req.url || "/";
 
     if (!host) {
       res.writeHead(400, { "Content-Type": "text/plain" });
@@ -199,7 +230,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, rawHost, strict);
+    const route = findRoute(routes, rawHost, url, strict);
 
     if (!route) {
       const safeHost = escapeHtml(host);
@@ -208,7 +239,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       const safeSuggestion = escapeHtml(strippedHost);
       const routesList =
         routes.length > 0
-          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
+          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes
+              .map((r) => {
+                const displayName = r.pathPrefix
+                  ? `${escapeHtml(r.hostname)}${escapeHtml(r.pathPrefix)}`
+                  : escapeHtml(r.hostname);
+                return `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls, r.pathPrefix))}" class="card-link"><span class="name">${displayName}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`;
+              })
+              .join("")}</ul></div>`
           : '<p class="empty">No apps running.</p>';
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(
@@ -244,7 +282,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       {
         // Dial via createLoopbackConnection so ::1-only backends work too.
         createConnection: () => createLoopbackConnection(route.port),
-        path: req.url,
+        path: url,
         method: req.method,
         headers: proxyReqHeaders,
       },
@@ -327,7 +365,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
 
     const routes = getRoutes();
-    const route = findRoute(routes, getRequestHost(req), strict);
+    const url = req.url || "/";
+    const route = findRoute(routes, getRequestHost(req), url, strict);
 
     if (!route) {
       socket.destroy();
@@ -356,7 +395,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const proxyReq = http.request({
       // Dial via createLoopbackConnection so ::1-only backends work too.
       createConnection: () => createLoopbackConnection(route.port),
-      path: req.url,
+      path: url,
       method: req.method,
       headers: proxyReqHeaders,
     });

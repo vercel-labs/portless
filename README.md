@@ -90,8 +90,20 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 | `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
 | `appPort` | number  | auto     | Fixed port for the child process.                         |
 | `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
+| `path`    | string  |          | URL path prefix for path-based routing (e.g. `/api`).     |
 | `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
 | `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+
+Apps sharing a `name` with different `path` values are served under one hostname and dispatched by longest prefix:
+
+```json
+{
+  "apps": {
+    "apps/web": { "name": "myapp" },
+    "apps/api": { "name": "myapp", "path": "/api" }
+  }
+}
+```
 
 ### package.json "portless" key
 
@@ -104,7 +116,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `path`):
 
 ```json
 {
@@ -199,6 +211,22 @@ portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+
+## Path-based routing
+
+Route multiple apps under one hostname by URL path:
+
+```bash
+portless myapp vite dev                  # serves /
+portless myapp --path /api pnpm start    # serves /api/*
+portless myapp --path /docs next dev     # serves /docs/*
+```
+
+The proxy uses longest-prefix matching to dispatch requests. The full request path is forwarded to the backend unchanged — `--path /api` does not strip `/api` before proxying, so your app must serve its routes under that prefix (or set a base path). Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain and route by path.
+
+Also available via environment variable: `PORTLESS_PATH=/api`, or per app in `portless.json` (`"path": "/api"`).
+
+Tailscale and ngrok tunnels dial the app's port directly, bypassing the proxy's path dispatch; since the path is never stripped, the shared URL printed for a `--path` app includes the prefix.
 
 ## Custom TLD
 
@@ -359,8 +387,8 @@ Requires the ngrok CLI to be installed and authenticated. If ngrok reports an au
 ```bash
 portless                        # Run dev script through proxy
 portless                        # From monorepo root: run all workspace packages
-portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
-portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
+portless run [--name <name>] [--path <prefix>] [cmd] [args...]  # Infer name, run through proxy
+portless <name> [--path <prefix>] <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route
@@ -408,6 +436,7 @@ portless service uninstall       # Remove the startup service
 --state-dir <path>               Use a custom state directory with service install
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
+--path <prefix>                  URL path prefix for path-based routing (e.g. /api)
 --tailscale                      Share the app on your Tailscale network (tailnet)
 --funnel                         Share the app publicly via Tailscale Funnel
 --ngrok                          Share the app publicly via ngrok
@@ -427,6 +456,7 @@ PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode
 PORTLESS_TLD=<tld>[,<tld>]       Use one or more TLDs (e.g. localhost,test)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
+PORTLESS_PATH=<path>             Path prefix for path-based routing (e.g. /api)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)

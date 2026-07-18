@@ -281,6 +281,42 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("accepts a valid path prefix", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ name: "myapp", path: "/api" })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result?.config.path).toBe("/api");
+  });
+
+  it("accepts path in apps entries", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ apps: { "apps/api": { name: "myapp", path: "/api" } } })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result?.config.apps?.["apps/api"].path).toBe("/api");
+  });
+
+  it("throws when path is not a string", () => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ path: 42 }));
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
+  it("throws when path contains invalid characters", () => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ path: "/api?x=1" }));
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
+  it("throws when an apps entry path is invalid", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ apps: { "apps/web": { name: "web", path: "/a//b" } } })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
   it("warns on unknown top-level keys", () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fs.writeFileSync(
@@ -309,6 +345,12 @@ describe("resolveAppConfig", () => {
     const config = { name: "myapp", script: "dev" };
     const result = resolveAppConfig(config, "/repo", "/repo");
     expect(result).toEqual({ name: "myapp", script: "dev", appPort: undefined, proxy: undefined });
+  });
+
+  it("returns the top-level path when no apps key", () => {
+    const config = { name: "myapp", path: "/api" };
+    const result = resolveAppConfig(config, "/repo", "/repo");
+    expect(result.path).toBe("/api");
   });
 
   it("returns proxy field from top-level config", () => {

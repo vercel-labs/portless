@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { normalizePathPrefix } from "./utils.js";
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -13,6 +14,8 @@ export interface AppConfig {
   script?: string;
   appPort?: number;
   proxy?: boolean;
+  /** URL path prefix for path-based routing (e.g. "/api"). */
+  path?: string;
 }
 
 export interface PortlessConfig extends AppConfig {
@@ -125,7 +128,13 @@ export function resolveAppConfig(
     }
     return {};
   }
-  return { name: config.name, script: config.script, appPort: config.appPort, proxy: config.proxy };
+  return {
+    name: config.name,
+    script: config.script,
+    appPort: config.appPort,
+    proxy: config.proxy,
+    path: config.path,
+  };
 }
 
 /**
@@ -294,8 +303,19 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo"]);
-const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy"]);
+const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "path", "apps", "turbo"]);
+const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "path"]);
+
+function validatePathValue(value: unknown, label: string, configPath: string): void {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new ConfigValidationError(`"${label}" in ${configPath} must be a non-empty string.`);
+  }
+  try {
+    normalizePathPrefix(value);
+  } catch (err) {
+    throw new ConfigValidationError(`"${label}" in ${configPath}: ${(err as Error).message}`);
+  }
+}
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) {
@@ -333,6 +353,10 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
     if (typeof obj.proxy !== "boolean") {
       throw new ConfigValidationError(`"proxy" in ${configPath} must be a boolean.`);
     }
+  }
+
+  if (obj.path !== undefined) {
+    validatePathValue(obj.path, "path", configPath);
   }
 
   if (obj.turbo !== undefined) {
@@ -387,6 +411,9 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
     if (typeof obj.proxy !== "boolean") {
       throw new ConfigValidationError(`"${prefix}.proxy" in ${configPath} must be a boolean.`);
     }
+  }
+  if (obj.path !== undefined) {
+    validatePathValue(obj.path, `${prefix}.path`, configPath);
   }
 
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
