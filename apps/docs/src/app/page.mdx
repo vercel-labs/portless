@@ -124,6 +124,16 @@ portless myapp next dev
 
 When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
+The `--tld` value accepts a lowercase DNS name such as `dev.example.com`, so a domain you own can be used as the "TLD":
+
+```bash
+portless proxy start --tld dev.example.com
+portless myapp next dev
+# -> https://myapp.dev.example.com
+```
+
+This gives local URLs the same structure as production, which keeps OAuth redirect URIs, cross-subdomain cookies, and host-based routing working the same way in both environments. Each label must follow DNS rules: lowercase letters, digits, and interior hyphens, with at most 63 characters per label and 253 characters total.
+
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
 ## How it works
