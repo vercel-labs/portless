@@ -226,5 +226,23 @@ export function parseHostnames(input: string, tlds: readonly string[] = ["localh
     }
   }
 
-  return uniqueTlds.map((tld) => parseHostname(baseInput, tld));
+  // Skip a TLD that fails for TLD-specific reasons (e.g. app.TLD exceeds the
+  // 253-char DNS limit) instead of losing the valid TLDs in the same list.
+  // Throw only when no TLD survives, so input-wide errors still surface.
+  const hostnames: string[] = [];
+  const skipped: string[] = [];
+  let firstError: unknown;
+  for (const tld of uniqueTlds) {
+    try {
+      hostnames.push(parseHostname(baseInput, tld));
+    } catch (err) {
+      firstError ??= err;
+      skipped.push(`"${tld}": ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  if (hostnames.length === 0) throw firstError;
+  for (const detail of skipped) {
+    console.warn(`Warning: skipping TLD ${detail}`);
+  }
+  return hostnames;
 }

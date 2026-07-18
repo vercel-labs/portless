@@ -294,11 +294,11 @@ export const DEFAULT_TLD = "localhost";
 export const RISKY_TLDS = new Map<string, string>([
   ["local", "conflicts with mDNS/Bonjour on macOS"],
   ["dev", "Google-owned; browsers force HTTPS via preloaded HSTS"],
+  ["app", "Google-owned; browsers force HTTPS via preloaded HSTS"],
   ["com", "public TLD; DNS requests will leak to the internet"],
   ["org", "public TLD; DNS requests will leak to the internet"],
   ["net", "public TLD; DNS requests will leak to the internet"],
   ["io", "public TLD; DNS requests will leak to the internet"],
-  ["app", "public TLD; DNS requests will leak to the internet"],
   ["edu", "public TLD; DNS requests will leak to the internet"],
   ["gov", "public TLD; DNS requests will leak to the internet"],
   ["mil", "public TLD; DNS requests will leak to the internet"],
@@ -306,15 +306,25 @@ export const RISKY_TLDS = new Map<string, string>([
 ]);
 
 /**
+ * Risky TLDs whose failure mode applies to the whole suffix tree, so
+ * multi-segment TLDs under them inherit the risk: mDNS claims all of
+ * `*.local`, and the `.dev`/`.app` HSTS preload entries carry
+ * includeSubDomains. Ownership-class entries (com, org, ...) only matter
+ * for a bare TLD — a multi-segment TLD under a domain the user owns is
+ * the recommended setup, not a pitfall.
+ */
+const SUFFIX_RISKY_TLDS = new Set(["local", "dev", "app"]);
+
+/**
  * Look up the risky-TLD warning for a configured TLD. Matches exact entries
- * ("dev") and multi-segment TLDs whose public suffix is risky ("example.dev"),
- * since HSTS preload and public-DNS pitfalls apply to the whole suffix tree.
+ * ("dev"), plus multi-segment TLDs whose suffix carries a tree-wide risk
+ * ("example.dev" inherits the HSTS preload).
  */
 export function getRiskyTldReason(tld: string): string | undefined {
   const exact = RISKY_TLDS.get(tld);
   if (exact) return exact;
-  for (const [risky, reason] of RISKY_TLDS) {
-    if (tld.endsWith(`.${risky}`)) return reason;
+  for (const risky of SUFFIX_RISKY_TLDS) {
+    if (tld.endsWith(`.${risky}`)) return RISKY_TLDS.get(risky);
   }
   return undefined;
 }

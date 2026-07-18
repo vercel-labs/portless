@@ -326,4 +326,20 @@ describe("parseHostnames", () => {
   it("deduplicates TLDs", () => {
     expect(parseHostnames("myapp", ["test", "test"])).toEqual(["myapp.test"]);
   });
+
+  it("skips a TLD that pushes the hostname past 253 chars and keeps the rest", () => {
+    const label = "a".repeat(62);
+    const longTld = [label, label, label, label].join("."); // 251 chars, valid TLD
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(parseHostnames("myapp", ["localhost", longTld])).toEqual(["myapp.localhost"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(longTld));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("still throws when no TLD survives", () => {
+    expect(() => parseHostnames("my..app", ["localhost", "test"])).toThrow(/consecutive dots/);
+  });
 });

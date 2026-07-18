@@ -1138,12 +1138,19 @@ describe("readTldFromDir / writeTldFile", () => {
 describe("getRiskyTldReason", () => {
   it("matches exact risky TLDs", () => {
     expect(getRiskyTldReason("dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("app")).toMatch(/HSTS/);
     expect(getRiskyTldReason("com")).toMatch(/public TLD/);
   });
 
-  it("matches multi-segment TLDs with a risky suffix", () => {
+  it("matches multi-segment TLDs under tree-wide risky suffixes", () => {
     expect(getRiskyTldReason("example.dev")).toMatch(/HSTS/);
-    expect(getRiskyTldReason("dev.example.com")).toMatch(/public TLD/);
+    expect(getRiskyTldReason("myapp.app")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("foo.local")).toMatch(/mDNS/);
+  });
+
+  it("does not suffix-match ownership-class TLDs", () => {
+    expect(getRiskyTldReason("dev.example.com")).toBeUndefined();
+    expect(getRiskyTldReason("internal.example.org")).toBeUndefined();
   });
 
   it("returns undefined for safe TLDs", () => {

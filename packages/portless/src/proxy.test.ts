@@ -1728,6 +1728,65 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     }
   });
 
+  it("proxies WS-over-H2 extended CONNECT with a multi-segment custom TLD (issue #260)", async () => {
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (req, socket) => {
+      const accept = crypto
+        .createHash("sha1")
+        .update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest("base64");
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          `Sec-WebSocket-Accept: ${accept}\r\n` +
+          "\r\n"
+      );
+      socket.on("data", (d) => socket.write(`echo:${d}`));
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.dev.example.com", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tlds: ["dev.example.com"],
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const { client } = await h2Session(server);
+    try {
+      const result = await new Promise<{ status: number; echoed: string }>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/ws",
+          ":authority": "myapp.dev.example.com",
+          ":scheme": "https",
+          "sec-websocket-version": "13",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          req.write("ping");
+          req.on("data", (d: Buffer) => {
+            resolve({ status: headers[":status"] as number, echoed: d.toString() });
+            req.close();
+          });
+        });
+      });
+
+      expect(result.status).toBe(200);
+      expect(result.echoed).toBe("echo:ping");
+    } finally {
+      client.close();
+    }
+  });
+
   it("answers 502 when the backend's Sec-WebSocket-Accept does not match", async () => {
     const backend = trackServer(http.createServer());
     backend.on("upgrade", (_req, socket) => {
