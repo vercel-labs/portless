@@ -7,6 +7,8 @@ import * as path from "node:path";
 import {
   buildProxyStartConfig,
   BLOCKED_PORTS,
+  cmdEscape,
+  cmdEscapeCommand,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
@@ -941,6 +943,78 @@ describe("parseTldList", () => {
 
   it("rejects empty list entries", () => {
     expect(() => parseTldList("test,")).toThrow("TLD cannot be empty");
+  });
+});
+
+describe("cmdEscape", () => {
+  it("leaves safe arguments bare (cmd built-ins print added quotes literally)", () => {
+    expect(cmdEscape("dev")).toBe("dev");
+    expect(cmdEscape("--force")).toBe("--force");
+    expect(cmdEscape("--port=3000")).toBe("--port=3000");
+    expect(cmdEscape("C:\\tools\\script.js")).toBe("C:\\tools\\script.js");
+  });
+
+  it("preserves paths with spaces as a single argument", () => {
+    expect(cmdEscape("C:\\Program Files\\nodejs\\node.exe")).toBe(
+      '^"C:\\Program^ Files\\nodejs\\node.exe^"'
+    );
+  });
+
+  it("caret-escapes cmd metacharacters", () => {
+    expect(cmdEscape("console.log(1)")).toBe('^"console.log^(1^)^"');
+    expect(cmdEscape("a&&b")).toBe('^"a^&^&b^"');
+    expect(cmdEscape("%PATH%")).toBe('^"^%PATH^%^"');
+  });
+
+  it("escapes embedded double quotes", () => {
+    expect(cmdEscape('say "hi"')).toBe('^"say^ \\^"hi\\^"^"');
+  });
+
+  it("doubles backslashes before quotes and before the added closing quote", () => {
+    expect(cmdEscape('dir\\"x')).toBe('^"dir\\\\\\^"x^"');
+    expect(cmdEscape("trailing \\")).toBe('^"trailing^ \\\\^"');
+  });
+
+  it("leaves a bare trailing backslash alone (no quote added, so no doubling)", () => {
+    expect(cmdEscape("trailing\\")).toBe("trailing\\");
+  });
+
+  it("handles the empty argument", () => {
+    expect(cmdEscape("")).toBe('^"^"');
+  });
+
+  it("escapes long backslash runs in linear time (regex form is quadratic)", () => {
+    const arg = "a " + "\\".repeat(64 * 1024);
+    const start = performance.now();
+    const escaped = cmdEscape(arg);
+    // The old /(\\*)"/g implementation takes >10s here; allow generous CI jitter.
+    expect(performance.now() - start).toBeLessThan(1000);
+    expect(escaped).toBe('^"a^ ' + "\\".repeat(128 * 1024) + '^"');
+  });
+});
+
+describe("cmdEscapeCommand", () => {
+  it("leaves bare PATH-resolved names untouched (quoting breaks %~dp0 in .cmd shims)", () => {
+    expect(cmdEscapeCommand("npm")).toBe("npm");
+    expect(cmdEscapeCommand("pnpm")).toBe("pnpm");
+    expect(cmdEscapeCommand("node")).toBe("node");
+    expect(cmdEscapeCommand("C:\\tools\\node.exe")).toBe("C:\\tools\\node.exe");
+  });
+
+  it("plain-quotes (no carets) paths with spaces", () => {
+    expect(cmdEscapeCommand("C:\\Program Files\\nodejs\\node.exe")).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe"'
+    );
+  });
+
+  it("plain-quotes names containing cmd metacharacters", () => {
+    expect(cmdEscapeCommand("foo&bar")).toBe('"foo&bar"');
+    expect(cmdEscapeCommand("a(b)c")).toBe('"a(b)c"');
+  });
+
+  it("caret-escapes % in bare names (quotes cannot suppress %VAR% expansion)", () => {
+    expect(cmdEscapeCommand("probe%PATH%.cmd")).toBe("probe^%PATH^%.cmd");
+    expect(cmdEscapeCommand("100%.exe")).toBe("100^%.exe");
   });
 });
 
