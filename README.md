@@ -48,7 +48,7 @@ Bare `portless` works out of the box. It runs the `"dev"` script from `package.j
 portless        # -> runs "dev" script, https://<project>.localhost
 ```
 
-Use an optional `portless.json` to override defaults:
+Use an optional `portless.json` or `.config/portless.json` to override defaults:
 
 ```json
 { "name": "myapp" }
@@ -62,7 +62,7 @@ The script defaults to `"dev"`. The name is inferred from `package.json` if not 
 
 ### Monorepo
 
-One `portless.json` at the repo root covers all workspace packages. Portless discovers packages from `pnpm-workspace.yaml`, or the `"workspaces"` field in `package.json` (npm, yarn, bun):
+One portless config file at the repo root covers all workspace packages. Portless discovers packages from `pnpm-workspace.yaml`, or the `"workspaces"` field in `package.json` (npm, yarn, bun):
 
 ```json
 {
@@ -78,7 +78,7 @@ portless        # from repo root: starts all workspace packages with a "dev" scr
 cd apps/web && portless   # start just one package
 ```
 
-The `apps` map is optional and only needed for name overrides. Packages not listed still auto-discover with names inferred from their `package.json`.
+The `apps` map is optional and only needed for name overrides. Packages not listed still auto-discover with names inferred from their `package.json`. Paths in `apps` are always relative to the repo root, even if the config file lives in `.config/`.
 
 Without an `apps` map, hostnames follow the `<package>.<project>.localhost` convention. The project name comes from the most common npm scope across workspace packages (e.g. `@myorg/web` and `@myorg/api` produce `myorg`), falling back to the workspace root directory name. If a package's short name matches the project name, it gets the bare `<project>.localhost` without duplication.
 
@@ -95,7 +95,7 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 
 ### package.json "portless" key
 
-Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
+Instead of a separate config file, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
 
 ```json
 {
@@ -113,7 +113,13 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
 }
 ```
 
-The `package.json` `"portless"` key takes precedence over `portless.json` app entries but is overridden by CLI flags.
+Lookup order is:
+
+1. `portless.json`
+2. `.config/portless.json`
+3. `package.json` `"portless"` key
+
+For workspace package overrides, the package's own `package.json` `"portless"` key takes precedence over the root config's `apps` entry but is overridden by CLI flags.
 
 ### --script flag
 
@@ -154,7 +160,7 @@ You can still use portless in `package.json` scripts:
 }
 ```
 
-With a `portless.json`, you can simplify to:
+With a portless config file, you can simplify to:
 
 ```json
 {
