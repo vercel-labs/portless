@@ -14,6 +14,7 @@ import {
   PRIVILEGED_PORT_THRESHOLD,
   RISKY_TLDS,
   USER_STATE_DIR,
+  cmdEscape,
   discoverState,
   findFreePort,
   getDefaultPort,
@@ -303,6 +304,31 @@ describe("constants", () => {
 
   it("USER_STATE_DIR is in home directory", () => {
     expect(USER_STATE_DIR).toBe(path.join(os.homedir(), ".portless"));
+  });
+});
+
+describe("cmdEscape", () => {
+  it("leaves a plain argument unquoted", () => {
+    expect(cmdEscape("dev")).toBe("dev");
+  });
+
+  it("quotes an argument that contains whitespace", () => {
+    expect(cmdEscape("C:\\Program Files\\nodejs\\node.exe")).toBe(
+      '"C:\\Program Files\\nodejs\\node.exe"'
+    );
+  });
+
+  it("quotes cmd metacharacters so cmd.exe does not interpret them", () => {
+    expect(cmdEscape("a&b")).toBe('"a&b"');
+    expect(cmdEscape("a|b")).toBe('"a|b"');
+  });
+
+  it("doubles an embedded quote inside the quoted argument", () => {
+    expect(cmdEscape('a"b c')).toBe('"a""b c"');
+  });
+
+  it("renders an empty argument as an empty quoted string", () => {
+    expect(cmdEscape("")).toBe('""');
   });
 });
 
