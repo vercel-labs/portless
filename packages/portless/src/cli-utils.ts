@@ -1045,14 +1045,15 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
 };
 
 /**
- * Find the basename of the framework command inside `commandArgs`, looking
- * past known package runners (npx, bunx, yarn dlx, …) and their flags.
+ * Find the index of the framework command inside `commandArgs`, looking past
+ * known package runners (npx, bunx, yarn dlx, …) and their flags. Returns null
+ * when no port-needing framework is present.
  */
-function findFrameworkBasename(commandArgs: string[]): string | null {
+function findFrameworkIndex(commandArgs: string[]): number | null {
   if (commandArgs.length === 0) return null;
 
   const first = path.basename(commandArgs[0]);
-  if (FRAMEWORKS_NEEDING_PORT[first]) return first;
+  if (FRAMEWORKS_NEEDING_PORT[first]) return 0;
 
   const subcommands = PACKAGE_RUNNERS[first];
   if (!subcommands) return null;
@@ -1066,7 +1067,7 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
     if (!subcommands.includes(commandArgs[i])) {
       // Not a recognized subcommand — might be an implicit bin (e.g. `yarn vite`)
       const name = path.basename(commandArgs[i]);
-      return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+      return FRAMEWORKS_NEEDING_PORT[name] ? i : null;
     }
     i++;
   }
@@ -1076,7 +1077,16 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
 
   if (i >= commandArgs.length) return null;
   const name = path.basename(commandArgs[i]);
-  return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+  return FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+}
+
+/**
+ * Find the basename of the framework command inside `commandArgs`, looking
+ * past known package runners (npx, bunx, yarn dlx, …) and their flags.
+ */
+function findFrameworkBasename(commandArgs: string[]): string | null {
+  const idx = findFrameworkIndex(commandArgs);
+  return idx === null ? null : path.basename(commandArgs[idx]);
 }
 
 /**
@@ -1124,7 +1134,12 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 /** Package managers whose `<pm> run <script>` delegates to a package.json script. */
 const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const NON_SERVER_FRAMEWORK_SUBCOMMANDS = new Set(["build"]);
-const SHELL_CONTROL_OPERATORS = new Set(["&&", "||", ";", "|", "&"]);
+/**
+ * Shell control operators (`&&`, `||`, `;`, `|`, `&`). splitCommand only breaks
+ * on whitespace, so an operator glued to a token (`vite dev&&node`) stays inside
+ * that token; match the operator characters as a substring, not a whole token.
+ */
+const SHELL_CONTROL_OPERATOR_PATTERN = /[&|;]/;
 
 function hasCliOption(args: string[], option: string): boolean {
   return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
@@ -1158,8 +1173,18 @@ export function injectPackageScriptFrameworkFlags(
 
   const rawScript = resolveScript(scriptName, packageDir);
   if (!rawScript) return;
-  if (rawScript.some((arg) => SHELL_CONTROL_OPERATORS.has(arg))) return;
-  if (rawScript[1] && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(rawScript[1])) return;
+  // Compound scripts (`vite dev && node x`, including the glued `dev&&node`
+  // form) append forwarded args to the wrong command; do not forward.
+  if (rawScript.some((arg) => SHELL_CONTROL_OPERATOR_PATTERN.test(arg))) return;
+  // Non-server subcommands (`build`) must not receive server flags. Locate the
+  // framework past any runner wrapper (`bunx vite build`) rather than assuming a
+  // fixed position, then inspect the first positional after it.
+  const fwIdx = findFrameworkIndex(rawScript);
+  if (fwIdx !== null) {
+    let sub = fwIdx + 1;
+    while (sub < rawScript.length && rawScript[sub].startsWith("-")) sub++;
+    if (sub < rawScript.length && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(rawScript[sub])) return;
+  }
 
   // Probe the script plus any user-supplied trailing args so an existing
   // --port/--host (in either place) suppresses injection.
