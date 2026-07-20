@@ -960,6 +960,13 @@ describe("injectPackageScriptFrameworkFlags", () => {
     expect(args).toEqual(["bun", "run", "dev"]);
   });
 
+  it("does not forward flags to compound scripts separated by a newline", () => {
+    writeScripts({ dev: "vite dev\nnode second.js" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
   it("does not forward server flags to framework build commands", () => {
     writeScripts({ build: "vite build" });
     const args = ["bun", "run", "build"];
@@ -969,6 +976,13 @@ describe("injectPackageScriptFrameworkFlags", () => {
 
   it("does not forward server flags to runner-wrapped build commands", () => {
     writeScripts({ build: "bunx vite build" });
+    const args = ["bun", "run", "build"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "build"]);
+  });
+
+  it("does not forward server flags when a flag value precedes the build subcommand", () => {
+    writeScripts({ build: "vite --mode production build" });
     const args = ["bun", "run", "build"];
     injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
     expect(args).toEqual(["bun", "run", "build"]);

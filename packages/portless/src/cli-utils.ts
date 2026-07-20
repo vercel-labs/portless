@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
-import { resolveScript } from "./config.js";
+import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -1135,11 +1135,13 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const NON_SERVER_FRAMEWORK_SUBCOMMANDS = new Set(["build"]);
 /**
- * Shell control operators (`&&`, `||`, `;`, `|`, `&`). splitCommand only breaks
- * on whitespace, so an operator glued to a token (`vite dev&&node`) stays inside
- * that token; match the operator characters as a substring, not a whole token.
+ * Shell command separators that make a script run more than one command:
+ * the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare newline, which
+ * the shell treats as a separator too. Matched against the raw script string
+ * rather than the tokenized array, because splitCommand collapses newlines and
+ * would leave a glued operator (`vite dev&&node`) hidden inside a single token.
  */
-const SHELL_CONTROL_OPERATOR_PATTERN = /[&|;]/;
+const SHELL_CONTROL_OPERATOR_PATTERN = /[&|;\n\r]/;
 
 function hasCliOption(args: string[], option: string): boolean {
   return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
@@ -1173,17 +1175,24 @@ export function injectPackageScriptFrameworkFlags(
 
   const rawScript = resolveScript(scriptName, packageDir);
   if (!rawScript) return;
-  // Compound scripts (`vite dev && node x`, including the glued `dev&&node`
-  // form) append forwarded args to the wrong command; do not forward.
-  if (rawScript.some((arg) => SHELL_CONTROL_OPERATOR_PATTERN.test(arg))) return;
+  // Compound scripts append forwarded args to the wrong command; do not
+  // forward. Test the raw script string, not the tokens: splitCommand collapses
+  // newlines and hides glued operators (`vite dev&&node`, `vite dev\nnode x`)
+  // inside a single token where a per-token check cannot see the separator.
+  const rawScriptText = resolveScriptRaw(scriptName, packageDir);
+  if (rawScriptText && SHELL_CONTROL_OPERATOR_PATTERN.test(rawScriptText)) return;
   // Non-server subcommands (`build`) must not receive server flags. Locate the
-  // framework past any runner wrapper (`bunx vite build`) rather than assuming a
-  // fixed position, then inspect the first positional after it.
+  // framework past any runner wrapper (`bunx vite build`), then scan every bare
+  // positional after it — the subcommand can sit behind a space-separated flag
+  // value (`vite --mode production build`), so a fixed slot or a flag-skip loop
+  // misses it. Errs conservative: a flag value equal to a subcommand also skips.
   const fwIdx = findFrameworkIndex(rawScript);
   if (fwIdx !== null) {
-    let sub = fwIdx + 1;
-    while (sub < rawScript.length && rawScript[sub].startsWith("-")) sub++;
-    if (sub < rawScript.length && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(rawScript[sub])) return;
+    const frameworkArgs = rawScript.slice(fwIdx + 1);
+    const invokesNonServer = frameworkArgs.some(
+      (arg) => !arg.startsWith("-") && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(arg)
+    );
+    if (invokesNonServer) return;
   }
 
   // Probe the script plus any user-supplied trailing args so an existing
