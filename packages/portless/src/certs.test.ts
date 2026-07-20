@@ -9,6 +9,7 @@ import {
   createSNICallback,
   ensureCerts,
   isCATrusted,
+  sanitizeHostForFilename,
   trustCA,
   untrustCA,
   untrustCALinux,
@@ -26,6 +27,40 @@ function getCertSignatureAlgo(certPath: string): string {
   const match = text.match(/Signature Algorithm:\s*(\S+)/i);
   return match ? match[1].toLowerCase() : "";
 }
+
+describe("sanitizeHostForFilename", () => {
+  // Longest suffix the cert cache appends to the sanitized base.
+  const SUFFIX_LEN = "-key.pem".length;
+  const NAME_MAX = 255;
+
+  it("keeps short hostnames readable and unchanged apart from dots", () => {
+    expect(sanitizeHostForFilename("myapp.dev.example.com")).toBe("myapp_dev_example_com");
+  });
+
+  it("bounds the composed cert filename under NAME_MAX for a max-length hostname", () => {
+    // A 253-char hostname is valid DNS (multi-segment TLD) but its naive
+    // sanitized filename would overflow NAME_MAX and fail with ENAMETOOLONG.
+    const label = "a".repeat(63);
+    const hostname = `x.${label}.${label}.${label}.${"b".repeat(57)}`;
+    expect(hostname.length).toBeGreaterThan(NAME_MAX - SUFFIX_LEN);
+    const safe = sanitizeHostForFilename(hostname);
+    expect(safe.length + SUFFIX_LEN).toBeLessThanOrEqual(NAME_MAX);
+  });
+
+  it("is deterministic so the cert cache still hits for the same host", () => {
+    const label = "a".repeat(63);
+    const hostname = `x.${label}.${label}.${label}.${"b".repeat(57)}`;
+    expect(sanitizeHostForFilename(hostname)).toBe(sanitizeHostForFilename(hostname));
+  });
+
+  it("maps distinct overflowing hostnames to distinct filenames", () => {
+    const label = "a".repeat(63);
+    const base = `${label}.${label}.${label}`;
+    const a = sanitizeHostForFilename(`app1.${base}.${"b".repeat(57)}`);
+    const b = sanitizeHostForFilename(`app2.${base}.${"b".repeat(57)}`);
+    expect(a).not.toBe(b);
+  });
+});
 
 describe("ensureCerts", () => {
   let tmpDir: string;

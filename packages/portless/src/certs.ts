@@ -630,11 +630,38 @@ function isCATrustedLinux(
 const HOST_CERTS_DIR = "host-certs";
 
 /**
+ * Longest suffix appended to a sanitized host when composing a cert cache
+ * filename (`-key.pem` and `-ext.cnf` are both 8 bytes). The sanitized base
+ * must leave room for it under the filesystem's per-component limit.
+ */
+const CERT_FILENAME_SUFFIX_LEN = "-key.pem".length;
+
+/**
+ * Conservative per-component filename limit. Most POSIX filesystems cap
+ * NAME_MAX at 255 bytes; the sanitized base is bounded so the longest
+ * composed filename (`${base}-key.pem`) never exceeds it.
+ */
+const MAX_FILENAME_BASE = 255 - CERT_FILENAME_SUFFIX_LEN;
+
+/**
  * Sanitize a hostname for use as a filename.
  * Replaces dots with underscores and removes non-alphanumeric chars (except - and _).
+ *
+ * Multi-segment TLDs allow hostnames up to the 253-char DNS limit, whose
+ * composed cert filenames would exceed NAME_MAX and fail generation with
+ * ENAMETOOLONG. When the sanitized base would overflow, its readable prefix is
+ * truncated and a hash of the full hostname is appended, keeping the mapping
+ * deterministic (same host -> same file, so the cache still hits) and
+ * collision-resistant (distinct hosts -> distinct files).
  */
-function sanitizeHostForFilename(hostname: string): string {
-  return hostname.replace(/\./g, "_").replace(/[^a-z0-9_-]/gi, "");
+export function sanitizeHostForFilename(hostname: string): string {
+  const safe = hostname.replace(/\./g, "_").replace(/[^a-z0-9_-]/gi, "");
+  if (safe.length <= MAX_FILENAME_BASE) {
+    return safe;
+  }
+  const hash = crypto.createHash("sha256").update(hostname).digest("hex").slice(0, 16);
+  const prefix = safe.slice(0, MAX_FILENAME_BASE - hash.length - 1);
+  return `${prefix}_${hash}`;
 }
 
 /**
