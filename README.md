@@ -464,7 +464,7 @@ portless hosts sync    # Add current routes to /etc/hosts
 portless hosts clean   # Clean up later
 ```
 
-Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLDs, LAN `.local`). Set `PORTLESS_SYNC_HOSTS=0` to disable.
+Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLDs, LAN `.local`). Set `PORTLESS_SYNC_HOSTS=0` to disable. If it cannot write the file, it warns once and points you to `portless hosts sync`.
 
 ## Troubleshooting
 

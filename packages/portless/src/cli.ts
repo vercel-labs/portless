@@ -77,6 +77,7 @@ import {
   resolveStateDir,
   spawnCommand,
   augmentedPath,
+  syncHostsWithWarning,
   waitForProxy,
   writeCustomCertMarker,
   writeLanMarker,
@@ -577,6 +578,16 @@ function startProxyServer(
 
   const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
 
+  // Warn once when an auto-sync cannot write the hosts file (e.g. an
+  // unprivileged proxy on a high port); a later successful sync re-arms it.
+  let hostsSyncWarned = false;
+  const warnHostsSyncFailed = () =>
+    console.warn(
+      colors.yellow(
+        `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`
+      )
+    );
+
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
   const publishCachedRoutes = () => {
@@ -612,7 +623,11 @@ function startProxyServer(
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
       if (autoSyncHosts) {
-        syncHostsFile(cachedRoutes.map((r) => r.hostname));
+        hostsSyncWarned = syncHostsWithWarning(
+          cachedRoutes.map((r) => r.hostname),
+          hostsSyncWarned,
+          warnHostsSyncFailed
+        );
       }
       // Sync mDNS records with current routes
       if (activeLanIp) {
@@ -649,7 +664,11 @@ function startProxyServer(
   }
 
   if (autoSyncHosts) {
-    syncHostsFile(cachedRoutes.map((r) => r.hostname));
+    hostsSyncWarned = syncHostsWithWarning(
+      cachedRoutes.map((r) => r.hostname),
+      hostsSyncWarned,
+      warnHostsSyncFailed
+    );
   }
 
   // Publish mDNS for routes that already exist at startup
@@ -1917,7 +1936,8 @@ ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. To manually sync:
+  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If the file
+  is not writable, it warns once instead of failing silently. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}

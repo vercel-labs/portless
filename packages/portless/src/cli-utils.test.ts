@@ -23,6 +23,7 @@ import {
   getProxyBindTargets,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
+  syncHostsWithWarning,
   isPortListening,
   isProxyRunning,
   listenOnProxyInterface,
@@ -464,6 +465,45 @@ describe("isHttpsEnvDisabled", () => {
   it("returns false when PORTLESS_HTTPS is unset", () => {
     delete process.env.PORTLESS_HTTPS;
     expect(isHttpsEnvDisabled()).toBe(false);
+  });
+});
+
+describe("syncHostsWithWarning", () => {
+  it("warns and latches when the sync fails and it has not warned yet", () => {
+    const onWarn = vi.fn();
+    const warned = syncHostsWithWarning(["a.localhost"], false, onWarn, () => false);
+    expect(warned).toBe(true);
+    expect(onWarn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not warn again while the sync keeps failing", () => {
+    const onWarn = vi.fn();
+    const warned = syncHostsWithWarning(["a.localhost"], true, onWarn, () => false);
+    expect(warned).toBe(true);
+    expect(onWarn).not.toHaveBeenCalled();
+  });
+
+  it("re-arms the warning after a successful sync", () => {
+    const onWarn = vi.fn();
+    const warned = syncHostsWithWarning(["a.localhost"], true, onWarn, () => true);
+    expect(warned).toBe(false);
+    expect(onWarn).not.toHaveBeenCalled();
+  });
+
+  it("warns again on failure after a success re-armed it", () => {
+    const onWarn = vi.fn();
+    let warned = syncHostsWithWarning(["a"], false, onWarn, () => false); // fail -> warn
+    warned = syncHostsWithWarning(["a"], warned, onWarn, () => false); // fail -> silent
+    warned = syncHostsWithWarning(["a"], warned, onWarn, () => true); // ok -> re-arm
+    warned = syncHostsWithWarning(["a"], warned, onWarn, () => false); // fail -> warn
+    expect(warned).toBe(true);
+    expect(onWarn).toHaveBeenCalledTimes(2);
+  });
+
+  it("passes the hostnames through to the sync function", () => {
+    const sync = vi.fn(() => true);
+    syncHostsWithWarning(["a.localhost", "b.localhost"], false, vi.fn(), sync);
+    expect(sync).toHaveBeenCalledWith(["a.localhost", "b.localhost"]);
   });
 });
 

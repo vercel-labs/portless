@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -156,6 +157,27 @@ export function killTree(
   } catch {
     // Already dead
   }
+}
+
+/**
+ * Run a hosts-file sync and emit a one-time warning when it fails, so an
+ * unwritable hosts file (e.g. an unprivileged proxy on a high port) surfaces
+ * instead of failing silently and leaving hostnames unresolvable server-side.
+ *
+ * Returns the next "already warned" state, which the caller threads back in:
+ * a failed sync latches it to true so repeated auto-syncs (route reloads) do
+ * not spam the terminal, and a successful sync re-arms it to false so a later
+ * failure warns again. `sync` is injectable for testing.
+ */
+export function syncHostsWithWarning(
+  hostnames: string[],
+  alreadyWarned: boolean,
+  onWarn: () => void,
+  sync: (hostnames: string[]) => boolean = syncHostsFile
+): boolean {
+  if (sync(hostnames)) return false;
+  if (!alreadyWarned) onWarn();
+  return true;
 }
 
 // ---------------------------------------------------------------------------
