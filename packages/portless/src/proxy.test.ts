@@ -1051,6 +1051,22 @@ describe("createProxyServer", () => {
       expect(res.status).toBe(200);
       expect(res.body).toBe("multi-segment tld hit");
     });
+
+    it("suggests the longest matching overlapping TLD in 404 page (issue #260)", async () => {
+      const routes: RouteInfo[] = [];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          tlds: ["example.com", "dev.example.com"],
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "missing.dev.example.com" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("portless missing your-command");
+    });
   });
 
   describe("XSS safety", () => {
