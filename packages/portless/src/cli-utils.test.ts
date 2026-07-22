@@ -967,6 +967,69 @@ describe("injectPackageScriptFrameworkFlags", () => {
     expect(args).toEqual(["bun", "run", "dev"]);
   });
 
+  it("does not forward flags to compound scripts piped between commands", () => {
+    writeScripts({ dev: "vite dev | tee log.txt" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still forwards flags when a shell metacharacter is inside quotes (single command)", () => {
+    writeScripts({ dev: "vite dev --open '/foo&bar'" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("still forwards flags when the script redirects output (single command)", () => {
+    writeScripts({ dev: "vite dev >vite.log 2>&1" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects the missing --host even when --port is already present in the script", () => {
+    writeScripts({ dev: "expo start --port 4567" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev", "--host", "localhost"]);
+  });
+
+  it("injects the missing --port even when --host is already present in the script", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["bun", "run", "dev", "--", "--host", "0.0.0.0"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "4567",
+      "--strictPort",
+    ]);
+  });
+
   it("does not forward server flags to framework build commands", () => {
     writeScripts({ build: "vite build" });
     const args = ["bun", "run", "build"];

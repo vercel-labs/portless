@@ -1704,13 +1704,26 @@ describe("CLI", () => {
           ].join("\n") + "\n"
         );
 
+        // Place the shim inside tmpDir/node_modules/.bin rather than relying
+        // on PATH order alone. spawnCommand's augmentedPath prepends the
+        // running node binary's own directory to PATH *ahead of* any PATH we
+        // pass in here, so a real `bun` installed beside Node (e.g. both
+        // via Homebrew) would shadow a shim placed in an arbitrary PATH
+        // directory no matter where it sits in that string. node_modules/.bin
+        // is collected first, before the node binary's directory, so a shim
+        // there always wins regardless of what else is installed on the
+        // machine. This mirrors how npm/pnpm/yarn/bun themselves resolve
+        // locally-installed binaries.
+        const localBinDir = path.join(tmpDir, "node_modules", ".bin");
+        fs.mkdirSync(localBinDir, { recursive: true });
+
         if (process.platform === "win32") {
           fs.writeFileSync(
-            path.join(shimDir, `${options.pm}.cmd`),
+            path.join(localBinDir, `${options.pm}.cmd`),
             `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
           );
         } else {
-          const shimPath = path.join(shimDir, options.pm);
+          const shimPath = path.join(localBinDir, options.pm);
           fs.writeFileSync(
             shimPath,
             `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`
@@ -1721,7 +1734,12 @@ describe("CLI", () => {
         const { status } = run(options.cliArgs, {
           cwd: tmpDir,
           env: {
-            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            // Deliberately do NOT inherit process.env.PATH here: the shim's
+            // discovery must not depend on where a real `bun` happens to sit
+            // in the ambient PATH. node_modules/.bin above is what actually
+            // makes the shim win; this PATH only needs to resolve /bin/sh
+            // itself and any other basic utilities the child script needs.
+            PATH: "/usr/bin:/bin",
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
             PORTLESS_HTTPS: "0",

@@ -1135,13 +1135,57 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const NON_SERVER_FRAMEWORK_SUBCOMMANDS = new Set(["build"]);
 /**
- * Shell command separators that make a script run more than one command:
- * the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare newline, which
- * the shell treats as a separator too. Matched against the raw script string
- * rather than the tokenized array, because splitCommand collapses newlines and
- * would leave a glued operator (`vite dev&&node`) hidden inside a single token.
+ * Detect whether a raw script string runs more than one command at the shell's
+ * top level: the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare
+ * newline, which the shell treats as a separator too. Checked against the raw
+ * script string rather than the tokenized array, because splitCommand collapses
+ * newlines and would leave a glued operator (`vite dev&&node`) hidden inside a
+ * single token.
+ *
+ * Two classes of false positives are excluded:
+ * - Metacharacters inside single or double quotes (`'/foo&bar'`) — they are
+ *   part of an argument, not shell syntax, so quote state is tracked the same
+ *   way `splitCommand` tracks it.
+ * - `&` used as part of a shell redirection rather than a separator: `2>&1`
+ *   (duplicate a file descriptor) and `&>`/`>&` (redirect stdout+stderr) both
+ *   contain `&` adjacent to `>` but do not start a new command.
  */
-const SHELL_CONTROL_OPERATOR_PATTERN = /[&|;\n\r]/;
+function isCompoundShellScript(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  const chars = Array.from(command);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+
+    if (ch === ";" || ch === "\n" || ch === "\r" || ch === "|") return true;
+    if (ch === "&") {
+      const prev = chars[i - 1];
+      const next = chars[i + 1];
+      // `2>&1` and `&>`/`>&` are redirections, not separators.
+      if (prev === ">" || next === ">") continue;
+      return true;
+    }
+  }
+  return false;
+}
 
 function hasCliOption(args: string[], option: string): boolean {
   return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
@@ -1180,7 +1224,7 @@ export function injectPackageScriptFrameworkFlags(
   // newlines and hides glued operators (`vite dev&&node`, `vite dev\nnode x`)
   // inside a single token where a per-token check cannot see the separator.
   const rawScriptText = resolveScriptRaw(scriptName, packageDir);
-  if (rawScriptText && SHELL_CONTROL_OPERATOR_PATTERN.test(rawScriptText)) return;
+  if (rawScriptText && isCompoundShellScript(rawScriptText)) return;
   // Non-server subcommands (`build`) must not receive server flags. Locate the
   // framework past any runner wrapper (`bunx vite build`), then scan every bare
   // positional after it — the subcommand can sit behind a space-separated flag
@@ -1196,9 +1240,11 @@ export function injectPackageScriptFrameworkFlags(
   }
 
   // Probe the script plus any user-supplied trailing args so an existing
-  // --port/--host (in either place) suppresses injection.
+  // --port/--host (in either place) suppresses injection of that flag.
+  // Each flag is independent: injectFrameworkFlags checks --port and --host
+  // separately, so an existing --port must not suppress a missing --host
+  // (and vice versa).
   const userExtras = commandArgs.slice(3).filter((arg) => arg !== "--");
-  if (hasCliOption([...rawScript, ...userExtras], "--port")) return;
   const probe = [...rawScript, ...userExtras];
   injectFrameworkFlags(probe, port);
   const forwardedFlags = probe.slice(rawScript.length + userExtras.length);
