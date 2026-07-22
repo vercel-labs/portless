@@ -349,6 +349,30 @@ export function consumeHostsSyncWarningMarker(dir: string): string | null {
   }
 }
 
+/**
+ * Poll for a pending hosts-sync-warning marker instead of checking once
+ * after a fixed delay. The daemon writes the marker asynchronously (it
+ * reloads routes.json on a debounce, then syncs, then writes), so a single
+ * fixed-delay check either wastes time waiting when the marker is already
+ * there, or misses it entirely when the daemon is slower than expected
+ * (e.g. under load, or a slow hosts-file write). Polling returns as soon as
+ * the marker appears, and gives up after `ceilingMs` so callers on the
+ * happy path (no failure) never wait longer than that ceiling.
+ */
+export async function pollForHostsSyncWarningMarker(
+  dir: string,
+  intervalMs = 50,
+  ceilingMs = 1500
+): Promise<string | null> {
+  const deadline = Date.now() + ceilingMs;
+  while (true) {
+    const message = consumeHostsSyncWarningMarker(dir);
+    if (message) return message;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
 

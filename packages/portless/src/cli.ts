@@ -80,6 +80,7 @@ import {
   syncHostsWithWarning,
   writeHostsSyncWarningMarker,
   consumeHostsSyncWarningMarker,
+  pollForHostsSyncWarningMarker,
   waitForProxy,
   writeCustomCertMarker,
   writeLanMarker,
@@ -531,19 +532,32 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
-/** Debounce delay used by the daemon before it reloads routes.json on change. */
-const HOSTS_SYNC_MARKER_WAIT_MS = DEBOUNCE_MS + 100;
+/**
+ * Ceiling for how long a CLI-attached process waits for the daemon to write
+ * a hosts-sync-warning marker after a route change, before giving up.
+ * Generous relative to the daemon's own debounce (DEBOUNCE_MS) plus the
+ * sync itself, so a slow daemon still gets its warning surfaced instead of
+ * silently losing it to a single too-early check.
+ */
+const HOSTS_SYNC_MARKER_POLL_CEILING_MS = 1500;
 
 /**
  * Surface a pending hosts-sync-failure marker (written by the daemon) on
  * this process's own stdio. Adding a route writes to routes.json, which the
- * daemon picks up asynchronously via fs.watch; wait past its debounce so a
- * sync triggered by the route we just added has had a chance to run and
- * write the marker before we check for it.
+ * daemon picks up asynchronously via fs.watch, debounces, and then syncs;
+ * poll for the marker rather than checking once after a fixed delay, so a
+ * slower-than-usual daemon still gets its warning surfaced instead of the
+ * warning being silently lost. On the happy path (no failure) this costs at
+ * most the poll ceiling and never blocks the caller's own return to the
+ * caller — invoke it without awaiting (`void reportHostsSyncWarningAfterRouteChange(...)`)
+ * so it never delays the primary flow (e.g. dev server startup output).
  */
 async function reportHostsSyncWarningAfterRouteChange(store: RouteStore): Promise<void> {
-  await new Promise((resolve) => setTimeout(resolve, HOSTS_SYNC_MARKER_WAIT_MS));
-  const message = consumeHostsSyncWarningMarker(store.dir);
+  const message = await pollForHostsSyncWarningMarker(
+    store.dir,
+    50,
+    HOSTS_SYNC_MARKER_POLL_CEILING_MS
+  );
   if (message) console.warn(colors.yellow(message));
 }
 
@@ -2365,6 +2379,11 @@ ${colors.bold("Examples:")}
   const force = args.includes("--force");
   addRoutes(store, hostnames, port, 0, force);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
+  // Runs in this CLI-attached process, not the daemon; surface a resulting
+  // hosts-sync failure here instead of leaving it in the daemon's proxy.log.
+  // Awaited (rather than void'd) because this is a one-shot command whose
+  // process would otherwise exit before a slower daemon writes the marker.
+  await reportHostsSyncWarningAfterRouteChange(store);
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -3627,6 +3646,9 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     addRoutes(store, hostnames, appPort, process.pid);
+    // Runs in this CLI-attached process (the turbo/multi-app orchestrator),
+    // not the daemon; void so a slow poll never delays spawning the child.
+    void reportHostsSyncWarningAfterRouteChange(store);
 
     env = {
       ...pkgEnv,
@@ -3883,6 +3905,9 @@ async function runWithTurbo(
 
     addRoutes(store, hostnames, appPort, process.pid);
     routes.push({ hostnames });
+    // Runs in this CLI-attached process (the turbo orchestrator), not the
+    // daemon; void so a slow poll never delays spawning turbo.
+    void reportHostsSyncWarningAfterRouteChange(store);
 
     const entry: ManifestEntry = {
       PORT: String(appPort),

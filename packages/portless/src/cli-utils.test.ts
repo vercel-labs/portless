@@ -41,6 +41,7 @@ import {
   writeTlsMarker,
   writeHostsSyncWarningMarker,
   consumeHostsSyncWarningMarker,
+  pollForHostsSyncWarningMarker,
 } from "./cli-utils.js";
 
 describe("proxy listener interface", () => {
@@ -590,6 +591,56 @@ describe("hosts-sync-warning marker (daemon-to-CLI handoff)", () => {
 
   it("returns null when no warning was ever written", () => {
     expect(consumeHostsSyncWarningMarker(tmpDir)).toBeNull();
+  });
+});
+
+describe("pollForHostsSyncWarningMarker", () => {
+  // Regression for issue #364 finding 2: reportHostsSyncWarningAfterRouteChange
+  // used to check for the marker exactly once, after a single fixed delay
+  // (DEBOUNCE_MS + 100). If the daemon was slower than that window (a real
+  // possibility: it reloads routes.json on its own debounce, then runs the
+  // sync, then writes the marker), the single check ran too early, found
+  // nothing, and the warning was lost for good even though the daemon wrote
+  // it moments later. Polling must keep checking until the marker shows up
+  // or a bounded ceiling is hit, so a slow daemon does not cost the user a
+  // silently dropped warning.
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-poll-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("picks up a marker written after the poll has already started", async () => {
+    // Simulate a daemon that is slower than a single fixed-delay check would
+    // tolerate: nothing exists yet when polling begins, and the marker only
+    // shows up after a short delay.
+    setTimeout(() => {
+      writeHostsSyncWarningMarker(tmpDir, "delayed warning");
+    }, 120);
+
+    const message = await pollForHostsSyncWarningMarker(tmpDir, 20, 1000);
+    expect(message).toBe("delayed warning");
+  });
+
+  it("returns the marker immediately if it is already present", async () => {
+    writeHostsSyncWarningMarker(tmpDir, "already here");
+    const start = Date.now();
+    const message = await pollForHostsSyncWarningMarker(tmpDir, 50, 1500);
+    expect(message).toBe("already here");
+    expect(Date.now() - start).toBeLessThan(100);
+  });
+
+  it("gives up at the ceiling and returns null when no marker ever appears", async () => {
+    const start = Date.now();
+    const message = await pollForHostsSyncWarningMarker(tmpDir, 20, 100);
+    expect(message).toBeNull();
+    expect(Date.now() - start).toBeGreaterThanOrEqual(100);
+    // Bounded: does not run away past the ceiling.
+    expect(Date.now() - start).toBeLessThan(400);
   });
 });
 
