@@ -34,6 +34,7 @@ import {
   readTldFromDir,
   readTldsFromDir,
   resolveStateDir,
+  resolveWindowsExecutable,
   validateTld,
   writeLanMarker,
   writeTldFile,
@@ -1301,5 +1302,193 @@ describe("readPersistedProxyState", () => {
       tlds: ["local"],
       lanMode: true,
     });
+  });
+});
+
+describe("resolveWindowsExecutable", () => {
+  let tmpDir: string;
+  let prevPathext: string | undefined;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-resolve-test-"));
+    prevPathext = process.env.PATHEXT;
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    if (prevPathext === undefined) {
+      delete process.env.PATHEXT;
+    } else {
+      process.env.PATHEXT = prevPathext;
+    }
+  });
+
+  it("returns the absolute path of an existing absolute path input", () => {
+    const file = path.join(tmpDir, "tool.exe");
+    fs.writeFileSync(file, "");
+    expect(resolveWindowsExecutable(file, "")).toBe(path.resolve(file));
+  });
+
+  it("returns null for an absolute path that does not exist", () => {
+    const missing = path.join(tmpDir, "nope.exe");
+    expect(resolveWindowsExecutable(missing, "")).toBeNull();
+  });
+
+  it("returns a path-as-given that contains a separator and exists", () => {
+    const sub = path.join(tmpDir, "sub");
+    fs.mkdirSync(sub);
+    const file = path.join(sub, "tool.cmd");
+    fs.writeFileSync(file, "");
+    // Path contains a separator but is absolute here too; the function
+    // resolves to the canonical absolute form.
+    expect(resolveWindowsExecutable(file, "")).toBe(path.resolve(file));
+  });
+
+  it("walks PATH and matches with PATHEXT extensions", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dirA = path.join(tmpDir, "a");
+    const dirB = path.join(tmpDir, "b");
+    fs.mkdirSync(dirA);
+    fs.mkdirSync(dirB);
+    const target = path.join(dirB, "tool.cmd");
+    fs.writeFileSync(target, "");
+
+    const pathStr = [dirA, dirB].join(path.delimiter);
+    expect(resolveWindowsExecutable("tool", pathStr)).toBe(target);
+  });
+
+  it("returns the first match when multiple PATH dirs hold the binary", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dirA = path.join(tmpDir, "a");
+    const dirB = path.join(tmpDir, "b");
+    fs.mkdirSync(dirA);
+    fs.mkdirSync(dirB);
+    const first = path.join(dirA, "tool.exe");
+    const second = path.join(dirB, "tool.exe");
+    fs.writeFileSync(first, "");
+    fs.writeFileSync(second, "");
+
+    const pathStr = [dirA, dirB].join(path.delimiter);
+    expect(resolveWindowsExecutable("tool", pathStr)).toBe(first);
+  });
+
+  it("respects PATHEXT priority order within a single directory", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "a");
+    fs.mkdirSync(dir);
+    const exe = path.join(dir, "tool.exe");
+    const cmd = path.join(dir, "tool.cmd");
+    fs.writeFileSync(exe, "");
+    fs.writeFileSync(cmd, "");
+
+    // .EXE is earlier in PATHEXT than .CMD, so it should win.
+    expect(resolveWindowsExecutable("tool", dir)).toBe(exe);
+  });
+
+  it("returns null when the command is not found in any PATH dir", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "a");
+    fs.mkdirSync(dir);
+    fs.writeFileSync(path.join(dir, "other.exe"), "");
+
+    expect(resolveWindowsExecutable("missing", dir)).toBeNull();
+  });
+
+  it("returns null when PATH is empty and the command has no separator", () => {
+    process.env.PATHEXT = ".EXE";
+    expect(resolveWindowsExecutable("anything", "")).toBeNull();
+  });
+
+  it("falls back to a default PATHEXT when the env var is unset", () => {
+    delete process.env.PATHEXT;
+    const dir = path.join(tmpDir, "a");
+    fs.mkdirSync(dir);
+    const target = path.join(dir, "tool.bat");
+    fs.writeFileSync(target, "");
+
+    expect(resolveWindowsExecutable("tool", dir)).toBe(target);
+  });
+
+  it("ignores empty directory entries in PATH", () => {
+    process.env.PATHEXT = ".EXE";
+    const dir = path.join(tmpDir, "a");
+    fs.mkdirSync(dir);
+    const target = path.join(dir, "tool.exe");
+    fs.writeFileSync(target, "");
+
+    const pathStr = ["", dir, ""].join(path.delimiter);
+    expect(resolveWindowsExecutable("tool", pathStr)).toBe(target);
+  });
+
+  it("returns null when binary exists with a non-PATHEXT extension", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "a");
+    fs.mkdirSync(dir);
+    // Only a .foo file exists; .foo is not in PATHEXT so the walk must miss.
+    fs.writeFileSync(path.join(dir, "mybin.foo"), "");
+    expect(resolveWindowsExecutable("mybin", dir)).toBeNull();
+  });
+
+  it("treats forward-slash input as path-like and returns null when missing", () => {
+    expect(resolveWindowsExecutable("./bin/missing", "")).toBeNull();
+  });
+
+  it("treats backslash input as path-like and returns null when missing", () => {
+    expect(resolveWindowsExecutable(".\\bin\\missing", "")).toBeNull();
+  });
+
+  it("returns literal path when cmd ends with .exe", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "bin");
+    fs.mkdirSync(dir);
+    const target = path.join(dir, "node.exe");
+    fs.writeFileSync(target, "");
+
+    expect(resolveWindowsExecutable("node.exe", dir)).toBe(target);
+  });
+
+  it("returns literal path when cmd ends with .bat", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "bin");
+    fs.mkdirSync(dir);
+    const target = path.join(dir, "tool.bat");
+    fs.writeFileSync(target, "");
+
+    expect(resolveWindowsExecutable("tool.bat", dir)).toBe(target);
+  });
+
+  it("returns literal path when cmd ends with .cmd", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "bin");
+    fs.mkdirSync(dir);
+    const target = path.join(dir, "script.cmd");
+    fs.writeFileSync(target, "");
+
+    expect(resolveWindowsExecutable("script.cmd", dir)).toBe(target);
+  });
+
+  it("returns literal path for non-PATHEXT extensions", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "bin");
+    fs.mkdirSync(dir);
+    const target = path.join(dir, "myscript.py");
+    fs.writeFileSync(target, "");
+
+    // .py is not in PATHEXT, but where.exe finds it when named literally.
+    expect(resolveWindowsExecutable("myscript.py", dir)).toBe(target);
+  });
+
+  it("prefers literal over PATHEXT-appended candidate when both exist", () => {
+    process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+    const dir = path.join(tmpDir, "bin");
+    fs.mkdirSync(dir);
+    const literal = path.join(dir, "mytool");
+    const withExt = path.join(dir, "mytool.exe");
+    fs.writeFileSync(literal, "");
+    fs.writeFileSync(withExt, "");
+
+    // Literal name wins over any PATHEXT extension when both exist in the
+    // same directory.
+    expect(resolveWindowsExecutable("mytool", dir)).toBe(literal);
   });
 });
