@@ -78,6 +78,8 @@ import {
   spawnCommand,
   augmentedPath,
   syncHostsWithWarning,
+  writeHostsSyncWarningMarker,
+  consumeHostsSyncWarningMarker,
   waitForProxy,
   writeCustomCertMarker,
   writeLanMarker,
@@ -529,6 +531,22 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
+/** Debounce delay used by the daemon before it reloads routes.json on change. */
+const HOSTS_SYNC_MARKER_WAIT_MS = DEBOUNCE_MS + 100;
+
+/**
+ * Surface a pending hosts-sync-failure marker (written by the daemon) on
+ * this process's own stdio. Adding a route writes to routes.json, which the
+ * daemon picks up asynchronously via fs.watch; wait past its debounce so a
+ * sync triggered by the route we just added has had a chance to run and
+ * write the marker before we check for it.
+ */
+async function reportHostsSyncWarningAfterRouteChange(store: RouteStore): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, HOSTS_SYNC_MARKER_WAIT_MS));
+  const message = consumeHostsSyncWarningMarker(store.dir);
+  if (message) console.warn(colors.yellow(message));
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -581,12 +599,16 @@ function startProxyServer(
   // Warn once when an auto-sync cannot write the hosts file (e.g. an
   // unprivileged proxy on a high port); a later successful sync re-arms it.
   let hostsSyncWarned = false;
-  const warnHostsSyncFailed = () =>
-    console.warn(
-      colors.yellow(
-        `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`
-      )
-    );
+  const hostsSyncWarningMessage = `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`;
+  const warnHostsSyncFailed = () => {
+    // This runs inside the detached daemon; its stdio is redirected to
+    // proxy.log (see the `spawn(...)` call in doProxyStart), so console.warn
+    // here only reaches the log file, never the user's terminal. Write a
+    // marker so a CLI process the user is actually attached to can surface
+    // this on its own stdio (see consumeHostsSyncWarningMarker callers).
+    console.warn(colors.yellow(hostsSyncWarningMessage));
+    writeHostsSyncWarningMarker(store.dir, hostsSyncWarningMessage);
+  };
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
@@ -1317,6 +1339,10 @@ async function runApp(
     }
     throw err;
   }
+  // The daemon syncs /etc/hosts asynchronously in reaction to the route we
+  // just registered; check for a resulting failure so it reaches this
+  // terminal instead of only the daemon's proxy.log.
+  void reportHostsSyncWarningAfterRouteChange(store);
   if (killedPids.length > 0) {
     console.log(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
   }
@@ -3377,6 +3403,12 @@ ${colors.bold("LAN mode (--lan):")}
 
   const proto = useHttps ? "HTTPS/2" : "HTTP";
   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
+  // The daemon may have already hit a hosts-sync failure during its own
+  // startup (before it started listening); surface it here, on this
+  // process's stdio, since the daemon's own console.warn only reached
+  // proxy.log.
+  const startupHostsSyncWarning = consumeHostsSyncWarningMarker(store.dir);
+  if (startupHostsSyncWarning) console.warn(colors.yellow(startupHostsSyncWarning));
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));

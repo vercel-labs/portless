@@ -176,6 +176,11 @@ export function syncHostsWithWarning(
   sync: (hostnames: string[]) => boolean = syncHostsFile
 ): boolean {
   if (sync(hostnames)) return false;
+  // An empty-route sync (the warm-up sync at proxy startup, or all routes
+  // removed) has nothing user-visible to write. Its failure must not consume
+  // the warn-once latch, or the first REAL route's sync failure later on
+  // finds the latch already spent and never warns.
+  if (hostnames.length === 0) return alreadyWarned;
   if (!alreadyWarned) onWarn();
   return true;
 }
@@ -306,6 +311,41 @@ export function writeLanMarker(dir: string, ip: string | null): void {
     }
   } else {
     fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+  }
+}
+
+/** Marker file recording an unreported hosts-sync failure, written by the daemon. */
+const HOSTS_SYNC_WARNING_MARKER_FILE = "proxy.hosts-sync-warning";
+
+/**
+ * Record a hosts-sync failure so a CLI process attached to the user's
+ * terminal can surface it later. The sync itself, and the warn-once latch
+ * that gates it, run inside the detached proxy daemon (its stdio is
+ * redirected to proxy.log, see the `spawn(...)` in `doProxyStart`), so the
+ * daemon writing a warning to its own log is invisible to the user. This
+ * marker is the only channel back to a process the user can actually see.
+ */
+export function writeHostsSyncWarningMarker(dir: string, message: string): void {
+  try {
+    fs.writeFileSync(path.join(dir, HOSTS_SYNC_WARNING_MARKER_FILE), message, { mode: 0o644 });
+  } catch {
+    // Best-effort; the daemon's own log still has the failure.
+  }
+}
+
+/**
+ * Read and clear a pending hosts-sync-warning marker, if any. Reading is
+ * destructive (one-shot) so the same failure is not reported to the user
+ * more than once across separate CLI invocations.
+ */
+export function consumeHostsSyncWarningMarker(dir: string): string | null {
+  const markerPath = path.join(dir, HOSTS_SYNC_WARNING_MARKER_FILE);
+  try {
+    const message = fs.readFileSync(markerPath, "utf-8");
+    fs.unlinkSync(markerPath);
+    return message || null;
+  } catch {
+    return null;
   }
 }
 

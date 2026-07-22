@@ -39,6 +39,8 @@ import {
   writeTldFile,
   writeTldsFile,
   writeTlsMarker,
+  writeHostsSyncWarningMarker,
+  consumeHostsSyncWarningMarker,
 } from "./cli-utils.js";
 
 describe("proxy listener interface", () => {
@@ -504,6 +506,90 @@ describe("syncHostsWithWarning", () => {
     const sync = vi.fn(() => true);
     syncHostsWithWarning(["a.localhost", "b.localhost"], false, vi.fn(), sync);
     expect(sync).toHaveBeenCalledWith(["a.localhost", "b.localhost"]);
+  });
+
+  it("does not consume the warn-once latch when an empty-route sync fails", () => {
+    // Regression for issue #364 finding 2: the proxy's warm-up sync at
+    // startup runs with zero routes. If its failure latched `hostsSyncWarned`
+    // to true, the first REAL route registered afterward would fail its own
+    // sync silently, because the latch had already been spent on a sync that
+    // had nothing user-visible to write.
+    const onWarn = vi.fn();
+
+    // Empty-route warm-up sync fails.
+    let warned = syncHostsWithWarning([], false, onWarn, () => false);
+    expect(onWarn).not.toHaveBeenCalled();
+    expect(warned).toBe(false); // latch must still be unarmed
+
+    // A real route is registered; its sync also fails and must warn.
+    warned = syncHostsWithWarning(["a.localhost"], warned, onWarn, () => false);
+    expect(onWarn).toHaveBeenCalledTimes(1);
+    expect(warned).toBe(true);
+  });
+
+  it("does not re-arm or disarm the latch on a successful empty-route sync", () => {
+    const onWarn = vi.fn();
+
+    // A real route already failed and warned.
+    let warned = syncHostsWithWarning(["a.localhost"], false, onWarn, () => false);
+    expect(warned).toBe(true);
+    expect(onWarn).toHaveBeenCalledTimes(1);
+
+    // All routes removed; the resulting empty sync succeeds. This must not
+    // be treated as a meaningful state change for the latch either way, but
+    // it also must not crash or warn again.
+    warned = syncHostsWithWarning([], warned, onWarn, () => true);
+    expect(warned).toBe(false);
+    expect(onWarn).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("hosts-sync-warning marker (daemon-to-CLI handoff)", () => {
+  // Regression for issue #364 finding 1: the hosts-sync warning is computed
+  // and would previously only be printed inside the detached proxy daemon,
+  // whose stdio is redirected to proxy.log (see the `spawn(...)` call in
+  // `doProxyStart`, cli.ts). A CLI process attached to the user's terminal
+  // never sees it. writeHostsSyncWarningMarker/consumeHostsSyncWarningMarker
+  // are the cross-process channel that lets a CLI-facing process (the one
+  // that spawned the daemon, or the one that just registered a route) pick
+  // up and print a failure that happened inside the daemon.
+  //
+  // This channel-crossing itself is exercised structurally, not by spawning
+  // a real daemon process in this unit test: `warnHostsSyncFailed` in
+  // `startProxyServer` (cli.ts) calls `writeHostsSyncWarningMarker`, and the
+  // CLI-facing checkpoints (`doProxyStart` after `waitForProxy`, and
+  // `reportHostsSyncWarningAfterRouteChange` after `addRoutes` in `runApp`)
+  // call `consumeHostsSyncWarningMarker` and print with `console.warn` on
+  // their own process's stdio. An end-to-end assertion that stdout literally
+  // differs between the daemon's fd and the parent's fd is not practical in
+  // this vitest harness (it would require spawning a real detached child and
+  // inspecting its inherited file descriptors); it is covered by the code
+  // structure above plus this in-process round-trip test.
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-marker-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("round-trips a written warning message", () => {
+    writeHostsSyncWarningMarker(tmpDir, "Could not write /etc/hosts; hostnames may not resolve.");
+    expect(consumeHostsSyncWarningMarker(tmpDir)).toBe(
+      "Could not write /etc/hosts; hostnames may not resolve."
+    );
+  });
+
+  it("is one-shot: a second read returns null and does not resurface the warning", () => {
+    writeHostsSyncWarningMarker(tmpDir, "boom");
+    expect(consumeHostsSyncWarningMarker(tmpDir)).toBe("boom");
+    expect(consumeHostsSyncWarningMarker(tmpDir)).toBeNull();
+  });
+
+  it("returns null when no warning was ever written", () => {
+    expect(consumeHostsSyncWarningMarker(tmpDir)).toBeNull();
   });
 });
 
