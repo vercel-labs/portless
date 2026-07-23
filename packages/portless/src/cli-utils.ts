@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -158,6 +159,32 @@ export function killTree(
   }
 }
 
+/**
+ * Run a hosts-file sync and emit a one-time warning when it fails, so an
+ * unwritable hosts file (e.g. an unprivileged proxy on a high port) surfaces
+ * instead of failing silently and leaving hostnames unresolvable server-side.
+ *
+ * Returns the next "already warned" state, which the caller threads back in:
+ * a failed sync latches it to true so repeated auto-syncs (route reloads) do
+ * not spam the terminal, and a successful sync re-arms it to false so a later
+ * failure warns again. `sync` is injectable for testing.
+ */
+export function syncHostsWithWarning(
+  hostnames: string[],
+  alreadyWarned: boolean,
+  onWarn: () => void,
+  sync: (hostnames: string[]) => boolean = syncHostsFile
+): boolean {
+  if (sync(hostnames)) return false;
+  // An empty-route sync (the warm-up sync at proxy startup, or all routes
+  // removed) has nothing user-visible to write. Its failure must not consume
+  // the warn-once latch, or the first REAL route's sync failure later on
+  // finds the latch already spent and never warns.
+  if (hostnames.length === 0) return alreadyWarned;
+  if (!alreadyWarned) onWarn();
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Port configuration
 // ---------------------------------------------------------------------------
@@ -284,6 +311,65 @@ export function writeLanMarker(dir: string, ip: string | null): void {
     }
   } else {
     fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+  }
+}
+
+/** Marker file recording an unreported hosts-sync failure, written by the daemon. */
+const HOSTS_SYNC_WARNING_MARKER_FILE = "proxy.hosts-sync-warning";
+
+/**
+ * Record a hosts-sync failure so a CLI process attached to the user's
+ * terminal can surface it later. The sync itself, and the warn-once latch
+ * that gates it, run inside the detached proxy daemon (its stdio is
+ * redirected to proxy.log, see the `spawn(...)` in `doProxyStart`), so the
+ * daemon writing a warning to its own log is invisible to the user. This
+ * marker is the only channel back to a process the user can actually see.
+ */
+export function writeHostsSyncWarningMarker(dir: string, message: string): void {
+  try {
+    fs.writeFileSync(path.join(dir, HOSTS_SYNC_WARNING_MARKER_FILE), message, { mode: 0o644 });
+  } catch {
+    // Best-effort; the daemon's own log still has the failure.
+  }
+}
+
+/**
+ * Read and clear a pending hosts-sync-warning marker, if any. Reading is
+ * destructive (one-shot) so the same failure is not reported to the user
+ * more than once across separate CLI invocations.
+ */
+export function consumeHostsSyncWarningMarker(dir: string): string | null {
+  const markerPath = path.join(dir, HOSTS_SYNC_WARNING_MARKER_FILE);
+  try {
+    const message = fs.readFileSync(markerPath, "utf-8");
+    fs.unlinkSync(markerPath);
+    return message || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Poll for a pending hosts-sync-warning marker instead of checking once
+ * after a fixed delay. The daemon writes the marker asynchronously (it
+ * reloads routes.json on a debounce, then syncs, then writes), so a single
+ * fixed-delay check either wastes time waiting when the marker is already
+ * there, or misses it entirely when the daemon is slower than expected
+ * (e.g. under load, or a slow hosts-file write). Polling returns as soon as
+ * the marker appears, and gives up after `ceilingMs` so callers on the
+ * happy path (no failure) never wait longer than that ceiling.
+ */
+export async function pollForHostsSyncWarningMarker(
+  dir: string,
+  intervalMs = 50,
+  ceilingMs = 1500
+): Promise<string | null> {
+  const deadline = Date.now() + ceilingMs;
+  while (true) {
+    const message = consumeHostsSyncWarningMarker(dir);
+    if (message) return message;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }
 }
 

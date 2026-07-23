@@ -77,6 +77,10 @@ import {
   resolveStateDir,
   spawnCommand,
   augmentedPath,
+  syncHostsWithWarning,
+  writeHostsSyncWarningMarker,
+  consumeHostsSyncWarningMarker,
+  pollForHostsSyncWarningMarker,
   waitForProxy,
   writeCustomCertMarker,
   writeLanMarker,
@@ -528,6 +532,35 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
+/**
+ * Ceiling for how long a CLI-attached process waits for the daemon to write
+ * a hosts-sync-warning marker after a route change, before giving up.
+ * Generous relative to the daemon's own debounce (DEBOUNCE_MS) plus the
+ * sync itself, so a slow daemon still gets its warning surfaced instead of
+ * silently losing it to a single too-early check.
+ */
+const HOSTS_SYNC_MARKER_POLL_CEILING_MS = 1500;
+
+/**
+ * Surface a pending hosts-sync-failure marker (written by the daemon) on
+ * this process's own stdio. Adding a route writes to routes.json, which the
+ * daemon picks up asynchronously via fs.watch, debounces, and then syncs;
+ * poll for the marker rather than checking once after a fixed delay, so a
+ * slower-than-usual daemon still gets its warning surfaced instead of the
+ * warning being silently lost. On the happy path (no failure) this costs at
+ * most the poll ceiling and never blocks the caller's own return to the
+ * caller — invoke it without awaiting (`void reportHostsSyncWarningAfterRouteChange(...)`)
+ * so it never delays the primary flow (e.g. dev server startup output).
+ */
+async function reportHostsSyncWarningAfterRouteChange(store: RouteStore): Promise<void> {
+  const message = await pollForHostsSyncWarningMarker(
+    store.dir,
+    50,
+    HOSTS_SYNC_MARKER_POLL_CEILING_MS
+  );
+  if (message) console.warn(colors.yellow(message));
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -577,6 +610,20 @@ function startProxyServer(
 
   const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
 
+  // Warn once when an auto-sync cannot write the hosts file (e.g. an
+  // unprivileged proxy on a high port); a later successful sync re-arms it.
+  let hostsSyncWarned = false;
+  const hostsSyncWarningMessage = `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`;
+  const warnHostsSyncFailed = () => {
+    // This runs inside the detached daemon; its stdio is redirected to
+    // proxy.log (see the `spawn(...)` call in doProxyStart), so console.warn
+    // here only reaches the log file, never the user's terminal. Write a
+    // marker so a CLI process the user is actually attached to can surface
+    // this on its own stdio (see consumeHostsSyncWarningMarker callers).
+    console.warn(colors.yellow(hostsSyncWarningMessage));
+    writeHostsSyncWarningMarker(store.dir, hostsSyncWarningMessage);
+  };
+
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
   const publishCachedRoutes = () => {
@@ -612,7 +659,11 @@ function startProxyServer(
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
       if (autoSyncHosts) {
-        syncHostsFile(cachedRoutes.map((r) => r.hostname));
+        hostsSyncWarned = syncHostsWithWarning(
+          cachedRoutes.map((r) => r.hostname),
+          hostsSyncWarned,
+          warnHostsSyncFailed
+        );
       }
       // Sync mDNS records with current routes
       if (activeLanIp) {
@@ -649,7 +700,11 @@ function startProxyServer(
   }
 
   if (autoSyncHosts) {
-    syncHostsFile(cachedRoutes.map((r) => r.hostname));
+    hostsSyncWarned = syncHostsWithWarning(
+      cachedRoutes.map((r) => r.hostname),
+      hostsSyncWarned,
+      warnHostsSyncFailed
+    );
   }
 
   // Publish mDNS for routes that already exist at startup
@@ -1298,6 +1353,10 @@ async function runApp(
     }
     throw err;
   }
+  // The daemon syncs /etc/hosts asynchronously in reaction to the route we
+  // just registered; check for a resulting failure so it reaches this
+  // terminal instead of only the daemon's proxy.log.
+  void reportHostsSyncWarningAfterRouteChange(store);
   if (killedPids.length > 0) {
     console.log(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
   }
@@ -1917,7 +1976,8 @@ ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. To manually sync:
+  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If the file
+  is not writable, it warns once instead of failing silently. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
@@ -2319,6 +2379,11 @@ ${colors.bold("Examples:")}
   const force = args.includes("--force");
   addRoutes(store, hostnames, port, 0, force);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
+  // Runs in this CLI-attached process, not the daemon; surface a resulting
+  // hosts-sync failure here instead of leaving it in the daemon's proxy.log.
+  // Awaited (rather than void'd) because this is a one-shot command whose
+  // process would otherwise exit before a slower daemon writes the marker.
+  await reportHostsSyncWarningAfterRouteChange(store);
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -3360,6 +3425,12 @@ ${colors.bold("LAN mode (--lan):")}
 
   const proto = useHttps ? "HTTPS/2" : "HTTP";
   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
+  // The daemon may have already hit a hosts-sync failure during its own
+  // startup (before it started listening); surface it here, on this
+  // process's stdio, since the daemon's own console.warn only reached
+  // proxy.log.
+  const startupHostsSyncWarning = consumeHostsSyncWarningMarker(store.dir);
+  if (startupHostsSyncWarning) console.warn(colors.yellow(startupHostsSyncWarning));
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
@@ -3578,6 +3649,9 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     addRoutes(store, hostnames, appPort, process.pid);
+    // Runs in this CLI-attached process (the turbo/multi-app orchestrator),
+    // not the daemon; void so a slow poll never delays spawning the child.
+    void reportHostsSyncWarningAfterRouteChange(store);
 
     env = {
       ...pkgEnv,
@@ -3834,6 +3908,9 @@ async function runWithTurbo(
 
     addRoutes(store, hostnames, appPort, process.pid);
     routes.push({ hostnames });
+    // Runs in this CLI-attached process (the turbo orchestrator), not the
+    // daemon; void so a slow poll never delays spawning turbo.
+    void reportHostsSyncWarningAfterRouteChange(store);
 
     const entry: ManifestEntry = {
       PORT: String(appPort),

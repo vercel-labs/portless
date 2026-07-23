@@ -111,7 +111,7 @@ portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for route hostnames, so `.test` and other dev hostnames resolve on your machine.
+The proxy auto-syncs `/etc/hosts` for route hostnames, so `.test` and other dev hostnames resolve on your machine. If it cannot write the hosts file (for example, running unprivileged on a high port), it warns once instead of failing silently and points you to `portless hosts sync`.
 
 Repeat `--tld` to serve the same app names under multiple TLDs from one proxy:
 
