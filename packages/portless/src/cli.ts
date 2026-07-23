@@ -476,8 +476,34 @@ function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolea
   return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls));
 }
 
-function formatViteAllowedHosts(tlds: readonly string[]): string {
-  return tlds.map((configuredTld) => `.${configuredTld}`).join(",");
+function formatTailscaleHostForVite(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    return parsed.hostname || parsed.host;
+  } catch {
+    return undefined;
+  }
+}
+
+function formatViteAllowedHosts(tlds: readonly string[], tailscaleUrl?: string): string {
+  const allowedHosts = new Set<string>();
+  for (const configuredTld of tlds) {
+    allowedHosts.add(`.${configuredTld}`);
+  }
+
+  if (tailscaleUrl) {
+    const tailHost = formatTailscaleHostForVite(tailscaleUrl);
+    if (tailHost && tailHost.endsWith(".ts.net")) {
+      allowedHosts.add(".ts.net");
+      allowedHosts.add(`.${tailHost}`);
+      allowedHosts.add(tailHost);
+    } else if (tailHost) {
+      allowedHosts.add(`.${tailHost}`);
+      allowedHosts.add(tailHost);
+    }
+  }
+
+  return Array.from(allowedHosts).join(",");
 }
 
 function formatBindEndpoint(host: string, port: number): string {
@@ -1499,7 +1525,7 @@ async function runApp(
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
       PORTLESS_URL: finalUrl,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds, tailscaleUrl),
       // Note: EXPO_PACKAGER_PROXY_URL is not used — expo-dev-client removed
       // baked-in pinging, making this env var ineffective. Expo handles its
       // own LAN discovery natively.
