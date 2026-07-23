@@ -7,6 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
+import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -1094,14 +1095,15 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
 };
 
 /**
- * Find the basename of the framework command inside `commandArgs`, looking
- * past known package runners (npx, bunx, yarn dlx, …) and their flags.
+ * Find the index of the framework command inside `commandArgs`, looking past
+ * known package runners (npx, bunx, yarn dlx, …) and their flags. Returns null
+ * when no port-needing framework is present.
  */
-function findFrameworkBasename(commandArgs: string[]): string | null {
+function findFrameworkIndex(commandArgs: string[]): number | null {
   if (commandArgs.length === 0) return null;
 
   const first = path.basename(commandArgs[0]);
-  if (FRAMEWORKS_NEEDING_PORT[first]) return first;
+  if (FRAMEWORKS_NEEDING_PORT[first]) return 0;
 
   const subcommands = PACKAGE_RUNNERS[first];
   if (!subcommands) return null;
@@ -1115,7 +1117,7 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
     if (!subcommands.includes(commandArgs[i])) {
       // Not a recognized subcommand — might be an implicit bin (e.g. `yarn vite`)
       const name = path.basename(commandArgs[i]);
-      return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+      return FRAMEWORKS_NEEDING_PORT[name] ? i : null;
     }
     i++;
   }
@@ -1125,7 +1127,16 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
 
   if (i >= commandArgs.length) return null;
   const name = path.basename(commandArgs[i]);
-  return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+  return FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+}
+
+/**
+ * Find the basename of the framework command inside `commandArgs`, looking
+ * past known package runners (npx, bunx, yarn dlx, …) and their flags.
+ */
+function findFrameworkBasename(commandArgs: string[]): string | null {
+  const idx = findFrameworkIndex(commandArgs);
+  return idx === null ? null : path.basename(commandArgs[idx]);
 }
 
 /**
@@ -1153,14 +1164,14 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
 
-  if (!commandArgs.includes("--port")) {
+  if (!hasCliOption(commandArgs, "--port")) {
     commandArgs.push("--port", port.toString());
     if (framework.strictPort) {
       commandArgs.push("--strictPort");
     }
   }
 
-  if (!commandArgs.includes("--host")) {
+  if (!hasCliOption(commandArgs, "--host")) {
     // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
     // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
@@ -1168,6 +1179,133 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
     const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
     commandArgs.push("--host", hostValue);
   }
+}
+
+/** Package managers whose `<pm> run <script>` delegates to a package.json script. */
+const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+const NON_SERVER_FRAMEWORK_SUBCOMMANDS = new Set(["build"]);
+/**
+ * Detect whether a raw script string runs more than one command at the shell's
+ * top level: the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare
+ * newline, which the shell treats as a separator too. Checked against the raw
+ * script string rather than the tokenized array, because splitCommand collapses
+ * newlines and would leave a glued operator (`vite dev&&node`) hidden inside a
+ * single token.
+ *
+ * Two classes of false positives are excluded:
+ * - Metacharacters inside single or double quotes (`'/foo&bar'`) — they are
+ *   part of an argument, not shell syntax, so quote state is tracked the same
+ *   way `splitCommand` tracks it.
+ * - `&` used as part of a shell redirection rather than a separator: `2>&1`
+ *   (duplicate a file descriptor) and `&>`/`>&` (redirect stdout+stderr) both
+ *   contain `&` adjacent to `>` but do not start a new command.
+ */
+function isCompoundShellScript(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  const chars = Array.from(command);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+
+    if (ch === ";" || ch === "\n" || ch === "\r" || ch === "|") return true;
+    if (ch === "&") {
+      const prev = chars[i - 1];
+      const next = chars[i + 1];
+      // `2>&1` and `&>`/`>&` are redirections, not separators.
+      if (prev === ">" || next === ">") continue;
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasCliOption(args: string[], option: string): boolean {
+  return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
+}
+
+/**
+ * When the child command delegates to a package script (`<pm> run <script>`),
+ * the framework command lives inside package.json where injectFrameworkFlags
+ * cannot see it (it only inspects argv). Resolve the script, compute the flags
+ * the underlying framework needs, and forward them through the package manager
+ * so e.g. `bun run dev` becomes `bun run dev --port <n> --strictPort`.
+ *
+ * Covers zero-arg mode (`portless` resolving the dev script) and explicit
+ * delegation (`portless run npm run dev`). The script must exist in
+ * package.json at `packageDir` (the directory the child will run in).
+ */
+export function injectPackageScriptFrameworkFlags(
+  commandArgs: string[],
+  port: number,
+  packageDir: string = process.cwd()
+): void {
+  if (commandArgs.length < 3) return;
+
+  const runner = path.basename(commandArgs[0]);
+  if (!PACKAGE_SCRIPT_MANAGERS.has(runner)) return;
+
+  const [, runSubcommand, scriptName] = commandArgs;
+  // Conservative shape match: `<pm> run <script>`. Runner flags between
+  // `run` and the script name (e.g. `bun run --bun dev`) are left alone.
+  if (runSubcommand !== "run" || scriptName.startsWith("-")) return;
+
+  const rawScript = resolveScript(scriptName, packageDir);
+  if (!rawScript) return;
+  // Compound scripts append forwarded args to the wrong command; do not
+  // forward. Test the raw script string, not the tokens: splitCommand collapses
+  // newlines and hides glued operators (`vite dev&&node`, `vite dev\nnode x`)
+  // inside a single token where a per-token check cannot see the separator.
+  const rawScriptText = resolveScriptRaw(scriptName, packageDir);
+  if (rawScriptText && isCompoundShellScript(rawScriptText)) return;
+  // Non-server subcommands (`build`) must not receive server flags. Locate the
+  // framework past any runner wrapper (`bunx vite build`), then scan every bare
+  // positional after it — the subcommand can sit behind a space-separated flag
+  // value (`vite --mode production build`), so a fixed slot or a flag-skip loop
+  // misses it. Errs conservative: a flag value equal to a subcommand also skips.
+  const fwIdx = findFrameworkIndex(rawScript);
+  if (fwIdx !== null) {
+    const frameworkArgs = rawScript.slice(fwIdx + 1);
+    const invokesNonServer = frameworkArgs.some(
+      (arg) => !arg.startsWith("-") && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(arg)
+    );
+    if (invokesNonServer) return;
+  }
+
+  // Probe the script plus any user-supplied trailing args so an existing
+  // --port/--host (in either place) suppresses injection of that flag.
+  // Each flag is independent: injectFrameworkFlags checks --port and --host
+  // separately, so an existing --port must not suppress a missing --host
+  // (and vice versa).
+  const userExtras = commandArgs.slice(3).filter((arg) => arg !== "--");
+  const probe = [...rawScript, ...userExtras];
+  injectFrameworkFlags(probe, port);
+  const forwardedFlags = probe.slice(rawScript.length + userExtras.length);
+  if (forwardedFlags.length === 0) return;
+
+  // npm requires `--` before arguments meant for the package script.
+  // bun, pnpm, and yarn forward trailing arguments directly.
+  if (runner === "npm" && !commandArgs.includes("--")) {
+    commandArgs.push("--");
+  }
+  commandArgs.push(...forwardedFlags);
 }
 
 /**

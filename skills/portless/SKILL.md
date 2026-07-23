@@ -169,7 +169,7 @@ Use `portless proxy start --tld localhost --tld test` to serve the same app name
 
 TLDs can be multi-segment DNS names such as `dev.example.com`, so local URLs can mirror production structure (`myapp.dev.example.com`). Each label follows DNS rules: lowercase letters, digits, interior hyphens, 63 characters per label, 253 total. Strict OAuth providers that reject `.localhost` redirect URIs accept a real domain like `https://myapp.dev.example.com/api/auth/callback/google`.
 
-Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag.
+Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag. Injection works through a package script (e.g. `"dev": "vite"`) but not through a compound script (`&&`, `|`, `;`) — write those as a direct dev command.
 
 ### State directory
 
@@ -383,7 +383,7 @@ portless proxy start -p 8080
 
 ### Framework not respecting PORT
 
-Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically.
+Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically. Injection works through a package script (e.g. `"dev": "vite"`) but not through a compound script (`&&`, `|`, `;`) — a compound script keeps its own port and the app returns 502; write those as a direct dev command.
 
 For other frameworks that don't read `PORT`, pass the port manually:
 

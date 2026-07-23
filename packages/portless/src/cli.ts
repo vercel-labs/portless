@@ -60,6 +60,7 @@ import {
   getProxyBindTargets,
   getRiskyTldReason,
   injectFrameworkFlags,
+  injectPackageScriptFrameworkFlags,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -1465,6 +1466,7 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
+  injectPackageScriptFrameworkFlags(commandArgs, port);
   injectFrameworkFlags(commandArgs, port);
 
   // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
@@ -1819,7 +1821,8 @@ ${colors.bold("How it works:")}
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
      Expo, React Native) get --port and, when needed, --host flags
-     injected automatically
+     injected automatically (through package scripts too, except compound
+     scripts using &&, | or ; — write those as a direct dev command)
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
