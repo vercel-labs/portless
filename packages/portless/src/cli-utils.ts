@@ -314,60 +314,101 @@ export function writeLanMarker(dir: string, ip: string | null): void {
   }
 }
 
-/** Marker file recording an unreported hosts-sync failure, written by the daemon. */
-const HOSTS_SYNC_WARNING_MARKER_FILE = "proxy.hosts-sync-warning";
+/** Status file recording the outcome of the daemon's last hosts sync. */
+const HOSTS_SYNC_STATUS_FILE = "proxy.hosts-sync-status";
 
-/**
- * Record a hosts-sync failure so a CLI process attached to the user's
- * terminal can surface it later. The sync itself, and the warn-once latch
- * that gates it, run inside the detached proxy daemon (its stdio is
- * redirected to proxy.log, see the `spawn(...)` in `doProxyStart`), so the
- * daemon writing a warning to its own log is invisible to the user. This
- * marker is the only channel back to a process the user can actually see.
- */
-export function writeHostsSyncWarningMarker(dir: string, message: string): void {
-  try {
-    fs.writeFileSync(path.join(dir, HOSTS_SYNC_WARNING_MARKER_FILE), message, { mode: 0o644 });
-  } catch {
-    // Best-effort; the daemon's own log still has the failure.
-  }
+/** Outcome of one hosts-file sync performed by the daemon. */
+export interface HostsSyncStatus {
+  /** Whether the sync wrote the hosts file. */
+  ok: boolean;
+  /** User-facing warning when `ok` is false. */
+  message: string | null;
+  /** Hostnames the sync tried to write, so a CLI can tell whether its own route was covered. */
+  hostnames: string[];
+  /** `Date.now()` when the sync finished, so a CLI can ignore outcomes older than its own route change. */
+  at: number;
 }
 
 /**
- * Read and clear a pending hosts-sync-warning marker, if any. Reading is
- * destructive (one-shot) so the same failure is not reported to the user
- * more than once across separate CLI invocations.
+ * Publish the outcome of a hosts sync so a CLI process attached to the
+ * user's terminal can report it. The sync runs inside the detached proxy
+ * daemon, whose stdio is redirected to proxy.log (see the `spawn(...)` in
+ * `doProxyStart`), so a warning printed there never reaches the user.
+ *
+ * Written on every sync, success included, and never consumed by the
+ * reader: the file is current state, not a one-shot message. A one-shot
+ * marker had three failure modes this avoids — a second attached app found
+ * the warning already consumed by the first, a marker outlived the failure
+ * it described and resurfaced on an unrelated command, and two concurrent
+ * readers raced for the same message. The stamp (`at`) and `hostnames` are
+ * what let a reader decide whether an outcome is its own.
+ *
+ * The write is atomic (temp file plus rename) so a reader never observes a
+ * half-written file.
  */
-export function consumeHostsSyncWarningMarker(dir: string): string | null {
-  const markerPath = path.join(dir, HOSTS_SYNC_WARNING_MARKER_FILE);
+export function writeHostsSyncStatus(dir: string, status: HostsSyncStatus): void {
+  const target = path.join(dir, HOSTS_SYNC_STATUS_FILE);
+  const tmp = `${target}.${process.pid}.tmp`;
   try {
-    const message = fs.readFileSync(markerPath, "utf-8");
-    fs.unlinkSync(markerPath);
-    return message || null;
+    fs.writeFileSync(tmp, JSON.stringify(status), { mode: 0o644 });
+    fs.renameSync(tmp, target);
+  } catch {
+    // Best-effort; the daemon's own log still has the failure.
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Nothing to clean up.
+    }
+  }
+}
+
+/** Read the last published hosts-sync outcome. Non-destructive. */
+export function readHostsSyncStatus(dir: string): HostsSyncStatus | null {
+  try {
+    const parsed: unknown = JSON.parse(
+      fs.readFileSync(path.join(dir, HOSTS_SYNC_STATUS_FILE), "utf-8")
+    );
+    if (!parsed || typeof parsed !== "object") return null;
+    const status = parsed as Partial<HostsSyncStatus>;
+    if (typeof status.ok !== "boolean" || typeof status.at !== "number") return null;
+    return {
+      ok: status.ok,
+      message: typeof status.message === "string" ? status.message : null,
+      hostnames: Array.isArray(status.hostnames) ? status.hostnames : [],
+      at: status.at,
+    };
   } catch {
     return null;
   }
 }
 
 /**
- * Poll for a pending hosts-sync-warning marker instead of checking once
- * after a fixed delay. The daemon writes the marker asynchronously (it
- * reloads routes.json on a debounce, then syncs, then writes), so a single
- * fixed-delay check either wastes time waiting when the marker is already
- * there, or misses it entirely when the daemon is slower than expected
- * (e.g. under load, or a slow hosts-file write). Polling returns as soon as
- * the marker appears, and gives up after `ceilingMs` so callers on the
- * happy path (no failure) never wait longer than that ceiling.
+ * Wait for the daemon to publish the outcome of a sync that covers this
+ * caller's own route change, and return it (or null at the ceiling).
+ *
+ * Two conditions make an outcome "mine": it is stamped no earlier than the
+ * moment the caller wrote its route (`since`), and it covers every hostname
+ * the caller registered. Without both, a CLI reports an outcome that belongs
+ * to a different route change, or to a failure that has since been fixed.
+ *
+ * `ceilingMs` is the caller's business, but it must be derived from the
+ * daemon's own worst-case cadence: routes.json changes reach the daemon
+ * through fs.watch plus a debounce, and where fs.watch is unavailable the
+ * daemon falls back to a periodic poll. A ceiling under that poll interval
+ * expires before the daemon has even looked at the file.
  */
-export async function pollForHostsSyncWarningMarker(
+export async function waitForHostsSyncStatus(
   dir: string,
-  intervalMs = 50,
-  ceilingMs = 1500
-): Promise<string | null> {
+  options: { since: number; hostnames?: string[]; intervalMs?: number; ceilingMs: number }
+): Promise<HostsSyncStatus | null> {
+  const { since, hostnames = [], intervalMs = 50, ceilingMs } = options;
   const deadline = Date.now() + ceilingMs;
   while (true) {
-    const message = consumeHostsSyncWarningMarker(dir);
-    if (message) return message;
+    const status = readHostsSyncStatus(dir);
+    if (status && status.at >= since) {
+      const covered = hostnames.every((hostname) => status.hostnames.includes(hostname));
+      if (covered) return status;
+    }
     if (Date.now() >= deadline) return null;
     await new Promise((resolve) => setTimeout(resolve, intervalMs));
   }

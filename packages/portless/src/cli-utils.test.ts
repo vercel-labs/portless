@@ -39,9 +39,9 @@ import {
   writeTldFile,
   writeTldsFile,
   writeTlsMarker,
-  writeHostsSyncWarningMarker,
-  consumeHostsSyncWarningMarker,
-  pollForHostsSyncWarningMarker,
+  writeHostsSyncStatus,
+  readHostsSyncStatus,
+  waitForHostsSyncStatus,
 } from "./cli-utils.js";
 
 describe("proxy listener interface", () => {
@@ -545,101 +545,145 @@ describe("syncHostsWithWarning", () => {
   });
 });
 
-describe("hosts-sync-warning marker (daemon-to-CLI handoff)", () => {
+describe("hosts-sync status file (daemon-to-CLI handoff)", () => {
   // Regression for issue #364 finding 1: the hosts-sync warning is computed
-  // and would previously only be printed inside the detached proxy daemon,
-  // whose stdio is redirected to proxy.log (see the `spawn(...)` call in
-  // `doProxyStart`, cli.ts). A CLI process attached to the user's terminal
-  // never sees it. writeHostsSyncWarningMarker/consumeHostsSyncWarningMarker
-  // are the cross-process channel that lets a CLI-facing process (the one
-  // that spawned the daemon, or the one that just registered a route) pick
-  // up and print a failure that happened inside the daemon.
+  // inside the detached proxy daemon, whose stdio is redirected to proxy.log
+  // (see the `spawn(...)` call in `doProxyStart`, cli.ts), so a CLI process
+  // attached to the user's terminal never sees it. The status file is the
+  // cross-process channel: the daemon publishes the outcome of every sync,
+  // and each CLI-facing checkpoint (`doProxyStart` after `waitForProxy`, and
+  // `reportHostsSyncAfterRouteChange` after `addRoutes`) reads the outcome
+  // for its OWN route change and prints it on its own stdio.
   //
-  // This channel-crossing itself is exercised structurally, not by spawning
-  // a real daemon process in this unit test: `warnHostsSyncFailed` in
-  // `startProxyServer` (cli.ts) calls `writeHostsSyncWarningMarker`, and the
-  // CLI-facing checkpoints (`doProxyStart` after `waitForProxy`, and
-  // `reportHostsSyncWarningAfterRouteChange` after `addRoutes` in `runApp`)
-  // call `consumeHostsSyncWarningMarker` and print with `console.warn` on
-  // their own process's stdio. An end-to-end assertion that stdout literally
-  // differs between the daemon's fd and the parent's fd is not practical in
-  // this vitest harness (it would require spawning a real detached child and
-  // inspecting its inherited file descriptors); it is covered by the code
-  // structure above plus this in-process round-trip test.
+  // Reading is non-destructive by design. A one-shot marker made the first
+  // reader the only reader: a second app registering a route against the
+  // same failing daemon found the warning already consumed and stayed
+  // silent, two concurrent readers raced for one message, and a marker
+  // outlived the failure it described. The stamp and hostname coverage are
+  // what make an outcome attributable instead of first-come-first-served.
   let tmpDir: string;
 
+  const status = (over: Partial<Parameters<typeof writeHostsSyncStatus>[1]> = {}) => ({
+    ok: false,
+    message: "Could not write /etc/hosts; hostnames may not resolve.",
+    hostnames: ["app1.localhost"],
+    at: Date.now(),
+    ...over,
+  });
+
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-marker-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-status-test-"));
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("round-trips a written warning message", () => {
-    writeHostsSyncWarningMarker(tmpDir, "Could not write /etc/hosts; hostnames may not resolve.");
-    expect(consumeHostsSyncWarningMarker(tmpDir)).toBe(
-      "Could not write /etc/hosts; hostnames may not resolve."
-    );
+  it("round-trips a published outcome", () => {
+    const published = status();
+    writeHostsSyncStatus(tmpDir, published);
+    expect(readHostsSyncStatus(tmpDir)).toEqual(published);
   });
 
-  it("is one-shot: a second read returns null and does not resurface the warning", () => {
-    writeHostsSyncWarningMarker(tmpDir, "boom");
-    expect(consumeHostsSyncWarningMarker(tmpDir)).toBe("boom");
-    expect(consumeHostsSyncWarningMarker(tmpDir)).toBeNull();
+  it("is not consumed by reading, so every attached CLI sees the same failure", () => {
+    writeHostsSyncStatus(tmpDir, status());
+    expect(readHostsSyncStatus(tmpDir)?.ok).toBe(false);
+    expect(readHostsSyncStatus(tmpDir)?.ok).toBe(false);
   });
 
-  it("returns null when no warning was ever written", () => {
-    expect(consumeHostsSyncWarningMarker(tmpDir)).toBeNull();
+  it("returns null when nothing was ever published", () => {
+    expect(readHostsSyncStatus(tmpDir)).toBeNull();
+  });
+
+  it("returns null on a corrupt or partially written file", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-status"), "{not json");
+    expect(readHostsSyncStatus(tmpDir)).toBeNull();
   });
 });
 
-describe("pollForHostsSyncWarningMarker", () => {
-  // Regression for issue #364 finding 2: reportHostsSyncWarningAfterRouteChange
-  // used to check for the marker exactly once, after a single fixed delay
-  // (DEBOUNCE_MS + 100). If the daemon was slower than that window (a real
-  // possibility: it reloads routes.json on its own debounce, then runs the
-  // sync, then writes the marker), the single check ran too early, found
-  // nothing, and the warning was lost for good even though the daemon wrote
-  // it moments later. Polling must keep checking until the marker shows up
-  // or a bounded ceiling is hit, so a slow daemon does not cost the user a
-  // silently dropped warning.
+describe("waitForHostsSyncStatus", () => {
+  // Regression for issue #364 finding 2 and the round-4 review: the wait must
+  // outlive the daemon's own worst-case cadence (fs.watch debounce, or the
+  // fallback poll interval where fs.watch is unavailable), and it must only
+  // accept an outcome that belongs to the caller's own route change. A wait
+  // that accepts any outcome reports a stale failure the user already fixed;
+  // a wait shorter than the producer's cadence reports nothing at all.
   let tmpDir: string;
 
+  const publish = (over: Record<string, unknown> = {}) =>
+    writeHostsSyncStatus(tmpDir, {
+      ok: false,
+      message: "boom",
+      hostnames: ["app1.localhost"],
+      at: Date.now(),
+      ...over,
+    });
+
   beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-poll-test-"));
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-wait-test-"));
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("picks up a marker written after the poll has already started", async () => {
-    // Simulate a daemon that is slower than a single fixed-delay check would
-    // tolerate: nothing exists yet when polling begins, and the marker only
-    // shows up after a short delay.
-    setTimeout(() => {
-      writeHostsSyncWarningMarker(tmpDir, "delayed warning");
-    }, 120);
-
-    const message = await pollForHostsSyncWarningMarker(tmpDir, 20, 1000);
-    expect(message).toBe("delayed warning");
+  it("picks up an outcome published after the wait has already started", async () => {
+    const since = Date.now();
+    setTimeout(publish, 120);
+    const result = await waitForHostsSyncStatus(tmpDir, {
+      since,
+      hostnames: ["app1.localhost"],
+      intervalMs: 20,
+      ceilingMs: 1000,
+    });
+    expect(result?.message).toBe("boom");
   });
 
-  it("returns the marker immediately if it is already present", async () => {
-    writeHostsSyncWarningMarker(tmpDir, "already here");
+  it("ignores an outcome older than the caller's own route change", async () => {
+    publish({ at: Date.now() - 5_000 });
+    const result = await waitForHostsSyncStatus(tmpDir, {
+      since: Date.now(),
+      hostnames: ["app1.localhost"],
+      intervalMs: 20,
+      ceilingMs: 100,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("ignores an outcome that does not cover the caller's hostnames", async () => {
+    publish({ hostnames: ["other.localhost"] });
+    const result = await waitForHostsSyncStatus(tmpDir, {
+      since: Date.now() - 1_000,
+      hostnames: ["app1.localhost"],
+      intervalMs: 20,
+      ceilingMs: 100,
+    });
+    expect(result).toBeNull();
+  });
+
+  it("returns a successful outcome so the caller can stop waiting early", async () => {
+    publish({ ok: true, message: null });
     const start = Date.now();
-    const message = await pollForHostsSyncWarningMarker(tmpDir, 50, 1500);
-    expect(message).toBe("already here");
+    const result = await waitForHostsSyncStatus(tmpDir, {
+      since: Date.now() - 1_000,
+      hostnames: ["app1.localhost"],
+      intervalMs: 50,
+      ceilingMs: 4100,
+    });
+    expect(result?.ok).toBe(true);
     expect(Date.now() - start).toBeLessThan(100);
   });
 
-  it("gives up at the ceiling and returns null when no marker ever appears", async () => {
+  it("gives up at the ceiling when the daemon never publishes", async () => {
     const start = Date.now();
-    const message = await pollForHostsSyncWarningMarker(tmpDir, 20, 100);
-    expect(message).toBeNull();
+    const result = await waitForHostsSyncStatus(tmpDir, {
+      since: Date.now(),
+      hostnames: ["app1.localhost"],
+      intervalMs: 20,
+      ceilingMs: 100,
+    });
+    expect(result).toBeNull();
     expect(Date.now() - start).toBeGreaterThanOrEqual(100);
-    // Bounded: does not run away past the ceiling.
     expect(Date.now() - start).toBeLessThan(400);
   });
 });
