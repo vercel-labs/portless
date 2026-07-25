@@ -77,6 +77,7 @@ import {
   resolveStateDir,
   spawnCommand,
   augmentedPath,
+  hasLiveHostsSyncPublisher,
   syncHostsWithWarning,
   writeHostsSyncStatus,
   waitForHostsSyncStatus,
@@ -551,8 +552,8 @@ const HOSTS_SYNC_STATUS_WAIT_CEILING_MS = DEBOUNCE_MS + POLL_INTERVAL_MS + 1000;
  *
  * Returns as soon as the daemon publishes an outcome covering these
  * hostnames, so the happy path costs one debounce, not the full ceiling.
- * When auto-sync is disabled there is no outcome to wait for and this
- * returns immediately.
+ * When auto-sync is disabled, or when no daemon is alive to publish an
+ * outcome, there is nothing to wait for and this returns immediately.
  */
 async function reportHostsSyncAfterRouteChange(
   store: RouteStore,
@@ -560,6 +561,7 @@ async function reportHostsSyncAfterRouteChange(
   since: number
 ): Promise<void> {
   if (!shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS)) return;
+  if (!hasLiveHostsSyncPublisher(store.pidPath)) return;
   const status = await waitForHostsSyncStatus(store.dir, {
     since,
     hostnames,

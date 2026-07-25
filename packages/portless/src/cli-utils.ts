@@ -8,7 +8,7 @@ import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
 import { syncHostsFile } from "./hosts.js";
-import { createLoopbackConnection, resolveUserHome } from "./utils.js";
+import { createLoopbackConnection, isProcessAlive, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -380,6 +380,30 @@ export function readHostsSyncStatus(dir: string): HostsSyncStatus | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether a daemon is alive to publish a hosts-sync outcome at all.
+ *
+ * Every wait for an outcome is a wait on the daemon: it is the only process
+ * that publishes one. When no daemon is running there is no producer, so the
+ * wait cannot end early and burns its full ceiling before returning null.
+ * Registering an alias before starting the proxy is an ordinary flow, so that
+ * ceiling would land on a routine command.
+ *
+ * A missing or unparseable PID file, or a PID no longer alive, all mean the
+ * same thing here: nobody will publish.
+ */
+export function hasLiveHostsSyncPublisher(pidPath: string): boolean {
+  let raw: string;
+  try {
+    raw = fs.readFileSync(pidPath, "utf-8").trim();
+  } catch {
+    return false;
+  }
+  const pid = parseInt(raw, 10);
+  if (isNaN(pid) || pid <= 0) return false;
+  return isProcessAlive(pid);
 }
 
 /**

@@ -21,6 +21,7 @@ import {
   getDefaultTlds,
   getProtocolPort,
   getProxyBindTargets,
+  hasLiveHostsSyncPublisher,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
   syncHostsWithWarning,
@@ -685,6 +686,66 @@ describe("waitForHostsSyncStatus", () => {
     expect(result).toBeNull();
     expect(Date.now() - start).toBeGreaterThanOrEqual(100);
     expect(Date.now() - start).toBeLessThan(400);
+  });
+});
+
+describe("hasLiveHostsSyncPublisher", () => {
+  let tmpDir: string;
+  let pidPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-publisher-"));
+    pidPath = path.join(tmpDir, "proxy.pid");
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("returns false when no PID file exists", () => {
+    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+  });
+
+  it("returns false for a stale PID file", () => {
+    // PID 1 is init and always alive, so pick one that cannot be running:
+    // a freshly reaped child's PID is racy, and 2^22 is above every default
+    // pid_max on the platforms portless supports.
+    fs.writeFileSync(pidPath, "4194303");
+    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+  });
+
+  it("returns false for an unparseable PID file", () => {
+    fs.writeFileSync(pidPath, "not-a-pid");
+    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+  });
+
+  it("returns false for a non-positive PID", () => {
+    fs.writeFileSync(pidPath, "0");
+    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+  });
+
+  it("returns true for a live PID", () => {
+    fs.writeFileSync(pidPath, `${process.pid}\n`);
+    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(true);
+  });
+
+  // Regression guard for the reason this check exists: without it, the
+  // no-daemon case waits out HOSTS_SYNC_STATUS_WAIT_CEILING_MS on a routine
+  // alias registration.
+  it("short-circuits the wait instead of burning the ceiling", async () => {
+    const start = Date.now();
+    const skipped = !hasLiveHostsSyncPublisher(pidPath);
+    const result = skipped
+      ? null
+      : await waitForHostsSyncStatus(tmpDir, {
+          since: Date.now(),
+          hostnames: ["app1.localhost"],
+          intervalMs: 50,
+          ceilingMs: 4100,
+        });
+    expect(skipped).toBe(true);
+    expect(result).toBeNull();
+    expect(Date.now() - start).toBeLessThan(100);
   });
 });
 
