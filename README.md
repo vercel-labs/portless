@@ -225,6 +225,22 @@ When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. `PORTLESS_
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
+### Multi-segment TLDs
+
+The `--tld` value accepts a lowercase DNS name (one or more dot-separated labels, no trailing dot), so a domain you own can be used as the "TLD". This gives local URLs the same structure as production, which keeps OAuth redirect URIs, cross-subdomain cookies, and host-based routing working the same way in both environments:
+
+```bash
+portless proxy start --tld dev.example.com
+portless myapp next dev
+# -> https://myapp.dev.example.com
+```
+
+Each label must follow DNS rules: lowercase letters, digits, and interior hyphens, with at most 63 characters per label and 253 characters total. The full hostname (`app.TLD`) is also subject to the 253-character DNS limit.
+
+The proxy auto-syncs `/etc/hosts` for registered hostnames, so `myapp.dev.example.com` resolves to `127.0.0.1` on your machine. This is a loopback-only setup: outside LAN mode the proxy binds only to `127.0.0.1` and `::1` (see below), so a custom TLD is reachable only from the machine running the proxy. Reaching the proxy from other devices requires LAN mode (`--lan`), but LAN mode serves apps under the `.local` TLD and ignores a custom `--tld`, so the two cannot be combined today.
+
+Strict OAuth providers (Google, Apple) reject `.localhost` and `.test` redirect URIs but accept a real domain, so `https://myapp.dev.example.com/api/auth/callback/google` works as a redirect URI.
+
 ## How it works
 
 ```mermaid

@@ -21,6 +21,7 @@ import {
   getDefaultTlds,
   getProtocolPort,
   getProxyBindTargets,
+  getRiskyTldReason,
   hasLiveHostsSyncPublisher,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
@@ -1224,6 +1225,10 @@ describe("parseTldList", () => {
   it("rejects empty list entries", () => {
     expect(() => parseTldList("test,")).toThrow("TLD cannot be empty");
   });
+
+  it("accepts a mix of single- and multi-segment TLDs", () => {
+    expect(parseTldList("localhost,dev.example.com")).toEqual(["localhost", "dev.example.com"]);
+  });
 });
 
 describe("buildProxyStartConfig", () => {
@@ -1395,6 +1400,46 @@ describe("readTldFromDir / writeTldFile", () => {
     writeTldFile(tmpDir, DEFAULT_TLD);
     expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
   });
+
+  it("skips invalid persisted entries instead of resetting the whole list", () => {
+    const tooLong = "a".repeat(70);
+    fs.writeFileSync(
+      path.join(tmpDir, "proxy.tlds"),
+      JSON.stringify(["test", tooLong, "internal"])
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(readTldsFromDir(tmpDir)).toEqual(["test", "internal"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("getRiskyTldReason", () => {
+  it("matches exact risky TLDs", () => {
+    expect(getRiskyTldReason("dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("app")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("com")).toMatch(/public TLD/);
+  });
+
+  it("matches multi-segment TLDs under tree-wide risky suffixes", () => {
+    expect(getRiskyTldReason("example.dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("myapp.app")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("foo.local")).toMatch(/mDNS/);
+  });
+
+  it("does not suffix-match ownership-class TLDs", () => {
+    expect(getRiskyTldReason("dev.example.com")).toBeUndefined();
+    expect(getRiskyTldReason("internal.example.org")).toBeUndefined();
+  });
+
+  it("returns undefined for safe TLDs", () => {
+    expect(getRiskyTldReason("test")).toBeUndefined();
+    expect(getRiskyTldReason("dev.internal")).toBeUndefined();
+    expect(getRiskyTldReason("devx")).toBeUndefined();
+  });
 });
 
 describe("validateTld", () => {
@@ -1409,10 +1454,41 @@ describe("validateTld", () => {
   });
 
   it("rejects TLDs with invalid characters", () => {
-    expect(validateTld("my-tld")).toMatch(/must contain only/);
-    expect(validateTld("my.tld")).toMatch(/must contain only/);
     expect(validateTld("MY_TLD")).toMatch(/must contain only/);
     expect(validateTld("tld!")).toMatch(/must contain only/);
+    expect(validateTld("my tld")).toMatch(/must contain only/);
+  });
+
+  it("accepts multi-segment TLDs", () => {
+    expect(validateTld("dev.example.com")).toBeNull();
+    expect(validateTld("local.example.dev")).toBeNull();
+    expect(validateTld("a.b.c.d.e")).toBeNull();
+  });
+
+  it("accepts hyphens inside labels", () => {
+    expect(validateTld("my-tld")).toBeNull();
+    expect(validateTld("dev.my-network.com")).toBeNull();
+  });
+
+  it("rejects empty labels", () => {
+    expect(validateTld(".example.com")).toMatch(/labels cannot be empty/);
+    expect(validateTld("example.com.")).toMatch(/labels cannot be empty/);
+    expect(validateTld("example..com")).toMatch(/labels cannot be empty/);
+  });
+
+  it("rejects hyphens at label edges", () => {
+    expect(validateTld("-bad.example.com")).toMatch(/must contain only/);
+    expect(validateTld("bad-.example.com")).toMatch(/must contain only/);
+  });
+
+  it("rejects labels over 63 characters", () => {
+    expect(validateTld(`${"a".repeat(64)}.example.com`)).toMatch(/63-character/);
+  });
+
+  it("rejects TLDs over 253 characters", () => {
+    const label = "a".repeat(63);
+    const long = [label, label, label, label, "example"].join(".");
+    expect(validateTld(long)).toMatch(/253-character/);
   });
 
   it("allows public TLDs (they produce warnings elsewhere)", () => {

@@ -203,8 +203,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     if (!route) {
       const safeHost = escapeHtml(host);
-      const matchedSuffix = tldSuffixes.find((suffix) => host.endsWith(suffix));
-      const strippedHost = matchedSuffix ? host.slice(0, -matchedSuffix.length) : host;
+      const matchedSuffix = tldSuffixes
+        .filter((suffix) => host.endsWith(suffix))
+        .sort((a, b) => b.length - a.length)[0];
+      const strippedHost =
+        matchedSuffix && matchedSuffix.length < host.length
+          ? host.slice(0, -matchedSuffix.length)
+          : host;
       const safeSuggestion = escapeHtml(strippedHost);
       const routesList =
         routes.length > 0

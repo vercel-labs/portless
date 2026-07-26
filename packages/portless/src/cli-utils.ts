@@ -445,11 +445,11 @@ export const DEFAULT_TLD = "localhost";
 export const RISKY_TLDS = new Map<string, string>([
   ["local", "conflicts with mDNS/Bonjour on macOS"],
   ["dev", "Google-owned; browsers force HTTPS via preloaded HSTS"],
+  ["app", "Google-owned; browsers force HTTPS via preloaded HSTS"],
   ["com", "public TLD; DNS requests will leak to the internet"],
   ["org", "public TLD; DNS requests will leak to the internet"],
   ["net", "public TLD; DNS requests will leak to the internet"],
   ["io", "public TLD; DNS requests will leak to the internet"],
-  ["app", "public TLD; DNS requests will leak to the internet"],
   ["edu", "public TLD; DNS requests will leak to the internet"],
   ["gov", "public TLD; DNS requests will leak to the internet"],
   ["mil", "public TLD; DNS requests will leak to the internet"],
@@ -457,13 +457,51 @@ export const RISKY_TLDS = new Map<string, string>([
 ]);
 
 /**
+ * Risky TLDs whose failure mode applies to the whole suffix tree, so
+ * multi-segment TLDs under them inherit the risk: mDNS claims all of
+ * `*.local`, and the `.dev`/`.app` HSTS preload entries carry
+ * includeSubDomains. Ownership-class entries (com, org, ...) only matter
+ * for a bare TLD — a multi-segment TLD under a domain the user owns is
+ * the recommended setup, not a pitfall.
+ */
+const SUFFIX_RISKY_TLDS = new Set(["local", "dev", "app"]);
+
+/**
+ * Look up the risky-TLD warning for a configured TLD. Matches exact entries
+ * ("dev"), plus multi-segment TLDs whose suffix carries a tree-wide risk
+ * ("example.dev" inherits the HSTS preload).
+ */
+export function getRiskyTldReason(tld: string): string | undefined {
+  const exact = RISKY_TLDS.get(tld);
+  if (exact) return exact;
+  for (const risky of SUFFIX_RISKY_TLDS) {
+    if (tld.endsWith(`.${risky}`)) return RISKY_TLDS.get(risky);
+  }
+  return undefined;
+}
+
+/**
  * Validate a TLD string. Returns an error message if invalid, or null if OK.
  * Does not check for risky TLDs (those produce warnings, not errors).
  */
 export function validateTld(tld: string): string | null {
   if (!tld) return "TLD cannot be empty";
-  if (!/^[a-z0-9]+$/.test(tld)) {
-    return `Invalid TLD "${tld}": must contain only lowercase letters and digits`;
+  if (tld.length > 253) {
+    return `Invalid TLD "${tld}": exceeds 253-character DNS limit`;
+  }
+
+  const labelRe = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
+  const labels = tld.split(".");
+  for (const label of labels) {
+    if (!label) {
+      return `Invalid TLD "${tld}": labels cannot be empty`;
+    }
+    if (label.length > 63) {
+      return `Invalid TLD "${tld}": label "${label}" exceeds 63-character DNS limit`;
+    }
+    if (!labelRe.test(label)) {
+      return `Invalid TLD "${tld}": labels must contain only lowercase letters, digits, and interior hyphens`;
+    }
   }
   return null;
 }
@@ -512,7 +550,19 @@ export function readTldsFromDir(dir: string): string[] {
           .map((line) => line.trim())
           .filter(Boolean);
     if (!Array.isArray(parsed)) return [readLegacyTldFromDir(dir)];
-    const tlds = parsed.flatMap((value) => (typeof value === "string" ? parseTldList(value) : []));
+    // Skip invalid persisted entries individually so one bad TLD (e.g. written
+    // before validation tightened) does not silently reset the whole list.
+    const tlds = parsed.flatMap((value) => {
+      if (typeof value !== "string") return [];
+      try {
+        return parseTldList(value);
+      } catch (err) {
+        console.warn(
+          `Warning: ignoring invalid TLD entry in ${TLDS_FILE}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        return [];
+      }
+    });
     return tlds.length > 0 ? [...new Set(tlds)] : [DEFAULT_TLD];
   } catch {
     return [readLegacyTldFromDir(dir)];

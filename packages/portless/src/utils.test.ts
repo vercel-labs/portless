@@ -269,6 +269,20 @@ describe("parseHostname", () => {
       expect(parseHostname("api.myapp", "test")).toBe("api.myapp.test");
     });
 
+    it("handles multi-segment custom TLDs", () => {
+      expect(parseHostname("myapp", "local.example.dev")).toBe("myapp.local.example.dev");
+      expect(parseHostname("api.myapp", "local.example.dev")).toBe("api.myapp.local.example.dev");
+      expect(parseHostname("myapp.local.example.dev", "local.example.dev")).toBe(
+        "myapp.local.example.dev"
+      );
+    });
+
+    it("rejects a final hostname over 253 characters", () => {
+      const label = "a".repeat(63);
+      const tld = [label, label, label, "b".repeat(60)].join(".");
+      expect(() => parseHostname("myapp", tld)).toThrow("exceeds 253-character DNS limit");
+    });
+
     it("throws on empty input with custom TLD", () => {
       expect(() => parseHostname("", "test")).toThrow("Hostname cannot be empty");
     });
@@ -302,7 +316,30 @@ describe("parseHostnames", () => {
     ]);
   });
 
+  it("strips the longest matching TLD when configured TLDs overlap", () => {
+    expect(parseHostnames("app.dev.example.com", ["example.com", "dev.example.com"])).toEqual([
+      "app.example.com",
+      "app.dev.example.com",
+    ]);
+  });
+
   it("deduplicates TLDs", () => {
     expect(parseHostnames("myapp", ["test", "test"])).toEqual(["myapp.test"]);
+  });
+
+  it("skips a TLD that pushes the hostname past 253 chars and keeps the rest", () => {
+    const label = "a".repeat(62);
+    const longTld = [label, label, label, label].join("."); // 251 chars, valid TLD
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(parseHostnames("myapp", ["localhost", longTld])).toEqual(["myapp.localhost"]);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining(longTld));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("still throws when no TLD survives", () => {
+    expect(() => parseHostnames("my..app", ["localhost", "test"])).toThrow(/consecutive dots/);
   });
 });
