@@ -296,7 +296,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         proxyReq.reusedSocket &&
         errWithCode.code === "ECONNRESET" &&
         !res.headersSent &&
-        REPLAYABLE_METHODS.has(req.method || "")
+        REPLAYABLE_METHODS.has(req.method || "") &&
+        // the first pipe already ate the body so only replay when there wasn't one
+        !req.headers["transfer-encoding"] &&
+        !Number(req.headers["content-length"])
       ) {
         req.unpipe(proxyReq);
         handleRequest(req, res, true);
