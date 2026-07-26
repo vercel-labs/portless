@@ -28,6 +28,12 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 
+// http/2 doesn't limit connections per origin so without a cap a cold page
+// load overflows the backend accept backlog with simultaneous connects
+const MAX_UPSTREAM_SOCKETS = 64;
+
+const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 /**
  * Get the effective host value from a request.
  * HTTP/2 uses the :authority pseudo-header; HTTP/1.1 uses Host.
@@ -162,7 +168,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
   const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
-  const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+  const upstreamAgent = new http.Agent({ keepAlive: true, maxSockets: MAX_UPSTREAM_SOCKETS });
+  // Dial via createLoopbackConnection so ::1-only backends work too.
+  upstreamAgent.createConnection = (options) => createLoopbackConnection(options.port as number);
+
+  const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse, isReplay = false) => {
     const reqTls = isEncrypted(req);
     res.setHeader(PORTLESS_HEADER, "1");
 
@@ -233,8 +243,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     }
     proxyReqHeaders[PORTLESS_HOPS_HEADER] = String(hops + 1);
     // Remove HTTP/2 pseudo-headers before forwarding to HTTP/1.1 backend
+    // connection should go too, forwarding it would close the pooled socket
     for (const key of Object.keys(proxyReqHeaders)) {
-      if (key.startsWith(":")) {
+      if (key.startsWith(":") || key === "connection") {
         delete proxyReqHeaders[key];
       }
     }
@@ -247,8 +258,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const proxyReq = http.request(
       {
-        // Dial via createLoopbackConnection so ::1-only backends work too.
-        createConnection: () => createLoopbackConnection(route.port),
+        agent: upstreamAgent,
+        port: route.port,
         path: req.url,
         method: req.method,
         headers: proxyReqHeaders,
@@ -277,9 +288,22 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     );
 
     proxyReq.on("error", (err) => {
+      const errWithCode = err as NodeJS.ErrnoException;
+      // backend closed the pooled socket as we yoinked it.
+      // replay once instead of a 502
+      if (
+        !isReplay &&
+        proxyReq.reusedSocket &&
+        errWithCode.code === "ECONNRESET" &&
+        !res.headersSent &&
+        REPLAYABLE_METHODS.has(req.method || "")
+      ) {
+        req.unpipe(proxyReq);
+        handleRequest(req, res, true);
+        return;
+      }
       onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
       if (!res.headersSent) {
-        const errWithCode = err as NodeJS.ErrnoException;
         const detail =
           errWithCode.code === "ECONNREFUSED"
             ? "The target app is not responding. It may have crashed."
@@ -308,7 +332,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       }
     });
 
-    req.pipe(proxyReq);
+    if (isReplay) {
+      proxyReq.end();
+    } else {
+      req.pipe(proxyReq);
+    }
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
@@ -701,6 +729,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     wrapper.close = function (cb?: (err?: Error) => void) {
       h2Server.close();
       plainServer.close();
+      upstreamAgent.destroy();
       return origClose(cb);
     } as typeof wrapper.close;
 
@@ -709,6 +738,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
+  httpServer.on("close", () => upstreamAgent.destroy());
 
   return httpServer;
 }

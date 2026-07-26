@@ -634,6 +634,66 @@ describe("createProxyServer", () => {
     });
   });
 
+  describe("upstream connections", () => {
+    it("reuses one upstream connection across requests (issue #370)", async () => {
+      const connections = new Set<net.Socket>();
+      const backend = trackServer(http.createServer((_req, res) => res.end("ok")));
+      backend.on("connection", (socket) => connections.add(socket));
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      for (let i = 0; i < 5; i++) {
+        expect((await request(server, { host: "myapp.localhost" })).status).toBe(200);
+      }
+      expect(connections.size).toBe(1);
+    });
+
+    it("replays a request when the backend resets a pooled connection", async () => {
+      // answer the first request on a connection then reset the next one, which
+      // is what an idle close looks like when it crosses our write
+      const handled = new WeakMap<net.Socket, number>();
+      let resets = 0;
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          const count = (handled.get(req.socket) ?? 0) + 1;
+          handled.set(req.socket, count);
+          if (count === 1) return res.end("ok");
+          resets++;
+          req.socket.resetAndDestroy();
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const errors: string[] = [];
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: (msg) => errors.push(msg),
+        })
+      );
+      await listen(server);
+
+      for (let i = 0; i < 4; i++) {
+        const res = await request(server, { host: "myapp.localhost" });
+        expect(res.status).toBe(200);
+        expect(res.body).toBe("ok");
+      }
+      expect(resets).toBeGreaterThan(0);
+      expect(errors).toEqual([]);
+    });
+  });
+
   describe("X-Portless header", () => {
     it("includes X-Portless header on 404 responses", async () => {
       const routes: RouteInfo[] = [];
