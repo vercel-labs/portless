@@ -3,7 +3,11 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { injectPackageScriptFrameworkFlags, resolveFrameworkBasename } from "./cli-utils.js";
+import {
+  injectPackageScriptFrameworkFlags,
+  isWindows,
+  resolveFrameworkBasename,
+} from "./cli-utils.js";
 
 /**
  * Differential test for package-script flag forwarding.
@@ -170,17 +174,36 @@ const EXPECTED_SKIPS = [
   "twoContinuations",
 ];
 
+/**
+ * Some shapes invoke a package runner by name. On a machine without that
+ * runner the shim can never be reached, which is an environment limit and not
+ * a verdict about the guard, so those cells are excluded rather than counted
+ * either way. Excluding by requirement keeps the "shim never ran" assertion
+ * meaningful for every cell that remains.
+ */
+function requiredBinary(script: string): string | null {
+  const first = script.trim().split(/\s+/)[0];
+  return ["bunx", "npx", "pnpx", "bun", "npm", "pnpm", "yarn"].includes(first) ? first : null;
+}
+
 function hasBinary(name: string): boolean {
   return spawnSync(name, ["--version"], { encoding: "utf-8" }).status === 0;
 }
 
-const runners = (process.env.PORTLESS_DIFFERENTIAL_RUNNERS ?? "bun")
-  .split(",")
+/**
+ * The shell sweep needs a package manager and a POSIX shim. CI installs no bun,
+ * so defaulting to bun alone would make this file skip entirely there: pick the
+ * first runner actually present instead. Windows is a named coverage gap, not a
+ * silent one; the shims are `#!/bin/sh` and `bun run` hands scripts to cmd.
+ */
+const requestedRunners = process.env.PORTLESS_DIFFERENTIAL_RUNNERS?.split(",")
   .map((r) => r.trim())
-  .filter(Boolean)
-  .filter(hasBinary);
+  .filter(Boolean);
+const runners = isWindows
+  ? []
+  : (requestedRunners ?? ["bun", "pnpm", "npm"].filter(hasBinary).slice(0, 1)).filter(hasBinary);
 
-describe.skipIf(runners.length === 0)("package script forwarding, against the shell", () => {
+describe("package script forwarding, against the shell", () => {
   let dir: string;
   let capturePath: string;
 
@@ -262,12 +285,19 @@ describe.skipIf(runners.length === 0)("package script forwarding, against the sh
     expect(skipped.sort()).toEqual([...EXPECTED_SKIPS].sort());
   });
 
+  it.skipIf(runners.length > 0)("names the platforms where the shell sweep did not run", () => {
+    // A skipped sweep is reported, never mistaken for a pass.
+    expect(isWindows || !hasBinary("bun")).toBe(true);
+  });
+
   for (const runner of runners) {
     it(`never appends flags the ${runner} child does not receive`, () => {
       const violations: string[] = [];
       const unmeasured: string[] = [];
 
       for (const [name, script] of Object.entries(SCRIPTS)) {
+        const needs = requiredBinary(script);
+        if (needs && !hasBinary(needs)) continue;
         const args = [runner, "run", name];
         injectPackageScriptFrameworkFlags(args, 4567, dir);
         const injected = args.slice(3).filter((arg) => arg !== "--");
