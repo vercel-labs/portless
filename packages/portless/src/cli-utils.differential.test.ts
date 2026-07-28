@@ -85,7 +85,10 @@ const SCRIPTS: Record<string, string> = {
   redirect: `${FRAMEWORK} > out.log`,
   redirectAppend: `${FRAMEWORK} >> out.log`,
   redirectErr: `${FRAMEWORK} 2>&1`,
+  // A bash extension; dash reads the `&` as backgrounding.
   redirectBoth: `${FRAMEWORK} &> out.log`,
+  redirectDupToFd: `${FRAMEWORK} 2>&1 >out.log`,
+  redirectCloseFd: `${FRAMEWORK} 2>&-`,
   redirectIn: `${FRAMEWORK} < /dev/null`,
 
   // Substitution and grouping.
@@ -166,6 +169,7 @@ const EXPECTED_SKIPS = [
   "newline",
   "oror",
   "pipe",
+  "redirectBoth",
   "semi",
   "semiGlued",
   "semiThenComment",

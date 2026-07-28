@@ -1212,8 +1212,13 @@ function isUnsafeToAppendArgs(command: string): boolean {
     if (ch === "&") {
       const prev = chars[i - 1];
       const next = chars[i + 1];
-      // `2>&1` and `&>`/`>&` are redirections, not separators.
-      if (prev === ">" || next === ">") continue;
+      // Only POSIX file-descriptor duplication is a redirection rather than a
+      // separator: `2>&1`, `>&2`, `2>&-`. `&>` and `>& file` are bash
+      // extensions, and package managers run scripts through `sh`, which is
+      // dash on Debian and Ubuntu. There `vite dev &> out.log --port 4567`
+      // backgrounds `vite dev` and runs the rest as its own command, so the
+      // appended flags never reach the framework.
+      if (prev === ">" && next !== undefined && /[0-9-]/.test(next)) continue;
       return true;
     }
     atWordStart = ch === " " || ch === "\t";

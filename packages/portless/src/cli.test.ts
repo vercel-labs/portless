@@ -1077,68 +1077,6 @@ describe("CLI", () => {
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     });
-
-    // Twin of the test above, one layer of indirection deeper. Deciding which
-    // framework runs drives both the injected flags and the exported env, and
-    // the env binder used to read commandArgs[0] — `bun`, not `expo` — so the
-    // LAN carve-out never fired and Metro got HOST=127.0.0.1.
-    it("omits HOST for expo in LAN mode when it runs through a package script", async () => {
-      const server = http.createServer((_req, res) => {
-        res.setHeader("X-Portless", "1");
-        res.end("ok");
-      });
-      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-shim-"));
-      const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-app-"));
-      const capturePath = path.join(shimDir, "capture.json");
-
-      try {
-        const proxyPort = await new Promise<number>((resolve) => {
-          server.listen(0, "127.0.0.1", () => {
-            const addr = server.address();
-            if (addr && typeof addr !== "string") {
-              resolve(addr.port);
-            }
-          });
-        });
-
-        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
-        fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
-        fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
-        writeExpoShim(shimDir);
-        fs.writeFileSync(
-          path.join(appDir, "package.json"),
-          JSON.stringify({ name: "mobile-app", scripts: { dev: "expo start" } })
-        );
-
-        const { status } = run(
-          ["run", "--name", "mobile", "--app-port", "4567", "bun", "run", "dev"],
-          {
-            cwd: appDir,
-            env: {
-              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
-              PORTLESS_STATE_DIR: tmpDir,
-              PORTLESS_TEST_CAPTURE_FILE: capturePath,
-              PORTLESS_HTTPS: "0",
-            },
-          }
-        );
-
-        expect(status).toBe(0);
-
-        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
-          args: string[];
-          env: Record<string, string>;
-        };
-
-        expect(capture.args).toEqual(["start", "--port", "4567"]);
-        expect(capture.env.PORT).toBe("4567");
-        expect(capture.env.HOST).toBeUndefined();
-      } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
-        fs.rmSync(shimDir, { recursive: true, force: true });
-        fs.rmSync(appDir, { recursive: true, force: true });
-      }
-    });
   });
 
   describe("Rsbuild flag injection", () => {
@@ -1715,6 +1653,7 @@ describe("CLI", () => {
       pm: string;
       script: string;
       cliArgs: string[];
+      lan?: boolean;
     }): Promise<{
       status: number | null;
       proxyPort: number;
@@ -1738,6 +1677,9 @@ describe("CLI", () => {
         });
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        if (options.lan) {
+          fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
+        }
         fs.writeFileSync(
           path.join(tmpDir, "package.json"),
           JSON.stringify({
@@ -1760,6 +1702,7 @@ describe("CLI", () => {
             "    PORT: process.env.PORT,",
             "    HOST: process.env.HOST,",
             "    PORTLESS_URL: process.env.PORTLESS_URL,",
+            "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
             "  },",
             "};",
             "fs.writeFileSync(capturePath, JSON.stringify(payload));",
@@ -1818,6 +1761,39 @@ describe("CLI", () => {
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     }
+
+    // Which framework runs drives two things: the flags appended to the child
+    // command, and the environment exported to it. Expo in LAN mode needs HOST
+    // omitted, or Metro's HMR websocket degrades. Both must see through the
+    // package script, and the env binder used to read commandArgs[0] — `bun`.
+    it("omits HOST for an expo package script in LAN mode", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "expo start",
+        cliArgs: [],
+        lan: true,
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_LAN).toBe("1");
+      expect(capture.env.HOST).toBeUndefined();
+    });
+
+    // The carve-out keys off the framework, not off whether anything was
+    // injected: this script supplies its own port and ends in a comment, so
+    // portless appends nothing and must still leave HOST unset.
+    it("omits HOST for an expo script it declines to append to", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "expo start --port 4567 # note",
+        cliArgs: [],
+        lan: true,
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev"]);
+      expect(capture.env.HOST).toBeUndefined();
+    });
 
     it("portless (no args) forwards Vite port flags through bun run dev", async () => {
       const { status, proxyPort, capture } = await captureScriptDelegation({
