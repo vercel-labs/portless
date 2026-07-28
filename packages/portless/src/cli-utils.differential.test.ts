@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { injectPackageScriptFrameworkFlags } from "./cli-utils.js";
+import { injectPackageScriptFrameworkFlags, resolveFrameworkBasename } from "./cli-utils.js";
 
 /**
  * Differential test for package-script flag forwarding.
@@ -110,9 +110,14 @@ const SCRIPTS: Record<string, string> = {
   hasBoth: `${FRAMEWORK} --port 5555 --host 0.0.0.0`,
   hasPortEquals: `${FRAMEWORK} --port=5555`,
 
-  // Other frameworks.
+  // Other frameworks. The expo shapes carry a second obligation beyond flag
+  // forwarding: see the framework-identity test below.
   expoPlain: "expo start",
   expoComment: "expo start --port 4567 # note",
+  expoAndAnd: "expo start && echo done",
+  expoRedirect: "expo start > out.log",
+  expoBuild: "expo build",
+  expoWrapped: "bunx expo start",
   dashDash: `${FRAMEWORK} -- --extra`,
 };
 
@@ -143,6 +148,8 @@ const EXPECTED_SKIPS = [
   "envPrefix",
   "envPrefixTwo",
   "execPrefix",
+  "expoAndAnd",
+  "expoBuild",
   "expoComment",
   "hasBoth",
   "hashAfterQuotedEnd",
@@ -218,6 +225,33 @@ describe.skipIf(runners.length === 0)("package script forwarding, against the sh
       : null;
     return { status: result.status, delivered };
   }
+
+  /**
+   * Which framework runs and whether portless may append to the script are
+   * different questions, and the Expo LAN carve-out only needs the first: it
+   * suppresses HOST, which breaks Metro's HMR websocket, and it must do so for
+   * a script that supplies its own port and gets no injection at all. Answering
+   * both questions with one nullable return is what broke this twice.
+   *
+   * Only the identity half is checkable here; that HOST is then actually
+   * omitted is an end-to-end assertion and lives in cli.test.ts.
+   */
+  it("identifies the framework even in shapes it declines to touch", () => {
+    const expoShapes = Object.keys(SCRIPTS).filter((n) => n.startsWith("expo"));
+    // Every expo shape whose first token is literally `expo`, or a runner
+    // wrapper portless understands, must resolve regardless of skip status.
+    const resolved = Object.fromEntries(
+      expoShapes.map((n) => [n, resolveFrameworkBasename(["bun", "run", n], dir)])
+    );
+    expect(resolved).toEqual({
+      expoPlain: "expo",
+      expoComment: "expo",
+      expoAndAnd: "expo",
+      expoRedirect: "expo",
+      expoBuild: "expo",
+      expoWrapped: "expo",
+    });
+  });
 
   it("declines exactly the documented set of script shapes", () => {
     const skipped = Object.keys(SCRIPTS).filter((name) => {
