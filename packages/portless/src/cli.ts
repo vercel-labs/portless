@@ -61,6 +61,7 @@ import {
   getProxyBindTargets,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
+  resolveFrameworkBasename,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -1453,9 +1454,11 @@ async function runApp(
   // Child servers always bind to localhost; the proxy handles cross-device LAN access.
   // Exception: Expo in LAN mode — Metro defaults to LAN and setting HOST=127.0.0.1
   // conflicts with its internal networking, causing HMR WebSocket degradation.
-  const basename = path.basename(commandArgs[0]);
-  const isExpo = basename === "expo";
-  const isExpoLan = isExpo && (lanMode || isLanEnvEnabled());
+  // Resolve the framework the same way the flag injectors do, through package
+  // runners and package scripts: `bun run dev` with `"dev": "expo start"` is
+  // still Expo, and reading commandArgs[0] here would see only `bun`.
+  const framework = resolveFrameworkBasename(commandArgs);
+  const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
   const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
@@ -1821,8 +1824,11 @@ ${colors.bold("How it works:")}
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
      Expo, React Native) get --port and, when needed, --host flags
-     injected automatically (through package scripts too, except compound
-     scripts using &&, | or ; — write those as a direct dev command)
+     injected automatically, including through a package script whose command
+     starts with the framework. Portless leaves a script alone when it is
+     compound (&&, |, ;), ends in a # comment, is env-prefixed
+     (NODE_ENV=production vite), or delegates to another script; set the port
+     in those yourself
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 

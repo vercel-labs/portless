@@ -24,6 +24,7 @@ import {
   isHttpsEnvDisabled,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
+  resolveFrameworkBasename,
   isPortListening,
   isProxyRunning,
   listenOnProxyInterface,
@@ -1092,6 +1093,109 @@ describe("injectPackageScriptFrameworkFlags", () => {
     const args = ["/usr/local/bin/bun", "run", "dev"];
     injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
     expect(args).toEqual(["/usr/local/bin/bun", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  // A trailing comment makes the shell discard everything appended after it,
+  // so injection would look successful and deliver nothing.
+  it("skips a script ending in a shell comment", () => {
+    writeScripts({ dev: "vite dev # keep this note" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("skips a script with a comment after the framework flags", () => {
+    writeScripts({ dev: "vite dev --open  # opens a browser" });
+    const args = ["npm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["npm", "run", "dev"]);
+  });
+
+  // Not a guard clause: the resolver declines these because "(vite" is not a
+  // framework name. Pinned so a future resolver that tokenizes shell syntax
+  // does not start injecting into them.
+  it("skips a subshell script", () => {
+    writeScripts({ dev: "(vite dev)" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still injects when # is inside a word or quoted", () => {
+    writeScripts({ dev: "vite dev --tag v1#2" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("still injects when a script substitutes a command mid-word", () => {
+    writeScripts({ dev: "vite dev --define SHA=$(git rev-parse HEAD)" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+});
+
+describe("resolveFrameworkBasename", () => {
+  let pkgDir: string;
+
+  beforeEach(() => {
+    pkgDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-fw-resolve-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pkgDir, { recursive: true, force: true });
+  });
+
+  function writeScripts(scripts: Record<string, string>) {
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ name: "test-app", scripts })
+    );
+  }
+
+  it("resolves a direct invocation", () => {
+    expect(resolveFrameworkBasename(["vite", "dev"], pkgDir)).toBe("vite");
+  });
+
+  it("resolves through a package runner", () => {
+    expect(resolveFrameworkBasename(["bunx", "--bun", "vite", "dev"], pkgDir)).toBe("vite");
+  });
+
+  // The env binder in cli.ts uses this to decide whether to export HOST.
+  // Reading commandArgs[0] there saw `bun` and broke Expo's HMR in LAN mode.
+  it("resolves expo through a package script", () => {
+    writeScripts({ dev: "expo start" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
+  });
+
+  it("returns null for a script portless declines to touch", () => {
+    writeScripts({ dev: "expo start # note" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBeNull();
+  });
+
+  it("returns null when no known framework is reached", () => {
+    writeScripts({ dev: "node server.js" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBeNull();
+    expect(resolveFrameworkBasename(["node", "server.js"], pkgDir)).toBeNull();
   });
 });
 

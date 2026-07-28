@@ -167,7 +167,7 @@ Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4
 
 Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
-Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag. Injection works through a package script (e.g. `"dev": "vite"`) but not through a compound script (`&&`, `|`, `;`) — write those as a direct dev command.
+Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, Astro, React Router, Angular, Expo, React Native), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag. Injection reaches through a package script whose command starts with the framework or a known runner (`"dev": "vite"`, `"dev": "bunx vite"`). Portless leaves a script alone when appending flags to it would not work: a compound command (`&&`, `|`, `;`), a trailing `#` comment, an env prefix (`NODE_ENV=production vite`), or delegation to another script (`"dev": "npm run dev:vite"`). Those keep their own port, so set it in the script yourself.
 
 ### State directory
 
@@ -380,7 +380,7 @@ portless proxy start -p 8080
 
 ### Framework not respecting PORT
 
-Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically. Injection works through a package script (e.g. `"dev": "vite"`) but not through a compound script (`&&`, `|`, `;`) — a compound script keeps its own port and the app returns 502; write those as a direct dev command.
+Portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag for frameworks that ignore the `PORT` env var: **Vite**, **VitePlus** (`vp`), **Astro**, **React Router**, **Angular**, **Expo**, and **React Native**. SvelteKit uses Vite internally and is handled automatically. Injection reaches through a package script whose command starts with the framework or a known runner. It is skipped for a compound command (`&&`, `|`, `;`), a trailing `#` comment, an env prefix (`NODE_ENV=production vite`), or delegation to another script — each of those keeps its own port and the app returns 502, so set the port in the script yourself.
 
 For other frameworks that don't read `PORT`, pass the port manually:
 

@@ -1135,22 +1135,39 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): void 
 const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
 const NON_SERVER_FRAMEWORK_SUBCOMMANDS = new Set(["build"]);
 /**
- * Detect whether a raw script string runs more than one command at the shell's
- * top level: the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare
- * newline, which the shell treats as a separator too. Checked against the raw
- * script string rather than the tokenized array, because splitCommand collapses
+ * Detect whether appending arguments to a raw script string would change what
+ * the shell runs. Flags are forwarded by concatenating them onto this string,
+ * which the package manager hands back to a shell, so the shell parses it a
+ * second time: appending is not composition. Checked against the raw script
+ * string rather than the tokenized array, because splitCommand collapses
  * newlines and would leave a glued operator (`vite dev&&node`) hidden inside a
  * single token.
  *
- * Two classes of false positives are excluded:
+ * Two classes make appending unsafe, and they fail differently:
+ * - Something starts a new command, so the appended flags land on the wrong
+ *   one: the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare newline.
+ * - Something makes the shell discard the tail. A word-initial `#` opens a
+ *   comment and swallows every appended flag silently: the script exits 0 with
+ *   the framework on its own port, so the failure surfaces much later as a 502.
+ *
+ * Three classes of false positives are excluded:
  * - Metacharacters inside single or double quotes (`'/foo&bar'`) — they are
  *   part of an argument, not shell syntax, so quote state is tracked the same
  *   way `splitCommand` tracks it.
  * - `&` used as part of a shell redirection rather than a separator: `2>&1`
  *   (duplicate a file descriptor) and `&>`/`>&` (redirect stdout+stderr) both
  *   contain `&` adjacent to `>` but do not start a new command.
+ * - A `#` that does not start a word. `vite --tag v1#2` is one argument,
+ *   and `vite --define X=$(git rev-parse HEAD)` substitutes mid-word and still
+ *   accepts appended flags. Only a word-initial occurrence changes parsing.
+ *
+ * Subshells (`(vite dev)`) and command substitution (`` `printf vite` dev ``,
+ * `$(printf vite) dev`) are deliberately absent. Neither discards the tail, and
+ * the framework resolver already declines every one of those scripts because
+ * their first token is not a name it recognizes, so a guard clause for them
+ * would be unreachable. A regression test pins that outcome instead.
  */
-function isCompoundShellScript(command: string): boolean {
+function isUnsafeToAppendArgs(command: string): boolean {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -1176,6 +1193,13 @@ function isCompoundShellScript(command: string): boolean {
     if (inSingle || inDouble) continue;
 
     if (ch === ";" || ch === "\n" || ch === "\r" || ch === "|") return true;
+    // A word-initial `#` opens a comment, so everything after it — including
+    // the flags we are about to append — is discarded by the shell.
+    if (ch === "#") {
+      const prev = chars[i - 1];
+      if (prev === undefined || prev === " " || prev === "\t") return true;
+      continue;
+    }
     if (ch === "&") {
       const prev = chars[i - 1];
       const next = chars[i + 1];
@@ -1189,6 +1213,75 @@ function isCompoundShellScript(command: string): boolean {
 
 function hasCliOption(args: string[], option: string): boolean {
   return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
+}
+
+/**
+ * Resolve the tokens of the package script a command delegates to, or null
+ * when the command is not `<pm> run <script>`, the script does not exist, or
+ * the script is in a form portless deliberately declines to touch (unsafe to
+ * append to, or invoking a non-server subcommand).
+ *
+ * Single home for "which script will actually run", so every consumer of that
+ * answer agrees. See resolveFrameworkBasename for why that matters.
+ */
+function resolvePackageScriptTokens(commandArgs: string[], packageDir: string): string[] | null {
+  if (commandArgs.length < 3) return null;
+
+  const runner = path.basename(commandArgs[0]);
+  if (!PACKAGE_SCRIPT_MANAGERS.has(runner)) return null;
+
+  const [, runSubcommand, scriptName] = commandArgs;
+  // Conservative shape match: `<pm> run <script>`. Runner flags between
+  // `run` and the script name (e.g. `bun run --bun dev`) are left alone.
+  if (runSubcommand !== "run" || scriptName.startsWith("-")) return null;
+
+  const rawScript = resolveScript(scriptName, packageDir);
+  if (!rawScript) return null;
+  // A script the shell re-parses in a way appending would break. Test the raw
+  // script string, not the tokens: splitCommand collapses newlines and hides
+  // glued operators (`vite dev&&node`, `vite dev\nnode x`) inside a single
+  // token where a per-token check cannot see the separator, and it drops a
+  // trailing comment entirely.
+  const rawScriptText = resolveScriptRaw(scriptName, packageDir);
+  if (rawScriptText && isUnsafeToAppendArgs(rawScriptText)) return null;
+  // Non-server subcommands (`build`) must not receive server flags. Locate the
+  // framework past any runner wrapper (`bunx vite build`), then scan every bare
+  // positional after it — the subcommand can sit behind a space-separated flag
+  // value (`vite --mode production build`), so a fixed slot or a flag-skip loop
+  // misses it. Errs conservative: a flag value equal to a subcommand also skips.
+  const fwIdx = findFrameworkIndex(rawScript);
+  if (fwIdx !== null) {
+    const frameworkArgs = rawScript.slice(fwIdx + 1);
+    const invokesNonServer = frameworkArgs.some(
+      (arg) => !arg.startsWith("-") && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(arg)
+    );
+    if (invokesNonServer) return null;
+  }
+  return rawScript;
+}
+
+/**
+ * Resolve which port-ignoring framework a command ultimately invokes, looking
+ * past package runners (`bunx vite dev`) and through one level of package
+ * script indirection (`bun run dev` where `"dev": "expo start"`). Returns null
+ * when the command reaches no framework portless knows about.
+ *
+ * Deciding which framework runs drives two independent effects, and both must
+ * read the same answer: the CLI flags appended below, and the environment
+ * `runApp` exports before spawning. Resolving the framework here while the env
+ * binder re-derived it from `path.basename(commandArgs[0])` is what left Expo
+ * package scripts with `HOST=127.0.0.1` in LAN mode, degrading Metro's HMR
+ * websocket — the exact condition the carve-out exists to avoid. Route every
+ * new consumer through this function rather than reading commandArgs[0].
+ */
+export function resolveFrameworkBasename(
+  commandArgs: string[],
+  packageDir: string = process.cwd()
+): string | null {
+  const direct = findFrameworkBasename(commandArgs);
+  if (direct) return direct;
+  const scriptTokens = resolvePackageScriptTokens(commandArgs, packageDir);
+  return scriptTokens ? findFrameworkBasename(scriptTokens) : null;
 }
 
 /**
@@ -1207,37 +1300,8 @@ export function injectPackageScriptFrameworkFlags(
   port: number,
   packageDir: string = process.cwd()
 ): void {
-  if (commandArgs.length < 3) return;
-
-  const runner = path.basename(commandArgs[0]);
-  if (!PACKAGE_SCRIPT_MANAGERS.has(runner)) return;
-
-  const [, runSubcommand, scriptName] = commandArgs;
-  // Conservative shape match: `<pm> run <script>`. Runner flags between
-  // `run` and the script name (e.g. `bun run --bun dev`) are left alone.
-  if (runSubcommand !== "run" || scriptName.startsWith("-")) return;
-
-  const rawScript = resolveScript(scriptName, packageDir);
+  const rawScript = resolvePackageScriptTokens(commandArgs, packageDir);
   if (!rawScript) return;
-  // Compound scripts append forwarded args to the wrong command; do not
-  // forward. Test the raw script string, not the tokens: splitCommand collapses
-  // newlines and hides glued operators (`vite dev&&node`, `vite dev\nnode x`)
-  // inside a single token where a per-token check cannot see the separator.
-  const rawScriptText = resolveScriptRaw(scriptName, packageDir);
-  if (rawScriptText && isCompoundShellScript(rawScriptText)) return;
-  // Non-server subcommands (`build`) must not receive server flags. Locate the
-  // framework past any runner wrapper (`bunx vite build`), then scan every bare
-  // positional after it — the subcommand can sit behind a space-separated flag
-  // value (`vite --mode production build`), so a fixed slot or a flag-skip loop
-  // misses it. Errs conservative: a flag value equal to a subcommand also skips.
-  const fwIdx = findFrameworkIndex(rawScript);
-  if (fwIdx !== null) {
-    const frameworkArgs = rawScript.slice(fwIdx + 1);
-    const invokesNonServer = frameworkArgs.some(
-      (arg) => !arg.startsWith("-") && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(arg)
-    );
-    if (invokesNonServer) return;
-  }
 
   // Probe the script plus any user-supplied trailing args so an existing
   // --port/--host (in either place) suppresses injection of that flag.
@@ -1252,7 +1316,7 @@ export function injectPackageScriptFrameworkFlags(
 
   // npm requires `--` before arguments meant for the package script.
   // bun, pnpm, and yarn forward trailing arguments directly.
-  if (runner === "npm" && !commandArgs.includes("--")) {
+  if (path.basename(commandArgs[0]) === "npm" && !commandArgs.includes("--")) {
     commandArgs.push("--");
   }
   commandArgs.push(...forwardedFlags);

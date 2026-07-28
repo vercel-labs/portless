@@ -1077,6 +1077,68 @@ describe("CLI", () => {
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     });
+
+    // Twin of the test above, one layer of indirection deeper. Deciding which
+    // framework runs drives both the injected flags and the exported env, and
+    // the env binder used to read commandArgs[0] — `bun`, not `expo` — so the
+    // LAN carve-out never fired and Metro got HOST=127.0.0.1.
+    it("omits HOST for expo in LAN mode when it runs through a package script", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-shim-"));
+      const appDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-app-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
+        fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
+        writeExpoShim(shimDir);
+        fs.writeFileSync(
+          path.join(appDir, "package.json"),
+          JSON.stringify({ name: "mobile-app", scripts: { dev: "expo start" } })
+        );
+
+        const { status } = run(
+          ["run", "--name", "mobile", "--app-port", "4567", "bun", "run", "dev"],
+          {
+            cwd: appDir,
+            env: {
+              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_TEST_CAPTURE_FILE: capturePath,
+              PORTLESS_HTTPS: "0",
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["start", "--port", "4567"]);
+        expect(capture.env.PORT).toBe("4567");
+        expect(capture.env.HOST).toBeUndefined();
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+        fs.rmSync(appDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("Rsbuild flag injection", () => {
