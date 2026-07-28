@@ -1825,11 +1825,14 @@ ${colors.bold("How it works:")}
   5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
      Expo, React Native) get --port and, when needed, --host flags
      injected automatically, including through a package script whose command
-     starts with the framework. Portless leaves a script alone when it is
-     compound (&&, |, ;), ends in a # comment, is env-prefixed
-     (NODE_ENV=production vite), delegates to another script, or is invoked
-     with runner flags before the script name (bun run --bun dev); set the
-     port in those yourself
+     starts with the framework. Only server commands (dev, serve, preview,
+     start) get them; build, optimize, test and the like reject them, and an
+     invocation portless cannot classify is left alone too.
+     Portless also leaves a script alone when it is
+     compound (&&, |, ;), ends in a # comment, ends its own option list with
+     --, is env-prefixed (NODE_ENV=production vite), delegates to another
+     script, or is invoked with runner flags before the script name
+     (bun run --bun dev); set the port in those yourself
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
