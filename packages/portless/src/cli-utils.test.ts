@@ -1137,6 +1137,24 @@ describe("injectPackageScriptFrameworkFlags", () => {
     ]);
   });
 
+  it("still injects when an escaped space precedes a #", () => {
+    // `--open /foo\ #bar` is a single argument, not a comment: the space is
+    // escaped, so the `#` does not begin a word.
+    writeScripts({ dev: "vite dev --open /foo\\ #bar" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
   it("still injects when a script substitutes a command mid-word", () => {
     writeScripts({ dev: "vite dev --define SHA=$(git rev-parse HEAD)" });
     const args = ["bun", "run", "dev"];
@@ -1187,9 +1205,20 @@ describe("resolveFrameworkBasename", () => {
     expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
   });
 
-  it("returns null for a script portless declines to touch", () => {
-    writeScripts({ dev: "expo start # note" });
-    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBeNull();
+  // Resolution and append-safety are different questions. A script portless
+  // refuses to append flags to still runs Metro, and the LAN carve-out that
+  // suppresses HOST keys off the framework, not off whether flags were added.
+  it("still identifies expo in a script portless will not append to", () => {
+    writeScripts({ dev: "expo start --port 4567 # note" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still identifies expo in a build script", () => {
+    writeScripts({ dev: "expo build" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
   });
 
   it("returns null when no known framework is reached", () => {

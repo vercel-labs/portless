@@ -1171,11 +1171,15 @@ function isUnsafeToAppendArgs(command: string): boolean {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
+  let atWordStart = true;
   const chars = Array.from(command);
   for (let i = 0; i < chars.length; i++) {
     const ch = chars[i];
     if (escaped) {
       escaped = false;
+      // An escaped character is part of the current word, so what follows it
+      // is not word-initial: `--open /foo\\ #bar` is one argument.
+      atWordStart = false;
       continue;
     }
     if (ch === "\\" && !inSingle) {
@@ -1184,22 +1188,22 @@ function isUnsafeToAppendArgs(command: string): boolean {
     }
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
+      atWordStart = false;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
+      atWordStart = false;
       continue;
     }
     if (inSingle || inDouble) continue;
 
     if (ch === ";" || ch === "\n" || ch === "\r" || ch === "|") return true;
     // A word-initial `#` opens a comment, so everything after it — including
-    // the flags we are about to append — is discarded by the shell.
-    if (ch === "#") {
-      const prev = chars[i - 1];
-      if (prev === undefined || prev === " " || prev === "\t") return true;
-      continue;
-    }
+    // the flags we are about to append — is discarded by the shell. Word start
+    // is tracked rather than read off the previous character: an escaped space
+    // keeps the word open even though the raw character before `#` is a space.
+    if (ch === "#" && atWordStart) return true;
     if (ch === "&") {
       const prev = chars[i - 1];
       const next = chars[i + 1];
@@ -1207,6 +1211,7 @@ function isUnsafeToAppendArgs(command: string): boolean {
       if (prev === ">" || next === ">") continue;
       return true;
     }
+    atWordStart = ch === " " || ch === "\t";
   }
   return false;
 }
@@ -1217,12 +1222,14 @@ function hasCliOption(args: string[], option: string): boolean {
 
 /**
  * Resolve the tokens of the package script a command delegates to, or null
- * when the command is not `<pm> run <script>`, the script does not exist, or
- * the script is in a form portless deliberately declines to touch (unsafe to
- * append to, or invoking a non-server subcommand).
+ * when the command is not `<pm> run <script>` or the script does not exist.
  *
- * Single home for "which script will actually run", so every consumer of that
- * answer agrees. See resolveFrameworkBasename for why that matters.
+ * Answers one question only: which command will run. Whether portless may
+ * safely append flags to that command is a separate question, asked by
+ * isSafeToInjectIntoScript. Conflating the two is its own defect: a script
+ * portless declines to append to still runs a framework, and the consumer that
+ * needs the framework's identity rather than its flags — the Expo LAN
+ * environment carve-out — must still get an answer.
  */
 function resolvePackageScriptTokens(commandArgs: string[], packageDir: string): string[] | null {
   if (commandArgs.length < 3) return null;
@@ -1235,15 +1242,26 @@ function resolvePackageScriptTokens(commandArgs: string[], packageDir: string): 
   // `run` and the script name (e.g. `bun run --bun dev`) are left alone.
   if (runSubcommand !== "run" || scriptName.startsWith("-")) return null;
 
-  const rawScript = resolveScript(scriptName, packageDir);
-  if (!rawScript) return null;
+  return resolveScript(scriptName, packageDir);
+}
+
+/**
+ * Decide whether portless may append flags to a resolved package script. Kept
+ * apart from resolving it: a script can be perfectly identifiable and still be
+ * one portless must not touch.
+ */
+function isSafeToInjectIntoScript(
+  scriptName: string,
+  rawScript: string[],
+  packageDir: string
+): boolean {
   // A script the shell re-parses in a way appending would break. Test the raw
   // script string, not the tokens: splitCommand collapses newlines and hides
   // glued operators (`vite dev&&node`, `vite dev\nnode x`) inside a single
   // token where a per-token check cannot see the separator, and it drops a
   // trailing comment entirely.
   const rawScriptText = resolveScriptRaw(scriptName, packageDir);
-  if (rawScriptText && isUnsafeToAppendArgs(rawScriptText)) return null;
+  if (rawScriptText && isUnsafeToAppendArgs(rawScriptText)) return false;
   // Non-server subcommands (`build`) must not receive server flags. Locate the
   // framework past any runner wrapper (`bunx vite build`), then scan every bare
   // positional after it — the subcommand can sit behind a space-separated flag
@@ -1255,9 +1273,9 @@ function resolvePackageScriptTokens(commandArgs: string[], packageDir: string): 
     const invokesNonServer = frameworkArgs.some(
       (arg) => !arg.startsWith("-") && NON_SERVER_FRAMEWORK_SUBCOMMANDS.has(arg)
     );
-    if (invokesNonServer) return null;
+    if (invokesNonServer) return false;
   }
-  return rawScript;
+  return true;
 }
 
 /**
@@ -1273,6 +1291,13 @@ function resolvePackageScriptTokens(commandArgs: string[], packageDir: string): 
  * package scripts with `HOST=127.0.0.1` in LAN mode, degrading Metro's HMR
  * websocket — the exact condition the carve-out exists to avoid. Route every
  * new consumer through this function rather than reading commandArgs[0].
+ *
+ * Deliberately independent of whether portless will inject flags: an Expo
+ * script portless declines to append to still runs Metro, and still must not
+ * get HOST in LAN mode. Shapes this cannot see through remain unresolved
+ * (a subshell or a leading command substitution hides the framework name from
+ * a tokenizer that does not parse shell syntax); those are recorded as a known
+ * gap rather than papered over.
  */
 export function resolveFrameworkBasename(
   commandArgs: string[],
@@ -1302,6 +1327,8 @@ export function injectPackageScriptFrameworkFlags(
 ): void {
   const rawScript = resolvePackageScriptTokens(commandArgs, packageDir);
   if (!rawScript) return;
+  const [, , scriptName] = commandArgs;
+  if (!isSafeToInjectIntoScript(scriptName, rawScript, packageDir)) return;
 
   // Probe the script plus any user-supplied trailing args so an existing
   // --port/--host (in either place) suppresses injection of that flag.

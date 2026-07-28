@@ -1827,8 +1827,9 @@ ${colors.bold("How it works:")}
      injected automatically, including through a package script whose command
      starts with the framework. Portless leaves a script alone when it is
      compound (&&, |, ;), ends in a # comment, is env-prefixed
-     (NODE_ENV=production vite), or delegates to another script; set the port
-     in those yourself
+     (NODE_ENV=production vite), delegates to another script, or is invoked
+     with runner flags before the script name (bun run --bun dev); set the
+     port in those yourself
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
