@@ -1736,21 +1736,40 @@ describe("CLI", () => {
           fs.chmodSync(shimPath, 0o755);
         }
 
-        const { status } = run(options.cliArgs, {
+        const { status, stdout, stderr } = run(options.cliArgs, {
           cwd: tmpDir,
           env: {
-            // Deliberately do NOT inherit process.env.PATH here: the shim's
-            // discovery must not depend on where a real `bun` happens to sit
-            // in the ambient PATH. node_modules/.bin above is what actually
-            // makes the shim win; this PATH only needs to resolve /bin/sh
-            // itself and any other basic utilities the child script needs.
-            PATH: "/usr/bin:/bin",
+            // Deliberately do NOT inherit process.env.PATH on POSIX: the
+            // shim's discovery must not depend on where a real `bun` happens
+            // to sit in the ambient PATH. node_modules/.bin above is what
+            // actually makes the shim win; this PATH only needs to resolve
+            // /bin/sh itself and any other basic utilities the child needs.
+            // Windows keeps the ambient PATH, because the shim is a `.cmd`
+            // and running it needs cmd.exe from System32. The hermeticity
+            // argument still holds there: node_modules/.bin is collected
+            // before anything on PATH, so a real bun cannot shadow the shim.
+            PATH: process.platform === "win32" ? process.env.PATH : "/usr/bin:/bin",
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
             PORTLESS_HTTPS: "0",
           },
         });
 
+        if (!fs.existsSync(capturePath)) {
+          // The shim not running is a resolution failure, and a bare ENOENT on
+          // the capture file says nothing about why. Surface what the CLI
+          // actually did, so one CI run diagnoses it instead of several.
+          throw new Error(
+            [
+              `package-manager shim never ran (${options.pm})`,
+              `platform: ${process.platform}`,
+              `localBin: ${fs.readdirSync(localBinDir).join(", ") || "(empty)"}`,
+              `exit: ${status}`,
+              `stdout: ${stdout.trim() || "(empty)"}`,
+              `stderr: ${stderr.trim() || "(empty)"}`,
+            ].join("\n")
+          );
+        }
         const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
           args: string[];
           env: Record<string, string>;
