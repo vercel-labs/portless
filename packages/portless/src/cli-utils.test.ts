@@ -1137,6 +1137,15 @@ describe("injectPackageScriptFrameworkFlags", () => {
     ]);
   });
 
+  // A backslash-newline is a line continuation, not an escaped character: the
+  // shell joins the lines and the `#` still opens a comment.
+  it("skips a script whose comment follows a line continuation", () => {
+    writeScripts({ dev: "vite dev \\\n# note" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
   it("still injects when an escaped space precedes a #", () => {
     // `--open /foo\ #bar` is a single argument, not a comment: the space is
     // escaped, so the `#` does not begin a word.

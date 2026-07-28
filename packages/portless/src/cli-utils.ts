@@ -1177,8 +1177,13 @@ function isUnsafeToAppendArgs(command: string): boolean {
     const ch = chars[i];
     if (escaped) {
       escaped = false;
-      // An escaped character is part of the current word, so what follows it
-      // is not word-initial: `--open /foo\\ #bar` is one argument.
+      // A backslash before a newline is a line continuation: the shell removes
+      // both characters and joins the lines, so whatever governed word
+      // position before it still governs after. `vite dev \<newline># note`
+      // reads as `vite dev # note`, and that `#` does open a comment.
+      if (ch === "\n" || ch === "\r") continue;
+      // Any other escaped character is part of the current word, so what
+      // follows it is not word-initial: `--open /foo\ #bar` is one argument.
       atWordStart = false;
       continue;
     }
