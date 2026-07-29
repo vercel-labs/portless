@@ -7,6 +7,12 @@ import {
   collectStateDirsForCleanup,
   removePortlessStateFiles,
 } from "./clean-utils.js";
+import {
+  HOSTS_SYNC_PROTOCOL,
+  HOSTS_SYNC_STATUS_FILE,
+  hostsSyncStatusTempPath,
+  writeHostsSyncStatus,
+} from "./cli-utils.js";
 
 describe("collectStateDirsForCleanup", () => {
   const prevState = process.env.PORTLESS_STATE_DIR;
@@ -34,6 +40,42 @@ describe("removePortlessStateFiles", () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // The status file records the hostnames the user registered, so leaving it
+  // behind is clean failing to remove user data after saying it did. Nothing
+  // could have failed here before: the allowlist has no coupling to the code
+  // that writes these files, so the writer worked and the remover was unaware.
+  // Driven through the REAL writer, not a hand-planted file. The allowlist and
+  // the code that writes these names are joined by nothing but agreement, and
+  // agreement drifts in the one direction no test catches: the writer works and
+  // the remover is merely unaware. Calling the writer here means changing either
+  // side alone turns this red.
+  it("removes what the real status writer creates, including an interrupted write", () => {
+    writeHostsSyncStatus(tmpDir, {
+      protocol: HOSTS_SYNC_PROTOCOL,
+      ok: false,
+      message: "Could not write /etc/hosts; hostnames may not resolve.",
+      hostnames: ["app.localhost"],
+      at: Date.now(),
+      pid: process.pid,
+      autoSync: true,
+    });
+    // A crash between the temp write and the rename orphans a name carrying a
+    // PID. Built from the writer's own rule rather than a literal, so the rule
+    // cannot change on one side only.
+    const orphan = hostsSyncStatusTempPath(tmpDir, 4194303);
+    fs.writeFileSync(orphan, "{}");
+    // Near misses that share the prefix but are not the writer's temp shape.
+    fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-status.notes"), "keep me");
+    fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-status.backup.tmp"), "keep me");
+
+    removePortlessStateFiles(tmpDir);
+
+    expect(fs.existsSync(path.join(tmpDir, HOSTS_SYNC_STATUS_FILE))).toBe(false);
+    expect(fs.existsSync(orphan)).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-status.notes"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-status.backup.tmp"))).toBe(true);
   });
 
   it("removes allowlisted files and host-certs directory", () => {

@@ -315,10 +315,43 @@ export function writeLanMarker(dir: string, ip: string | null): void {
 }
 
 /** Status file recording the outcome of the daemon's last hosts sync. */
-const HOSTS_SYNC_STATUS_FILE = "proxy.hosts-sync-status";
+export const HOSTS_SYNC_STATUS_FILE = "proxy.hosts-sync-status";
+
+/**
+ * Schema this build writes and understands.
+ *
+ * An absent file already answers "the daemon predates publishing". This answers
+ * the case absence cannot: a daemon from a *newer* build whose record this one
+ * would misread. Unsupported becomes a statement rather than an inference, and
+ * a reader that does not recognize the version declines instead of guessing.
+ */
+export const HOSTS_SYNC_PROTOCOL = 1;
+
+/**
+ * Path of the temporary file an atomic status write renames from.
+ *
+ * Exported because cleanup must match exactly what the writer creates. A PID in
+ * the name means no static allowlist can enumerate these, so the writer and the
+ * remover have to share one definition of the rule or they drift apart in the
+ * one direction nothing tests: the writer works and the remover is unaware.
+ */
+export function hostsSyncStatusTempPath(dir: string, pid: number): string {
+  return path.join(dir, `${HOSTS_SYNC_STATUS_FILE}.${pid}.tmp`);
+}
+
+/** Whether a directory entry is a temporary file left by an interrupted status write. */
+export function isHostsSyncStatusTemp(entry: string): boolean {
+  return (
+    entry.startsWith(`${HOSTS_SYNC_STATUS_FILE}.`) &&
+    entry.endsWith(".tmp") &&
+    /^\d+$/.test(entry.slice(HOSTS_SYNC_STATUS_FILE.length + 1, -".tmp".length))
+  );
+}
 
 /** Outcome of one hosts-file sync performed by the daemon. */
 export interface HostsSyncStatus {
+  /** Schema of this record; a reader that does not support it must decline the record. */
+  protocol: number;
   /** Whether the sync wrote the hosts file. */
   ok: boolean;
   /** User-facing warning when `ok` is false. */
@@ -327,6 +360,14 @@ export interface HostsSyncStatus {
   hostnames: string[];
   /** `Date.now()` when the sync finished, so a CLI can ignore outcomes older than its own route change. */
   at: number;
+  /** The publishing daemon's PID, so a reader can tell this record from one left by a previous daemon. */
+  pid: number;
+  /**
+   * Whether that daemon syncs the hosts file at all. It is the daemon's answer,
+   * not the reader's: a CLI's own PORTLESS_SYNC_HOSTS describes the environment
+   * the CLI was started in, which the daemon may never have seen.
+   */
+  autoSync: boolean;
 }
 
 /**
@@ -348,7 +389,7 @@ export interface HostsSyncStatus {
  */
 export function writeHostsSyncStatus(dir: string, status: HostsSyncStatus): void {
   const target = path.join(dir, HOSTS_SYNC_STATUS_FILE);
-  const tmp = `${target}.${process.pid}.tmp`;
+  const tmp = hostsSyncStatusTempPath(dir, process.pid);
   try {
     fs.writeFileSync(tmp, JSON.stringify(status), { mode: 0o644 });
     fs.renameSync(tmp, target);
@@ -371,11 +412,17 @@ export function readHostsSyncStatus(dir: string): HostsSyncStatus | null {
     if (!parsed || typeof parsed !== "object") return null;
     const status = parsed as Partial<HostsSyncStatus>;
     if (typeof status.ok !== "boolean" || typeof status.at !== "number") return null;
+    // A record this build cannot read is the same answer as no record: decline
+    // rather than interpret fields that may have moved.
+    if (status.protocol !== HOSTS_SYNC_PROTOCOL) return null;
     return {
+      protocol: HOSTS_SYNC_PROTOCOL,
       ok: status.ok,
       message: typeof status.message === "string" ? status.message : null,
       hostnames: Array.isArray(status.hostnames) ? status.hostnames : [],
       at: status.at,
+      pid: typeof status.pid === "number" ? status.pid : 0,
+      autoSync: status.autoSync !== false,
     };
   } catch {
     return null;
@@ -383,27 +430,45 @@ export function readHostsSyncStatus(dir: string): HostsSyncStatus | null {
 }
 
 /**
- * Whether a daemon is alive to publish a hosts-sync outcome at all.
+ * The running daemon's own declaration that it publishes hosts-sync outcomes,
+ * and whether it syncs at all. Null means nobody will publish, so a caller
+ * must not wait.
  *
  * Every wait for an outcome is a wait on the daemon: it is the only process
- * that publishes one. When no daemon is running there is no producer, so the
- * wait cannot end early and burns its full ceiling before returning null.
- * Registering an alias before starting the proxy is an ordinary flow, so that
- * ceiling would land on a routine command.
+ * that publishes one. When nobody will publish, the wait cannot end early and
+ * burns its full ceiling before returning the same empty answer it could have
+ * returned immediately.
  *
- * A missing or unparseable PID file, or a PID no longer alive, all mean the
- * same thing here: nobody will publish.
+ * A live PID is not enough to answer this. A daemon can be running, correct,
+ * and mute in two ordinary ways:
+ *
+ *   1. It predates the publishing side. The moment this feature ships, the
+ *      daemon already running is the older build by definition, so the upgrade
+ *      path is the first one users take and the only one the branch cannot
+ *      test against itself. Such a daemon never writes the status file, so its
+ *      absence is the answer.
+ *   2. It was started with syncing disabled. Only the daemon knows that: it
+ *      inherited its environment at spawn time, possibly hours earlier and
+ *      from another shell. A CLI reading its own PORTLESS_SYNC_HOSTS is
+ *      describing an environment the daemon never saw.
+ *
+ * The PID cross-check is what separates a live publisher from a record left by
+ * a previous daemon: the record must name the PID that `proxy.pid` currently
+ * names, and that process must still be alive.
  */
-export function hasLiveHostsSyncPublisher(pidPath: string): boolean {
+export function readHostsSyncPublisher(dir: string, pidPath: string): { autoSync: boolean } | null {
+  const status = readHostsSyncStatus(dir);
+  if (!status || status.pid <= 0) return null;
   let raw: string;
   try {
     raw = fs.readFileSync(pidPath, "utf-8").trim();
   } catch {
-    return false;
+    return null;
   }
   const pid = parseInt(raw, 10);
-  if (isNaN(pid) || pid <= 0) return false;
-  return isProcessAlive(pid);
+  if (isNaN(pid) || pid <= 0 || pid !== status.pid) return null;
+  if (!isProcessAlive(pid)) return null;
+  return { autoSync: status.autoSync };
 }
 
 /**

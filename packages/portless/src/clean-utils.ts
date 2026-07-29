@@ -1,6 +1,11 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
+import {
+  HOSTS_SYNC_STATUS_FILE,
+  isHostsSyncStatusTemp,
+  LEGACY_SYSTEM_STATE_DIR,
+  USER_STATE_DIR,
+} from "./cli-utils.js";
 
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
@@ -14,6 +19,7 @@ const PORTLESS_STATE_FILES = [
   "proxy.tld",
   "proxy.tlds",
   "proxy.lan",
+  HOSTS_SYNC_STATUS_FILE,
   "ca.trusted",
   "ca.trust-refresh-pending",
   "ca-key.pem",
@@ -83,6 +89,23 @@ export function removePortlessStateFiles(
     } catch {
       // ENOENT or permission; non-fatal
     }
+  }
+  // The status file is written atomically as a temporary plus a rename, so a
+  // crash between the two orphans a file whose name carries a PID. No static
+  // allowlist can enumerate those. The match rule is not restated here: it is
+  // owned by the writer's module, so changing the naming on one side cannot
+  // silently leave the other side unable to find what it now creates.
+  try {
+    for (const entry of fs.readdirSync(dir)) {
+      if (!isHostsSyncStatusTemp(entry)) continue;
+      try {
+        fs.unlinkSync(path.join(dir, entry));
+      } catch {
+        // ENOENT or permission; non-fatal
+      }
+    }
+  } catch {
+    // Directory unreadable; the allowlist pass above already reported what it could.
   }
   try {
     fs.rmSync(path.join(dir, HOST_CERTS_DIR), { recursive: true, force: true });

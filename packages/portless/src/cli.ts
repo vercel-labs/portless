@@ -77,7 +77,8 @@ import {
   resolveStateDir,
   spawnCommand,
   augmentedPath,
-  hasLiveHostsSyncPublisher,
+  HOSTS_SYNC_PROTOCOL,
+  readHostsSyncPublisher,
   syncHostsWithWarning,
   writeHostsSyncStatus,
   waitForHostsSyncStatus,
@@ -552,16 +553,21 @@ const HOSTS_SYNC_STATUS_WAIT_CEILING_MS = DEBOUNCE_MS + POLL_INTERVAL_MS + 1000;
  *
  * Returns as soon as the daemon publishes an outcome covering these
  * hostnames, so the happy path costs one debounce, not the full ceiling.
- * When auto-sync is disabled, or when no daemon is alive to publish an
- * outcome, there is nothing to wait for and this returns immediately.
+ *
+ * Whether there is anything to wait for is the daemon's answer, read from the
+ * handshake it publishes at startup, never inferred here. This process's own
+ * PORTLESS_SYNC_HOSTS describes the shell this command was typed in; the
+ * daemon may have been started hours ago from another one. Inferring from it
+ * costs the full ceiling against a daemon that will never publish, and — the
+ * worse direction — throws away a real failure the daemon did publish.
  */
 async function reportHostsSyncAfterRouteChange(
   store: RouteStore,
   hostnames: string[],
   since: number
 ): Promise<void> {
-  if (!shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS)) return;
-  if (!hasLiveHostsSyncPublisher(store.pidPath)) return;
+  const publisher = readHostsSyncPublisher(store.dir, store.pidPath);
+  if (!publisher || !publisher.autoSync) return;
   const status = await waitForHostsSyncStatus(store.dir, {
     since,
     hostnames,
@@ -647,10 +653,13 @@ function startProxyServer(
     // reader mistake it for the outcome of its own change.
     if (hostnames.length > 0) {
       writeHostsSyncStatus(store.dir, {
+        protocol: HOSTS_SYNC_PROTOCOL,
         ok,
         message: ok ? null : hostsSyncWarningMessage,
         hostnames,
         at: Date.now(),
+        pid: process.pid,
+        autoSync: autoSyncHosts,
       });
     }
     return ok;
@@ -840,6 +849,24 @@ function startProxyServer(
     // Save PID and port once the server is actually listening
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
+    // Handshake, written beside the PID it names: this daemon publishes
+    // hosts-sync outcomes, and here is whether it syncs at all. A CLI can
+    // infer neither. A daemon from a build older than this feature never
+    // writes the file, which is how its absence answers "nobody will publish";
+    // and the daemon's PORTLESS_SYNC_HOSTS is the one it was spawned with, not
+    // the one in the shell a later command was typed in.
+    //
+    // The empty `hostnames` keeps the handshake from ever being read as a sync
+    // outcome: a waiter requires its own hostnames covered, and none are.
+    writeHostsSyncStatus(store.dir, {
+      protocol: HOSTS_SYNC_PROTOCOL,
+      ok: true,
+      message: null,
+      hostnames: [],
+      at: Date.now(),
+      pid: process.pid,
+      autoSync: autoSyncHosts,
+    });
     writeTlsMarker(store.dir, isTls);
     writeCustomCertMarker(store.dir, isTls && customCert);
     writeTldsFile(store.dir, tlds);
@@ -2013,7 +2040,8 @@ ${colors.bold("Safari / DNS:")}
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
   custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If the file
-  is not writable, it warns once instead of failing silently. To sync manually:
+  is not writable, the command that registered the route warns instead of
+  failing silently. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}

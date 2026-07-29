@@ -22,7 +22,8 @@ import {
   getProtocolPort,
   getProxyBindTargets,
   getRiskyTldReason,
-  hasLiveHostsSyncPublisher,
+  HOSTS_SYNC_PROTOCOL,
+  readHostsSyncPublisher,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
   syncHostsWithWarning,
@@ -568,8 +569,11 @@ describe("hosts-sync status file (daemon-to-CLI handoff)", () => {
   const status = (over: Partial<Parameters<typeof writeHostsSyncStatus>[1]> = {}) => ({
     ok: false,
     message: "Could not write /etc/hosts; hostnames may not resolve.",
+    protocol: HOSTS_SYNC_PROTOCOL,
     hostnames: ["app1.localhost"],
     at: Date.now(),
+    pid: process.pid,
+    autoSync: true,
     ...over,
   });
 
@@ -597,6 +601,22 @@ describe("hosts-sync status file (daemon-to-CLI handoff)", () => {
     expect(readHostsSyncStatus(tmpDir)).toBeNull();
   });
 
+  // Absence of the file answers "the daemon predates publishing". It cannot
+  // answer "the daemon is NEWER and moved these fields", and interpreting a
+  // record whose shape this build does not know is how a reader turns a
+  // forward-compatibility problem into a wrong warning.
+  it("declines a record whose protocol this build does not support", () => {
+    writeHostsSyncStatus(tmpDir, { ...status(), protocol: HOSTS_SYNC_PROTOCOL + 1 });
+    expect(readHostsSyncStatus(tmpDir)).toBeNull();
+  });
+
+  it("declines a record written before the protocol field existed", () => {
+    const legacy = status() as Record<string, unknown>;
+    delete legacy.protocol;
+    fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-status"), JSON.stringify(legacy));
+    expect(readHostsSyncStatus(tmpDir)).toBeNull();
+  });
+
   it("returns null on a corrupt or partially written file", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-status"), "{not json");
     expect(readHostsSyncStatus(tmpDir)).toBeNull();
@@ -616,8 +636,11 @@ describe("waitForHostsSyncStatus", () => {
     writeHostsSyncStatus(tmpDir, {
       ok: false,
       message: "boom",
+      protocol: HOSTS_SYNC_PROTOCOL,
       hostnames: ["app1.localhost"],
       at: Date.now(),
+      pid: process.pid,
+      autoSync: true,
       ...over,
     });
 
@@ -676,7 +699,13 @@ describe("waitForHostsSyncStatus", () => {
     expect(Date.now() - start).toBeLessThan(100);
   });
 
-  it("gives up at the ceiling when the daemon never publishes", async () => {
+  // This covers the bound itself, at an injected ceiling. It deliberately does
+  // NOT bless reaching the bound in production: at the shipped
+  // HOSTS_SYNC_STATUS_WAIT_CEILING_MS that is a 4.1s hang on a routine command,
+  // and the publisher guard below is what keeps every mute-daemon case off this
+  // path. Asserting a timeout at 100ms reads as reasonable bounded behavior and
+  // is exactly how the shipped hang stayed green through two review rounds.
+  it("bounds the wait when an outcome never arrives", async () => {
     const start = Date.now();
     const result = await waitForHostsSyncStatus(tmpDir, {
       since: Date.now(),
@@ -690,9 +719,33 @@ describe("waitForHostsSyncStatus", () => {
   });
 });
 
-describe("hasLiveHostsSyncPublisher", () => {
+describe("readHostsSyncPublisher", () => {
+  // A wait for a published outcome is a wait on the daemon, so the guard in
+  // front of it must answer "will anyone publish, and does that daemon sync at
+  // all". Liveness cannot answer either: the round-5 guard proved a PID was
+  // alive, which every case below also satisfies, and each still hangs for the
+  // full ceiling on a routine command.
   let tmpDir: string;
   let pidPath: string;
+
+  // The shipped HOSTS_SYNC_STATUS_WAIT_CEILING_MS (cli.ts). Timing assertions
+  // here run against the real constant on purpose: a guard verified at an
+  // injected 100ms proves nothing about the command a user actually runs.
+  const PRODUCTION_CEILING_MS = 4100;
+
+  const handshake = (over: Record<string, unknown> = {}) => {
+    fs.writeFileSync(pidPath, `${process.pid}\n`);
+    writeHostsSyncStatus(tmpDir, {
+      protocol: HOSTS_SYNC_PROTOCOL,
+      ok: true,
+      message: null,
+      hostnames: [],
+      at: Date.now(),
+      pid: process.pid,
+      autoSync: true,
+      ...over,
+    } as Parameters<typeof writeHostsSyncStatus>[1]);
+  };
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-publisher-"));
@@ -703,48 +756,78 @@ describe("hasLiveHostsSyncPublisher", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns false when no PID file exists", () => {
-    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+  it("returns null when no daemon is running", () => {
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toBeNull();
   });
 
-  it("returns false for a stale PID file", () => {
+  // The upgrade path, and the reason liveness is not enough. A daemon from a
+  // build older than the handshake is alive, correct, and serving traffic; it
+  // simply never writes the status file. It is also, by construction, the
+  // daemon every user is running the moment this ships.
+  it("returns null for a live daemon from a build that predates the handshake", () => {
+    fs.writeFileSync(pidPath, `${process.pid}\n`);
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toBeNull();
+  });
+
+  it("returns null for a record left by a previous daemon", () => {
+    handshake({ pid: 4194303 });
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toBeNull();
+  });
+
+  it("returns null when the PID it names is no longer alive", () => {
     // PID 1 is init and always alive, so pick one that cannot be running:
     // a freshly reaped child's PID is racy, and 2^22 is above every default
     // pid_max on the platforms portless supports.
+    handshake({ pid: 4194303 });
     fs.writeFileSync(pidPath, "4194303");
-    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toBeNull();
   });
 
-  it("returns false for an unparseable PID file", () => {
+  it("returns null for an unparseable PID file", () => {
+    handshake();
     fs.writeFileSync(pidPath, "not-a-pid");
-    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toBeNull();
   });
 
-  it("returns false for a non-positive PID", () => {
-    fs.writeFileSync(pidPath, "0");
-    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(false);
+  // The forward half of the skew problem: a daemon from a build this CLI does
+  // not understand is as mute as one that predates publishing, and waiting on
+  // it costs the same full ceiling.
+  it("returns null for a live daemon speaking an unsupported protocol", () => {
+    handshake({ protocol: HOSTS_SYNC_PROTOCOL + 1 });
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toBeNull();
   });
 
-  it("returns true for a live PID", () => {
-    fs.writeFileSync(pidPath, `${process.pid}\n`);
-    expect(hasLiveHostsSyncPublisher(pidPath)).toBe(true);
+  it("reports a live publisher that syncs", () => {
+    handshake();
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toEqual({ autoSync: true });
   });
 
-  // Regression guard for the reason this check exists: without it, the
-  // no-daemon case waits out HOSTS_SYNC_STATUS_WAIT_CEILING_MS on a routine
-  // alias registration.
-  it("short-circuits the wait instead of burning the ceiling", async () => {
+  // The daemon's own answer, which is the only one that exists: a CLI reading
+  // its own PORTLESS_SYNC_HOSTS describes the shell the command was typed in,
+  // not the environment the daemon was spawned with.
+  it("reports a live publisher that was started with syncing disabled", () => {
+    handshake({ autoSync: false });
+    expect(readHostsSyncPublisher(tmpDir, pidPath)).toEqual({ autoSync: false });
+  });
+
+  // Every way a daemon can be alive and mute, timed against the real ceiling.
+  it.each([
+    ["a daemon predating the handshake", () => fs.writeFileSync(pidPath, `${process.pid}\n`)],
+    ["a daemon started with syncing disabled", () => handshake({ autoSync: false })],
+    ["a record left by a previous daemon", () => handshake({ pid: 4194303 })],
+  ])("does not spend the production ceiling on %s", async (_label, setup) => {
+    setup();
     const start = Date.now();
-    const skipped = !hasLiveHostsSyncPublisher(pidPath);
-    const result = skipped
-      ? null
-      : await waitForHostsSyncStatus(tmpDir, {
-          since: Date.now(),
-          hostnames: ["app1.localhost"],
-          intervalMs: 50,
-          ceilingMs: 4100,
-        });
-    expect(skipped).toBe(true);
+    const publisher = readHostsSyncPublisher(tmpDir, pidPath);
+    const result =
+      publisher && publisher.autoSync
+        ? await waitForHostsSyncStatus(tmpDir, {
+            since: Date.now(),
+            hostnames: ["app1.localhost"],
+            intervalMs: 50,
+            ceilingMs: PRODUCTION_CEILING_MS,
+          })
+        : null;
     expect(result).toBeNull();
     expect(Date.now() - start).toBeLessThan(100);
   });
