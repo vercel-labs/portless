@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   checkHostResolution,
-  blockCoversHostnames,
+  blockMatchesHostnames,
+  blockResolvesHostnames,
   extractManagedBlock,
   removeBlock,
   buildBlock,
@@ -182,28 +183,67 @@ describe("checkHostResolution", () => {
 // with the block already correct from an earlier run, and the hostnames resolve
 // regardless, so reporting the write would warn about a failure the user does
 // not have. The predicate is pure because the hosts path is a module constant.
-describe("blockCoversHostnames", () => {
+describe("blockMatchesHostnames", () => {
   const block = "# portless-start\n127.0.0.1 a.localhost\n127.0.0.1 b.localhost\n# portless-end";
 
-  it("is true when every hostname is in the managed block", () => {
-    expect(blockCoversHostnames(`127.0.0.1 localhost\n${block}\n`, ["a.localhost"])).toBe(true);
-    expect(blockCoversHostnames(block, ["a.localhost", "b.localhost"])).toBe(true);
+  it("is true only when the block is exactly the wanted set", () => {
+    expect(blockMatchesHostnames(block, ["a.localhost", "b.localhost"])).toBe(true);
+    expect(
+      blockMatchesHostnames(`127.0.0.1 localhost\n${block}\n`, ["b.localhost", "a.localhost"])
+    ).toBe(true);
   });
 
-  it("is false when any hostname is missing", () => {
-    expect(blockCoversHostnames(block, ["a.localhost", "c.localhost"])).toBe(false);
-    expect(blockCoversHostnames("127.0.0.1 localhost\n", ["a.localhost"])).toBe(false);
+  it("is false when a hostname is missing", () => {
+    expect(blockMatchesHostnames(block, ["a.localhost", "c.localhost"])).toBe(false);
+    expect(blockMatchesHostnames("127.0.0.1 localhost\n", ["a.localhost"])).toBe(false);
+  });
+
+  // The defect a subset test cannot see. A removed route leaves its hostname in
+  // the block; if that still counts as correct, the sync skips its write and the
+  // stale entry resolves forever.
+  it("is false when the block carries a hostname that is no longer wanted", () => {
+    expect(blockMatchesHostnames(block, ["a.localhost"])).toBe(false);
+  });
+
+  // A line only helps if it points at loopback.
+  it("is false when a wanted hostname maps to another address", () => {
+    const wrong = "# portless-start\n10.0.0.1 a.localhost\n# portless-end";
+    expect(blockMatchesHostnames(wrong, ["a.localhost"])).toBe(false);
+  });
+
+  it("is false on a duplicate entry, which is not what a sync would write", () => {
+    const dupe = "# portless-start\n127.0.0.1 a.localhost\n127.0.0.1 a.localhost\n# portless-end";
+    expect(blockMatchesHostnames(dupe, ["a.localhost"])).toBe(false);
   });
 
   it("ignores entries outside the managed block", () => {
-    expect(blockCoversHostnames("127.0.0.1 a.localhost\n", ["a.localhost"])).toBe(false);
+    expect(blockMatchesHostnames("127.0.0.1 a.localhost\n", ["a.localhost"])).toBe(false);
   });
 
-  // An empty request means the block should be gone. Treating that as satisfied
-  // whenever no block exists is what makes the startup warm-up sync a no-op
-  // instead of a failure, and it is why an empty sync cannot report a problem.
   it("treats no hostnames as satisfied only when no block remains", () => {
-    expect(blockCoversHostnames("127.0.0.1 localhost\n", [])).toBe(true);
-    expect(blockCoversHostnames(block, [])).toBe(false);
+    expect(blockMatchesHostnames("127.0.0.1 localhost\n", [])).toBe(true);
+    expect(blockMatchesHostnames(block, [])).toBe(false);
+  });
+});
+
+// The weaker of the two questions, and the one a caller gets answered. Skipping
+// the write needs exactness; telling a user whether their hostname resolves does
+// not. Collapsing them means an unprivileged daemon that cannot delete someone
+// else's stale entry reports failure to every registration that actually works.
+describe("blockResolvesHostnames", () => {
+  it("is true when the wanted hostnames resolve, whatever else is there", () => {
+    const withStale =
+      "# portless-start\n127.0.0.1 a.localhost\n127.0.0.1 stale.localhost\n# portless-end";
+    expect(blockResolvesHostnames(withStale, ["a.localhost"])).toBe(true);
+    expect(blockMatchesHostnames(withStale, ["a.localhost"])).toBe(false);
+  });
+
+  it("is false when a wanted hostname is absent", () => {
+    expect(blockResolvesHostnames("# portless-start\n# portless-end", ["a.localhost"])).toBe(false);
+  });
+
+  it("does not count a hostname mapped somewhere other than loopback", () => {
+    const wrong = "# portless-start\n10.0.0.1 a.localhost\n# portless-end";
+    expect(blockResolvesHostnames(wrong, ["a.localhost"])).toBe(false);
   });
 });

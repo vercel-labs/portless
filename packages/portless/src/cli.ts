@@ -2396,7 +2396,8 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Auto-sync:")}
   The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
-  PORTLESS_SYNC_HOSTS=0.
+  PORTLESS_SYNC_HOSTS=0. If the file is not writable, the command that registered
+  the route warns instead of failing silently.
 `);
     process.exit(0);
   }
@@ -2456,8 +2457,18 @@ ${colors.bold("Usage: portless hosts <command>")}
 
   const routes = store.loadRoutes();
   if (routes.length === 0) {
-    console.log(colors.yellow("No active routes to sync."));
-    return;
+    // Zero routes is a valid desired state, not a reason to do nothing. Bailing
+    // here leaves whatever the block already held, so a block left behind by
+    // routes that are gone survives the very command the failure warning tells
+    // people to run.
+    if (getManagedHostnames().length === 0) {
+      console.log(colors.yellow("No active routes to sync."));
+      return;
+    }
+    if (syncHostsFile([])) {
+      console.log(colors.green(`Removed stale portless entries from ${HOSTS_DISPLAY}.`));
+      return;
+    }
   }
   const hostnames = routes.map((r) => r.hostname);
   if (syncHostsFile(hostnames)) {

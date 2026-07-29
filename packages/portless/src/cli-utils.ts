@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
-import { getManagedHostnames, syncHostsFile } from "./hosts.js";
+import { syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -828,6 +828,9 @@ export const HOSTS_DISPLAY = process.platform === "win32" ? "hosts file" : "/etc
  * produces it and the CLI that falls back to it, so the sentence users see and
  * the sentence documented cannot drift apart.
  */
+/** Said when the channel itself failed, which is not the same as knowing the write did. */
+export const HOSTS_SYNC_UNCONFIRMED_MESSAGE = `Could not confirm the ${HOSTS_DISPLAY} sync. Check: portless doctor`;
+
 export const HOSTS_SYNC_FAILED_MESSAGE = `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`;
 
 const HOSTS_SYNC_REQUEST_TIMEOUT_MS = 2000;
@@ -870,6 +873,14 @@ export function requestHostsSync(port: number, tls = false): Promise<HostsSyncRe
         ...(tls ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
+        // The port comes from proxy.port, which can be stale or reused. Without
+        // the identity header an unrelated local server answering "disabled"
+        // silences the warning, which is issue #364 restored by the fix for it.
+        if (res.headers[PORTLESS_HEADER.toLowerCase()] !== "1") {
+          res.resume();
+          resolve({ state: "unreachable" });
+          return;
+        }
         if (res.statusCode === 404 || res.statusCode === 403) {
           res.resume();
           resolve({ state: "unsupported" });
@@ -928,16 +939,14 @@ export function requestHostsSync(port: number, tls = false): Promise<HostsSyncRe
  * the honest answer when a slow but successful write outlives the request
  * timeout, where claiming failure would be a lie.
  *
- * `sync` and `readManaged` are injectable so the decision can be tested without
- * a daemon or the hosts path, which is a module constant.
+ * `sync` is injectable so the decision can be tested without a daemon.
  */
 export async function reportHostsSync(
   hostnames: string[],
   port: number,
   tls: boolean,
   onWarn: (message: string) => void,
-  sync: (port: number, tls: boolean) => Promise<HostsSyncRequestResult> = requestHostsSync,
-  readManaged: () => string[] = getManagedHostnames
+  sync: (port: number, tls: boolean) => Promise<HostsSyncRequestResult> = requestHostsSync
 ): Promise<void> {
   if (hostnames.length === 0) return;
   const result = await sync(port, tls);
@@ -946,9 +955,19 @@ export async function reportHostsSync(
     onWarn(result.message);
     return;
   }
-  // Nobody answered. Ask the hosts file directly.
-  const managed = new Set(readManaged());
-  if (!hostnames.every((hostname) => managed.has(hostname))) onWarn(HOSTS_SYNC_FAILED_MESSAGE);
+  // Nobody answered, and the two reasons need different treatment.
+  //
+  // `unsupported` is a daemon older than this route. Its 404 says nothing about
+  // what it did: success, write failure and opt-out all produce the same 404,
+  // and its sync happens later on its own watcher. Reading the hosts file now
+  // reports a failure it is about to not have, and waiting instead only moves
+  // the guess later, because an absence at any deadline still cannot tell a
+  // failed write from a user who disabled syncing. So say nothing. Such a user
+  // is where main already leaves them, and one restart on this build fixes it.
+  //
+  // `unreachable` is different: something is wrong with the channel itself, and
+  // that is worth saying without claiming to know the write failed.
+  if (result.state === "unreachable") onWarn(HOSTS_SYNC_UNCONFIRMED_MESSAGE);
 }
 
 /**

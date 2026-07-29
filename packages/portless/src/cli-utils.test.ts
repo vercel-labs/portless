@@ -1,4 +1,5 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
+import { PORTLESS_HEADER } from "./proxy.js";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
@@ -1336,7 +1337,7 @@ describe("requestHostsSync", () => {
 
   it.each(["synced", "disabled"] as const)("passes through a %s answer", async (state) => {
     const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
       res.end(JSON.stringify({ state }));
     });
     expect(await requestHostsSync(port)).toEqual({ state });
@@ -1344,7 +1345,7 @@ describe("requestHostsSync", () => {
 
   it("carries the daemon's message on a failure", async () => {
     const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
       res.end(JSON.stringify({ state: "failed", message: "Could not write /etc/hosts" }));
     });
     expect(await requestHostsSync(port)).toEqual({
@@ -1357,10 +1358,20 @@ describe("requestHostsSync", () => {
   // milliseconds instead of waiting out a publication that will never arrive.
   it("reads a 404 as an unsupported daemon", async () => {
     const port = await serve((_req, res) => {
-      res.writeHead(404);
+      res.writeHead(404, { [PORTLESS_HEADER]: "1" });
       res.end();
     });
     expect(await requestHostsSync(port)).toEqual({ state: "unsupported" });
+  });
+
+  // proxy.port can be stale or reused, so an unrelated local server must not be
+  // able to answer for portless. Without this the fix for #364 restores #364.
+  it("refuses an answer from a server that is not portless", async () => {
+    const port = await serve((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ state: "disabled" }));
+    });
+    expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
   });
 
   it("reports nothing listening as unreachable", async () => {
@@ -1369,7 +1380,7 @@ describe("requestHostsSync", () => {
 
   it("reports an unparseable answer as unreachable rather than guessing", async () => {
     const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
       res.end("{not json");
     });
     expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
@@ -1377,7 +1388,7 @@ describe("requestHostsSync", () => {
 
   it("reports an unknown state as unreachable rather than guessing", async () => {
     const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
+      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
       res.end(JSON.stringify({ state: "something-new" }));
     });
     expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
@@ -1412,33 +1423,27 @@ describe("reportHostsSync", () => {
     expect(warnings).toEqual(["boom"]);
   });
 
-  // Nobody answered, so ask the hosts file instead. This is what makes an older
-  // daemon a non-event, and it is the honest answer when a slow but successful
-  // write outlives the request timeout: claiming failure there would be a lie.
-  it.each(["unsupported", "unreachable"] as const)(
-    "falls back to the hosts file when the answer is %s",
-    async (state) => {
-      await reportHostsSync(
-        ["a.localhost"],
-        1,
-        false,
-        onWarn,
-        async () => ({ state }),
-        () => ["a.localhost"]
-      );
-      expect(warnings).toEqual([]);
+  // An older daemon's 404 says nothing about what it did: success, a failed write
+  // and opt-out all look identical, and its own sync lands later on its watcher.
+  // Reading the hosts file now reports a failure it is about to not have, and
+  // waiting only moves the guess later. Say nothing rather than assert.
+  it("says nothing when the daemon is too old to answer", async () => {
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({
+      state: "unsupported",
+    }));
+    expect(warnings).toEqual([]);
+  });
 
-      await reportHostsSync(
-        ["a.localhost"],
-        1,
-        false,
-        onWarn,
-        async () => ({ state }),
-        () => []
-      );
-      expect(warnings).toHaveLength(1);
-    }
-  );
+  // A broken channel is worth reporting, but not as a write failure we did not
+  // observe.
+  it("reports an unreachable daemon without claiming the write failed", async () => {
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({
+      state: "unreachable",
+    }));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).not.toMatch(/could not write/i);
+    expect(warnings[0]).toMatch(/could not confirm/i);
+  });
 
   it("asks nothing when there is no hostname to report on", async () => {
     let asked = false;

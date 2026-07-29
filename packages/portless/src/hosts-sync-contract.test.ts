@@ -42,4 +42,26 @@ describe("hosts-sync failure wording", () => {
     const text = fs.readFileSync(path.join(REPO_ROOT, surface), "utf-8");
     expect(text).toMatch(/(command|terminal) that registered the route warns/i);
   });
+
+  // File-level assertions on cli.ts are not enough: it carries several help
+  // sections, and one of them describing auto-sync correctly satisfies a
+  // whole-file match while another stays stale. That is exactly how the
+  // dedicated `hosts --help` section kept the old wording while global help
+  // gained the new one. Check every passage that opts users out, since each one
+  // is a place a reader learns what happens when the write fails.
+  it("states the warning in every help passage that mentions the opt-out", () => {
+    const cli = fs.readFileSync(path.join(REPO_ROOT, "packages/portless/src/cli.ts"), "utf-8");
+    const passages = cli
+      .split(/\n\s*\n/)
+      .filter(
+        (block) => block.includes("PORTLESS_SYNC_HOSTS=0") && block.includes(HOSTS_DISPLAY_HINT)
+      );
+    expect(passages.length).toBeGreaterThan(0);
+    for (const passage of passages) {
+      expect(passage).toMatch(/registered the route warns/i);
+    }
+  });
 });
+
+/** Substring every user-facing auto-sync passage shares, on either platform. */
+const HOSTS_DISPLAY_HINT = "hosts";

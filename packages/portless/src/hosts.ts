@@ -7,6 +7,7 @@ const isWindows = process.platform === "win32";
 const HOSTS_PATH = isWindows
   ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "drivers", "etc", "hosts")
   : "/etc/hosts";
+const LOOPBACK_ADDRESS = "127.0.0.1";
 const MARKER_START = "# portless-start";
 const MARKER_END = "# portless-end";
 
@@ -56,7 +57,7 @@ export function removeBlock(content: string): string {
  */
 export function buildBlock(hostnames: string[]): string {
   if (hostnames.length === 0) return "";
-  const entries = hostnames.map((h) => `127.0.0.1 ${h}`).join("\n");
+  const entries = hostnames.map((h) => `${LOOPBACK_ADDRESS} ${h}`).join("\n");
   return `${MARKER_START}\n${entries}\n${MARKER_END}`;
 }
 
@@ -69,16 +70,43 @@ export function shouldAutoSyncHosts(syncVal: string | undefined): boolean {
 }
 
 /**
- * Whether the hosts file content already resolves every given hostname through
- * the portless-managed block.
+ * Whether the managed block is already exactly what a sync would write: these
+ * hostnames, no others, each mapped to loopback.
  *
- * Pure, so the question a caller actually has ("will my hostname resolve")
- * can be tested without the hosts path, which is a module constant.
+ * Exactness is the contract, not coverage. A subset test would call the block
+ * correct while it still carried a hostname whose route was removed, and the
+ * sync that skipped on the strength of that answer would leave the stale entry
+ * resolving forever. It would also accept a wrong address, since a line is only
+ * useful if it points at loopback.
+ *
+ * Pure, so the question can be tested without the hosts path, which is a module
+ * constant with no test seam.
  */
-export function blockCoversHostnames(content: string, hostnames: string[]): boolean {
-  if (hostnames.length === 0) return extractManagedBlock(content).length === 0;
+export function blockMatchesHostnames(content: string, hostnames: string[]): boolean {
+  const lines = extractManagedBlock(content);
+  const wanted = new Set(hostnames);
+  if (lines.length !== wanted.size) return false;
+  const seen = new Set<string>();
+  for (const line of lines) {
+    const [address, hostname] = line.split(/\s+/);
+    if (address !== LOOPBACK_ADDRESS || !hostname || !wanted.has(hostname)) return false;
+    seen.add(hostname);
+  }
+  return seen.size === wanted.size;
+}
+
+/**
+ * Whether the managed block resolves every given hostname, ignoring whatever
+ * else it contains.
+ *
+ * This is the weaker question, and it is the right one to answer a caller with.
+ * A caller asks "will my hostname resolve", and a stale entry left by some other
+ * route does not change that answer.
+ */
+export function blockResolvesHostnames(content: string, hostnames: string[]): boolean {
   const managed = new Set(
     extractManagedBlock(content)
+      .filter((line) => line.split(/\s+/)[0] === LOOPBACK_ADDRESS)
       .map((line) => line.split(/\s+/)[1] ?? "")
       .filter(Boolean)
   );
@@ -90,18 +118,22 @@ export function blockCoversHostnames(content: string, hostnames: string[]): bool
  * hostname. Replaces any existing managed block. Writing needs privilege the
  * user may not have.
  *
- * Returns whether the file now resolves those hostnames, which is the question
- * every caller has. That is not the same as "the write did not throw": a write
- * can throw with the block already correct from an earlier run, and the
- * hostnames resolve regardless. Reporting the write instead of the state is how
- * a caller ends up warning about a failure that does not affect the user.
+ * Two different questions are asked here on purpose, and collapsing them into
+ * one produces a defect either way.
  *
- * Returns early when the block is already correct, so a route reload that
- * changes nothing does not rewrite the file.
+ * **Whether to skip** is exactness. The write rebuilds the block to exactly this
+ * set, so only an already-exact block makes skipping it harmless. A coverage test
+ * here calls a block correct while it still carries a hostname whose route was
+ * removed, and the skip then leaves that entry resolving forever.
+ *
+ * **What to report** is coverage. The caller asks whether its own hostname will
+ * resolve. Answering with exactness means an unprivileged daemon that cannot
+ * delete someone else's stale entry reports failure to every later registration
+ * whose hostname does resolve, which is a false alarm on the common path.
  */
 export function syncHostsFile(hostnames: string[]): boolean {
   const content = readHostsFile();
-  if (blockCoversHostnames(content, hostnames)) return true;
+  if (blockMatchesHostnames(content, hostnames)) return true;
   try {
     const cleaned = removeBlock(content);
     if (hostnames.length === 0) {
@@ -111,11 +143,13 @@ export function syncHostsFile(hostnames: string[]): boolean {
       fs.writeFileSync(HOSTS_PATH, cleaned.trimEnd() + "\n\n" + block + "\n");
     }
   } catch {
-    // Unwritable, so the state is whatever it already was.
-    return false;
+    // Unwritable, so the state is whatever it already was. Report on that state
+    // rather than on the write, because the block may already resolve this
+    // caller from an earlier run.
+    return blockResolvesHostnames(content, hostnames);
   }
-  // Report the state, not the write: re-read rather than assume the write landed.
-  return blockCoversHostnames(readHostsFile(), hostnames);
+  // Re-read rather than assume the write landed.
+  return blockResolvesHostnames(readHostsFile(), hostnames);
 }
 
 /**
