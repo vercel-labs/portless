@@ -76,6 +76,9 @@ import {
   readTlsMarker,
   resolveStateDir,
   spawnCommand,
+  reportHostsSync,
+  syncHostsWithWarning,
+  HOSTS_SYNC_FAILED_MESSAGE,
   augmentedPath,
   waitForProxy,
   writeCustomCertMarker,
@@ -109,6 +112,7 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig } from "./config.js";
+import type { HostsSyncOutcome } from "./types.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -528,6 +532,17 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
+/**
+ * Tell this terminal whether the route it just registered will resolve.
+ *
+ * The daemon performs the sync and answers on the request, so nothing here
+ * interprets the daemon's environment or waits on its watcher. Not awaited where
+ * a child process is about to start, so a dev server never waits on it.
+ */
+function reportHostsSyncHere(hostnames: string[], port: number, tls: boolean): Promise<void> {
+  return reportHostsSync(hostnames, port, tls, (message) => console.warn(colors.yellow(message)));
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -607,12 +622,51 @@ function startProxyServer(
     publishCachedRoutes();
   };
 
+  // Warn once per failure run in the daemon's own log. This bounds proxy.log on
+  // repeated reloads; it never bounds what users are told, because delivery is
+  // per request and each registering CLI gets its own answer.
+  let hostsSyncWarned = false;
+  const syncHostsAndLatch = (hostnames: string[]): boolean => {
+    let ok = true;
+    hostsSyncWarned = syncHostsWithWarning(
+      hostnames,
+      hostsSyncWarned,
+      () => console.warn(colors.yellow(HOSTS_SYNC_FAILED_MESSAGE)),
+      (names) => {
+        ok = syncHostsFile(names);
+        return ok;
+      }
+    );
+    return ok;
+  };
+
+  /**
+   * Answer a CLI's hosts-sync request. Runs in the daemon, so it owns both the
+   * privileges the write needs and the setting that decides whether to write.
+   */
+  const onHostsSyncRequest = (): HostsSyncOutcome => {
+    if (!autoSyncHosts) return { state: "disabled" };
+    // Read routes from disk rather than trusting the cache. The caller registered
+    // its route moments ago and the watcher's debounce has almost certainly not
+    // fired yet, so the cache does not contain the hostname being asked about.
+    // Syncing the cache here answers about the wrong route set, and an empty one
+    // is trivially "already correct", which reports success for a write that
+    // never covered the caller.
+    try {
+      cachedRoutes = store.loadRoutes();
+    } catch {
+      // Mid-write; the cache is the best available answer.
+    }
+    const ok = syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
+    return ok ? { state: "synced" } : { state: "failed", message: HOSTS_SYNC_FAILED_MESSAGE };
+  };
+
   const reloadRoutes = () => {
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
       if (autoSyncHosts) {
-        syncHostsFile(cachedRoutes.map((r) => r.hostname));
+        syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
       // Sync mDNS records with current routes
       if (activeLanIp) {
@@ -649,7 +703,7 @@ function startProxyServer(
   }
 
   if (autoSyncHosts) {
-    syncHostsFile(cachedRoutes.map((r) => r.hostname));
+    syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
   }
 
   // Publish mDNS for routes that already exist at startup
@@ -663,6 +717,7 @@ function startProxyServer(
       tlds,
       strict,
       onError: (msg) => console.error(colors.red(msg)),
+      onHostsSyncRequest,
       tls: tlsOptions,
     });
   const server = createServer();
@@ -1291,6 +1346,7 @@ async function runApp(
   let killedPids: number[] = [];
   try {
     killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    void reportHostsSyncHere(hostnames, proxyPort, tls);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -1917,7 +1973,9 @@ ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. To manually sync:
+  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If the file
+  is not writable, the command that registered the route warns instead of failing
+  silently. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
@@ -2273,7 +2331,7 @@ ${colors.bold("Examples:")}
     process.exit(0);
   }
 
-  const { dir, tlds } = await discoverState();
+  const { dir, tlds, port: proxyPort, tls } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -2319,6 +2377,9 @@ ${colors.bold("Examples:")}
   const force = args.includes("--force");
   addRoutes(store, hostnames, port, 0, force);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
+  // Awaited, unlike the app paths: this command exits, and a warning printed
+  // after exit reaches nobody. It costs one loopback round trip.
+  await reportHostsSyncHere(hostnames, proxyPort, tls);
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -3360,6 +3421,11 @@ ${colors.bold("LAN mode (--lan):")}
 
   const proto = useHttps ? "HTTPS/2" : "HTTP";
   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
+  // The daemon syncs whatever routes were already persisted. Report that here:
+  // this process is attached to the terminal, the daemon's output is not. There
+  // is no record to race against, because the answer arrives on the request.
+  const persistedHostnames = store.loadRoutes().map((route) => route.hostname);
+  await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps);
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
@@ -3578,6 +3644,7 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     addRoutes(store, hostnames, appPort, process.pid);
+    void reportHostsSyncHere(hostnames, proxyPort, tls);
 
     env = {
       ...pkgEnv,
@@ -3833,6 +3900,7 @@ async function runWithTurbo(
     appUrls.push({ label: app.label, url });
 
     addRoutes(store, hostnames, appPort, process.pid);
+    void reportHostsSyncHere(hostnames, proxyPort, tls);
     routes.push({ hostnames });
 
     const entry: ManifestEntry = {

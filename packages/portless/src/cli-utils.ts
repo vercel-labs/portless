@@ -6,7 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
-import { PORTLESS_HEADER } from "./proxy.js";
+import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import { getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -808,6 +809,173 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
     });
     req.end();
   });
+}
+
+/**
+ * How long to wait for the daemon to answer a hosts-sync request.
+ *
+ * This bounds a request, not a watcher. It is deliberately unrelated to the
+ * daemon's debounce or its route-poll interval: the answer comes back on the
+ * connection that asked, so no cadence of the producer can delay it. Only the
+ * hosts write itself can, which is why this is generous relative to a file
+ * write and still an order of magnitude below any of those intervals.
+ */
+/** Display name for the hosts file in user-facing text. */
+export const HOSTS_DISPLAY = process.platform === "win32" ? "hosts file" : "/etc/hosts";
+
+/**
+ * The one line issue #364 asked for. Defined once and shared by the daemon that
+ * produces it and the CLI that falls back to it, so the sentence users see and
+ * the sentence documented cannot drift apart.
+ */
+export const HOSTS_SYNC_FAILED_MESSAGE = `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`;
+
+const HOSTS_SYNC_REQUEST_TIMEOUT_MS = 2000;
+
+/**
+ * What a hosts-sync request produced.
+ *
+ * `unsupported` is a daemon that predates this route, which answers 404. Version
+ * skew needs no negotiation: the 404 arrives in milliseconds and the caller
+ * falls back to reading the hosts file. `unreachable` covers a refused
+ * connection, a timeout, or an answer this build cannot parse.
+ */
+export type HostsSyncRequestResult =
+  | { state: "synced" }
+  | { state: "disabled" }
+  | { state: "failed"; message: string }
+  | { state: "unsupported" }
+  | { state: "unreachable" };
+
+/**
+ * Ask the running daemon to sync the hosts file and report what happened.
+ *
+ * The daemon is the only process that can answer: it holds the privileges the
+ * write needs and the configuration that decides whether to write at all. The
+ * answer arrives on this request, so it needs no timestamp to prove it is
+ * current and no owner to prove it is ours.
+ *
+ * Never rejects. Every failure mode is a state the caller can act on.
+ */
+export function requestHostsSync(port: number, tls = false): Promise<HostsSyncRequestResult> {
+  return new Promise((resolve) => {
+    const requestFn = tls ? https.request : http.request;
+    const req = requestFn(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: HOSTS_SYNC_PATH,
+        method: "POST",
+        timeout: HOSTS_SYNC_REQUEST_TIMEOUT_MS,
+        ...(tls ? { rejectUnauthorized: false } : {}),
+      },
+      (res) => {
+        if (res.statusCode === 404 || res.statusCode === 403) {
+          res.resume();
+          resolve({ state: "unsupported" });
+          return;
+        }
+        let body = "";
+        res.setEncoding("utf-8");
+        res.on("data", (chunk: string) => {
+          // Bound what an unexpected responder can make us buffer.
+          if (body.length < 4096) body += chunk;
+        });
+        res.on("end", () => {
+          try {
+            const parsed: unknown = JSON.parse(body);
+            const state = (parsed as { state?: unknown } | null)?.state;
+            if (state === "synced" || state === "disabled") {
+              resolve({ state });
+              return;
+            }
+            if (state === "failed") {
+              const message = (parsed as { message?: unknown }).message;
+              resolve({
+                state: "failed",
+                message: typeof message === "string" ? message : HOSTS_SYNC_FAILED_MESSAGE,
+              });
+              return;
+            }
+          } catch {
+            // Fall through: an unparseable answer is no answer.
+          }
+          resolve({ state: "unreachable" });
+        });
+        res.on("error", () => resolve({ state: "unreachable" }));
+      }
+    );
+    req.on("error", () => resolve({ state: "unreachable" }));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve({ state: "unreachable" });
+    });
+    req.end();
+  });
+}
+
+/**
+ * Report a hosts-sync outcome to the terminal that registered a route.
+ *
+ * The sync runs in the detached daemon, whose stdio is redirected to proxy.log,
+ * so a warning printed there reaches a file the user never opens. This asks the
+ * daemon and prints the answer here instead.
+ *
+ * When nobody answers, fall back to the effect. A daemon predating this route
+ * returns 404, and an unreachable or unparseable answer is the same situation:
+ * we do not know what the daemon did, but we can read what the hosts file says,
+ * and that is the fact the user actually cares about. Reading the effect is also
+ * the honest answer when a slow but successful write outlives the request
+ * timeout, where claiming failure would be a lie.
+ *
+ * `sync` and `readManaged` are injectable so the decision can be tested without
+ * a daemon or the hosts path, which is a module constant.
+ */
+export async function reportHostsSync(
+  hostnames: string[],
+  port: number,
+  tls: boolean,
+  onWarn: (message: string) => void,
+  sync: (port: number, tls: boolean) => Promise<HostsSyncRequestResult> = requestHostsSync,
+  readManaged: () => string[] = getManagedHostnames
+): Promise<void> {
+  if (hostnames.length === 0) return;
+  const result = await sync(port, tls);
+  if (result.state === "synced" || result.state === "disabled") return;
+  if (result.state === "failed") {
+    onWarn(result.message);
+    return;
+  }
+  // Nobody answered. Ask the hosts file directly.
+  const managed = new Set(readManaged());
+  if (!hostnames.every((hostname) => managed.has(hostname))) onWarn(HOSTS_SYNC_FAILED_MESSAGE);
+}
+
+/**
+ * Run a hosts-file sync and emit a one-time warning when it fails, so a daemon
+ * that cannot write does not fill its log with the same line on every route
+ * reload.
+ *
+ * This governs the daemon's own log only. Delivery to users is per request, so
+ * this latch cannot silence anyone: several apps registering against the same
+ * failing daemon are each told, which an earlier one-shot design got wrong.
+ *
+ * Returns the next "already warned" state, which the caller threads back in: a
+ * failed sync latches it, a successful one re-arms it. An empty-route sync (the
+ * warm-up at startup, or all routes removed) has nothing user-visible to write,
+ * so its failure must not consume the latch, or the first real route's failure
+ * finds it already spent.
+ */
+export function syncHostsWithWarning(
+  hostnames: string[],
+  alreadyWarned: boolean,
+  onWarn: () => void,
+  sync: (hostnames: string[]) => boolean = syncHostsFile
+): boolean {
+  if (sync(hostnames)) return false;
+  if (hostnames.length === 0) return alreadyWarned;
+  if (!alreadyWarned) onWarn();
+  return true;
 }
 
 /** Check whether any process is listening on the given port on either loopback family. */

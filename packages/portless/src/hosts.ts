@@ -69,25 +69,53 @@ export function shouldAutoSyncHosts(syncVal: string | undefined): boolean {
 }
 
 /**
- * Sync /etc/hosts to include entries for all given hostnames.
- * Replaces any existing portless-managed block. Requires root access.
- * Returns true on success, false on failure.
+ * Whether the hosts file content already resolves every given hostname through
+ * the portless-managed block.
+ *
+ * Pure, so the question a caller actually has ("will my hostname resolve")
+ * can be tested without the hosts path, which is a module constant.
+ */
+export function blockCoversHostnames(content: string, hostnames: string[]): boolean {
+  if (hostnames.length === 0) return extractManagedBlock(content).length === 0;
+  const managed = new Set(
+    extractManagedBlock(content)
+      .map((line) => line.split(/\s+/)[1] ?? "")
+      .filter(Boolean)
+  );
+  return hostnames.every((hostname) => managed.has(hostname));
+}
+
+/**
+ * Sync the hosts file so the portless-managed block resolves every given
+ * hostname. Replaces any existing managed block. Writing needs privilege the
+ * user may not have.
+ *
+ * Returns whether the file now resolves those hostnames, which is the question
+ * every caller has. That is not the same as "the write did not throw": a write
+ * can throw with the block already correct from an earlier run, and the
+ * hostnames resolve regardless. Reporting the write instead of the state is how
+ * a caller ends up warning about a failure that does not affect the user.
+ *
+ * Returns early when the block is already correct, so a route reload that
+ * changes nothing does not rewrite the file.
  */
 export function syncHostsFile(hostnames: string[]): boolean {
+  const content = readHostsFile();
+  if (blockCoversHostnames(content, hostnames)) return true;
   try {
-    const content = readHostsFile();
     const cleaned = removeBlock(content);
-
     if (hostnames.length === 0) {
       fs.writeFileSync(HOSTS_PATH, cleaned);
     } else {
       const block = buildBlock(hostnames);
       fs.writeFileSync(HOSTS_PATH, cleaned.trimEnd() + "\n\n" + block + "\n");
     }
-    return true;
   } catch {
+    // Unwritable, so the state is whatever it already was.
     return false;
   }
+  // Report the state, not the write: re-read rather than assume the write landed.
+  return blockCoversHostnames(readHostsFile(), hostnames);
 }
 
 /**

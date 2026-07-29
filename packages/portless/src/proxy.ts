@@ -47,6 +47,51 @@ function isEncrypted(req: http.IncomingMessage): boolean {
   return !!(req.socket as net.Socket & { encrypted?: boolean }).encrypted;
 }
 
+/** Internal path a CLI uses to ask the daemon to sync the hosts file and report back. */
+export const HOSTS_SYNC_PATH = "/.portless/hosts-sync";
+
+/** Whether an address is a loopback literal, in either family. */
+function isLoopbackAddress(address: string | undefined): boolean {
+  if (!address) return false;
+  const bare = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+  return bare === "127.0.0.1" || bare === "::1" || bare.startsWith("127.");
+}
+
+/**
+ * Answer a CLI's hosts-sync request. The caller has already established that the
+ * request Host is loopback, which is what selects this route.
+ *
+ * The remaining guard is the peer address, and it is the security boundary: a
+ * Host header is attacker-controlled, so in LAN mode, where the proxy binds
+ * `0.0.0.0` and `::`, anyone on the network could send `Host: 127.0.0.1`. The
+ * socket's remote address cannot be forged that way.
+ *
+ * Note what is deliberately absent: no token, no signature, no custom header.
+ * The request carries no data. Hostnames come from the daemon's own route table,
+ * so nothing an attacker supplies reaches the hosts file, and the worst a local
+ * process achieves is asking portless to write the routes that are already
+ * registered.
+ */
+function handleHostsSyncRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  onHostsSyncRequest: (() => import("./types.js").HostsSyncOutcome) | undefined
+): void {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Forbidden");
+    return;
+  }
+  if (!onHostsSyncRequest) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not Found");
+    return;
+  }
+  const outcome = onHostsSyncRequest();
+  res.writeHead(200, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(outcome));
+}
+
 /**
  * Build X-Forwarded-* headers for a proxied request.
  */
@@ -157,6 +202,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     tlds = [tld],
     strict = true,
     onError = (msg: string) => console.error(msg),
+    onHostsSyncRequest,
     tls,
   } = options;
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
@@ -173,6 +219,16 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     if (!host) {
       res.writeHead(400, { "Content-Type": "text/plain" });
       res.end("Missing Host header");
+      return;
+    }
+
+    // The loopback Host is part of *matching* this route, not a check inside it.
+    // Gate entry on it and an app that serves this same path keeps serving it,
+    // because an app is only ever reached by its own hostname. Checking it after
+    // entering would answer 403 to that app's traffic, which is shadowing with a
+    // different status code.
+    if (req.method === "POST" && req.url === HOSTS_SYNC_PATH && isLoopbackAddress(host)) {
+      handleHostsSyncRequest(req, res, onHostsSyncRequest);
       return;
     }
 

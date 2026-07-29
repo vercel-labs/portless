@@ -1,6 +1,7 @@
 import { describe, it, expect } from "vitest";
 import {
   checkHostResolution,
+  blockCoversHostnames,
   extractManagedBlock,
   removeBlock,
   buildBlock,
@@ -173,5 +174,36 @@ describe("checkHostResolution", () => {
   it("returns false for a nonexistent domain", async () => {
     const result = await checkHostResolution("this-should-never-exist.invalid");
     expect(result).toBe(false);
+  });
+});
+
+// syncHostsFile answers "does the hosts file resolve these hostnames", not "did
+// the write throw". The two differ in the case that matters: a write can fail
+// with the block already correct from an earlier run, and the hostnames resolve
+// regardless, so reporting the write would warn about a failure the user does
+// not have. The predicate is pure because the hosts path is a module constant.
+describe("blockCoversHostnames", () => {
+  const block = "# portless-start\n127.0.0.1 a.localhost\n127.0.0.1 b.localhost\n# portless-end";
+
+  it("is true when every hostname is in the managed block", () => {
+    expect(blockCoversHostnames(`127.0.0.1 localhost\n${block}\n`, ["a.localhost"])).toBe(true);
+    expect(blockCoversHostnames(block, ["a.localhost", "b.localhost"])).toBe(true);
+  });
+
+  it("is false when any hostname is missing", () => {
+    expect(blockCoversHostnames(block, ["a.localhost", "c.localhost"])).toBe(false);
+    expect(blockCoversHostnames("127.0.0.1 localhost\n", ["a.localhost"])).toBe(false);
+  });
+
+  it("ignores entries outside the managed block", () => {
+    expect(blockCoversHostnames("127.0.0.1 a.localhost\n", ["a.localhost"])).toBe(false);
+  });
+
+  // An empty request means the block should be gone. Treating that as satisfied
+  // whenever no block exists is what makes the startup warm-up sync a no-op
+  // instead of a failure, and it is why an empty sync cannot report a problem.
+  it("treats no hostnames as satisfied only when no block remains", () => {
+    expect(blockCoversHostnames("127.0.0.1 localhost\n", [])).toBe(true);
+    expect(blockCoversHostnames(block, [])).toBe(false);
   });
 });

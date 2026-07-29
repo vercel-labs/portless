@@ -26,6 +26,9 @@ import {
   injectFrameworkFlags,
   isPortListening,
   isProxyRunning,
+  requestHostsSync,
+  reportHostsSync,
+  syncHostsWithWarning,
   listenOnProxyInterface,
   parsePidFromNetstat,
   parseTldList,
@@ -1301,5 +1304,196 @@ describe("readPersistedProxyState", () => {
       tlds: ["local"],
       lanMode: true,
     });
+  });
+});
+
+// Issue #364: the automatic sync ignored its result, so an unprivileged run
+// registered a route, skipped the hosts block and said nothing. The sync runs in
+// the detached daemon whose stdio goes to proxy.log, so the answer has to cross a
+// process boundary. It crosses on the request that asked for it, which is what
+// lets the outcome carry no timestamp, no owner and no schema version: a response
+// cannot be stale, cannot belong to another caller, and cannot be left behind by
+// a previous daemon.
+describe("requestHostsSync", () => {
+  const servers: http.Server[] = [];
+
+  function serve(handler: http.RequestListener): Promise<number> {
+    const server = http.createServer(handler);
+    servers.push(server);
+    return new Promise((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("no addr");
+        resolve(addr.port);
+      });
+    });
+  }
+
+  afterEach(async () => {
+    for (const s of servers) await new Promise<void>((r) => s.close(() => r()));
+    servers.length = 0;
+  });
+
+  it.each(["synced", "disabled"] as const)("passes through a %s answer", async (state) => {
+    const port = await serve((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ state }));
+    });
+    expect(await requestHostsSync(port)).toEqual({ state });
+  });
+
+  it("carries the daemon's message on a failure", async () => {
+    const port = await serve((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ state: "failed", message: "Could not write /etc/hosts" }));
+    });
+    expect(await requestHostsSync(port)).toEqual({
+      state: "failed",
+      message: "Could not write /etc/hosts",
+    });
+  });
+
+  // A daemon from a build older than this route. Version skew resolves in
+  // milliseconds instead of waiting out a publication that will never arrive.
+  it("reads a 404 as an unsupported daemon", async () => {
+    const port = await serve((_req, res) => {
+      res.writeHead(404);
+      res.end();
+    });
+    expect(await requestHostsSync(port)).toEqual({ state: "unsupported" });
+  });
+
+  it("reports nothing listening as unreachable", async () => {
+    expect(await requestHostsSync(19899)).toEqual({ state: "unreachable" });
+  });
+
+  it("reports an unparseable answer as unreachable rather than guessing", async () => {
+    const port = await serve((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end("{not json");
+    });
+    expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
+  });
+
+  it("reports an unknown state as unreachable rather than guessing", async () => {
+    const port = await serve((_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ state: "something-new" }));
+    });
+    expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
+  });
+});
+
+describe("reportHostsSync", () => {
+  const warnings: string[] = [];
+  const onWarn = (m: string) => warnings.push(m);
+
+  beforeEach(() => {
+    warnings.length = 0;
+  });
+
+  it("says nothing when the daemon synced", async () => {
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({ state: "synced" }));
+    expect(warnings).toEqual([]);
+  });
+
+  // The user opted out of hosts sync. Warning on every registration is noise
+  // about a decision they already made.
+  it("says nothing when the daemon has syncing disabled", async () => {
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({ state: "disabled" }));
+    expect(warnings).toEqual([]);
+  });
+
+  it("prints the daemon's own message on a failure", async () => {
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({
+      state: "failed",
+      message: "boom",
+    }));
+    expect(warnings).toEqual(["boom"]);
+  });
+
+  // Nobody answered, so ask the hosts file instead. This is what makes an older
+  // daemon a non-event, and it is the honest answer when a slow but successful
+  // write outlives the request timeout: claiming failure there would be a lie.
+  it.each(["unsupported", "unreachable"] as const)(
+    "falls back to the hosts file when the answer is %s",
+    async (state) => {
+      await reportHostsSync(
+        ["a.localhost"],
+        1,
+        false,
+        onWarn,
+        async () => ({ state }),
+        () => ["a.localhost"]
+      );
+      expect(warnings).toEqual([]);
+
+      await reportHostsSync(
+        ["a.localhost"],
+        1,
+        false,
+        onWarn,
+        async () => ({ state }),
+        () => []
+      );
+      expect(warnings).toHaveLength(1);
+    }
+  );
+
+  it("asks nothing when there is no hostname to report on", async () => {
+    let asked = false;
+    await reportHostsSync([], 1, false, onWarn, async () => {
+      asked = true;
+      return { state: "failed", message: "boom" };
+    });
+    expect(asked).toBe(false);
+    expect(warnings).toEqual([]);
+  });
+});
+
+describe("syncHostsWithWarning", () => {
+  // This latch bounds the daemon's own proxy.log on repeated route reloads. It
+  // never bounds what users are told: delivery is per request, so each
+  // registering CLI gets its own answer even while this is latched.
+  it("warns once and stays quiet while the sync keeps failing", () => {
+    let warns = 0;
+    const fail = () => false;
+    let latched = syncHostsWithWarning(["a.localhost"], false, () => warns++, fail);
+    expect(warns).toBe(1);
+    latched = syncHostsWithWarning(["a.localhost"], latched, () => warns++, fail);
+    expect(warns).toBe(1);
+    expect(latched).toBe(true);
+  });
+
+  it("re-arms after a success so a later failure warns again", () => {
+    let warns = 0;
+    const latched = syncHostsWithWarning(
+      ["a.localhost"],
+      true,
+      () => warns++,
+      () => true
+    );
+    expect(latched).toBe(false);
+    syncHostsWithWarning(
+      ["a.localhost"],
+      latched,
+      () => warns++,
+      () => false
+    );
+    expect(warns).toBe(1);
+  });
+
+  // The startup warm-up runs with no routes. If its failure spent the latch, the
+  // first real route's failure would find it already gone and log nothing.
+  it("does not let an empty warm-up sync consume the latch", () => {
+    let warns = 0;
+    const latched = syncHostsWithWarning(
+      [],
+      false,
+      () => warns++,
+      () => false
+    );
+    expect(warns).toBe(0);
+    expect(latched).toBe(false);
   });
 });
