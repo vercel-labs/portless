@@ -96,40 +96,24 @@ export function blockMatchesHostnames(content: string, hostnames: string[]): boo
 }
 
 /**
- * Whether the managed block resolves every given hostname, ignoring whatever
- * else it contains.
+ * Sync the hosts file so the portless-managed block is exactly the given
+ * hostnames, each mapped to loopback. Writing needs privilege the user may not
+ * have.
  *
- * This is the weaker question, and it is the right one to answer a caller with.
- * A caller asks "will my hostname resolve", and a stale entry left by some other
- * route does not change that answer.
- */
-export function blockResolvesHostnames(content: string, hostnames: string[]): boolean {
-  const managed = new Set(
-    extractManagedBlock(content)
-      .filter((line) => line.split(/\s+/)[0] === LOOPBACK_ADDRESS)
-      .map((line) => line.split(/\s+/)[1] ?? "")
-      .filter(Boolean)
-  );
-  return hostnames.every((hostname) => managed.has(hostname));
-}
-
-/**
- * Sync the hosts file so the portless-managed block resolves every given
- * hostname. Replaces any existing managed block. Writing needs privilege the
- * user may not have.
+ * Returns whether the block now matches exactly. That is the writer's own
+ * question and the only one it can answer honestly: it was asked to make the
+ * file say something, and either it does or it does not. A stale entry it could
+ * not remove is a failure of that job, even when the caller's own hostname
+ * resolves regardless.
  *
- * Two different questions are asked here on purpose, and collapsing them into
- * one produces a defect either way.
+ * Whether a particular hostname will resolve is a different and weaker question,
+ * and it belongs to whoever is asking it. `checkHostResolution` answers that one
+ * against the real resolver, which is authoritative in a way this function
+ * cannot be: a hosts entry is only one of the reasons a name resolves, and on
+ * current macOS and glibc `.localhost` names resolve without one.
  *
- * **Whether to skip** is exactness. The write rebuilds the block to exactly this
- * set, so only an already-exact block makes skipping it harmless. A coverage test
- * here calls a block correct while it still carries a hostname whose route was
- * removed, and the skip then leaves that entry resolving forever.
- *
- * **What to report** is coverage. The caller asks whether its own hostname will
- * resolve. Answering with exactness means an unprivileged daemon that cannot
- * delete someone else's stale entry reports failure to every later registration
- * whose hostname does resolve, which is a false alarm on the common path.
+ * Returns early when the block already matches, so a route reload that changes
+ * nothing does not rewrite the file.
  */
 export function syncHostsFile(hostnames: string[]): boolean {
   const content = readHostsFile();
@@ -143,13 +127,10 @@ export function syncHostsFile(hostnames: string[]): boolean {
       fs.writeFileSync(HOSTS_PATH, cleaned.trimEnd() + "\n\n" + block + "\n");
     }
   } catch {
-    // Unwritable, so the state is whatever it already was. Report on that state
-    // rather than on the write, because the block may already resolve this
-    // caller from an earlier run.
-    return blockResolvesHostnames(content, hostnames);
+    return false;
   }
   // Re-read rather than assume the write landed.
-  return blockResolvesHostnames(readHostsFile(), hostnames);
+  return blockMatchesHostnames(readHostsFile(), hostnames);
 }
 
 /**

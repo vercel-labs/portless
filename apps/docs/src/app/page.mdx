@@ -111,7 +111,7 @@ portless myapp next dev
 # -> https://myapp.test
 ```
 
-The proxy auto-syncs `/etc/hosts` for route hostnames, so `.test` and other dev hostnames resolve on your machine. If it cannot write the hosts file (for example, running unprivileged on a high port), the command that registered the route warns instead of failing silently and points you to `portless hosts sync`.
+The proxy auto-syncs `/etc/hosts` for route hostnames, so `.test` and other dev hostnames resolve on your machine. If a route hostname will not resolve, the command that registered it warns instead of failing silently and points you to `portless hosts sync`. Note that `.localhost` names resolve without a hosts entry on current macOS and Linux, so a skipped write is often invisible; a custom TLD needs the entry.
 
 Repeat `--tld` to serve the same app names under multiple TLDs from one proxy:
 

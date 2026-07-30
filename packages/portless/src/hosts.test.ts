@@ -2,7 +2,6 @@ import { describe, it, expect } from "vitest";
 import {
   checkHostResolution,
   blockMatchesHostnames,
-  blockResolvesHostnames,
   extractManagedBlock,
   removeBlock,
   buildBlock,
@@ -223,27 +222,5 @@ describe("blockMatchesHostnames", () => {
   it("treats no hostnames as satisfied only when no block remains", () => {
     expect(blockMatchesHostnames("127.0.0.1 localhost\n", [])).toBe(true);
     expect(blockMatchesHostnames(block, [])).toBe(false);
-  });
-});
-
-// The weaker of the two questions, and the one a caller gets answered. Skipping
-// the write needs exactness; telling a user whether their hostname resolves does
-// not. Collapsing them means an unprivileged daemon that cannot delete someone
-// else's stale entry reports failure to every registration that actually works.
-describe("blockResolvesHostnames", () => {
-  it("is true when the wanted hostnames resolve, whatever else is there", () => {
-    const withStale =
-      "# portless-start\n127.0.0.1 a.localhost\n127.0.0.1 stale.localhost\n# portless-end";
-    expect(blockResolvesHostnames(withStale, ["a.localhost"])).toBe(true);
-    expect(blockMatchesHostnames(withStale, ["a.localhost"])).toBe(false);
-  });
-
-  it("is false when a wanted hostname is absent", () => {
-    expect(blockResolvesHostnames("# portless-start\n# portless-end", ["a.localhost"])).toBe(false);
-  });
-
-  it("does not count a hostname mapped somewhere other than loopback", () => {
-    const wrong = "# portless-start\n10.0.0.1 a.localhost\n# portless-end";
-    expect(blockResolvesHostnames(wrong, ["a.localhost"])).toBe(false);
   });
 });

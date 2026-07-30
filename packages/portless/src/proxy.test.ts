@@ -9,7 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createProxyServer, HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import type { ProxyServer } from "./proxy.js";
-import type { HostsSyncOutcome, RouteInfo } from "./types.js";
+import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
 
 const TEST_PROXY_PORT = 1355;
@@ -2246,10 +2246,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 describe("internal hosts-sync route", () => {
   const servers: AnyServer[] = [];
 
-  function start(
-    onHostsSyncRequest?: () => HostsSyncOutcome,
-    routes: RouteInfo[] = []
-  ): Promise<AnyServer> {
+  function start(onHostsSyncRequest?: () => void, routes: RouteInfo[] = []): Promise<AnyServer> {
     const server = createProxyServer({
       getRoutes: () => routes,
       proxyPort: TEST_PROXY_PORT,
@@ -2264,30 +2261,28 @@ describe("internal hosts-sync route", () => {
     servers.length = 0;
   });
 
-  it("answers each outcome the daemon can produce", async () => {
-    for (const outcome of [
-      { state: "synced" } as const,
-      { state: "disabled" } as const,
-      { state: "failed", message: "Could not write /etc/hosts" } as const,
-    ]) {
-      const server = await start(() => outcome);
-      const res = await request(server, {
-        host: "127.0.0.1",
-        path: HOSTS_SYNC_PATH,
-        method: "POST",
-      });
-      expect(res.status).toBe(200);
-      expect(JSON.parse(res.body)).toEqual(outcome);
-      await new Promise<void>((r) => server.close(() => r()));
-      servers.length = 0;
-    }
+  // An acknowledgement, not a report: the caller reads the resolver to learn what
+  // happened, so there is no body to parse and no schema to version.
+  it("acknowledges without a body and runs the sync exactly once", async () => {
+    let calls = 0;
+    const server = await start(() => {
+      calls += 1;
+    });
+    const res = await request(server, {
+      host: "127.0.0.1",
+      path: HOSTS_SYNC_PATH,
+      method: "POST",
+    });
+    expect(res.status).toBe(204);
+    expect(res.body).toBe("");
+    expect(calls).toBe(1);
   });
 
   // A non-loopback Host does not select this route at all, so it lands in normal
   // routing. That is what keeps the route from shadowing anything, and it is why
   // the peer check below is a separate concern rather than the same one.
   it("does not claim a request whose Host is not loopback", async () => {
-    const server = await start(() => ({ state: "synced" }));
+    const server = await start(() => {});
     const res = await request(server, {
       host: "192.168.1.50",
       path: HOSTS_SYNC_PATH,
@@ -2309,7 +2304,7 @@ describe("internal hosts-sync route", () => {
     const server = createProxyServer({
       getRoutes: () => [],
       proxyPort: TEST_PROXY_PORT,
-      onHostsSyncRequest: () => ({ state: "synced" }),
+      onHostsSyncRequest: () => {},
     });
     servers.push(server);
     await new Promise<void>((r) => server.listen(0, "0.0.0.0", () => r()));
@@ -2362,7 +2357,7 @@ describe("internal hosts-sync route", () => {
   });
 
   it("falls through to normal routing on the wrong method", async () => {
-    const server = await start(() => ({ state: "synced" }));
+    const server = await start(() => {});
     const res = await request(server, { host: "127.0.0.1", path: HOSTS_SYNC_PATH, method: "GET" });
     expect(res.status).toBe(404);
   });

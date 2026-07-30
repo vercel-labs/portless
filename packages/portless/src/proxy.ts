@@ -75,7 +75,7 @@ function isLoopbackAddress(address: string | undefined): boolean {
 function handleHostsSyncRequest(
   req: http.IncomingMessage,
   res: http.ServerResponse,
-  onHostsSyncRequest: (() => import("./types.js").HostsSyncOutcome) | undefined
+  onHostsSyncRequest: (() => void) | undefined
 ): void {
   if (!isLoopbackAddress(req.socket.remoteAddress)) {
     res.writeHead(403, { "Content-Type": "text/plain" });
@@ -87,9 +87,11 @@ function handleHostsSyncRequest(
     res.end("Not Found");
     return;
   }
-  const outcome = onHostsSyncRequest();
-  res.writeHead(200, { "Content-Type": "application/json" });
-  res.end(JSON.stringify(outcome));
+  onHostsSyncRequest();
+  // An acknowledgement, not a report. The caller reads the resolver to learn what
+  // happened, so there is nothing here worth serialising and no schema to version.
+  res.writeHead(204);
+  res.end();
 }
 
 /**

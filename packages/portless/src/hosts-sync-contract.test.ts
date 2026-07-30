@@ -35,12 +35,17 @@ describe("hosts-sync failure wording", () => {
     // A surface that moved is a finding, not a skip: silence here would be the
     // same false pass the claim itself enjoyed.
     expect(fs.existsSync(full), `${surface} not found; update SURFACES`).toBe(true);
-    expect(fs.readFileSync(full, "utf-8")).not.toMatch(/warns once/i);
+    const text = fs.readFileSync(full, "utf-8");
+    expect(text).not.toMatch(/warns once/i);
+    // The old framing. A failed write is not what a user can observe, and on
+    // current macOS and glibc a .localhost name resolves without the entry, so
+    // promising a warning on a failed write promises one that does not come.
+    expect(text).not.toMatch(/cannot write the (hosts )?file, the command/i);
   });
 
   it.each(SURFACES)("%s attributes the warning to the registering command", (surface) => {
     const text = fs.readFileSync(path.join(REPO_ROOT, surface), "utf-8");
-    expect(text).toMatch(/(command|terminal) that registered the route warns/i);
+    expect(text).toMatch(/will not resolve, the command that registered it warns/i);
   });
 
   // File-level assertions on cli.ts are not enough: it carries several help
@@ -58,7 +63,7 @@ describe("hosts-sync failure wording", () => {
       );
     expect(passages.length).toBeGreaterThan(0);
     for (const passage of passages) {
-      expect(passage).toMatch(/registered the route warns/i);
+      expect(passage).toMatch(/will not resolve, the command that\s+registered it warns/i);
     }
   });
 });

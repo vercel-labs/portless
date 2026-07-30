@@ -7,7 +7,7 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
-import { syncHostsFile } from "./hosts.js";
+import { checkHostResolution, syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -811,56 +811,40 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
   });
 }
 
-/**
- * How long to wait for the daemon to answer a hosts-sync request.
- *
- * This bounds a request, not a watcher. It is deliberately unrelated to the
- * daemon's debounce or its route-poll interval: the answer comes back on the
- * connection that asked, so no cadence of the producer can delay it. Only the
- * hosts write itself can, which is why this is generous relative to a file
- * write and still an order of magnitude below any of those intervals.
- */
 /** Display name for the hosts file in user-facing text. */
 export const HOSTS_DISPLAY = process.platform === "win32" ? "hosts file" : "/etc/hosts";
 
-/**
- * The one line issue #364 asked for. Defined once and shared by the daemon that
- * produces it and the CLI that falls back to it, so the sentence users see and
- * the sentence documented cannot drift apart.
- */
-/** Said when the channel itself failed, which is not the same as knowing the write did. */
-export const HOSTS_SYNC_UNCONFIRMED_MESSAGE = `Could not confirm the ${HOSTS_DISPLAY} sync. Check: portless doctor`;
-
-export const HOSTS_SYNC_FAILED_MESSAGE = `Could not write ${HOSTS_DISPLAY}; hostnames may not resolve. Run: portless hosts sync`;
-
-const HOSTS_SYNC_REQUEST_TIMEOUT_MS = 2000;
+/** The one line issue #364 asked for, phrased as the thing the user can observe. */
+export function hostsUnresolvedMessage(hostnames: string[]): string {
+  return `${hostnames.join(", ")} will not resolve. Run: portless hosts sync`;
+}
 
 /**
- * What a hosts-sync request produced.
+ * How long to wait for the daemon to finish a sync we asked it to perform.
  *
- * `unsupported` is a daemon that predates this route, which answers 404. Version
- * skew needs no negotiation: the 404 arrives in milliseconds and the caller
- * falls back to reading the hosts file. `unreachable` covers a refused
- * connection, a timeout, or an answer this build cannot parse.
+ * This bounds a request, not a watcher: the acknowledgement comes back on the
+ * connection that asked, so no cadence of the daemon's own can delay it. Only
+ * the hosts write can, and the observed round trip on a healthy daemon is 8.6ms
+ * median and 35.7ms worst, so this leaves fourteen times the worst case. It is
+ * short on purpose, because callers await it before starting a child process.
  */
-export type HostsSyncRequestResult =
-  | { state: "synced" }
-  | { state: "disabled" }
-  | { state: "failed"; message: string }
-  | { state: "unsupported" }
-  | { state: "unreachable" };
+const HOSTS_SYNC_TRIGGER_TIMEOUT_MS = 500;
 
 /**
- * Ask the running daemon to sync the hosts file and report what happened.
+ * Ask the running daemon to sync the hosts file now, and wait for it to finish.
  *
- * The daemon is the only process that can answer: it holds the privileges the
- * write needs and the configuration that decides whether to write at all. The
- * answer arrives on this request, so it needs no timestamp to prove it is
- * current and no owner to prove it is ours.
+ * This is a trigger, not a question. The daemon holds the privileges the write
+ * needs, so it has to be the one to attempt it, and asking removes the wait for
+ * its file watcher that three review rounds were spent sizing. But its answer is
+ * not the source of truth for anything: what it says happened, whether it is even
+ * the daemon we meant to ask, and whether it is new enough to understand the
+ * request are all irrelevant, because the caller checks the resolver afterwards.
  *
- * Never rejects. Every failure mode is a state the caller can act on.
+ * Never rejects, and reports nothing. An older daemon answering 404, an
+ * unrelated server on a stale port, a refused connection and a timeout all mean
+ * the same thing here: whatever could happen has now had its chance.
  */
-export function requestHostsSync(port: number, tls = false): Promise<HostsSyncRequestResult> {
+export function triggerHostsSync(port: number, tls = false): Promise<void> {
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(
@@ -869,105 +853,55 @@ export function requestHostsSync(port: number, tls = false): Promise<HostsSyncRe
         port,
         path: HOSTS_SYNC_PATH,
         method: "POST",
-        timeout: HOSTS_SYNC_REQUEST_TIMEOUT_MS,
+        timeout: HOSTS_SYNC_TRIGGER_TIMEOUT_MS,
         ...(tls ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
-        // The port comes from proxy.port, which can be stale or reused. Without
-        // the identity header an unrelated local server answering "disabled"
-        // silences the warning, which is issue #364 restored by the fix for it.
-        if (res.headers[PORTLESS_HEADER.toLowerCase()] !== "1") {
-          res.resume();
-          resolve({ state: "unreachable" });
-          return;
-        }
-        if (res.statusCode === 404 || res.statusCode === 403) {
-          res.resume();
-          resolve({ state: "unsupported" });
-          return;
-        }
-        let body = "";
-        res.setEncoding("utf-8");
-        res.on("data", (chunk: string) => {
-          // Bound what an unexpected responder can make us buffer.
-          if (body.length < 4096) body += chunk;
-        });
-        res.on("end", () => {
-          try {
-            const parsed: unknown = JSON.parse(body);
-            const state = (parsed as { state?: unknown } | null)?.state;
-            if (state === "synced" || state === "disabled") {
-              resolve({ state });
-              return;
-            }
-            if (state === "failed") {
-              const message = (parsed as { message?: unknown }).message;
-              resolve({
-                state: "failed",
-                message: typeof message === "string" ? message : HOSTS_SYNC_FAILED_MESSAGE,
-              });
-              return;
-            }
-          } catch {
-            // Fall through: an unparseable answer is no answer.
-          }
-          resolve({ state: "unreachable" });
-        });
-        res.on("error", () => resolve({ state: "unreachable" }));
+        res.resume();
+        res.on("end", () => resolve());
+        res.on("error", () => resolve());
       }
     );
-    req.on("error", () => resolve({ state: "unreachable" }));
+    req.on("error", () => resolve());
     req.on("timeout", () => {
       req.destroy();
-      resolve({ state: "unreachable" });
+      resolve();
     });
     req.end();
   });
 }
 
 /**
- * Report a hosts-sync outcome to the terminal that registered a route.
+ * Tell this terminal whether the route it just registered will actually resolve.
  *
- * The sync runs in the detached daemon, whose stdio is redirected to proxy.log,
- * so a warning printed there reaches a file the user never opens. This asks the
- * daemon and prints the answer here instead.
+ * Issue #364 asked for a warning at registration time, and the question behind it
+ * is whether the app is about to fail with ENOTFOUND. That is not the same as
+ * whether a file was written. RFC 6761 makes `.localhost` resolution a SHOULD for
+ * resolvers, and on current macOS and glibc `app.localhost` resolves with no
+ * hosts entry at all, so a failed write there changes nothing the user can see.
+ * A custom TLD like `app.test` resolves on neither, so there a failed write is
+ * the whole problem. Reporting the write cannot tell those apart; asking the
+ * resolver answers exactly the question the user has.
  *
- * When nobody answers, fall back to the effect. A daemon predating this route
- * returns 404, and an unreachable or unparseable answer is the same situation:
- * we do not know what the daemon did, but we can read what the hosts file says,
- * and that is the fact the user actually cares about. Reading the effect is also
- * the honest answer when a slow but successful write outlives the request
- * timeout, where claiming failure would be a lie.
- *
- * `sync` is injectable so the decision can be tested without a daemon.
+ * The daemon is triggered first and the resolver is read once afterwards. The
+ * order is not cosmetic: querying before the write can cache a negative that is
+ * about to become false, and macOS caches negatives (21.4ms cold against 0.5ms
+ * warm on the same name), so a probe running early could break the very
+ * resolution it is checking.
  */
 export async function reportHostsSync(
   hostnames: string[],
   port: number,
   tls: boolean,
   onWarn: (message: string) => void,
-  sync: (port: number, tls: boolean) => Promise<HostsSyncRequestResult> = requestHostsSync
+  trigger: (port: number, tls: boolean) => Promise<void> = triggerHostsSync,
+  resolves: (hostname: string) => Promise<boolean> = checkHostResolution
 ): Promise<void> {
   if (hostnames.length === 0) return;
-  const result = await sync(port, tls);
-  if (result.state === "synced" || result.state === "disabled") return;
-  if (result.state === "failed") {
-    onWarn(result.message);
-    return;
-  }
-  // Nobody answered, and the two reasons need different treatment.
-  //
-  // `unsupported` is a daemon older than this route. Its 404 says nothing about
-  // what it did: success, write failure and opt-out all produce the same 404,
-  // and its sync happens later on its own watcher. Reading the hosts file now
-  // reports a failure it is about to not have, and waiting instead only moves
-  // the guess later, because an absence at any deadline still cannot tell a
-  // failed write from a user who disabled syncing. So say nothing. Such a user
-  // is where main already leaves them, and one restart on this build fixes it.
-  //
-  // `unreachable` is different: something is wrong with the channel itself, and
-  // that is worth saying without claiming to know the write failed.
-  if (result.state === "unreachable") onWarn(HOSTS_SYNC_UNCONFIRMED_MESSAGE);
+  await trigger(port, tls);
+  const checked = await Promise.all(hostnames.map((hostname) => resolves(hostname)));
+  const unresolved = hostnames.filter((_, i) => !checked[i]);
+  if (unresolved.length > 0) onWarn(hostsUnresolvedMessage(unresolved));
 }
 
 /**

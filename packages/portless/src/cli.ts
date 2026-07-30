@@ -78,7 +78,6 @@ import {
   spawnCommand,
   reportHostsSync,
   syncHostsWithWarning,
-  HOSTS_SYNC_FAILED_MESSAGE,
   augmentedPath,
   waitForProxy,
   writeCustomCertMarker,
@@ -112,7 +111,6 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig } from "./config.js";
-import type { HostsSyncOutcome } from "./types.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -535,9 +533,10 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
 /**
  * Tell this terminal whether the route it just registered will resolve.
  *
- * The daemon performs the sync and answers on the request, so nothing here
- * interprets the daemon's environment or waits on its watcher. Not awaited where
- * a child process is about to start, so a dev server never waits on it.
+ * Awaited everywhere, including before a child starts. The trigger is bounded at
+ * half a second against an observed 8.6ms median, so a healthy daemon costs
+ * single-digit milliseconds, and awaiting removes the only way a warning could be
+ * lost: a child that exits before a discarded promise settles.
  */
 function reportHostsSyncHere(hostnames: string[], port: number, tls: boolean): Promise<void> {
   return reportHostsSync(hostnames, port, tls, (message) => console.warn(colors.yellow(message)));
@@ -631,7 +630,7 @@ function startProxyServer(
     hostsSyncWarned = syncHostsWithWarning(
       hostnames,
       hostsSyncWarned,
-      () => console.warn(colors.yellow(HOSTS_SYNC_FAILED_MESSAGE)),
+      () => console.warn(colors.yellow(`Could not write ${HOSTS_DISPLAY} for route hostnames.`)),
       (names) => {
         ok = syncHostsFile(names);
         return ok;
@@ -644,21 +643,17 @@ function startProxyServer(
    * Answer a CLI's hosts-sync request. Runs in the daemon, so it owns both the
    * privileges the write needs and the setting that decides whether to write.
    */
-  const onHostsSyncRequest = (): HostsSyncOutcome => {
-    if (!autoSyncHosts) return { state: "disabled" };
+  const onHostsSyncRequest = (): void => {
+    if (!autoSyncHosts) return;
     // Read routes from disk rather than trusting the cache. The caller registered
     // its route moments ago and the watcher's debounce has almost certainly not
     // fired yet, so the cache does not contain the hostname being asked about.
-    // Syncing the cache here answers about the wrong route set, and an empty one
-    // is trivially "already correct", which reports success for a write that
-    // never covered the caller.
     try {
       cachedRoutes = store.loadRoutes();
     } catch {
       // Mid-write; the cache is the best available answer.
     }
-    const ok = syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
-    return ok ? { state: "synced" } : { state: "failed", message: HOSTS_SYNC_FAILED_MESSAGE };
+    syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
   };
 
   const reloadRoutes = () => {
@@ -1346,7 +1341,7 @@ async function runApp(
   let killedPids: number[] = [];
   try {
     killedPids = addRoutes(store, hostnames, port, process.pid, force);
-    void reportHostsSyncHere(hostnames, proxyPort, tls);
+    await reportHostsSyncHere(hostnames, proxyPort, tls);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -1973,9 +1968,9 @@ ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
   Safari relies on the system DNS resolver, which may not handle them.
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If the file
-  is not writable, the command that registered the route warns instead of failing
-  silently. To sync manually:
+  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If a route
+  hostname will not resolve, the command that registered it warns instead of
+  failing silently. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
@@ -2396,8 +2391,8 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Auto-sync:")}
   The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
-  PORTLESS_SYNC_HOSTS=0. If the file is not writable, the command that registered
-  the route warns instead of failing silently.
+  PORTLESS_SYNC_HOSTS=0. If a route hostname will not resolve, the command that
+  registered it warns instead of failing silently.
 `);
     process.exit(0);
   }
@@ -3655,7 +3650,7 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     addRoutes(store, hostnames, appPort, process.pid);
-    void reportHostsSyncHere(hostnames, proxyPort, tls);
+    await reportHostsSyncHere(hostnames, proxyPort, tls);
 
     env = {
       ...pkgEnv,
@@ -3911,7 +3906,7 @@ async function runWithTurbo(
     appUrls.push({ label: app.label, url });
 
     addRoutes(store, hostnames, appPort, process.pid);
-    void reportHostsSyncHere(hostnames, proxyPort, tls);
+    await reportHostsSyncHere(hostnames, proxyPort, tls);
     routes.push({ hostnames });
 
     const entry: ManifestEntry = {

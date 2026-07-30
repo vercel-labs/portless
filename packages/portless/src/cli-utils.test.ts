@@ -1,5 +1,4 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from "vitest";
-import { PORTLESS_HEADER } from "./proxy.js";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as net from "node:net";
@@ -27,7 +26,7 @@ import {
   injectFrameworkFlags,
   isPortListening,
   isProxyRunning,
-  requestHostsSync,
+  triggerHostsSync,
   reportHostsSync,
   syncHostsWithWarning,
   listenOnProxyInterface,
@@ -1315,7 +1314,10 @@ describe("readPersistedProxyState", () => {
 // lets the outcome carry no timestamp, no owner and no schema version: a response
 // cannot be stale, cannot belong to another caller, and cannot be left behind by
 // a previous daemon.
-describe("requestHostsSync", () => {
+describe("triggerHostsSync", () => {
+  // A trigger, not a question. Every answer means the same thing: whatever could
+  // happen has had its chance. So the only thing worth testing is that it always
+  // settles, and settles fast, since callers await it before starting a child.
   const servers: http.Server[] = [];
 
   function serve(handler: http.RequestListener): Promise<number> {
@@ -1335,123 +1337,89 @@ describe("requestHostsSync", () => {
     servers.length = 0;
   });
 
-  it.each(["synced", "disabled"] as const)("passes through a %s answer", async (state) => {
+  it.each([204, 404, 403, 500])("settles on a %s answer", async (status) => {
     const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
-      res.end(JSON.stringify({ state }));
-    });
-    expect(await requestHostsSync(port)).toEqual({ state });
-  });
-
-  it("carries the daemon's message on a failure", async () => {
-    const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
-      res.end(JSON.stringify({ state: "failed", message: "Could not write /etc/hosts" }));
-    });
-    expect(await requestHostsSync(port)).toEqual({
-      state: "failed",
-      message: "Could not write /etc/hosts",
-    });
-  });
-
-  // A daemon from a build older than this route. Version skew resolves in
-  // milliseconds instead of waiting out a publication that will never arrive.
-  it("reads a 404 as an unsupported daemon", async () => {
-    const port = await serve((_req, res) => {
-      res.writeHead(404, { [PORTLESS_HEADER]: "1" });
+      res.writeHead(status);
       res.end();
     });
-    expect(await requestHostsSync(port)).toEqual({ state: "unsupported" });
+    await expect(triggerHostsSync(port)).resolves.toBeUndefined();
   });
 
-  // proxy.port can be stale or reused, so an unrelated local server must not be
-  // able to answer for portless. Without this the fix for #364 restores #364.
-  it("refuses an answer from a server that is not portless", async () => {
-    const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json" });
-      res.end(JSON.stringify({ state: "disabled" }));
+  it("settles when nothing is listening", async () => {
+    await expect(triggerHostsSync(19899)).resolves.toBeUndefined();
+  });
+
+  // The reason the timeout is short: a caller awaits this before spawning a dev
+  // server, so a daemon that accepts and never answers must not hold the terminal.
+  it("settles at its own bound against a responder that never answers", async () => {
+    const port = await serve(() => {
+      // Never respond.
     });
-    expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
-  });
-
-  it("reports nothing listening as unreachable", async () => {
-    expect(await requestHostsSync(19899)).toEqual({ state: "unreachable" });
-  });
-
-  it("reports an unparseable answer as unreachable rather than guessing", async () => {
-    const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
-      res.end("{not json");
-    });
-    expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
-  });
-
-  it("reports an unknown state as unreachable rather than guessing", async () => {
-    const port = await serve((_req, res) => {
-      res.writeHead(200, { "Content-Type": "application/json", [PORTLESS_HEADER]: "1" });
-      res.end(JSON.stringify({ state: "something-new" }));
-    });
-    expect(await requestHostsSync(port)).toEqual({ state: "unreachable" });
+    const started = Date.now();
+    await triggerHostsSync(port);
+    expect(Date.now() - started).toBeLessThan(1500);
   });
 });
 
 describe("reportHostsSync", () => {
   const warnings: string[] = [];
   const onWarn = (m: string) => warnings.push(m);
+  const noop = async () => {};
 
   beforeEach(() => {
     warnings.length = 0;
   });
 
-  it("says nothing when the daemon synced", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({ state: "synced" }));
+  // The question issue #364 actually asks. RFC 6761 makes .localhost resolution a
+  // SHOULD, and on current macOS and glibc it resolves with no hosts entry, so a
+  // failed write there is invisible to the user. Reporting the write cannot tell
+  // that apart from a custom TLD, where a failed write breaks the app.
+  it("says nothing when the hostname resolves", async () => {
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, noop, async () => true);
     expect(warnings).toEqual([]);
   });
 
-  // The user opted out of hosts sync. Warning on every registration is noise
-  // about a decision they already made.
-  it("says nothing when the daemon has syncing disabled", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({ state: "disabled" }));
-    expect(warnings).toEqual([]);
-  });
-
-  it("prints the daemon's own message on a failure", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({
-      state: "failed",
-      message: "boom",
-    }));
-    expect(warnings).toEqual(["boom"]);
-  });
-
-  // An older daemon's 404 says nothing about what it did: success, a failed write
-  // and opt-out all look identical, and its own sync lands later on its watcher.
-  // Reading the hosts file now reports a failure it is about to not have, and
-  // waiting only moves the guess later. Say nothing rather than assert.
-  it("says nothing when the daemon is too old to answer", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({
-      state: "unsupported",
-    }));
-    expect(warnings).toEqual([]);
-  });
-
-  // A broken channel is worth reporting, but not as a write failure we did not
-  // observe.
-  it("reports an unreachable daemon without claiming the write failed", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, async () => ({
-      state: "unreachable",
-    }));
+  it("warns naming only the hostnames that do not resolve", async () => {
+    await reportHostsSync(
+      ["good.test", "bad.test"],
+      1,
+      false,
+      onWarn,
+      noop,
+      async (hostname) => hostname === "good.test"
+    );
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]).not.toMatch(/could not write/i);
-    expect(warnings[0]).toMatch(/could not confirm/i);
+    expect(warnings[0]).toContain("bad.test");
+    expect(warnings[0]).not.toContain("good.test");
   });
 
-  it("asks nothing when there is no hostname to report on", async () => {
-    let asked = false;
+  // Order is the fix for a hazard, not a style choice. Querying before the daemon
+  // writes can cache a negative that is about to become false, and macOS caches
+  // negatives, so an early probe could break the resolution it checks.
+  it("triggers the daemon before it reads the resolver", async () => {
+    const order: string[] = [];
+    await reportHostsSync(
+      ["a.test"],
+      1,
+      false,
+      onWarn,
+      async () => {
+        order.push("trigger");
+      },
+      async () => {
+        order.push("resolve");
+        return true;
+      }
+    );
+    expect(order).toEqual(["trigger", "resolve"]);
+  });
+
+  it("does not trigger at all when there is no hostname to report on", async () => {
+    let triggered = false;
     await reportHostsSync([], 1, false, onWarn, async () => {
-      asked = true;
-      return { state: "failed", message: "boom" };
+      triggered = true;
     });
-    expect(asked).toBe(false);
+    expect(triggered).toBe(false);
     expect(warnings).toEqual([]);
   });
 });
