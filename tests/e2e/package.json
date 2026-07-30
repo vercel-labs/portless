@@ -18,6 +18,7 @@
     "@hono/node-server": "^1.19.9",
     "@react-router/dev": "^7.13.0",
     "@react-router/node": "^7.13.0",
+    "@rsbuild/core": "^2.0.0",
     "@sveltejs/adapter-auto": "^7.0.1",
     "@sveltejs/kit": "^2.53.0",
     "@types/express": "^5.0.6",
