@@ -70,3 +70,22 @@ describe("hosts-sync failure wording", () => {
 
 /** Substring every user-facing auto-sync passage shares, on either platform. */
 const HOSTS_DISPLAY_HINT = "hosts";
+
+// `cachedRoutes` is the route watcher's before-image: `reloadRoutes` diffs a fresh
+// load against it to decide which mDNS records to publish and unpublish. The
+// hosts-sync handler needs the current route set too, and reading it into that
+// same variable makes the next diff compare the new set with itself, so in LAN
+// mode a route registered through this path never gets a `.local` publisher.
+//
+// Asserted on source text, which is weaker than driving LAN mode and is chosen
+// because the handler is a closure with no export and mDNS needs a real
+// publisher. It goes red on exactly the assignment that caused the regression.
+describe("hosts-sync handler and the watcher's before-image", () => {
+  it("does not write to cachedRoutes", () => {
+    const cli = fs.readFileSync(path.join(REPO_ROOT, "packages/portless/src/cli.ts"), "utf-8");
+    const start = cli.indexOf("const onHostsSyncRequest = ");
+    expect(start).toBeGreaterThan(-1);
+    const body = cli.slice(start, cli.indexOf("\n  };", start));
+    expect(body).not.toMatch(/cachedRoutes\s*=/);
+  });
+});

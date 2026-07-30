@@ -1345,19 +1345,21 @@ describe("triggerHostsSync", () => {
       res.writeHead(204);
       res.end();
     });
-    expect(await triggerHostsSync(ack)).toBe(true);
+    expect(await triggerHostsSync(ack)).toBe("acted");
   });
 
-  it.each([404, 403, 500])("reports no action on a %s answer", async (status) => {
+  it.each([404, 403, 500])("reports a mute listener on a %s answer", async (status) => {
     const port = await serve((_req, res) => {
       res.writeHead(status);
       res.end();
     });
-    expect(await triggerHostsSync(port)).toBe(false);
+    expect(await triggerHostsSync(port)).toBe("mute");
   });
 
-  it("reports no action when nothing is listening", async () => {
-    expect(await triggerHostsSync(19899)).toBe(false);
+  // The distinction the repo has now got wrong three times. A refused connection
+  // already answers the question a ceiling would spend seconds re-asking.
+  it("reports absent when nothing is listening", async () => {
+    expect(await triggerHostsSync(19899)).toBe("absent");
   });
 
   // The reason the timeout is short: a caller awaits this before spawning a dev
@@ -1375,8 +1377,9 @@ describe("triggerHostsSync", () => {
 describe("reportHostsSync", () => {
   const warnings: string[] = [];
   const onWarn = (m: string) => warnings.push(m);
-  const acted = async () => true;
-  const notActed = async () => false;
+  const acted = async (): Promise<"acted"> => "acted";
+  const mute = async (): Promise<"mute"> => "mute";
+  const absent = async (): Promise<"absent"> => "absent";
 
   beforeEach(() => {
     warnings.length = 0;
@@ -1417,7 +1420,7 @@ describe("reportHostsSync", () => {
       onWarn,
       async () => {
         order.push("trigger");
-        return true;
+        return "acted";
       },
       async () => {
         order.push("resolve");
@@ -1432,23 +1435,43 @@ describe("reportHostsSync", () => {
   // being false, which is exactly the class of defect this design was meant to end.
   it("gives an untriggerable daemon its chance before calling it a failure", async () => {
     let reads = 0;
-    await reportHostsSync(["a.test"], 1, false, onWarn, notActed, async () => ++reads >= 3, 2000);
+    await reportHostsSync(["a.test"], 1, false, onWarn, mute, async () => ++reads >= 3, 2000);
     expect(reads).toBeGreaterThan(1);
     expect(warnings).toEqual([]);
   });
 
   it("warns at the ceiling when an untriggerable daemon never syncs", async () => {
     const started = Date.now();
-    await reportHostsSync(["a.test"], 1, false, onWarn, notActed, async () => false, 150);
+    await reportHostsSync(["a.test"], 1, false, onWarn, mute, async () => false, 150);
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     expect(warnings).toHaveLength(1);
+  });
+
+  // No producer exists, so an absence is already final. Waiting spends a ceiling
+  // to learn what the refused connection said.
+  it("does not wait when nothing is listening", async () => {
+    const started = Date.now();
+    await reportHostsSync(["a.test"], 1, false, onWarn, absent, async () => false, 3000);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(warnings).toHaveLength(1);
+  });
+
+  // mDNS serves .local, and it resolves to the LAN address, not loopback.
+  it("says nothing about a .local hostname", async () => {
+    let triggered = false;
+    await reportHostsSync(["app.local"], 1, false, onWarn, async () => {
+      triggered = true;
+      return "acted";
+    });
+    expect(triggered).toBe(false);
+    expect(warnings).toEqual([]);
   });
 
   it("does not trigger at all when there is no hostname to report on", async () => {
     let triggered = false;
     await reportHostsSync([], 1, false, onWarn, async () => {
       triggered = true;
-      return true;
+      return "acted";
     });
     expect(triggered).toBe(false);
     expect(warnings).toEqual([]);

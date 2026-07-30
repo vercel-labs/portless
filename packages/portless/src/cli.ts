@@ -645,15 +645,22 @@ function startProxyServer(
    */
   const onHostsSyncRequest = (): void => {
     if (!autoSyncHosts) return;
-    // Read routes from disk rather than trusting the cache. The caller registered
+    // Read routes from disk rather than trusting the cache: the caller registered
     // its route moments ago and the watcher's debounce has almost certainly not
     // fired yet, so the cache does not contain the hostname being asked about.
+    //
+    // Read into a local and leave `cachedRoutes` alone. It is the watcher's
+    // before-image: `reloadRoutes` diffs the new load against it to decide which
+    // mDNS records to publish and unpublish. Updating it here makes that diff
+    // compare the new route set with itself, and in LAN mode a route registered
+    // this way then never gets a `.local` publisher at all.
+    let hostnames: string[];
     try {
-      cachedRoutes = store.loadRoutes();
+      hostnames = store.loadRoutes().map((r) => r.hostname);
     } catch {
-      // Mid-write; the cache is the best available answer.
+      hostnames = cachedRoutes.map((r) => r.hostname);
     }
-    syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
+    syncHostsAndLatch(hostnames);
   };
 
   const reloadRoutes = () => {

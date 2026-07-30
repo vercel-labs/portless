@@ -851,14 +851,19 @@ const UNTRIGGERED_SYNC_CEILING_MS = 3500;
  * the daemon we meant to ask, and whether it is new enough to understand the
  * request are all irrelevant, because the caller checks the resolver afterwards.
  *
- * Never rejects. Reports one bit: whether a daemon acknowledged doing the work.
- * That bit is not a claim about the outcome, only about whether the write has
- * already been attempted by the time this returns. An older daemon answering 404,
- * an unrelated server on a stale port, a refused connection and a timeout all
- * mean the same thing: nobody acted on our behalf, and anything that still
- * happens will happen on someone else's schedule.
+ * Never rejects. Reports which of three situations it found, because a caller
+ * that waits afterwards needs to tell them apart:
+ *
+ * - `acted`: a daemon acknowledged doing the work, so the write has already been
+ *   attempted and the resolver is current.
+ * - `absent`: nothing is listening, so there is no producer at all. Waiting here
+ *   spends a ceiling to learn what the refused connection already said.
+ * - `mute`: something answered but did not acknowledge, which in practice is a
+ *   daemon older than this route. It will still sync, on its own watcher.
  */
-export function triggerHostsSync(port: number, tls = false): Promise<boolean> {
+export type HostsSyncTrigger = "acted" | "absent" | "mute";
+
+export function triggerHostsSync(port: number, tls = false): Promise<HostsSyncTrigger> {
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(
@@ -873,14 +878,18 @@ export function triggerHostsSync(port: number, tls = false): Promise<boolean> {
       (res) => {
         const acted = res.statusCode === 204;
         res.resume();
-        res.on("end", () => resolve(acted));
-        res.on("error", () => resolve(false));
+        res.on("end", () => resolve(acted ? "acted" : "mute"));
+        res.on("error", () => resolve("mute"));
       }
     );
-    req.on("error", () => resolve(false));
+    req.on("error", (err: NodeJS.ErrnoException) => {
+      // A refused connection or an unresolvable host is the whole answer: nobody
+      // is there. Anything else means something is listening and went wrong.
+      resolve(err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? "absent" : "mute");
+    });
     req.on("timeout", () => {
       req.destroy();
-      resolve(false);
+      resolve("mute");
     });
     req.end();
   });
@@ -909,26 +918,34 @@ export async function reportHostsSync(
   port: number,
   tls: boolean,
   onWarn: (message: string) => void,
-  trigger: (port: number, tls: boolean) => Promise<boolean> = triggerHostsSync,
+  trigger: (port: number, tls: boolean) => Promise<HostsSyncTrigger> = triggerHostsSync,
   resolves: (hostname: string) => Promise<boolean> = checkHostResolution,
   unTriggeredCeilingMs = UNTRIGGERED_SYNC_CEILING_MS
 ): Promise<void> {
-  if (hostnames.length === 0) return;
-  const acted = await trigger(port, tls);
+  // A `.local` name is served by mDNS, not by the hosts block, and it correctly
+  // resolves to the machine's LAN address rather than loopback. Asking whether it
+  // resolves to loopback answers no for a hostname that works, so these are not
+  // this warning's business at all.
+  const managed = hostnames.filter((hostname) => !hostname.endsWith(".local"));
+  if (managed.length === 0) return;
+  const found = await trigger(port, tls);
   const missing = async () => {
-    const checked = await Promise.all(hostnames.map((hostname) => resolves(hostname)));
-    return hostnames.filter((_, i) => !checked[i]);
+    const checked = await Promise.all(managed.map((hostname) => resolves(hostname)));
+    return managed.filter((_, i) => !checked[i]);
   };
 
-  // A daemon that acknowledged has already attempted the write, so the resolver
-  // is current and one read settles it.
-  if (acted) {
+  // Either the write has already been attempted, or nothing exists to attempt it.
+  // Both make the resolver current, so one read settles it. Polling in the second
+  // case spends a ceiling to learn what the refused connection already said, which
+  // is the mistake this repo has now made three times.
+  if (found !== "mute") {
     const unresolved = await missing();
     if (unresolved.length > 0) onWarn(hostsUnresolvedMessage(unresolved));
     return;
   }
 
-  // Nobody acted on our request. A daemon too old to have this route still syncs,
+  // Something answered without acknowledging, which is a daemon too old to have
+  // this route. It still syncs,
   // on its own file watcher, so an absence right now is about to stop being true.
   // Reading once here reports a failure the daemon is a debounce away from fixing.
   // This is the one path where a producer's cadence still bounds us, and it is the
