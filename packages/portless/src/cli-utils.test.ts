@@ -1337,16 +1337,27 @@ describe("triggerHostsSync", () => {
     servers.length = 0;
   });
 
-  it.each([204, 404, 403, 500])("settles on a %s answer", async (status) => {
+  // The one bit it reports is "a daemon acted", not "the sync worked". A caller
+  // needs it to know whether the resolver is already current or whether someone
+  // else's schedule still has work to do.
+  it("reports that a daemon acted only on its acknowledgement", async () => {
+    const ack = await serve((_req, res) => {
+      res.writeHead(204);
+      res.end();
+    });
+    expect(await triggerHostsSync(ack)).toBe(true);
+  });
+
+  it.each([404, 403, 500])("reports no action on a %s answer", async (status) => {
     const port = await serve((_req, res) => {
       res.writeHead(status);
       res.end();
     });
-    await expect(triggerHostsSync(port)).resolves.toBeUndefined();
+    expect(await triggerHostsSync(port)).toBe(false);
   });
 
-  it("settles when nothing is listening", async () => {
-    await expect(triggerHostsSync(19899)).resolves.toBeUndefined();
+  it("reports no action when nothing is listening", async () => {
+    expect(await triggerHostsSync(19899)).toBe(false);
   });
 
   // The reason the timeout is short: a caller awaits this before spawning a dev
@@ -1364,7 +1375,8 @@ describe("triggerHostsSync", () => {
 describe("reportHostsSync", () => {
   const warnings: string[] = [];
   const onWarn = (m: string) => warnings.push(m);
-  const noop = async () => {};
+  const acted = async () => true;
+  const notActed = async () => false;
 
   beforeEach(() => {
     warnings.length = 0;
@@ -1375,7 +1387,7 @@ describe("reportHostsSync", () => {
   // failed write there is invisible to the user. Reporting the write cannot tell
   // that apart from a custom TLD, where a failed write breaks the app.
   it("says nothing when the hostname resolves", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, noop, async () => true);
+    await reportHostsSync(["a.localhost"], 1, false, onWarn, acted, async () => true);
     expect(warnings).toEqual([]);
   });
 
@@ -1385,7 +1397,7 @@ describe("reportHostsSync", () => {
       1,
       false,
       onWarn,
-      noop,
+      acted,
       async (hostname) => hostname === "good.test"
     );
     expect(warnings).toHaveLength(1);
@@ -1405,6 +1417,7 @@ describe("reportHostsSync", () => {
       onWarn,
       async () => {
         order.push("trigger");
+        return true;
       },
       async () => {
         order.push("resolve");
@@ -1414,10 +1427,28 @@ describe("reportHostsSync", () => {
     expect(order).toEqual(["trigger", "resolve"]);
   });
 
+  // A daemon too old to have this route still syncs, on its watcher. Reading the
+  // resolver the instant its 404 arrives reports an absence a debounce away from
+  // being false, which is exactly the class of defect this design was meant to end.
+  it("gives an untriggerable daemon its chance before calling it a failure", async () => {
+    let reads = 0;
+    await reportHostsSync(["a.test"], 1, false, onWarn, notActed, async () => ++reads >= 3, 2000);
+    expect(reads).toBeGreaterThan(1);
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns at the ceiling when an untriggerable daemon never syncs", async () => {
+    const started = Date.now();
+    await reportHostsSync(["a.test"], 1, false, onWarn, notActed, async () => false, 150);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(150);
+    expect(warnings).toHaveLength(1);
+  });
+
   it("does not trigger at all when there is no hostname to report on", async () => {
     let triggered = false;
     await reportHostsSync([], 1, false, onWarn, async () => {
       triggered = true;
+      return true;
     });
     expect(triggered).toBe(false);
     expect(warnings).toEqual([]);

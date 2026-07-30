@@ -831,6 +831,17 @@ export function hostsUnresolvedMessage(hostnames: string[]): string {
 const HOSTS_SYNC_TRIGGER_TIMEOUT_MS = 500;
 
 /**
+ * How long to let an untriggerable daemon act on its own schedule.
+ *
+ * Only reachable when nothing acknowledged our request, which in practice means a
+ * daemon older than this route. Such a daemon syncs from a file watcher plus a
+ * debounce, and falls back to a periodic poll where the watcher does not fire, so
+ * this has to clear the slower of the two. A daemon that acknowledges never comes
+ * here, so the common paths pay none of it.
+ */
+const UNTRIGGERED_SYNC_CEILING_MS = 3500;
+
+/**
  * Ask the running daemon to sync the hosts file now, and wait for it to finish.
  *
  * This is a trigger, not a question. The daemon holds the privileges the write
@@ -840,11 +851,14 @@ const HOSTS_SYNC_TRIGGER_TIMEOUT_MS = 500;
  * the daemon we meant to ask, and whether it is new enough to understand the
  * request are all irrelevant, because the caller checks the resolver afterwards.
  *
- * Never rejects, and reports nothing. An older daemon answering 404, an
- * unrelated server on a stale port, a refused connection and a timeout all mean
- * the same thing here: whatever could happen has now had its chance.
+ * Never rejects. Reports one bit: whether a daemon acknowledged doing the work.
+ * That bit is not a claim about the outcome, only about whether the write has
+ * already been attempted by the time this returns. An older daemon answering 404,
+ * an unrelated server on a stale port, a refused connection and a timeout all
+ * mean the same thing: nobody acted on our behalf, and anything that still
+ * happens will happen on someone else's schedule.
  */
-export function triggerHostsSync(port: number, tls = false): Promise<void> {
+export function triggerHostsSync(port: number, tls = false): Promise<boolean> {
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(
@@ -857,15 +871,16 @@ export function triggerHostsSync(port: number, tls = false): Promise<void> {
         ...(tls ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
+        const acted = res.statusCode === 204;
         res.resume();
-        res.on("end", () => resolve());
-        res.on("error", () => resolve());
+        res.on("end", () => resolve(acted));
+        res.on("error", () => resolve(false));
       }
     );
-    req.on("error", () => resolve());
+    req.on("error", () => resolve(false));
     req.on("timeout", () => {
       req.destroy();
-      resolve();
+      resolve(false);
     });
     req.end();
   });
@@ -894,14 +909,40 @@ export async function reportHostsSync(
   port: number,
   tls: boolean,
   onWarn: (message: string) => void,
-  trigger: (port: number, tls: boolean) => Promise<void> = triggerHostsSync,
-  resolves: (hostname: string) => Promise<boolean> = checkHostResolution
+  trigger: (port: number, tls: boolean) => Promise<boolean> = triggerHostsSync,
+  resolves: (hostname: string) => Promise<boolean> = checkHostResolution,
+  unTriggeredCeilingMs = UNTRIGGERED_SYNC_CEILING_MS
 ): Promise<void> {
   if (hostnames.length === 0) return;
-  await trigger(port, tls);
-  const checked = await Promise.all(hostnames.map((hostname) => resolves(hostname)));
-  const unresolved = hostnames.filter((_, i) => !checked[i]);
-  if (unresolved.length > 0) onWarn(hostsUnresolvedMessage(unresolved));
+  const acted = await trigger(port, tls);
+  const missing = async () => {
+    const checked = await Promise.all(hostnames.map((hostname) => resolves(hostname)));
+    return hostnames.filter((_, i) => !checked[i]);
+  };
+
+  // A daemon that acknowledged has already attempted the write, so the resolver
+  // is current and one read settles it.
+  if (acted) {
+    const unresolved = await missing();
+    if (unresolved.length > 0) onWarn(hostsUnresolvedMessage(unresolved));
+    return;
+  }
+
+  // Nobody acted on our request. A daemon too old to have this route still syncs,
+  // on its own file watcher, so an absence right now is about to stop being true.
+  // Reading once here reports a failure the daemon is a debounce away from fixing.
+  // This is the one path where a producer's cadence still bounds us, and it is the
+  // only place it can: with nothing to trigger, there is nothing else to wait on.
+  const deadline = Date.now() + unTriggeredCeilingMs;
+  for (;;) {
+    const unresolved = await missing();
+    if (unresolved.length === 0) return;
+    if (Date.now() >= deadline) {
+      onWarn(hostsUnresolvedMessage(unresolved));
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
 }
 
 /**
