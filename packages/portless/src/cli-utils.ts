@@ -6,8 +6,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
-import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
-import { checkHostResolution, syncHostsFile } from "./hosts.js";
+import { PORTLESS_HEADER } from "./proxy.js";
+import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -814,152 +814,56 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
 /** Display name for the hosts file in user-facing text. */
 export const HOSTS_DISPLAY = process.platform === "win32" ? "hosts file" : "/etc/hosts";
 
-/** The one line issue #364 asked for, phrased as the thing the user can observe. */
 export function hostsUnresolvedMessage(hostnames: string[]): string {
   return `${hostnames.join(", ")} will not resolve. Run: portless hosts sync`;
 }
 
 /**
- * How long to wait for the daemon to finish a sync we asked it to perform.
- *
- * This bounds a request, not a watcher: the acknowledgement comes back on the
- * connection that asked, so no cadence of the daemon's own can delay it. Only
- * the hosts write can, and the observed round trip on a healthy daemon is 8.6ms
- * median and 35.7ms worst, so this leaves fourteen times the worst case. It is
- * short on purpose, because callers await it before starting a child process.
+ * Bound on waiting for the daemon to write the hosts block. Must clear its route
+ * watcher's debounce and its poll fallback, whichever is slower.
  */
-const HOSTS_SYNC_TRIGGER_TIMEOUT_MS = 500;
+const HOSTS_WRITE_CEILING_MS = 3500;
 
 /**
- * How long to let an untriggerable daemon act on its own schedule.
+ * Warn if a route hostname will not resolve. Issue #364.
  *
- * Only reachable when nothing acknowledged our request, which in practice means a
- * daemon older than this route. Such a daemon syncs from a file watcher plus a
- * debounce, and falls back to a periodic poll where the watcher does not fire, so
- * this has to clear the slower of the two. A daemon that acknowledges never comes
- * here, so the common paths pay none of it.
- */
-const UNTRIGGERED_SYNC_CEILING_MS = 3500;
-
-/**
- * Ask the running daemon to sync the hosts file now, and wait for it to finish.
+ * Reports resolution, not whether the file was written. `.localhost` resolves
+ * without a hosts entry on current macOS and glibc (RFC 6761 says SHOULD), so a
+ * skipped write there is invisible; a custom TLD resolves on neither.
  *
- * This is a trigger, not a question. The daemon holds the privileges the write
- * needs, so it has to be the one to attempt it, and asking removes the wait for
- * its file watcher that three review rounds were spent sizing. But its answer is
- * not the source of truth for anything: what it says happened, whether it is even
- * the daemon we meant to ask, and whether it is new enough to understand the
- * request are all irrelevant, because the caller checks the resolver afterwards.
- *
- * Never rejects. Reports which of three situations it found, because a caller
- * that waits afterwards needs to tell them apart:
- *
- * - `acted`: a daemon acknowledged doing the work, so the write has already been
- *   attempted and the resolver is current.
- * - `absent`: nothing is listening, so there is no producer at all. Waiting here
- *   spends a ceiling to learn what the refused connection already said.
- * - `mute`: something answered but did not acknowledge, which in practice is a
- *   daemon older than this route. It will still sync, on its own watcher.
- */
-export type HostsSyncTrigger = "acted" | "absent" | "mute";
-
-export function triggerHostsSync(port: number, tls = false): Promise<HostsSyncTrigger> {
-  return new Promise((resolve) => {
-    const requestFn = tls ? https.request : http.request;
-    const req = requestFn(
-      {
-        hostname: "127.0.0.1",
-        port,
-        path: HOSTS_SYNC_PATH,
-        method: "POST",
-        timeout: HOSTS_SYNC_TRIGGER_TIMEOUT_MS,
-        ...(tls ? { rejectUnauthorized: false } : {}),
-      },
-      (res) => {
-        const acted = res.statusCode === 204;
-        res.resume();
-        res.on("end", () => resolve(acted ? "acted" : "mute"));
-        res.on("error", () => resolve("mute"));
-      }
-    );
-    req.on("error", (err: NodeJS.ErrnoException) => {
-      // A refused connection or an unresolvable host is the whole answer: nobody
-      // is there. Anything else means something is listening and went wrong.
-      resolve(err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? "absent" : "mute");
-    });
-    req.on("timeout", () => {
-      req.destroy();
-      resolve("mute");
-    });
-    req.end();
-  });
-}
-
-/**
- * Tell this terminal whether the route it just registered will actually resolve.
- *
- * Issue #364 asked for a warning at registration time, and the question behind it
- * is whether the app is about to fail with ENOTFOUND. That is not the same as
- * whether a file was written. RFC 6761 makes `.localhost` resolution a SHOULD for
- * resolvers, and on current macOS and glibc `app.localhost` resolves with no
- * hosts entry at all, so a failed write there changes nothing the user can see.
- * A custom TLD like `app.test` resolves on neither, so there a failed write is
- * the whole problem. Reporting the write cannot tell those apart; asking the
- * resolver answers exactly the question the user has.
- *
- * The daemon is triggered first and the resolver is read once afterwards. The
- * order is not cosmetic: querying before the write can cache a negative that is
- * about to become false, and macOS caches negatives (21.4ms cold against 0.5ms
- * warm on the same name), so a probe running early could break the very
- * resolution it is checking.
+ * Waits by reading the hosts file, not by re-querying the resolver, because a
+ * negative lookup can be cached and a name that is about to resolve would stay
+ * negative.
  */
 export async function reportHostsSync(
   hostnames: string[],
-  port: number,
-  tls: boolean,
   onWarn: (message: string) => void,
-  trigger: (port: number, tls: boolean) => Promise<HostsSyncTrigger> = triggerHostsSync,
   resolves: (hostname: string) => Promise<boolean> = checkHostResolution,
-  unTriggeredCeilingMs = UNTRIGGERED_SYNC_CEILING_MS
+  readManaged: () => string[] = getManagedHostnames,
+  ceilingMs = HOSTS_WRITE_CEILING_MS
 ): Promise<void> {
-  // A `.local` name is served by mDNS, not by the hosts block, and it correctly
-  // resolves to the machine's LAN address rather than loopback. Asking whether it
-  // resolves to loopback answers no for a hostname that works, so these are not
-  // this warning's business at all.
+  // mDNS serves .local, and it resolves to the LAN address rather than loopback.
   const managed = hostnames.filter((hostname) => !hostname.endsWith(".local"));
   if (managed.length === 0) return;
-  const found = await trigger(port, tls);
-  const missing = async () => {
+
+  const unresolved = async () => {
     const checked = await Promise.all(managed.map((hostname) => resolves(hostname)));
     return managed.filter((_, i) => !checked[i]);
   };
 
-  // Either the write has already been attempted, or nothing exists to attempt it.
-  // Both make the resolver current, so one read settles it. Polling in the second
-  // case spends a ceiling to learn what the refused connection already said, which
-  // is the mistake this repo has now made three times.
-  if (found !== "mute") {
-    const unresolved = await missing();
-    if (unresolved.length > 0) onWarn(hostsUnresolvedMessage(unresolved));
-    return;
+  // Already resolving means there is nothing to wait for, whatever the daemon does.
+  let missing = await unresolved();
+  if (missing.length === 0) return;
+
+  const deadline = Date.now() + ceilingMs;
+  while (Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 100));
+    const written = new Set(readManaged());
+    if (managed.every((hostname) => written.has(hostname))) break;
   }
 
-  // Something answered without acknowledging, which is a daemon too old to have
-  // this route. It still syncs,
-  // on its own file watcher, so an absence right now is about to stop being true.
-  // Reading once here reports a failure the daemon is a debounce away from fixing.
-  // This is the one path where a producer's cadence still bounds us, and it is the
-  // only place it can: with nothing to trigger, there is nothing else to wait on.
-  const deadline = Date.now() + unTriggeredCeilingMs;
-  for (;;) {
-    const unresolved = await missing();
-    if (unresolved.length === 0) return;
-    if (Date.now() >= deadline) {
-      onWarn(hostsUnresolvedMessage(unresolved));
-      return;
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  missing = await unresolved();
+  if (missing.length > 0) onWarn(hostsUnresolvedMessage(missing));
 }
 
 /**

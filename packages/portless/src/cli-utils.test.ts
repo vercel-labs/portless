@@ -26,7 +26,6 @@ import {
   injectFrameworkFlags,
   isPortListening,
   isProxyRunning,
-  triggerHostsSync,
   reportHostsSync,
   syncHostsWithWarning,
   listenOnProxyInterface,
@@ -1314,166 +1313,83 @@ describe("readPersistedProxyState", () => {
 // lets the outcome carry no timestamp, no owner and no schema version: a response
 // cannot be stale, cannot belong to another caller, and cannot be left behind by
 // a previous daemon.
-describe("triggerHostsSync", () => {
-  // A trigger, not a question. Every answer means the same thing: whatever could
-  // happen has had its chance. So the only thing worth testing is that it always
-  // settles, and settles fast, since callers await it before starting a child.
-  const servers: http.Server[] = [];
-
-  function serve(handler: http.RequestListener): Promise<number> {
-    const server = http.createServer(handler);
-    servers.push(server);
-    return new Promise((resolve) => {
-      server.listen(0, "127.0.0.1", () => {
-        const addr = server.address();
-        if (!addr || typeof addr === "string") throw new Error("no addr");
-        resolve(addr.port);
-      });
-    });
-  }
-
-  afterEach(async () => {
-    for (const s of servers) await new Promise<void>((r) => s.close(() => r()));
-    servers.length = 0;
-  });
-
-  // The one bit it reports is "a daemon acted", not "the sync worked". A caller
-  // needs it to know whether the resolver is already current or whether someone
-  // else's schedule still has work to do.
-  it("reports that a daemon acted only on its acknowledgement", async () => {
-    const ack = await serve((_req, res) => {
-      res.writeHead(204);
-      res.end();
-    });
-    expect(await triggerHostsSync(ack)).toBe("acted");
-  });
-
-  it.each([404, 403, 500])("reports a mute listener on a %s answer", async (status) => {
-    const port = await serve((_req, res) => {
-      res.writeHead(status);
-      res.end();
-    });
-    expect(await triggerHostsSync(port)).toBe("mute");
-  });
-
-  // The distinction the repo has now got wrong three times. A refused connection
-  // already answers the question a ceiling would spend seconds re-asking.
-  it("reports absent when nothing is listening", async () => {
-    expect(await triggerHostsSync(19899)).toBe("absent");
-  });
-
-  // The reason the timeout is short: a caller awaits this before spawning a dev
-  // server, so a daemon that accepts and never answers must not hold the terminal.
-  it("settles at its own bound against a responder that never answers", async () => {
-    const port = await serve(() => {
-      // Never respond.
-    });
-    const started = Date.now();
-    await triggerHostsSync(port);
-    expect(Date.now() - started).toBeLessThan(1500);
-  });
-});
-
 describe("reportHostsSync", () => {
   const warnings: string[] = [];
   const onWarn = (m: string) => warnings.push(m);
-  const acted = async (): Promise<"acted"> => "acted";
-  const mute = async (): Promise<"mute"> => "mute";
-  const absent = async (): Promise<"absent"> => "absent";
 
   beforeEach(() => {
     warnings.length = 0;
   });
 
-  // The question issue #364 actually asks. RFC 6761 makes .localhost resolution a
-  // SHOULD, and on current macOS and glibc it resolves with no hosts entry, so a
-  // failed write there is invisible to the user. Reporting the write cannot tell
-  // that apart from a custom TLD, where a failed write breaks the app.
-  it("says nothing when the hostname resolves", async () => {
-    await reportHostsSync(["a.localhost"], 1, false, onWarn, acted, async () => true);
+  it("says nothing when the hostname already resolves", async () => {
+    let reads = 0;
+    await reportHostsSync(
+      ["a.localhost"],
+      onWarn,
+      async () => true,
+      () => {
+        reads += 1;
+        return [];
+      }
+    );
     expect(warnings).toEqual([]);
+    // Nothing to wait for, so the hosts file is never consulted.
+    expect(reads).toBe(0);
   });
 
   it("warns naming only the hostnames that do not resolve", async () => {
     await reportHostsSync(
       ["good.test", "bad.test"],
-      1,
-      false,
       onWarn,
-      acted,
-      async (hostname) => hostname === "good.test"
+      async (hostname) => hostname === "good.test",
+      () => ["good.test", "bad.test"],
+      50
     );
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain("bad.test");
     expect(warnings[0]).not.toContain("good.test");
   });
 
-  // Order is the fix for a hazard, not a style choice. Querying before the daemon
-  // writes can cache a negative that is about to become false, and macOS caches
-  // negatives, so an early probe could break the resolution it checks.
-  it("triggers the daemon before it reads the resolver", async () => {
-    const order: string[] = [];
+  // Waits by reading the file, not by re-querying: a cached negative would
+  // outlive the write that makes it false.
+  it("waits for the daemon's write before deciding", async () => {
+    let writes = 0;
+    let resolved = false;
     await reportHostsSync(
       ["a.test"],
-      1,
-      false,
       onWarn,
-      async () => {
-        order.push("trigger");
-        return "acted";
+      async () => resolved,
+      () => {
+        if (++writes >= 2) resolved = true;
+        return resolved ? ["a.test"] : [];
       },
-      async () => {
-        order.push("resolve");
-        return true;
-      }
+      2000
     );
-    expect(order).toEqual(["trigger", "resolve"]);
-  });
-
-  // A daemon too old to have this route still syncs, on its watcher. Reading the
-  // resolver the instant its 404 arrives reports an absence a debounce away from
-  // being false, which is exactly the class of defect this design was meant to end.
-  it("gives an untriggerable daemon its chance before calling it a failure", async () => {
-    let reads = 0;
-    await reportHostsSync(["a.test"], 1, false, onWarn, mute, async () => ++reads >= 3, 2000);
-    expect(reads).toBeGreaterThan(1);
+    expect(writes).toBeGreaterThan(1);
     expect(warnings).toEqual([]);
   });
 
-  it("warns at the ceiling when an untriggerable daemon never syncs", async () => {
+  it("warns at the ceiling when the write never lands", async () => {
     const started = Date.now();
-    await reportHostsSync(["a.test"], 1, false, onWarn, mute, async () => false, 150);
+    await reportHostsSync(
+      ["a.test"],
+      onWarn,
+      async () => false,
+      () => [],
+      150
+    );
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
-    expect(warnings).toHaveLength(1);
-  });
-
-  // No producer exists, so an absence is already final. Waiting spends a ceiling
-  // to learn what the refused connection said.
-  it("does not wait when nothing is listening", async () => {
-    const started = Date.now();
-    await reportHostsSync(["a.test"], 1, false, onWarn, absent, async () => false, 3000);
-    expect(Date.now() - started).toBeLessThan(200);
     expect(warnings).toHaveLength(1);
   });
 
   // mDNS serves .local, and it resolves to the LAN address, not loopback.
   it("says nothing about a .local hostname", async () => {
-    let triggered = false;
-    await reportHostsSync(["app.local"], 1, false, onWarn, async () => {
-      triggered = true;
-      return "acted";
+    let asked = 0;
+    await reportHostsSync(["app.local"], onWarn, async () => {
+      asked += 1;
+      return false;
     });
-    expect(triggered).toBe(false);
-    expect(warnings).toEqual([]);
-  });
-
-  it("does not trigger at all when there is no hostname to report on", async () => {
-    let triggered = false;
-    await reportHostsSync([], 1, false, onWarn, async () => {
-      triggered = true;
-      return "acted";
-    });
-    expect(triggered).toBe(false);
+    expect(asked).toBe(0);
     expect(warnings).toEqual([]);
   });
 });

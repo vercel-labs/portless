@@ -70,17 +70,9 @@ export function shouldAutoSyncHosts(syncVal: string | undefined): boolean {
 }
 
 /**
- * Whether the managed block is already exactly what a sync would write: these
- * hostnames, no others, each mapped to loopback.
- *
- * Exactness is the contract, not coverage. A subset test would call the block
- * correct while it still carried a hostname whose route was removed, and the
- * sync that skipped on the strength of that answer would leave the stale entry
- * resolving forever. It would also accept a wrong address, since a line is only
- * useful if it points at loopback.
- *
- * Pure, so the question can be tested without the hosts path, which is a module
- * constant with no test seam.
+ * Whether the managed block is exactly these hostnames, no others, each on
+ * loopback. Exactness, not coverage: a superset means a removed route's entry is
+ * still resolving. Pure so it is testable without the hosts path.
  */
 export function blockMatchesHostnames(content: string, hostnames: string[]): boolean {
   const lines = extractManagedBlock(content);
@@ -96,24 +88,14 @@ export function blockMatchesHostnames(content: string, hostnames: string[]): boo
 }
 
 /**
- * Sync the hosts file so the portless-managed block is exactly the given
- * hostnames, each mapped to loopback. Writing needs privilege the user may not
- * have.
+ * Rewrite the managed block to exactly these hostnames. Needs privilege.
  *
- * Returns whether the block now matches exactly. That is the writer's own
- * question and the only one it can answer honestly: it was asked to make the
- * file say something, and either it does or it does not. A stale entry it could
- * not remove is a failure of that job, even when the caller's own hostname
- * resolves regardless.
+ * Returns whether the block matches afterwards, which is the writer's question.
+ * Whether some hostname resolves is a weaker, different question: use
+ * `checkHostResolution`, since a hosts entry is only one reason a name resolves.
  *
- * Whether a particular hostname will resolve is a different and weaker question,
- * and it belongs to whoever is asking it. `checkHostResolution` answers that one
- * against the real resolver, which is authoritative in a way this function
- * cannot be: a hosts entry is only one of the reasons a name resolves, and on
- * current macOS and glibc `.localhost` names resolve without one.
- *
- * Returns early when the block already matches, so a route reload that changes
- * nothing does not rewrite the file.
+ * Skips the write when the block already matches, so a no-op reload does not
+ * rewrite the file.
  */
 export function syncHostsFile(hostnames: string[]): boolean {
   const content = readHostsFile();

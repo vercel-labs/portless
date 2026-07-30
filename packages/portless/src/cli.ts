@@ -530,16 +530,9 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
-/**
- * Tell this terminal whether the route it just registered will resolve.
- *
- * Awaited everywhere, including before a child starts. The trigger is bounded at
- * half a second against an observed 8.6ms median, so a healthy daemon costs
- * single-digit milliseconds, and awaiting removes the only way a warning could be
- * lost: a child that exits before a discarded promise settles.
- */
-function reportHostsSyncHere(hostnames: string[], port: number, tls: boolean): Promise<void> {
-  return reportHostsSync(hostnames, port, tls, (message) => console.warn(colors.yellow(message)));
+/** Warn on this terminal if a route it registered will not resolve. Issue #364. */
+function reportHostsSyncHere(hostnames: string[]): Promise<void> {
+  return reportHostsSync(hostnames, (message) => console.warn(colors.yellow(message)));
 }
 
 // ---------------------------------------------------------------------------
@@ -621,9 +614,8 @@ function startProxyServer(
     publishCachedRoutes();
   };
 
-  // Warn once per failure run in the daemon's own log. This bounds proxy.log on
-  // repeated reloads; it never bounds what users are told, because delivery is
-  // per request and each registering CLI gets its own answer.
+  // Bounds proxy.log on repeated reloads. Not a user-facing channel: users are
+  // warned by the CLI reading the resolver, so latching here silences nobody.
   let hostsSyncWarned = false;
   const syncHostsAndLatch = (hostnames: string[]): boolean => {
     let ok = true;
@@ -637,30 +629,6 @@ function startProxyServer(
       }
     );
     return ok;
-  };
-
-  /**
-   * Answer a CLI's hosts-sync request. Runs in the daemon, so it owns both the
-   * privileges the write needs and the setting that decides whether to write.
-   */
-  const onHostsSyncRequest = (): void => {
-    if (!autoSyncHosts) return;
-    // Read routes from disk rather than trusting the cache: the caller registered
-    // its route moments ago and the watcher's debounce has almost certainly not
-    // fired yet, so the cache does not contain the hostname being asked about.
-    //
-    // Read into a local and leave `cachedRoutes` alone. It is the watcher's
-    // before-image: `reloadRoutes` diffs the new load against it to decide which
-    // mDNS records to publish and unpublish. Updating it here makes that diff
-    // compare the new route set with itself, and in LAN mode a route registered
-    // this way then never gets a `.local` publisher at all.
-    let hostnames: string[];
-    try {
-      hostnames = store.loadRoutes().map((r) => r.hostname);
-    } catch {
-      hostnames = cachedRoutes.map((r) => r.hostname);
-    }
-    syncHostsAndLatch(hostnames);
   };
 
   const reloadRoutes = () => {
@@ -719,7 +687,6 @@ function startProxyServer(
       tlds,
       strict,
       onError: (msg) => console.error(colors.red(msg)),
-      onHostsSyncRequest,
       tls: tlsOptions,
     });
   const server = createServer();
@@ -1348,7 +1315,7 @@ async function runApp(
   let killedPids: number[] = [];
   try {
     killedPids = addRoutes(store, hostnames, port, process.pid, force);
-    await reportHostsSyncHere(hostnames, proxyPort, tls);
+    await reportHostsSyncHere(hostnames);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -2333,7 +2300,7 @@ ${colors.bold("Examples:")}
     process.exit(0);
   }
 
-  const { dir, tlds, port: proxyPort, tls } = await discoverState();
+  const { dir, tlds } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -2379,9 +2346,8 @@ ${colors.bold("Examples:")}
   const force = args.includes("--force");
   addRoutes(store, hostnames, port, 0, force);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
-  // Awaited, unlike the app paths: this command exits, and a warning printed
-  // after exit reaches nobody. It costs one loopback round trip.
-  await reportHostsSyncHere(hostnames, proxyPort, tls);
+  // Awaited: this command exits, and a warning printed after exit reaches nobody.
+  await reportHostsSyncHere(hostnames);
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -2459,10 +2425,8 @@ ${colors.bold("Usage: portless hosts <command>")}
 
   const routes = store.loadRoutes();
   if (routes.length === 0) {
-    // Zero routes is a valid desired state, not a reason to do nothing. Bailing
-    // here leaves whatever the block already held, so a block left behind by
-    // routes that are gone survives the very command the failure warning tells
-    // people to run.
+    // Zero routes is a desired state, not a no-op: bailing here would leave a
+    // block whose routes are gone, in the command the warning tells users to run.
     if (getManagedHostnames().length === 0) {
       console.log(colors.yellow("No active routes to sync."));
       return;
@@ -3434,11 +3398,10 @@ ${colors.bold("LAN mode (--lan):")}
 
   const proto = useHttps ? "HTTPS/2" : "HTTP";
   console.log(chalk.green(`${proto} proxy started on port ${proxyPort}`));
-  // The daemon syncs whatever routes were already persisted. Report that here:
-  // this process is attached to the terminal, the daemon's output is not. There
-  // is no record to race against, because the answer arrives on the request.
+  // The daemon syncs the routes that were already persisted; its own output only
+  // reaches proxy.log, so report here where the user is.
   const persistedHostnames = store.loadRoutes().map((route) => route.hostname);
-  await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps);
+  await reportHostsSyncHere(persistedHostnames);
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
@@ -3657,7 +3620,7 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     addRoutes(store, hostnames, appPort, process.pid);
-    await reportHostsSyncHere(hostnames, proxyPort, tls);
+    await reportHostsSyncHere(hostnames);
 
     env = {
       ...pkgEnv,
@@ -3913,7 +3876,7 @@ async function runWithTurbo(
     appUrls.push({ label: app.label, url });
 
     addRoutes(store, hostnames, appPort, process.pid);
-    await reportHostsSyncHere(hostnames, proxyPort, tls);
+    await reportHostsSyncHere(hostnames);
     routes.push({ hostnames });
 
     const entry: ManifestEntry = {
