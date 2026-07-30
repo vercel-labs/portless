@@ -1,8 +1,23 @@
 # Changelog
 
-## 0.15.4
+## 0.15.5
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Multi-segment custom TLDs**: `--tld` and `PORTLESS_TLD` now accept dotted DNS names such as `dev.example.com`, so local URLs can mirror production structure. `validateTld` checks per-label DNS rules and the 253-character total limit, overlapping TLDs resolve by longest match, and cert cache filenames stay under the filesystem name limit for long hostnames. (#365)
+- **WebSocket over HTTP/2**: Proxy now advertises RFC 8441 extended CONNECT and bridges `:protocol websocket` streams to an HTTP/1.1 upgrade against the backend, fixing dev server HMR for browsers that negotiate h2 over ALPN. Plain-HTTP upgrades on the TLS port are proxied instead of dropped, and a backend that rejects the handshake or answers with a bad `Sec-WebSocket-Accept` now gets a 502 instead of a silently destroyed socket. (#363)
+
+### Contributors
+
+- @Railly
+- @KingPsychopath
+- @erichurkman
+- @sanjevirau
+<!-- release:end -->
+
+## 0.15.4
 
 ### Bug Fixes
 
@@ -11,7 +26,6 @@
 ### Contributors
 
 - @ctate
-<!-- release:end -->
 
 ## 0.15.3
 
