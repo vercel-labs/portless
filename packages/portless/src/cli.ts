@@ -1633,6 +1633,8 @@ ${colors.bold("Name inference (in order):")}
   Use --name to override the inferred name while keeping worktree prefixes.
   In git worktrees, the branch name is prepended as a subdomain prefix
   (e.g. feature-auth.myapp.localhost).
+  Set PORTLESS_WORKTREE_FLAT=1 to use one label instead
+  (e.g. feature-auth-myapp.localhost).
 
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
@@ -1898,6 +1900,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
+  PORTLESS_WORKTREE_FLAT=1      Join worktree and app names into one DNS label
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
@@ -2246,7 +2249,7 @@ ${colors.bold("Examples:")}
 
   const name = positional[0];
   const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const effectiveName = applyWorktreePrefix(name, worktree);
 
   const { port, tls, tlds } = await discoverState();
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
@@ -4057,7 +4060,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   }
 
   const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const effectiveName = applyWorktreePrefix(baseName, worktree);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
