@@ -96,7 +96,7 @@ jobs:
             --state-dir $stateDir
 
           $task = Get-ScheduledTask -TaskName "Portless Proxy"
-          if ($task.Settings.ExecutionTimeLimit -ne [TimeSpan]::Zero) {
+          if ([string]$task.Settings.ExecutionTimeLimit -ne "PT0S") {
             throw "Expected zero execution time limit, got $($task.Settings.ExecutionTimeLimit)"
           }
           if ($task.Principal.UserId -notin @("SYSTEM", "S-1-5-18")) {
