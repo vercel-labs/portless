@@ -42,7 +42,6 @@ jobs:
 
   ci-windows:
     runs-on: windows-latest
-    timeout-minutes: 20
 
     steps:
       - uses: actions/checkout@v4
@@ -65,24 +64,6 @@ jobs:
       - run: pnpm build
 
       - run: pnpm test
-
-      - name: Download cuse
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          Invoke-WebRequest `
-            -Uri "https://github.com/crafter-agents/cuse/releases/download/v0.1.0/cuse-windows-x64.exe" `
-            -OutFile "cuse.exe"
-          Invoke-WebRequest `
-            -Uri "https://github.com/crafter-agents/cuse/releases/download/v0.1.0/SHA256SUMS" `
-            -OutFile "SHA256SUMS"
-          $expected = (Select-String -Path SHA256SUMS -Pattern "cuse-windows-x64.exe").Line.Split()[0]
-          $actual = (Get-FileHash cuse.exe -Algorithm SHA256).Hash.ToLowerInvariant()
-          if ($actual -ne $expected) {
-            throw "cuse checksum mismatch: expected $expected, got $actual"
-          }
-          .\cuse.exe os --json
 
       - name: Install and verify the Windows service
         shell: pwsh
@@ -134,18 +115,6 @@ jobs:
 
           node packages/portless/dist/cli.js service status | Tee-Object service-status.txt
 
-      - name: Inspect Task Scheduler with cuse
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $PSNativeCommandUseErrorActionPreference = $true
-          Start-Process mmc.exe -ArgumentList "$env:WINDIR\System32\taskschd.msc"
-          .\cuse.exe wait --window="Task Scheduler" --timeout=30000 --json
-          .\cuse.exe focus "Task Scheduler" --json
-          .\cuse.exe windows --json | Tee-Object cuse-windows.json
-          .\cuse.exe elements "Task Scheduler" --json | Tee-Object cuse-elements.json
-          .\cuse.exe capture task-scheduler.png --json
-
       - name: Upload Windows service evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -154,9 +123,6 @@ jobs:
           path: |
             portless-task.xml
             service-status.txt
-            cuse-windows.json
-            cuse-elements.json
-            task-scheduler.png
 
       - name: Uninstall Windows service
         if: always()
