@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
-import { PORTLESS_HEADER } from "./proxy.js";
+import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
@@ -528,7 +528,7 @@ export function readPersistedProxyState(): {
     const tlds = readTldsFromDir(dir);
     const tld = tlds[0] ?? DEFAULT_TLD;
     const lanIp = readLanMarker(dir);
-    return { port, tls, tld, tlds, lanMode: lanIp !== null || tlds.includes("local") };
+    return { port, tls, tld, tlds, lanMode: lanIp !== null };
   }
 
   return null;
@@ -628,7 +628,7 @@ export async function discoverState(): Promise<{
         tls,
         tld,
         tlds,
-        lanMode: lanIp !== null || tlds.includes("local"),
+        lanMode: lanIp !== null,
         lanIp,
       };
     }
@@ -662,7 +662,7 @@ export async function discoverState(): Promise<{
         tls,
         tld,
         tlds,
-        lanMode: lanIp !== null || tlds.includes("local"),
+        lanMode: lanIp !== null,
         lanIp,
       };
     }
@@ -683,7 +683,7 @@ export async function discoverState(): Promise<{
         tls,
         tld,
         tlds,
-        lanMode: lanIp !== null || tlds.includes("local"),
+        lanMode: lanIp !== null,
         lanIp,
       };
     }
@@ -710,7 +710,7 @@ export async function discoverState(): Promise<{
         tls,
         tld,
         tlds,
-        lanMode: lanIp !== null || tlds.includes("local"),
+        lanMode: lanIp !== null,
         lanIp,
       };
     }
@@ -818,11 +818,41 @@ export function hostsUnresolvedMessage(hostnames: string[]): string {
   return `${hostnames.join(", ")} will not resolve. Run: portless hosts sync`;
 }
 
-/**
- * Bound on waiting for the daemon to write the hosts block. Must clear its route
- * watcher's debounce and its poll fallback, whichever is slower.
- */
-const HOSTS_WRITE_CEILING_MS = 3500;
+const HOSTS_SYNC_TRIGGER_TIMEOUT_MS = 500;
+const UNTRIGGERED_SYNC_CEILING_MS = 3500;
+
+export type HostsSyncTrigger = "acted" | "absent" | "disabled" | "mute";
+
+export function triggerHostsSync(port: number, tls = false): Promise<HostsSyncTrigger> {
+  return new Promise((resolve) => {
+    const requestFn = tls ? https.request : http.request;
+    const req = requestFn(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: HOSTS_SYNC_PATH,
+        method: "POST",
+        timeout: HOSTS_SYNC_TRIGGER_TIMEOUT_MS,
+        ...(tls ? { rejectUnauthorized: false } : {}),
+      },
+      (res) => {
+        const result =
+          res.statusCode === 204 ? "acted" : res.statusCode === 409 ? "disabled" : "mute";
+        res.resume();
+        res.on("end", () => resolve(result));
+        res.on("error", () => resolve("mute"));
+      }
+    );
+    req.on("error", (err: NodeJS.ErrnoException) => {
+      resolve(err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? "absent" : "mute");
+    });
+    req.on("timeout", () => {
+      req.destroy();
+      resolve("mute");
+    });
+    req.end();
+  });
+}
 
 /**
  * Warn if a route hostname will not resolve. Issue #364.
@@ -837,32 +867,40 @@ const HOSTS_WRITE_CEILING_MS = 3500;
  */
 export async function reportHostsSync(
   hostnames: string[],
+  port: number,
+  tls: boolean,
+  lanMode: boolean,
   onWarn: (message: string) => void,
+  trigger: (port: number, tls: boolean) => Promise<HostsSyncTrigger> = triggerHostsSync,
   resolves: (hostname: string) => Promise<boolean> = checkHostResolution,
-  readManaged: () => string[] = getManagedHostnames,
-  ceilingMs = HOSTS_WRITE_CEILING_MS
+  ceilingMs = UNTRIGGERED_SYNC_CEILING_MS,
+  readManaged: () => string[] = getManagedHostnames
 ): Promise<void> {
-  // mDNS serves .local, and it resolves to the LAN address rather than loopback.
-  const managed = hostnames.filter((hostname) => !hostname.endsWith(".local"));
+  const managed = lanMode
+    ? hostnames.filter((hostname) => !hostname.endsWith(".local"))
+    : hostnames;
   if (managed.length === 0) return;
+  const found = await trigger(port, tls);
 
   const unresolved = async () => {
     const checked = await Promise.all(managed.map((hostname) => resolves(hostname)));
     return managed.filter((_, i) => !checked[i]);
   };
 
-  // Already resolving means there is nothing to wait for, whatever the daemon does.
-  let missing = await unresolved();
-  if (missing.length === 0) return;
+  if (found !== "mute") {
+    const missing = await unresolved();
+    if (missing.length > 0) onWarn(hostsUnresolvedMessage(missing));
+    return;
+  }
 
   const deadline = Date.now() + ceilingMs;
   while (Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 100));
     const written = new Set(readManaged());
     if (managed.every((hostname) => written.has(hostname))) break;
+    await new Promise((r) => setTimeout(r, 100));
   }
 
-  missing = await unresolved();
+  const missing = await unresolved();
   if (missing.length > 0) onWarn(hostsUnresolvedMessage(missing));
 }
 

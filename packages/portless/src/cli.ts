@@ -285,7 +285,7 @@ function readCurrentProxyConfig(dir: string): ProxyConfig {
     useHttps: readTlsMarker(dir),
     customCertPath: null,
     customKeyPath: null,
-    lanMode: lanIp !== null || tlds.includes("local"),
+    lanMode: lanIp !== null,
     lanIp,
     lanIpExplicit: false,
     tld,
@@ -531,8 +531,15 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
 }
 
 /** Warn on this terminal if a route it registered will not resolve. Issue #364. */
-function reportHostsSyncHere(hostnames: string[]): Promise<void> {
-  return reportHostsSync(hostnames, (message) => console.warn(colors.yellow(message)));
+function reportHostsSyncHere(
+  hostnames: string[],
+  port: number,
+  tls: boolean,
+  lanMode: boolean
+): Promise<void> {
+  return reportHostsSync(hostnames, port, tls, lanMode, (message) =>
+    console.warn(colors.yellow(message))
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -631,6 +638,18 @@ function startProxyServer(
     return ok;
   };
 
+  const onHostsSyncRequest = (): "acted" | "disabled" => {
+    if (!autoSyncHosts) return "disabled";
+    let hostnames: string[];
+    try {
+      hostnames = store.loadRoutes().map((route) => route.hostname);
+    } catch {
+      hostnames = cachedRoutes.map((route) => route.hostname);
+    }
+    syncHostsAndLatch(hostnames);
+    return "acted";
+  };
+
   const reloadRoutes = () => {
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
@@ -687,6 +706,7 @@ function startProxyServer(
       tlds,
       strict,
       onError: (msg) => console.error(colors.red(msg)),
+      onHostsSyncRequest,
       tls: tlsOptions,
     });
   const server = createServer();
@@ -1315,7 +1335,7 @@ async function runApp(
   let killedPids: number[] = [];
   try {
     killedPids = addRoutes(store, hostnames, port, process.pid, force);
-    await reportHostsSyncHere(hostnames);
+    await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
     if (err instanceof RouteConflictError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -2300,7 +2320,7 @@ ${colors.bold("Examples:")}
     process.exit(0);
   }
 
-  const { dir, tlds } = await discoverState();
+  const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
@@ -2347,7 +2367,7 @@ ${colors.bold("Examples:")}
   addRoutes(store, hostnames, port, 0, force);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
   // Awaited: this command exits, and a warning printed after exit reaches nobody.
-  await reportHostsSyncHere(hostnames);
+  await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 }
 
 async function handleHosts(args: string[]): Promise<void> {
@@ -3401,7 +3421,7 @@ ${colors.bold("LAN mode (--lan):")}
   // The daemon syncs the routes that were already persisted; its own output only
   // reaches proxy.log, so report here where the user is.
   const persistedHostnames = store.loadRoutes().map((route) => route.hostname);
-  await reportHostsSyncHere(persistedHostnames);
+  await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps, lanMode);
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
@@ -3589,6 +3609,7 @@ async function spawnProxiedApp(
   proxyPort: number,
   tls: boolean,
   tlds: string[],
+  lanMode: boolean,
   exitCodes: Map<string, number | null>
 ): Promise<{
   child: ReturnType<typeof spawn>;
@@ -3620,7 +3641,7 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     addRoutes(store, hostnames, appPort, process.pid);
-    await reportHostsSyncHere(hostnames);
+    await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 
     env = {
       ...pkgEnv,
@@ -3808,7 +3829,7 @@ async function handleDefaultMulti(
 
   console.log(chalk.blue.bold(`\nportless\n`));
 
-  let { dir, port, tls, tlds } = await discoverState();
+  let { dir, port, tls, tlds, lanMode } = await discoverState();
 
   if (proxiedApps.length > 0) {
     let multiDesired: ProxyDesiredState;
@@ -3824,9 +3845,10 @@ async function handleDefaultMulti(
       port = ensureResult.state.port;
       tls = ensureResult.state.tls;
       tlds = ensureResult.state.tlds;
+      lanMode = ensureResult.state.lanMode;
     } else {
       // Proxy was already running; re-discover to pick up current state.
-      ({ dir, port, tls, tlds } = await discoverState());
+      ({ dir, port, tls, tlds, lanMode } = await discoverState());
     }
 
     if (tls && !isCATrusted(dir)) {
@@ -3837,9 +3859,20 @@ async function handleDefaultMulti(
   const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
 
   if (useTurbo) {
-    await runWithTurbo(wsRoot, dir, port, tls, tlds, scriptName, proxiedApps, taskApps, extraArgs);
+    await runWithTurbo(
+      wsRoot,
+      dir,
+      port,
+      tls,
+      tlds,
+      lanMode,
+      scriptName,
+      proxiedApps,
+      taskApps,
+      extraArgs
+    );
   } else {
-    await runWithDirectSpawn(dir, port, tls, tlds, proxiedApps, taskApps);
+    await runWithDirectSpawn(dir, port, tls, tlds, lanMode, proxiedApps, taskApps);
   }
 }
 
@@ -3849,6 +3882,7 @@ async function runWithTurbo(
   proxyPort: number,
   tls: boolean,
   tlds: string[],
+  lanMode: boolean,
   scriptName: string,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[],
@@ -3876,7 +3910,7 @@ async function runWithTurbo(
     appUrls.push({ label: app.label, url });
 
     addRoutes(store, hostnames, appPort, process.pid);
-    await reportHostsSyncHere(hostnames);
+    await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 
     const entry: ManifestEntry = {
@@ -3965,6 +3999,7 @@ async function runWithDirectSpawn(
   proxyPort: number,
   tls: boolean,
   tlds: string[],
+  lanMode: boolean,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[]
 ): Promise<void> {
@@ -3982,6 +4017,7 @@ async function runWithDirectSpawn(
       proxyPort,
       tls,
       tlds,
+      lanMode,
       exitCodes
     );
     children.push(child);

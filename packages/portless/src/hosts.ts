@@ -77,12 +77,16 @@ export function shouldAutoSyncHosts(syncVal: string | undefined): boolean {
 export function blockMatchesHostnames(content: string, hostnames: string[]): boolean {
   const lines = extractManagedBlock(content);
   const wanted = new Set(hostnames);
-  if (lines.length !== wanted.size) return false;
+  if (wanted.size !== hostnames.length) return false;
   const seen = new Set<string>();
   for (const line of lines) {
-    const [address, hostname] = line.split(/\s+/);
-    if (address !== LOOPBACK_ADDRESS || !hostname || !wanted.has(hostname)) return false;
-    seen.add(hostname);
+    const tokens = line.split("#", 1)[0].trim().split(/\s+/);
+    const [address, ...aliases] = tokens;
+    if (address !== LOOPBACK_ADDRESS || aliases.length === 0) return false;
+    for (const hostname of aliases) {
+      if (!wanted.has(hostname) || seen.has(hostname)) return false;
+      seen.add(hostname);
+    }
   }
   return seen.size === wanted.size;
 }
@@ -135,12 +139,10 @@ export function cleanHostsFile(): boolean {
  */
 export function getManagedHostnames(): string[] {
   const content = readHostsFile();
-  return extractManagedBlock(content)
-    .map((line) => {
-      const parts = line.split(/\s+/);
-      return parts.length >= 2 ? parts[1] : "";
-    })
-    .filter(Boolean);
+  return extractManagedBlock(content).flatMap((line) => {
+    const [, ...aliases] = line.split("#", 1)[0].trim().split(/\s+/);
+    return aliases;
+  });
 }
 
 /**

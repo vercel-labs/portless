@@ -7,7 +7,7 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createProxyServer, PORTLESS_HEADER } from "./proxy.js";
+import { createProxyServer, HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
@@ -2235,5 +2235,124 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       expect(finalStatus).toBe(200);
     },
     15_000
+  );
+});
+
+describe("internal hosts-sync route", () => {
+  const servers: AnyServer[] = [];
+
+  afterEach(async () => {
+    for (const server of servers) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  function start(
+    onHostsSyncRequest?: () => "acted" | "disabled",
+    routes: RouteInfo[] = []
+  ): Promise<AnyServer> {
+    const server = createProxyServer({
+      getRoutes: () => routes,
+      proxyPort: TEST_PROXY_PORT,
+      onHostsSyncRequest,
+    });
+    servers.push(server);
+    return listen(server).then(() => server);
+  }
+
+  it("accepts canonical loopback authorities with optional ports", async () => {
+    let calls = 0;
+    const server = await start(() => {
+      calls += 1;
+      return "acted";
+    });
+    for (const host of ["127.0.0.1", "127.0.0.1:1355", "[::1]", "[::1]:1355"]) {
+      const res = await request(server, { host, path: HOSTS_SYNC_PATH, method: "POST" });
+      expect(res.status).toBe(204);
+    }
+    expect(calls).toBe(4);
+  });
+
+  it("proxies a registered hostname beginning with 127", async () => {
+    const upstream = http.createServer((_req, res) => res.end("app response"));
+    servers.push(upstream);
+    await new Promise<void>((resolve) => upstream.listen(0, "127.0.0.1", () => resolve()));
+    const address = upstream.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+
+    const server = await start(() => "acted", [{ hostname: "127.evil.test", port: address.port }]);
+    const res = await request(server, {
+      host: "127.evil.test",
+      path: HOSTS_SYNC_PATH,
+      method: "POST",
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toBe("app response");
+  });
+
+  it("refuses a canonical loopback authority from a non-loopback peer", async (ctx) => {
+    const lanIp = Object.values(os.networkInterfaces())
+      .flat()
+      .find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address;
+    if (!lanIp) return ctx.skip();
+
+    const server = createProxyServer({
+      getRoutes: () => [],
+      proxyPort: TEST_PROXY_PORT,
+      onHostsSyncRequest: () => "acted",
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: lanIp,
+          port: address.port,
+          path: HOSTS_SYNC_PATH,
+          method: "POST",
+          headers: { host: "127.0.0.1" },
+        },
+        (res) => {
+          res.resume();
+          resolve(res.statusCode ?? 0);
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+    expect(status).toBe(403);
+  });
+
+  it("answers 404 when the daemon has no hosts-sync producer", async () => {
+    const server = await start();
+    const res = await request(server, {
+      host: "127.0.0.1",
+      path: HOSTS_SYNC_PATH,
+      method: "POST",
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("does not acknowledge when hosts sync is disabled", async () => {
+    const server = await start(() => "disabled");
+    const res = await request(server, {
+      host: "127.0.0.1",
+      path: HOSTS_SYNC_PATH,
+      method: "POST",
+    });
+    expect(res.status).toBe(409);
+  });
+
+  it.each(["127.1", "2130706433", "127.0.0.1@evil.test"])(
+    "does not accept alternate authority %s",
+    async (host) => {
+      const server = await start(() => "acted");
+      const res = await request(server, { host, path: HOSTS_SYNC_PATH, method: "POST" });
+      expect(res.status).not.toBe(204);
+    }
   );
 });

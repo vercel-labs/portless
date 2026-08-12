@@ -204,6 +204,16 @@ describe("blockMatchesHostnames", () => {
     expect(blockMatchesHostnames(block, ["a.localhost"])).toBe(false);
   });
 
+  it("is false when an extra hostname shares a wanted line", () => {
+    const aliases = "# portless-start\n127.0.0.1 a.localhost stale.localhost\n# portless-end";
+    expect(blockMatchesHostnames(aliases, ["a.localhost"])).toBe(false);
+  });
+
+  it("ignores inline comments after all hostname aliases", () => {
+    const commented = "# portless-start\n127.0.0.1 a.localhost # managed\n# portless-end";
+    expect(blockMatchesHostnames(commented, ["a.localhost"])).toBe(true);
+  });
+
   // A line only helps if it points at loopback.
   it("is false when a wanted hostname maps to another address", () => {
     const wrong = "# portless-start\n10.0.0.1 a.localhost\n# portless-end";

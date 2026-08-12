@@ -104,6 +104,34 @@ async function getFreePort(): Promise<number> {
   }
 }
 
+async function startMockProxy(
+  dir: string,
+  options: { acknowledgeHostsSync?: boolean; port?: number } = {}
+): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
+  const port = options.port ?? (await getFreePort());
+  const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
+  fs.writeFileSync(
+    scriptPath,
+    [
+      'const http = require("node:http");',
+      "const server = http.createServer((req, res) => {",
+      '  res.setHeader("X-Portless", "1");',
+      options.acknowledgeHostsSync !== false
+        ? '  if (req.method === "POST" && req.url === "/.portless/hosts-sync") { res.writeHead(204); res.end(); return; }'
+        : "",
+      '  res.end("ok");',
+      "});",
+      `server.listen(${port}, "127.0.0.1");`,
+      'process.on("SIGTERM", () => server.close(() => process.exit(0)));',
+    ]
+      .filter(Boolean)
+      .join("\n") + "\n"
+  );
+  const child = spawn(process.execPath, [scriptPath], { stdio: "ignore" });
+  await waitForHttpHeader(port, "X-Portless", "1");
+  return { port, child };
+}
+
 async function waitForHttpHeader(
   port: number,
   headerName: string,
@@ -871,20 +899,12 @@ describe("CLI", () => {
 
     it("warns when a running proxy uses a different explicit config", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-running-proxy-"));
-      const server = http.createServer((_req, res) => {
-        res.setHeader("X-Portless", "1");
-        res.end("ok");
-      });
+      let proxyChild: ReturnType<typeof spawn> | undefined;
 
       try {
-        const proxyPort = await new Promise<number>((resolve) => {
-          server.listen(0, "127.0.0.1", () => {
-            const addr = server.address();
-            if (addr && typeof addr !== "string") {
-              resolve(addr.port);
-            }
-          });
-        });
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        const proxyPort = proxy.port;
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
 
@@ -897,7 +917,7 @@ describe("CLI", () => {
         expect(stderr).toContain("requested LAN mode");
         expect(stderr).toContain("portless proxy stop");
       } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
@@ -1025,22 +1045,14 @@ describe("CLI", () => {
     );
 
     it("propagates the LAN marker into expo child commands", async () => {
-      const server = http.createServer((_req, res) => {
-        res.setHeader("X-Portless", "1");
-        res.end("ok");
-      });
       const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-shim-"));
       const capturePath = path.join(shimDir, "capture.json");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
 
       try {
-        const proxyPort = await new Promise<number>((resolve) => {
-          server.listen(0, "127.0.0.1", () => {
-            const addr = server.address();
-            if (addr && typeof addr !== "string") {
-              resolve(addr.port);
-            }
-          });
-        });
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        const proxyPort = proxy.port;
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
         fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
@@ -1073,7 +1085,51 @@ describe("CLI", () => {
         });
         expect(capture.env.HOST).toBeUndefined();
       } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (proxyChild) await stopChild(proxyChild);
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+
+    it("checks a custom local TLD when no LAN marker exists", async () => {
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-custom-local-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+      const dnsPreloadPath = path.join(shimDir, "dns-preload.cjs");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      try {
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
+        writeExpoShim(shimDir);
+        fs.writeFileSync(
+          dnsPreloadPath,
+          [
+            'const dns = require("node:dns");',
+            "dns.lookup = (_hostname, _options, callback) => {",
+            '  const error = Object.assign(new Error("not found"), { code: "ENOTFOUND" });',
+            "  queueMicrotask(() => callback(error));",
+            "};",
+          ].join("\n")
+        );
+
+        const { status, stderr } = run(
+          ["run", "--name", "portless-unresolvable-test", "--app-port", "4567", "expo", "start"],
+          {
+            env: {
+              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_TEST_CAPTURE_FILE: capturePath,
+              PORTLESS_HTTPS: "0",
+              NODE_OPTIONS: `--require=${dnsPreloadPath}`,
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+        expect(stderr).toContain("will not resolve");
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     });
@@ -1123,22 +1179,14 @@ describe("CLI", () => {
     }
 
     it("injects --port and --host into rsbuild child commands", async () => {
-      const server = http.createServer((_req, res) => {
-        res.setHeader("X-Portless", "1");
-        res.end("ok");
-      });
       const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-rsbuild-shim-"));
       const capturePath = path.join(shimDir, "capture.json");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
 
       try {
-        const proxyPort = await new Promise<number>((resolve) => {
-          server.listen(0, "127.0.0.1", () => {
-            const addr = server.address();
-            if (addr && typeof addr !== "string") {
-              resolve(addr.port);
-            }
-          });
-        });
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        const proxyPort = proxy.port;
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
 
@@ -1167,26 +1215,18 @@ describe("CLI", () => {
           PORTLESS_URL: `http://myapp.localhost:${proxyPort}`,
         });
       } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     });
 
     it("registers one app route per configured TLD", async () => {
-      const server = http.createServer((_req, res) => {
-        res.setHeader("X-Portless", "1");
-        res.end("ok");
-      });
+      let proxyChild: ReturnType<typeof spawn> | undefined;
 
       try {
-        const proxyPort = await new Promise<number>((resolve) => {
-          server.listen(0, "127.0.0.1", () => {
-            const addr = server.address();
-            if (addr && typeof addr !== "string") {
-              resolve(addr.port);
-            }
-          });
-        });
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        const proxyPort = proxy.port;
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
         fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
@@ -1230,7 +1270,7 @@ describe("CLI", () => {
         ]);
         expect(new Set(capture.routes.map((route) => route.port)).size).toBe(1);
       } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (proxyChild) await stopChild(proxyChild);
       }
     });
   });
@@ -1251,20 +1291,12 @@ describe("CLI", () => {
       writeCaPem?: boolean;
       env?: Record<string, string | undefined>;
     }): Promise<{ status: number | null; capture: Record<string, unknown> }> {
-      const server = http.createServer((_req, res) => {
-        res.setHeader("X-Portless", "1");
-        res.end("ok");
-      });
+      let proxyChild: ReturnType<typeof spawn> | undefined;
 
       try {
-        const proxyPort = await new Promise<number>((resolve) => {
-          server.listen(0, "127.0.0.1", () => {
-            const addr = server.address();
-            if (addr && typeof addr !== "string") {
-              resolve(addr.port);
-            }
-          });
-        });
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        const proxyPort = proxy.port;
 
         fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
         if (opts.tls !== false) {
@@ -1295,7 +1327,7 @@ describe("CLI", () => {
           : {};
         return { status, capture };
       } finally {
-        await new Promise<void>((resolve) => server.close(() => resolve()));
+        if (proxyChild) await stopChild(proxyChild);
       }
     }
 

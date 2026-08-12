@@ -47,6 +47,51 @@ function isEncrypted(req: http.IncomingMessage): boolean {
   return !!(req.socket as net.Socket & { encrypted?: boolean }).encrypted;
 }
 
+export const HOSTS_SYNC_PATH = "/.portless/hosts-sync";
+
+function isLoopbackPeer(address: string | undefined): boolean {
+  if (!address) return false;
+  const bare = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+  return bare === "::1" || bare.startsWith("127.");
+}
+
+function hasValidPort(authority: string, hostname: string): boolean {
+  if (authority === hostname) return true;
+  const port = authority.slice(hostname.length + 1);
+  return /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535;
+}
+
+function isLoopbackAuthority(authority: string): boolean {
+  if (authority === "127.0.0.1" || authority === "[::1]") return true;
+  if (authority.startsWith("127.0.0.1:")) return hasValidPort(authority, "127.0.0.1");
+  if (authority.startsWith("[::1]:")) return hasValidPort(authority, "[::1]");
+  return false;
+}
+
+function handleHostsSyncRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  onHostsSyncRequest: (() => "acted" | "disabled") | undefined
+): void {
+  if (!isLoopbackPeer(req.socket.remoteAddress)) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Forbidden");
+    return;
+  }
+  if (!onHostsSyncRequest) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not Found");
+    return;
+  }
+  if (onHostsSyncRequest() === "disabled") {
+    res.writeHead(409, { "Content-Type": "text/plain" });
+    res.end("Hosts sync disabled");
+    return;
+  }
+  res.writeHead(204);
+  res.end();
+}
+
 /**
  * Build X-Forwarded-* headers for a proxied request.
  */
@@ -157,6 +202,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     tlds = [tld],
     strict = true,
     onError = (msg: string) => console.error(msg),
+    onHostsSyncRequest,
     tls,
   } = options;
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
@@ -168,6 +214,16 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     const routes = getRoutes();
     const rawHost = getRequestHost(req);
+
+    if (
+      req.method === "POST" &&
+      req.url === HOSTS_SYNC_PATH &&
+      isLoopbackAuthority(rawHost.toLowerCase())
+    ) {
+      handleHostsSyncRequest(req, res, onHostsSyncRequest);
+      return;
+    }
+
     const host = rawHost.split(":")[0];
 
     if (!host) {

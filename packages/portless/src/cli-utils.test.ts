@@ -27,6 +27,7 @@ import {
   isPortListening,
   isProxyRunning,
   reportHostsSync,
+  triggerHostsSync,
   syncHostsWithWarning,
   listenOnProxyInterface,
   parsePidFromNetstat,
@@ -1304,6 +1305,15 @@ describe("readPersistedProxyState", () => {
       lanMode: true,
     });
   });
+
+  it("does not infer LAN mode from a custom local TLD", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
+    fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
+    expect(readPersistedProxyState()).toMatchObject({
+      tlds: ["local"],
+      lanMode: false,
+    });
+  });
 });
 
 // Issue #364: the automatic sync ignored its result, so an unprivileged run
@@ -1316,33 +1326,29 @@ describe("readPersistedProxyState", () => {
 describe("reportHostsSync", () => {
   const warnings: string[] = [];
   const onWarn = (m: string) => warnings.push(m);
+  const acted = async (): Promise<"acted"> => "acted";
+  const mute = async (): Promise<"mute"> => "mute";
+  const absent = async (): Promise<"absent"> => "absent";
+  const disabled = async (): Promise<"disabled"> => "disabled";
 
   beforeEach(() => {
     warnings.length = 0;
   });
 
   it("says nothing when the hostname already resolves", async () => {
-    let reads = 0;
-    await reportHostsSync(
-      ["a.localhost"],
-      onWarn,
-      async () => true,
-      () => {
-        reads += 1;
-        return [];
-      }
-    );
+    await reportHostsSync(["a.localhost"], 1, false, false, onWarn, acted, async () => true);
     expect(warnings).toEqual([]);
-    // Nothing to wait for, so the hosts file is never consulted.
-    expect(reads).toBe(0);
   });
 
   it("warns naming only the hostnames that do not resolve", async () => {
     await reportHostsSync(
       ["good.test", "bad.test"],
+      1,
+      false,
+      false,
       onWarn,
+      acted,
       async (hostname) => hostname === "good.test",
-      () => ["good.test", "bad.test"],
       50
     );
     expect(warnings).toHaveLength(1);
@@ -1350,47 +1356,96 @@ describe("reportHostsSync", () => {
     expect(warnings[0]).not.toContain("good.test");
   });
 
-  // Waits by reading the file, not by re-querying: a cached negative would
-  // outlive the write that makes it false.
-  it("waits for the daemon's write before deciding", async () => {
-    let writes = 0;
-    let resolved = false;
+  it("gives an older daemon its watcher window", async () => {
+    let reads = 0;
     await reportHostsSync(
       ["a.test"],
+      1,
+      false,
+      false,
       onWarn,
-      async () => resolved,
-      () => {
-        if (++writes >= 2) resolved = true;
-        return resolved ? ["a.test"] : [];
-      },
-      2000
+      mute,
+      async () => true,
+      2000,
+      () => (++reads >= 3 ? ["a.test"] : [])
     );
-    expect(writes).toBeGreaterThan(1);
+    expect(reads).toBeGreaterThan(1);
     expect(warnings).toEqual([]);
   });
 
-  it("warns at the ceiling when the write never lands", async () => {
+  it("warns at the ceiling when an older daemon never syncs", async () => {
     const started = Date.now();
     await reportHostsSync(
       ["a.test"],
+      1,
+      false,
+      false,
       onWarn,
+      mute,
       async () => false,
-      () => [],
-      150
+      150,
+      () => []
     );
     expect(Date.now() - started).toBeGreaterThanOrEqual(150);
     expect(warnings).toHaveLength(1);
   });
 
-  // mDNS serves .local, and it resolves to the LAN address, not loopback.
-  it("says nothing about a .local hostname", async () => {
+  it("does not wait when no producer exists", async () => {
+    const started = Date.now();
+    await reportHostsSync(["a.test"], 1, false, false, onWarn, absent, async () => false, 3000);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("does not wait when hosts sync is disabled", async () => {
+    const started = Date.now();
+    await reportHostsSync(["a.test"], 1, false, false, onWarn, disabled, async () => false, 3000);
+    expect(Date.now() - started).toBeLessThan(200);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("checks custom .local names outside LAN mode", async () => {
     let asked = 0;
-    await reportHostsSync(["app.local"], onWarn, async () => {
+    await reportHostsSync(["app.local"], 1, false, false, onWarn, acted, async () => {
       asked += 1;
       return false;
     });
-    expect(asked).toBe(0);
+    expect(asked).toBe(1);
+    expect(warnings).toHaveLength(1);
+  });
+
+  it("skips .local names in active LAN mode", async () => {
+    let triggered = false;
+    await reportHostsSync(["app.local"], 1, false, true, onWarn, async () => {
+      triggered = true;
+      return "acted";
+    });
+    expect(triggered).toBe(false);
     expect(warnings).toEqual([]);
+  });
+});
+
+describe("triggerHostsSync", () => {
+  it("reports absent when nothing is listening", async () => {
+    expect(await triggerHostsSync(19899)).toBe("absent");
+  });
+
+  it("reports disabled when the daemon declines automatic sync", async () => {
+    const server = http.createServer((_req, res) => {
+      res.writeHead(409);
+      res.end();
+    });
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (address && typeof address !== "string") resolve(address.port);
+      });
+    });
+    try {
+      expect(await triggerHostsSync(port)).toBe("disabled");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });
 
