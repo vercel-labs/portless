@@ -521,7 +521,7 @@ function buildWindowsScript(ctx: ServiceContext, command: string[]): string {
 
 function buildWindowsTaskXml(scriptPath: string): string {
   const taskArguments = `/d /s /c "${windowsQuote(scriptPath)}"`;
-  return `<?xml version="1.0" encoding="UTF-8"?>
+  return `\uFEFF<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo>
     <Description>Portless HTTPS proxy</Description>
@@ -1044,7 +1044,7 @@ async function installService(
   } else {
     fs.mkdirSync(spec.scriptDir, { recursive: true });
     fs.writeFileSync(spec.scriptPath, spec.script);
-    fs.writeFileSync(spec.taskXmlPath, spec.taskXml);
+    fs.writeFileSync(spec.taskXmlPath, spec.taskXml, "utf16le");
     runRequired(runner, "schtasks", spec.createArgs);
     runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
     await stopExistingProxy(entryScript, runner, spec.config.proxyPort);

@@ -69,6 +69,8 @@ jobs:
       - name: Download cuse
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           Invoke-WebRequest `
             -Uri "https://github.com/crafter-agents/cuse/releases/download/v0.1.0/cuse-windows-x64.exe" `
             -OutFile "cuse.exe"
@@ -85,6 +87,8 @@ jobs:
       - name: Install and verify the Windows service
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           $stateDir = "C:\portless-ci-state"
           node packages/portless/dist/cli.js service install `
             --no-tls `
@@ -133,6 +137,8 @@ jobs:
       - name: Inspect Task Scheduler with cuse
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           Start-Process mmc.exe -ArgumentList "$env:WINDIR\System32\taskschd.msc"
           .\cuse.exe wait --window="Task Scheduler" --timeout=30000 --json
           .\cuse.exe focus "Task Scheduler" --json
@@ -156,4 +162,6 @@ jobs:
         if: always()
         shell: pwsh
         run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
           node packages/portless/dist/cli.js service uninstall

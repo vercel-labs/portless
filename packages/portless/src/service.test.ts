@@ -488,6 +488,7 @@ describe("handleService", () => {
     expect(runIndex).toBeGreaterThan(createIndex);
     expect(calls.some((call) => call.command === "powershell.exe")).toBe(false);
     expect(taskXmlWrite?.[1]).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    expect(taskXmlWrite?.[2]).toBe("utf16le");
   });
 
   it("does not start a Windows task when atomic registration fails", async () => {
@@ -699,6 +700,7 @@ describe("handleService", () => {
         String(content).includes("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
       )
     ).toBe(true);
+    expect(taskXmlWrites.every(([, , encoding]) => encoding === "utf16le")).toBe(true);
     expect(createCalls).toHaveLength(2);
     expect(createCalls.every(([, args]) => args.includes("/XML"))).toBe(true);
   });
