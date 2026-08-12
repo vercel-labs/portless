@@ -731,6 +731,20 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
+  it("treats a Vite positional root as the default server command", () => {
+    const args = ["vite", "./app"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "./app",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
   it("injects when only a consumed flag value precedes the default command", () => {
     const args = ["vite", "--config", "./cfg.ts"];
     injectFrameworkFlags(args, 4567);
@@ -848,6 +862,22 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual([
       "npx",
       "--yes",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("keeps an npx option separator before the framework command", () => {
+    const args = ["npx", "--", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--",
       "vite",
       "dev",
       "--port",
@@ -1000,6 +1030,50 @@ describe("injectFrameworkFlags", () => {
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
   });
+
+  it("does not treat runner options as framework options", () => {
+    const args = ["npx", "--package=host-tool", "--", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--package=host-tool",
+      "--",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("consumes separate runner option values before the framework command", () => {
+    const args = ["npx", "--package", "vite", "--", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--package",
+      "vite",
+      "--",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it.each(["--localhost", "--lan", "--tunnel"])(
+    "preserves Expo connection mode %s while still injecting the port",
+    (mode) => {
+      const args = ["expo", "start", mode];
+      injectFrameworkFlags(args, 4567);
+      expect(args).toEqual(["expo", "start", mode, "--port", "4567"]);
+    }
+  );
 
   // Negative cases: runner with non-framework commands
 
@@ -1208,6 +1282,16 @@ describe("injectPackageScriptFrameworkFlags", () => {
     injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
     expect(args).toEqual(["bun", "run", "dev", "--host", "localhost"]);
   });
+
+  it.each(["--localhost", "--lan", "--tunnel"])(
+    "preserves Expo connection mode %s through a package script",
+    (mode) => {
+      writeScripts({ dev: `expo start ${mode}` });
+      const args = ["pnpm", "run", "dev"];
+      injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+      expect(args).toEqual(["pnpm", "run", "dev", "--port", "4567"]);
+    }
+  );
 
   it("injects the missing --port even when --host is already present in the script", () => {
     writeScripts({ dev: "vite dev --host 127.0.0.1" });

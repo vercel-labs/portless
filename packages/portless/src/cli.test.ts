@@ -67,6 +67,7 @@ function writeExpoShim(dir: string): void {
       "    PORT: process.env.PORT,",
       "    HOST: process.env.HOST,",
       "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
+      "    PORTLESS_LAN_IP: process.env.PORTLESS_LAN_IP,",
       "    PORTLESS_URL: process.env.PORTLESS_URL,",
       "  },",
       "};",
@@ -85,6 +86,32 @@ function writeExpoShim(dir: string): void {
   const shimPath = path.join(dir, "expo");
   fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
   fs.chmodSync(shimPath, 0o755);
+}
+
+function captureBypassedExpo(args: string[]): {
+  status: number | null;
+  args: string[];
+  env: Record<string, string>;
+} {
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-args-shim-"));
+  const capturePath = path.join(shimDir, "capture.json");
+  try {
+    writeExpoShim(shimDir);
+    const { status } = run(args, {
+      env: {
+        PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        PORTLESS: "0",
+        PORTLESS_TEST_CAPTURE_FILE: capturePath,
+      },
+    });
+    const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+      args: string[];
+      env: Record<string, string>;
+    };
+    return { status, ...capture };
+  } finally {
+    fs.rmSync(shimDir, { recursive: true, force: true });
+  }
 }
 
 async function getFreePort(): Promise<number> {
@@ -698,6 +725,79 @@ describe("CLI", () => {
       expect(status).toBe(0);
       expect(stdout).toContain("portless run");
     });
+
+    it.each([
+      ["before run", ["--lan", "run"]],
+      ["in run options", ["run", "--lan"]],
+    ])("accepts global --lan %s", (_label, prefix) => {
+      const { status, stdout } = run(
+        [...prefix, "node", "-e", "process.stdout.write(process.env.PORTLESS_LAN ?? '')"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout).toBe("1");
+    });
+
+    it("does not consume global-looking flags after the run command starts", () => {
+      const { status, args, env } = captureBypassedExpo([
+        "run",
+        "--lan",
+        "expo",
+        "start",
+        "--lan",
+        "--ngrok",
+      ]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", "--lan", "--ngrok"]);
+      expect(env.PORTLESS_LAN).toBe("1");
+    });
+
+    it("does not consume global-looking flags after a named command starts", () => {
+      const { status, args, env } = captureBypassedExpo([
+        "myapp",
+        "--lan",
+        "expo",
+        "start",
+        "--lan",
+        "--ip",
+        "0.0.0.0",
+      ]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", "--lan", "--ip", "0.0.0.0"]);
+      expect(env.PORTLESS_LAN).toBe("1");
+    });
+
+    it("accepts global --lan after leading named-mode options", () => {
+      const { status, stdout } = run(
+        [
+          "--app-port",
+          "4567",
+          "myapp",
+          "--lan",
+          "node",
+          "-e",
+          "process.stdout.write(process.env.PORTLESS_LAN ?? '')",
+        ],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout).toBe("1");
+    });
+
+    it("does not consume global-looking flags after an explicit --name command starts", () => {
+      const { status, args, env } = captureBypassedExpo([
+        "--name",
+        "myapp",
+        "--lan",
+        "expo",
+        "start",
+        "--lan",
+        "--funnel",
+      ]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", "--lan", "--funnel"]);
+      expect(env.PORTLESS_LAN).toBe("1");
+    });
   });
 
   describe("--app-port flag", () => {
@@ -1072,6 +1172,111 @@ describe("CLI", () => {
           PORTLESS_URL: `http://mobile.local:${proxyPort}`,
         });
         expect(capture.env.HOST).toBeUndefined();
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves Expo --lan in the child command without enabling portless LAN mode", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-child-lan-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        writeExpoShim(shimDir);
+
+        const { status } = run(
+          ["run", "--name", "mobile", "--app-port", "4567", "expo", "start", "--lan"],
+          {
+            env: {
+              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_TEST_CAPTURE_FILE: capturePath,
+              PORTLESS_HTTPS: "0",
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["start", "--lan", "--port", "4567"]);
+        expect(capture.env.PORTLESS_LAN).toBeUndefined();
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves --ip in the child command after the command boundary", async () => {
+      const server = http.createServer((_req, res) => {
+        res.setHeader("X-Portless", "1");
+        res.end("ok");
+      });
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-child-ip-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        writeExpoShim(shimDir);
+
+        const { status } = run(
+          ["run", "--name", "mobile", "--app-port", "4567", "expo", "start", "--ip", "0.0.0.0"],
+          {
+            env: {
+              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_TEST_CAPTURE_FILE: capturePath,
+              PORTLESS_HTTPS: "0",
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual([
+          "start",
+          "--ip",
+          "0.0.0.0",
+          "--port",
+          "4567",
+          "--host",
+          "localhost",
+        ]);
+        expect(capture.env.PORTLESS_LAN).toBeUndefined();
+        expect(capture.env.PORTLESS_LAN_IP).toBeUndefined();
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
         fs.rmSync(shimDir, { recursive: true, force: true });

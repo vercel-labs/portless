@@ -163,8 +163,6 @@ const EXPECTED_SKIPS = [
   "buildWrapped",
   "comment",
   "commentAfterNewline",
-  // `vite dev# note` tokenizes to `dev#`, which is not a server subcommand.
-  "commentNoSpaceBefore",
   "commentOnly",
   "commentTight",
   "dashDash",

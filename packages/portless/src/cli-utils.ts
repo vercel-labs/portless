@@ -1036,7 +1036,9 @@ export function spawnCommand(
 type FrameworkSpec = {
   strictPort: boolean;
   serverSubcommands: string[];
+  nonServerSubcommands?: string[];
   defaultIsServer: boolean;
+  positionalRootIsServer?: boolean;
   valueFlags?: string[];
 };
 
@@ -1044,7 +1046,9 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
   vite: {
     strictPort: true,
     serverSubcommands: ["dev", "serve", "preview"],
+    nonServerSubcommands: ["build", "optimize"],
     defaultIsServer: true,
+    positionalRootIsServer: true,
     // Union of vite 6 and vite 7, listing a flag whether its value is required
     // or optional, since cac consumes the next token either way. Derived from
     // each CLI's own option table, not from its prose docs.
@@ -1108,13 +1112,20 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
   expo: { strictPort: false, serverSubcommands: ["start", "serve"], defaultIsServer: true },
 };
 
-/** Known package runners. Values list subcommands that run a package. */
-const PACKAGE_RUNNERS: Record<string, string[]> = {
-  npx: [],
-  bunx: [],
-  pnpx: [],
-  yarn: ["dlx", "exec"],
-  pnpm: ["dlx", "exec"],
+type PackageRunnerSpec = {
+  subcommands: string[];
+  valueFlags?: string[];
+};
+
+const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
+  npx: {
+    subcommands: [],
+    valueFlags: ["-c", "--call", "-p", "--package", "-w", "--workspace", "--allow-scripts"],
+  },
+  bunx: { subcommands: [] },
+  pnpx: { subcommands: [], valueFlags: ["-p", "--package"] },
+  yarn: { subcommands: ["dlx", "exec"] },
+  pnpm: { subcommands: ["dlx", "exec"] },
 };
 
 /**
@@ -1122,35 +1133,65 @@ const PACKAGE_RUNNERS: Record<string, string[]> = {
  * known package runners (npx, bunx, yarn dlx, …) and their flags. Returns null
  * when no port-needing framework is present.
  */
-function findFrameworkIndex(commandArgs: string[]): number | null {
+type FrameworkInvocation = {
+  basename: string;
+  framework: FrameworkSpec;
+  frameworkIndex: number;
+  frameworkArgs: string[];
+  insertionIndex: number;
+};
+
+function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
   if (commandArgs.length === 0) return null;
 
   const first = path.basename(commandArgs[0]);
-  if (FRAMEWORKS_NEEDING_PORT[first]) return 0;
+  let frameworkIndex: number | null = FRAMEWORKS_NEEDING_PORT[first] ? 0 : null;
 
-  const subcommands = PACKAGE_RUNNERS[first];
-  if (!subcommands) return null;
+  if (frameworkIndex === null) {
+    const runner = PACKAGE_RUNNERS[first];
+    if (!runner) return null;
 
-  let i = 1;
+    let i = 1;
+    const skipRunnerOptions = () => {
+      while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
+        const option = commandArgs[i];
+        i++;
+        if (option === "--") break;
+        if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
+      }
+    };
 
-  if (subcommands.length > 0) {
-    // Skip flags before the subcommand
-    while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
-    if (i >= commandArgs.length) return null;
-    if (!subcommands.includes(commandArgs[i])) {
-      // Not a recognized subcommand — might be an implicit bin (e.g. `yarn vite`)
-      const name = path.basename(commandArgs[i]);
-      return FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+    if (runner.subcommands.length > 0) {
+      skipRunnerOptions();
+      if (i >= commandArgs.length) return null;
+      if (!runner.subcommands.includes(commandArgs[i])) {
+        const name = path.basename(commandArgs[i]);
+        frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+      } else {
+        i++;
+      }
     }
-    i++;
+
+    if (frameworkIndex === null) {
+      skipRunnerOptions();
+      if (i >= commandArgs.length) return null;
+      const name = path.basename(commandArgs[i]);
+      frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+    }
   }
 
-  // Skip runner flags (e.g. `--bun`, `--yes`)
-  while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
-
-  if (i >= commandArgs.length) return null;
-  const name = path.basename(commandArgs[i]);
-  return FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+  if (frameworkIndex === null) return null;
+  const basename = path.basename(commandArgs[frameworkIndex]);
+  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  const optionEnd = commandArgs.indexOf("--", frameworkIndex + 1);
+  const insertionIndex = optionEnd === -1 ? commandArgs.length : optionEnd;
+  return {
+    basename,
+    framework,
+    frameworkIndex,
+    frameworkArgs: commandArgs.slice(frameworkIndex + 1, insertionIndex),
+    insertionIndex,
+  };
 }
 
 /**
@@ -1158,8 +1199,7 @@ function findFrameworkIndex(commandArgs: string[]): number | null {
  * past known package runners (npx, bunx, yarn dlx, …) and their flags.
  */
 function findFrameworkBasename(commandArgs: string[]): string | null {
-  const idx = findFrameworkIndex(commandArgs);
-  return idx === null ? null : path.basename(commandArgs[idx]);
+  return parseFrameworkInvocation(commandArgs)?.basename ?? null;
 }
 
 /**
@@ -1202,17 +1242,15 @@ function frameworkPositionals(args: string[], framework: FrameworkSpec): string[
  * such as a root path in `vite dev ./app`. An unrecognized subcommand is
  * declined, not assumed to be a server.
  */
-function invokesFrameworkServer(
-  commandArgs: string[],
-  frameworkIndex: number,
-  framework: FrameworkSpec
-): boolean {
-  const positionals = frameworkPositionals(commandArgs.slice(frameworkIndex + 1), framework);
+function invokesFrameworkServer(frameworkArgs: string[], framework: FrameworkSpec): boolean {
+  const positionals = frameworkPositionals(frameworkArgs, framework);
   if (positionals === null) return false;
 
   const [subcommand] = positionals;
   if (subcommand === undefined) return framework.defaultIsServer;
-  return framework.serverSubcommands.includes(subcommand);
+  if (framework.serverSubcommands.includes(subcommand)) return true;
+  if (framework.nonServerSubcommands?.includes(subcommand)) return false;
+  return framework.positionalRootIsServer === true;
 }
 
 /**
@@ -1239,36 +1277,33 @@ function invokesFrameworkServer(
  * server local.
  */
 export function injectFrameworkFlags(commandArgs: string[], port: number): string[] {
-  const frameworkIndex = findFrameworkIndex(commandArgs);
-  if (frameworkIndex === null) return [];
+  const invocation = parseFrameworkInvocation(commandArgs);
+  if (!invocation) return [];
+  const { basename, framework, frameworkArgs, insertionIndex } = invocation;
 
-  const basename = path.basename(commandArgs[frameworkIndex]);
-  const framework = FRAMEWORKS_NEEDING_PORT[basename];
-
-  if (!invokesFrameworkServer(commandArgs, frameworkIndex, framework)) return [];
+  if (!invokesFrameworkServer(frameworkArgs, framework)) return [];
 
   const flags: string[] = [];
 
-  if (!hasCliOption(commandArgs, "--port")) {
+  if (!hasCliOption(frameworkArgs, "--port")) {
     flags.push("--port", port.toString());
     if (framework.strictPort) {
       flags.push("--strictPort");
     }
   }
 
-  if (!hasCliOption(commandArgs, "--host")) {
-    // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
-    // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
+  const hasHostChoice =
+    hasCliOption(frameworkArgs, "--host") ||
+    (basename === "expo" &&
+      ["--localhost", "--lan", "--tunnel"].some((option) => hasCliOption(frameworkArgs, option)));
+  if (!hasHostChoice) {
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
     if (!isExpoLan) {
       flags.push("--host", basename === "expo" ? "localhost" : "127.0.0.1");
     }
   }
 
-  // Everything after a bare `--` is positional data for the framework, so flags
-  // appended past it are never parsed as options. Place them before it.
-  const optionEnd = commandArgs.indexOf("--");
-  commandArgs.splice(optionEnd === -1 ? commandArgs.length : optionEnd, 0, ...flags);
+  commandArgs.splice(insertionIndex, 0, ...flags);
   return flags;
 }
 

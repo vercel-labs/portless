@@ -1826,8 +1826,10 @@ ${colors.bold("How it works:")}
      Expo, React Native) get --port and, when needed, --host flags
      injected automatically, including through a package script whose command
      starts with the framework. Only server commands (dev, serve, preview,
-     start) get them; build, optimize, test and the like reject them, and an
-     invocation portless cannot classify is left alone too.
+     start, a bare vite, or vite [root]) get them; build, optimize, test and
+     the like reject them, and an invocation portless cannot classify is left
+     alone too. Expo --localhost, --lan and --tunnel modes are preserved while
+     the assigned port is still injected.
      Portless also leaves a script alone when it is
      compound (&&, |, ;), ends in a # comment, ends its own option list with
      --, is env-prefixed (NODE_ENV=production vite), delegates to another
@@ -4166,18 +4168,80 @@ async function main() {
     process.exit(1);
   }
 
-  // --lan / --ip / --lan-ip-auto: global flags that enable LAN mode.
-  // Strip from args and convert to env vars so all downstream code paths
-  // see them regardless of where the user placed them (e.g.
-  // `portless --lan run ...`, `portless proxy start --lan`).
-  // Only scan before the `--` separator to avoid consuming flags meant
-  // for the child command (e.g. `portless run tool -- --ip 0.0.0.0`).
-  //
-  // Helper: find a flag before `--`, strip it (and optionally its value)
-  // from args, and return the value (or true for boolean flags).
+  const globalBooleanFlags = new Set(["--lan", "--tailscale", "--funnel", "--ngrok"]);
+  const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
+  const childlessCommands = new Set([
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+    "trust",
+    "clean",
+    "prune",
+    "list",
+    "doctor",
+    "get",
+    "alias",
+    "hosts",
+    "proxy",
+    "service",
+  ]);
+
+  const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
+    const arg = args[index];
+    if (globalBooleanFlags.has(arg) || arg === "--force" || arg === "--help" || arg === "-h") {
+      return index + 1;
+    }
+    if (globalValueFlags.has(arg) || localValueFlags.has(arg)) {
+      return index + 2;
+    }
+    return null;
+  };
+
+  const globalFlagEnd = (): number => {
+    const separator = args.indexOf("--");
+    const limit = separator === -1 ? args.length : separator;
+    const leadingValueFlags = new Set(["--app-port"]);
+    let index = 0;
+
+    while (index < limit) {
+      const next = advancePortlessFlag(index, leadingValueFlags);
+      if (next === null) break;
+      index = next;
+    }
+
+    if (index >= limit) return limit;
+    const mode = args[index];
+    if (childlessCommands.has(mode)) return limit;
+
+    if (mode === "run") {
+      index++;
+      const runValueFlags = new Set(["--name", "--app-port"]);
+      while (index < limit) {
+        const next = advancePortlessFlag(index, runValueFlags);
+        if (next === null) break;
+        index = next;
+      }
+      return index;
+    }
+
+    if (mode === "--name") {
+      index += 2;
+    } else {
+      index++;
+    }
+
+    const namedValueFlags = new Set(["--app-port"]);
+    while (index < limit) {
+      const next = advancePortlessFlag(index, namedValueFlags);
+      if (next === null) break;
+      index = next;
+    }
+    return index;
+  };
+
   const stripGlobalFlag = (flag: string, hasValue: boolean): string | boolean | null => {
-    const sep = args.indexOf("--");
-    const end = sep === -1 ? args.length : sep;
+    const end = globalFlagEnd();
     const idx = args.indexOf(flag);
     if (idx === -1 || idx >= end) return null;
     if (!hasValue) {
