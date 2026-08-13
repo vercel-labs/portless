@@ -1760,6 +1760,76 @@ describe("CLI", () => {
     });
   });
 
+  describe("--routes-cleanup-interval flag", () => {
+    let tmpDir: string;
+    let testPort: number;
+
+    const proxyEnv = () => ({
+      PORTLESS_PORT: String(testPort),
+      PORTLESS_HTTPS: "0",
+      PORTLESS_STATE_DIR: tmpDir,
+    });
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cleanup-interval-"));
+      testPort = await getFreePort();
+    });
+
+    afterEach(() => {
+      run(["proxy", "stop"], { env: proxyEnv() });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("rejects a non-numeric value", () => {
+      const { status, stderr } = run(["proxy", "start", "--routes-cleanup-interval", "abc"], {
+        env: proxyEnv(),
+      });
+      expect(status).not.toBe(0);
+      expect(stderr).toContain("Invalid");
+    });
+
+    it("rejects a negative value", () => {
+      const { status, stderr } = run(["proxy", "start", "--routes-cleanup-interval", "-5"], {
+        env: proxyEnv(),
+      });
+      expect(status).not.toBe(0);
+      expect(stderr).toContain("Invalid");
+    });
+
+    it("accepts 0 to disable the sweep and still starts normally", () => {
+      const start = run(["proxy", "start", "--routes-cleanup-interval", "0"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain(`proxy started on port ${testPort}`);
+    });
+
+    it("prunes routes with dead PIDs on the background sweep, unlike a plain file-change reload", async () => {
+      const start = run(["proxy", "start", "--routes-cleanup-interval", "1"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+
+      // Written directly (not via RouteStore) after the daemon is already up,
+      // so this exercises only the periodic sweep, not startup initialization.
+      const routesPath = path.join(tmpDir, "routes.json");
+      const deadPid = 999999;
+      fs.writeFileSync(
+        routesPath,
+        JSON.stringify([
+          { hostname: "dead.localhost", port: 4001, pid: deadPid },
+          { hostname: "alive.localhost", port: 4002, pid: process.pid },
+        ])
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+
+      const raw = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+      expect(raw).toHaveLength(1);
+      expect(raw[0].hostname).toBe("alive.localhost");
+    }, 10_000);
+  });
+
   describe("HTTPS proxy with broken security binary (#228)", () => {
     let fakeBinDir: string;
     let tmpDir: string;

@@ -548,6 +548,7 @@ export function buildProxyStartConfig(options: {
   includePort?: boolean;
   proxyPort?: number;
   skipTrust?: boolean;
+  routesCleanupIntervalSeconds?: number;
 }): { effectiveTld: string; effectiveTlds: string[]; args: string[] } {
   const requestedTlds = options.tlds && options.tlds.length > 0 ? [...options.tlds] : [options.tld];
   const effectiveTlds = options.lanMode ? ["local"] : [...new Set(requestedTlds)];
@@ -593,6 +594,10 @@ export function buildProxyStartConfig(options: {
 
   if (options.skipTrust) {
     args.push("--skip-trust");
+  }
+
+  if (options.routesCleanupIntervalSeconds !== undefined) {
+    args.push("--routes-cleanup-interval", options.routesCleanupIntervalSeconds.toString());
   }
 
   return { effectiveTld, effectiveTlds, args };

@@ -138,6 +138,17 @@ const DEBOUNCE_MS = 100;
 /** Polling interval (ms) when fs.watch is unavailable. */
 const POLL_INTERVAL_MS = 3000;
 
+/**
+ * Default interval (seconds) for the proxy's background sweep that prunes
+ * routes whose owning process has died. This is a safety net, not the
+ * primary cleanup path: a client still removes its own route on a graceful
+ * exit. It exists because that exit-time cleanup can be skipped entirely
+ * (e.g. a client killed with SIGKILL by an IDE's stop/debug action never
+ * runs its handler). Five minutes bounds how long a dead route can linger
+ * without noticeably waking the process; 0 disables the sweep.
+ */
+const DEFAULT_ROUTES_CLEANUP_INTERVAL_SECONDS = 300;
+
 /** Grace period (ms) for connections to drain before force-exiting the proxy. */
 const EXIT_TIMEOUT_MS = 2000;
 
@@ -542,7 +553,8 @@ function startProxyServer(
   tlsOptions?: { cert: Buffer; key: Buffer },
   lanIp?: string | null,
   strict?: boolean,
-  customCert = false
+  customCert = false,
+  routesCleanupIntervalSeconds = DEFAULT_ROUTES_CLEANUP_INTERVAL_SECONDS
 ): void {
   store.ensureDir();
 
@@ -576,6 +588,7 @@ function startProxyServer(
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
+  let routesCleanupInterval: ReturnType<typeof setInterval> | null = null;
 
   const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
 
@@ -648,6 +661,22 @@ function startProxyServer(
     // fs.watch may not be supported; fall back to periodic polling
     console.warn(colors.yellow("fs.watch unavailable; falling back to polling for route changes"));
     pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
+  }
+
+  // Background safety net: sweep routes.json for entries whose owning process
+  // has died, independent of the client's own exit-time cleanup (which can be
+  // skipped entirely if the client is killed with an uncatchable signal, e.g.
+  // an IDE's stop/debug action). This write goes through the same fs.watch
+  // path above, so reloadRoutes() reconciles the in-memory cache and mDNS
+  // records automatically. Disabled with --routes-cleanup-interval 0.
+  if (routesCleanupIntervalSeconds > 0) {
+    routesCleanupInterval = setInterval(() => {
+      try {
+        store.pruneStaleRoutes();
+      } catch {
+        // Best-effort background cleanup; non-fatal
+      }
+    }, routesCleanupIntervalSeconds * 1000).unref();
   }
 
   if (autoSyncHosts) {
@@ -790,6 +819,7 @@ function startProxyServer(
     exiting = true;
     if (debounceTimer) clearTimeout(debounceTimer);
     if (pollingInterval) clearInterval(pollingInterval);
+    if (routesCleanupInterval) clearInterval(routesCleanupInterval);
     if (lanMonitor) lanMonitor.stop();
     if (watcher) {
       watcher.close();
@@ -1117,6 +1147,7 @@ async function ensureProxyRunning(
     useWildcard: startConfig.useWildcard,
     includePort: startPort !== undefined,
     proxyPort: startPort,
+    routesCleanupIntervalSeconds: resolveRoutesCleanupIntervalSeconds([]),
   });
   const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
 
@@ -2836,6 +2867,39 @@ ${colors.bold("Options:")}
   console.log(colors.green(`Summary: 0 failures, ${pluralize(warnings, "warning")}.`));
 }
 
+/**
+ * Parse `--routes-cleanup-interval <seconds>`, falling back to
+ * PORTLESS_ROUTES_CLEANUP_INTERVAL, then the default. `0` disables the
+ * background sweep entirely.
+ */
+function resolveRoutesCleanupIntervalSeconds(args: string[]): number {
+  const flagIdx = args.indexOf("--routes-cleanup-interval");
+  let raw: string | undefined;
+  let source: string;
+  if (flagIdx !== -1) {
+    raw = args[flagIdx + 1];
+    source = "--routes-cleanup-interval";
+  } else if (process.env.PORTLESS_ROUTES_CLEANUP_INTERVAL !== undefined) {
+    raw = process.env.PORTLESS_ROUTES_CLEANUP_INTERVAL;
+    source = "PORTLESS_ROUTES_CLEANUP_INTERVAL";
+  } else {
+    return DEFAULT_ROUTES_CLEANUP_INTERVAL_SECONDS;
+  }
+
+  if (!raw || raw.startsWith("--")) {
+    console.error(colors.red("Error: --routes-cleanup-interval requires a number of seconds."));
+    process.exit(1);
+  }
+  const seconds = Number(raw);
+  if (!Number.isFinite(seconds) || !Number.isInteger(seconds) || seconds < 0) {
+    console.error(
+      colors.red(`Error: Invalid ${source}="${raw}". Must be a non-negative integer (0 disables).`)
+    );
+    process.exit(1);
+  }
+  return seconds;
+}
+
 async function handleProxy(args: string[]): Promise<void> {
   if (args[1] === "stop") {
     let explicitPort: number | undefined;
@@ -2881,6 +2945,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy start --routes-cleanup-interval 60")}  Sweep dead routes every 60s (default 300, 0 disables)
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("LAN mode (--lan):")}
@@ -2892,12 +2957,21 @@ ${colors.bold("LAN mode (--lan):")}
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+
+${colors.bold("Route cleanup (--routes-cleanup-interval):")}
+  A client removes its own route when it exits normally. This is a
+  background safety net for when that does not happen (e.g. a process
+  killed with SIGKILL, such as an IDE's stop/debug action terminating a
+  child process tree). The proxy periodically prunes routes whose owning
+  process is no longer alive. Defaults to every 300 seconds; set to 0 to
+  disable. Equivalent env var: PORTLESS_ROUTES_CLEANUP_INTERVAL.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
 
   const isForeground = args.includes("--foreground");
   const skipTrust = args.includes("--skip-trust");
+  const routesCleanupIntervalSeconds = resolveRoutesCleanupIntervalSeconds(args);
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
   const hasHttpsFlag = args.includes("--https");
@@ -3167,6 +3241,7 @@ ${colors.bold("LAN mode (--lan):")}
         foreground: isForeground,
         includePort: true,
         proxyPort,
+        routesCleanupIntervalSeconds,
       }).args,
     ];
     const fallbackCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, resolvedConfig);
@@ -3313,7 +3388,8 @@ ${colors.bold("LAN mode (--lan):")}
       tlsOptions,
       lanIp,
       desiredWildcard ? false : undefined,
-      !!(customCertPath && customKeyPath)
+      !!(customCertPath && customKeyPath),
+      routesCleanupIntervalSeconds
     );
     return;
   }
@@ -3348,6 +3424,7 @@ ${colors.bold("LAN mode (--lan):")}
         includePort: true,
         proxyPort,
         skipTrust: true,
+        routesCleanupIntervalSeconds,
       }).args,
     ];
 
