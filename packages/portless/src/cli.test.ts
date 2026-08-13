@@ -67,6 +67,7 @@ function writeExpoShim(dir: string): void {
       "    PORT: process.env.PORT,",
       "    HOST: process.env.HOST,",
       "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
+      "    PORTLESS_LAN_IP: process.env.PORTLESS_LAN_IP,",
       "    PORTLESS_URL: process.env.PORTLESS_URL,",
       "  },",
       "};",
@@ -85,6 +86,32 @@ function writeExpoShim(dir: string): void {
   const shimPath = path.join(dir, "expo");
   fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
   fs.chmodSync(shimPath, 0o755);
+}
+
+function captureBypassedExpo(args: string[]): {
+  status: number | null;
+  args: string[];
+  env: Record<string, string>;
+} {
+  const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-args-shim-"));
+  const capturePath = path.join(shimDir, "capture.json");
+  try {
+    writeExpoShim(shimDir);
+    const { status } = run(args, {
+      env: {
+        PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        PORTLESS: "0",
+        PORTLESS_TEST_CAPTURE_FILE: capturePath,
+      },
+    });
+    const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+      args: string[];
+      env: Record<string, string>;
+    };
+    return { status, ...capture };
+  } finally {
+    fs.rmSync(shimDir, { recursive: true, force: true });
+  }
 }
 
 async function getFreePort(): Promise<number> {
@@ -726,6 +753,79 @@ describe("CLI", () => {
       expect(status).toBe(0);
       expect(stdout).toContain("portless run");
     });
+
+    it.each([
+      ["before run", ["--lan", "run"]],
+      ["in run options", ["run", "--lan"]],
+    ])("accepts global --lan %s", (_label, prefix) => {
+      const { status, stdout } = run(
+        [...prefix, "node", "-e", "process.stdout.write(process.env.PORTLESS_LAN)"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout).toBe("1");
+    });
+
+    it("does not consume global-looking flags after the run command starts", () => {
+      const { status, args, env } = captureBypassedExpo([
+        "run",
+        "--lan",
+        "expo",
+        "start",
+        "--lan",
+        "--ngrok",
+      ]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", "--lan", "--ngrok"]);
+      expect(env.PORTLESS_LAN).toBe("1");
+    });
+
+    it("does not consume global-looking flags after a named command starts", () => {
+      const { status, args, env } = captureBypassedExpo([
+        "myapp",
+        "--lan",
+        "expo",
+        "start",
+        "--lan",
+        "--ip",
+        "0.0.0.0",
+      ]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", "--lan", "--ip", "0.0.0.0"]);
+      expect(env.PORTLESS_LAN).toBe("1");
+    });
+
+    it("accepts global --lan after leading named-mode options", () => {
+      const { status, stdout } = run(
+        [
+          "--app-port",
+          "4567",
+          "myapp",
+          "--lan",
+          "node",
+          "-e",
+          "process.stdout.write(process.env.PORTLESS_LAN)",
+        ],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout).toBe("1");
+    });
+
+    it("does not consume global-looking flags after an explicit --name command starts", () => {
+      const { status, args, env } = captureBypassedExpo([
+        "--name",
+        "myapp",
+        "--lan",
+        "expo",
+        "start",
+        "--lan",
+        "--funnel",
+      ]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", "--lan", "--funnel"]);
+      expect(env.PORTLESS_LAN).toBe("1");
+    });
   });
 
   describe("--app-port flag", () => {
@@ -1128,6 +1228,91 @@ describe("CLI", () => {
 
         expect(status).toBe(0);
         expect(stderr).toContain("will not resolve");
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves Expo --lan in the child command without enabling portless LAN mode", async () => {
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-child-lan-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      try {
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+        writeExpoShim(shimDir);
+
+        const { status } = run(
+          ["run", "--name", "mobile", "--app-port", "4567", "expo", "start", "--lan"],
+          {
+            env: {
+              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_TEST_CAPTURE_FILE: capturePath,
+              PORTLESS_HTTPS: "0",
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual(["start", "--lan", "--port", "4567"]);
+        expect(capture.env.PORTLESS_LAN).toBeUndefined();
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    });
+
+    it("leaves --ip in the child command after the command boundary", async () => {
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-expo-child-ip-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      try {
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+        writeExpoShim(shimDir);
+
+        const { status } = run(
+          ["run", "--name", "mobile", "--app-port", "4567", "expo", "start", "--ip", "0.0.0.0"],
+          {
+            env: {
+              PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_TEST_CAPTURE_FILE: capturePath,
+              PORTLESS_HTTPS: "0",
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+
+        expect(capture.args).toEqual([
+          "start",
+          "--ip",
+          "0.0.0.0",
+          "--port",
+          "4567",
+          "--host",
+          "localhost",
+        ]);
+        expect(capture.env.PORTLESS_LAN).toBeUndefined();
+        expect(capture.env.PORTLESS_LAN_IP).toBeUndefined();
       } finally {
         if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(shimDir, { recursive: true, force: true });
@@ -1676,6 +1861,218 @@ describe("CLI", () => {
       });
       expect(status).toBe(0);
       expect(stdout).toContain("hello");
+    });
+
+    // Run the CLI against a fake package-manager binary (shim) that records
+    // the args and env it was invoked with, so package-script flag forwarding
+    // can be asserted without requiring bun/npm or a real dev server.
+    async function captureScriptDelegation(options: {
+      pm: string;
+      script: string;
+      cliArgs: string[];
+      lan?: boolean;
+    }): Promise<{
+      status: number | null;
+      proxyPort: number;
+      capture: { args: string[]; env: Record<string, string> };
+    }> {
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-pm-shim-"));
+      const capturePath = path.join(shimDir, "capture.json");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      try {
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+        if (options.lan) {
+          fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
+        }
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({
+            name: "test-app",
+            packageManager: `${options.pm}@1.0.0`,
+            portless: { appPort: 4567 },
+            scripts: { dev: options.script },
+          })
+        );
+
+        const captureScriptPath = path.join(shimDir, "capture-pm.js");
+        fs.writeFileSync(
+          captureScriptPath,
+          [
+            'const fs = require("node:fs");',
+            "const capturePath = process.env.PORTLESS_TEST_CAPTURE_FILE;",
+            "const payload = {",
+            "  args: process.argv.slice(2),",
+            "  env: {",
+            "    PORT: process.env.PORT,",
+            "    HOST: process.env.HOST,",
+            "    PORTLESS_URL: process.env.PORTLESS_URL,",
+            "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
+            "  },",
+            "};",
+            "fs.writeFileSync(capturePath, JSON.stringify(payload));",
+          ].join("\n") + "\n"
+        );
+
+        // Place the shim inside tmpDir/node_modules/.bin rather than relying
+        // on PATH order alone. spawnCommand's augmentedPath prepends the
+        // running node binary's own directory to PATH *ahead of* any PATH we
+        // pass in here, so a real `bun` installed beside Node (e.g. both
+        // via Homebrew) would shadow a shim placed in an arbitrary PATH
+        // directory no matter where it sits in that string. node_modules/.bin
+        // is collected first, before the node binary's directory, so a shim
+        // there always wins regardless of what else is installed on the
+        // machine. This mirrors how npm/pnpm/yarn/bun themselves resolve
+        // locally-installed binaries.
+        const localBinDir = path.join(tmpDir, "node_modules", ".bin");
+        fs.mkdirSync(localBinDir, { recursive: true });
+
+        if (process.platform === "win32") {
+          fs.writeFileSync(
+            path.join(localBinDir, `${options.pm}.cmd`),
+            `@echo off\r\n"${process.execPath}" "${captureScriptPath}" %*\r\n`
+          );
+        } else {
+          const shimPath = path.join(localBinDir, options.pm);
+          fs.writeFileSync(
+            shimPath,
+            `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`
+          );
+          fs.chmodSync(shimPath, 0o755);
+        }
+
+        const { status, stdout, stderr } = run(options.cliArgs, {
+          cwd: tmpDir,
+          env: {
+            // Deliberately do NOT inherit process.env.PATH on POSIX: the
+            // shim's discovery must not depend on where a real `bun` happens
+            // to sit in the ambient PATH. node_modules/.bin above is what
+            // actually makes the shim win; this PATH only needs to resolve
+            // /bin/sh itself and any other basic utilities the child needs.
+            // Windows keeps the ambient PATH, because the shim is a `.cmd`
+            // and running it needs cmd.exe from System32. The hermeticity
+            // argument still holds there: node_modules/.bin is collected
+            // before anything on PATH, so a real bun cannot shadow the shim.
+            PATH: process.platform === "win32" ? process.env.PATH : "/usr/bin:/bin",
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_CAPTURE_FILE: capturePath,
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        if (!fs.existsSync(capturePath)) {
+          // The shim not running is a resolution failure, and a bare ENOENT on
+          // the capture file says nothing about why. Surface what the CLI
+          // actually did, so one CI run diagnoses it instead of several.
+          throw new Error(
+            [
+              `package-manager shim never ran (${options.pm})`,
+              `platform: ${process.platform}`,
+              `localBin: ${fs.readdirSync(localBinDir).join(", ") || "(empty)"}`,
+              `exit: ${status}`,
+              `stdout: ${stdout.trim() || "(empty)"}`,
+              `stderr: ${stderr.trim() || "(empty)"}`,
+            ].join("\n")
+          );
+        }
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          args: string[];
+          env: Record<string, string>;
+        };
+        return { status, proxyPort: proxy.port, capture };
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    }
+
+    // Which framework runs drives two things: the flags appended to the child
+    // command, and the environment exported to it. Expo in LAN mode needs HOST
+    // omitted, or Metro's HMR websocket degrades. Both must see through the
+    // package script, and the env binder used to read commandArgs[0] — `bun`.
+    it("omits HOST for an expo package script in LAN mode", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "expo start",
+        cliArgs: [],
+        lan: true,
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_LAN).toBe("1");
+      expect(capture.env.HOST).toBeUndefined();
+    });
+
+    // The carve-out keys off the framework, not off whether anything was
+    // injected: this script supplies its own port and ends in a comment, so
+    // portless appends nothing and must still leave HOST unset.
+    it("omits HOST for an expo script it declines to append to", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "expo start --port 4567 # note",
+        cliArgs: [],
+        lan: true,
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev"]);
+      expect(capture.env.HOST).toBeUndefined();
+    });
+
+    it("portless (no args) forwards Vite port flags through bun run dev", async () => {
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "vite dev --host 127.0.0.1",
+        cliArgs: [],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev", "--port", "4567", "--strictPort"]);
+      expect(capture.env).toMatchObject({
+        PORT: "4567",
+        HOST: "127.0.0.1",
+        PORTLESS_URL: `http://test-app.localhost:${proxyPort}`,
+      });
+    });
+
+    // Note: the same forwarding for npm (including the `--` separator) is
+    // covered by unit tests in cli-utils.test.ts — a fake `npm` binary cannot
+    // shadow the real one here because spawnCommand prepends node's own bin
+    // directory (which contains npm) to the child PATH.
+
+    it("portless run <pm> run <script> forwards Vite port flags (explicit delegation)", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "vite dev --host 127.0.0.1",
+        cliArgs: ["run", "bun", "run", "dev"],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev", "--port", "4567", "--strictPort"]);
+    });
+
+    it("does not forward flags when the script already sets --port", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "vite dev --port 5000 --host 127.0.0.1",
+        cliArgs: [],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev"]);
+    });
+
+    it("does not forward flags for non-framework scripts", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: [],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.args).toEqual(["run", "dev"]);
     });
 
     it("portless run (no command) with portless.json resolves dev script", () => {

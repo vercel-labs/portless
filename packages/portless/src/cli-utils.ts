@@ -8,6 +8,7 @@ import * as readline from "node:readline";
 import { execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
+import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 
 // ---------------------------------------------------------------------------
@@ -1191,71 +1192,249 @@ export function spawnCommand(
  * flags needed. `strictPort` indicates whether `--strictPort` is supported
  * (prevents the framework from silently picking a different port).
  *
+ * `serverSubcommands` are the subcommands that accept `--port`/`--host`;
+ * `defaultIsServer` marks a CLI whose bare invocation starts that server.
+ * Anything else gets no flags: those commands exit with an unknown-option error.
+ *
+ * `valueFlags` are the flags that consume the next token, needed only for CLIs
+ * that accept flags before the subcommand — without them `vite --mode dev build`
+ * reads `dev` as the subcommand and injects into a build. A CLI that lists none
+ * is not classified at all once a flag precedes the subcommand.
+ *
  * SvelteKit is not listed because its dev server is Vite under the hood,
  * so the `vite` entry already covers it.
  */
-const FRAMEWORKS_NEEDING_PORT: Record<string, { strictPort: boolean }> = {
-  vite: { strictPort: true },
-  vp: { strictPort: true },
-  "react-router": { strictPort: true },
-  rsbuild: { strictPort: false },
-  astro: { strictPort: false },
-  ng: { strictPort: false },
-  "react-native": { strictPort: false },
-  expo: { strictPort: false },
+type FrameworkSpec = {
+  strictPort: boolean;
+  serverSubcommands: string[];
+  nonServerSubcommands?: string[];
+  defaultIsServer: boolean;
+  positionalRootIsServer?: boolean;
+  valueFlags?: string[];
 };
 
-/** Known package runners. Values list subcommands that run a package. */
-const PACKAGE_RUNNERS: Record<string, string[]> = {
-  npx: [],
-  bunx: [],
-  pnpx: [],
-  yarn: ["dlx", "exec"],
-  pnpm: ["dlx", "exec"],
+const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
+  vite: {
+    strictPort: true,
+    serverSubcommands: ["dev", "serve", "preview"],
+    nonServerSubcommands: ["build", "optimize"],
+    defaultIsServer: true,
+    positionalRootIsServer: true,
+    // Union of vite 6 and vite 7, listing a flag whether its value is required
+    // or optional, since cac consumes the next token either way. Derived from
+    // each CLI's own option table, not from its prose docs.
+    valueFlags: [
+      "--assetsDir",
+      "--assetsInlineLimit",
+      "--base",
+      "--configLoader",
+      "--host",
+      "--manifest",
+      "--minify",
+      "--open",
+      "--outDir",
+      "--port",
+      "--sourcemap",
+      "--ssr",
+      "--ssrManifest",
+      "--target",
+      "-c",
+      "--config",
+      "-d",
+      "--debug",
+      "-f",
+      "--filter",
+      "-l",
+      "--logLevel",
+      "-m",
+      "--mode",
+    ],
+  },
+  vp: { strictPort: true, serverSubcommands: ["dev"], defaultIsServer: false },
+  "react-router": { strictPort: true, serverSubcommands: ["dev"], defaultIsServer: false },
+  rsbuild: {
+    strictPort: false,
+    serverSubcommands: ["dev", "preview"],
+    defaultIsServer: true,
+    valueFlags: [
+      "--base",
+      "--config-loader",
+      "--dist-path",
+      "--env-dir",
+      "--env-mode",
+      "--environment",
+      "--host",
+      "--log-level",
+      "--output",
+      "--port",
+      "-c",
+      "--config",
+      "-m",
+      "--mode",
+      "-o",
+      "--open",
+      "-r",
+      "--root",
+    ],
+  },
+  astro: { strictPort: false, serverSubcommands: ["dev", "preview"], defaultIsServer: false },
+  ng: { strictPort: false, serverSubcommands: ["serve", "dev", "s"], defaultIsServer: false },
+  "react-native": { strictPort: false, serverSubcommands: ["start"], defaultIsServer: false },
+  expo: { strictPort: false, serverSubcommands: ["start", "serve"], defaultIsServer: true },
 };
+
+type PackageRunnerSpec = {
+  subcommands: string[];
+  valueFlags?: string[];
+};
+
+const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
+  npx: {
+    subcommands: [],
+    valueFlags: ["-c", "--call", "-p", "--package", "-w", "--workspace", "--allow-scripts"],
+  },
+  bunx: { subcommands: [] },
+  pnpx: { subcommands: [], valueFlags: ["-p", "--package"] },
+  yarn: { subcommands: ["dlx", "exec"] },
+  pnpm: { subcommands: ["dlx", "exec"] },
+};
+
+/**
+ * Find the index of the framework command inside `commandArgs`, looking past
+ * known package runners (npx, bunx, yarn dlx, …) and their flags. Returns null
+ * when no port-needing framework is present.
+ */
+type FrameworkInvocation = {
+  basename: string;
+  framework: FrameworkSpec;
+  frameworkIndex: number;
+  frameworkArgs: string[];
+  insertionIndex: number;
+};
+
+function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
+  if (commandArgs.length === 0) return null;
+
+  const first = path.basename(commandArgs[0]);
+  let frameworkIndex: number | null = FRAMEWORKS_NEEDING_PORT[first] ? 0 : null;
+
+  if (frameworkIndex === null) {
+    const runner = PACKAGE_RUNNERS[first];
+    if (!runner) return null;
+
+    let i = 1;
+    const skipRunnerOptions = () => {
+      while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
+        const option = commandArgs[i];
+        i++;
+        if (option === "--") break;
+        if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
+      }
+    };
+
+    if (runner.subcommands.length > 0) {
+      skipRunnerOptions();
+      if (i >= commandArgs.length) return null;
+      if (!runner.subcommands.includes(commandArgs[i])) {
+        const name = path.basename(commandArgs[i]);
+        frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+      } else {
+        i++;
+      }
+    }
+
+    if (frameworkIndex === null) {
+      skipRunnerOptions();
+      if (i >= commandArgs.length) return null;
+      const name = path.basename(commandArgs[i]);
+      frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
+    }
+  }
+
+  if (frameworkIndex === null) return null;
+  const basename = path.basename(commandArgs[frameworkIndex]);
+  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  const optionEnd = commandArgs.indexOf("--", frameworkIndex + 1);
+  const insertionIndex = optionEnd === -1 ? commandArgs.length : optionEnd;
+  return {
+    basename,
+    framework,
+    frameworkIndex,
+    frameworkArgs: commandArgs.slice(frameworkIndex + 1, insertionIndex),
+    insertionIndex,
+  };
+}
 
 /**
  * Find the basename of the framework command inside `commandArgs`, looking
  * past known package runners (npx, bunx, yarn dlx, …) and their flags.
  */
 function findFrameworkBasename(commandArgs: string[]): string | null {
-  if (commandArgs.length === 0) return null;
+  return parseFrameworkInvocation(commandArgs)?.basename ?? null;
+}
 
-  const first = path.basename(commandArgs[0]);
-  if (FRAMEWORKS_NEEDING_PORT[first]) return first;
+/**
+ * Positionals after a framework name, with flag values consumed so a value is
+ * never mistaken for a subcommand. Returns null when the subcommand cannot be
+ * identified: a CLI with no `valueFlags` hits a flag before any positional, and
+ * `--mode dev build` and `--open build` cannot both be resolved without knowing
+ * which of the two flags takes a value. Flags after the subcommand no longer
+ * affect it, so an unknown one is treated as a boolean there.
+ *
+ * `--name=value` is self-contained and never consumes. Everything after a bare
+ * `--` belongs to the underlying process, not to the framework.
+ */
+function frameworkPositionals(args: string[], framework: FrameworkSpec): string[] | null {
+  const positionals: string[] = [];
 
-  const subcommands = PACKAGE_RUNNERS[first];
-  if (!subcommands) return null;
-
-  let i = 1;
-
-  if (subcommands.length > 0) {
-    // Skip flags before the subcommand
-    while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
-    if (i >= commandArgs.length) return null;
-    if (!subcommands.includes(commandArgs[i])) {
-      // Not a recognized subcommand — might be an implicit bin (e.g. `yarn vite`)
-      const name = path.basename(commandArgs[i]);
-      return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--") break;
+    if (!arg.startsWith("-")) {
+      positionals.push(arg);
+      continue;
     }
-    i++;
+    if (arg.includes("=")) continue;
+    if (framework.valueFlags?.includes(arg)) {
+      i++;
+      continue;
+    }
+    if (!framework.valueFlags && positionals.length === 0) return null;
   }
 
-  // Skip runner flags (e.g. `--bun`, `--yes`)
-  while (i < commandArgs.length && commandArgs[i].startsWith("-")) i++;
+  return positionals;
+}
 
-  if (i >= commandArgs.length) return null;
-  const name = path.basename(commandArgs[i]);
-  return FRAMEWORKS_NEEDING_PORT[name] ? name : null;
+/**
+ * Whether the arguments after a framework name invoke one of its server
+ * subcommands, and so may receive `--port`/`--host`.
+ *
+ * The first positional is the subcommand; later ones are its own arguments,
+ * such as a root path in `vite dev ./app`. An unrecognized subcommand is
+ * declined, not assumed to be a server.
+ */
+function invokesFrameworkServer(frameworkArgs: string[], framework: FrameworkSpec): boolean {
+  const positionals = frameworkPositionals(frameworkArgs, framework);
+  if (positionals === null) return false;
+
+  const [subcommand] = positionals;
+  if (subcommand === undefined) return framework.defaultIsServer;
+  if (framework.serverSubcommands.includes(subcommand)) return true;
+  if (framework.nonServerSubcommands?.includes(subcommand)) return false;
+  return framework.positionalRootIsServer === true;
 }
 
 /**
  * Check if `commandArgs` invokes a framework that ignores `PORT` and, if so,
- * mutate the array in-place to append the correct CLI flags so the app
- * listens on the expected port and address.
+ * mutate the array in-place to add the correct CLI flags so the app listens on
+ * the expected port and address. Returns the flags that were added.
  *
  * Handles both direct invocation (`vite dev`) and invocation via package
  * runners (`bunx --bun vite dev`, `npx vite dev`, `yarn dlx vite dev`).
+ *
+ * Appends nothing unless the invocation reaches one of the framework's server
+ * subcommands (see invokesFrameworkServer): `vite build` and `vite optimize`
+ * reject `--port` outright.
  *
  * We also inject `--host 127.0.0.1` so frameworks bind IPv4 loopback
  * predictably. The proxy itself dials both loopback families (see
@@ -1268,27 +1447,255 @@ function findFrameworkBasename(commandArgs: string[]): string | null {
  * HMR WebSocket to degrade. Outside LAN mode, `--host localhost` keeps the
  * server local.
  */
-export function injectFrameworkFlags(commandArgs: string[], port: number): void {
-  const basename = findFrameworkBasename(commandArgs);
-  if (!basename) return;
+export function injectFrameworkFlags(commandArgs: string[], port: number): string[] {
+  const invocation = parseFrameworkInvocation(commandArgs);
+  if (!invocation) return [];
+  const { basename, framework, frameworkArgs, insertionIndex } = invocation;
 
-  const framework = FRAMEWORKS_NEEDING_PORT[basename];
+  if (!invokesFrameworkServer(frameworkArgs, framework)) return [];
 
-  if (!commandArgs.includes("--port")) {
-    commandArgs.push("--port", port.toString());
+  const flags: string[] = [];
+
+  if (!hasCliOption(frameworkArgs, "--port")) {
+    flags.push("--port", port.toString());
     if (framework.strictPort) {
-      commandArgs.push("--strictPort");
+      flags.push("--strictPort");
     }
   }
 
-  if (!commandArgs.includes("--host")) {
-    // In LAN mode, let Expo use its default (LAN) — injecting --host alongside
-    // HOST=127.0.0.1 causes Metro's HMR WebSocket to break after a few reloads.
+  const hasHostChoice =
+    hasCliOption(frameworkArgs, "--host") ||
+    (basename === "expo" &&
+      ["--localhost", "--lan", "--tunnel"].some((option) => hasCliOption(frameworkArgs, option)));
+  if (!hasHostChoice) {
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
-    if (isExpoLan) return;
-    const hostValue = basename === "expo" ? "localhost" : "127.0.0.1";
-    commandArgs.push("--host", hostValue);
+    if (!isExpoLan) {
+      flags.push("--host", basename === "expo" ? "localhost" : "127.0.0.1");
+    }
   }
+
+  commandArgs.splice(insertionIndex, 0, ...flags);
+  return flags;
+}
+
+/** Package managers whose `<pm> run <script>` delegates to a package.json script. */
+const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
+/**
+ * Detect whether appending arguments to a raw script string would change what
+ * the shell runs. Flags are forwarded by concatenating them onto this string,
+ * which the package manager hands back to a shell, so the shell parses it a
+ * second time: appending is not composition. Checked against the raw script
+ * string rather than the tokenized array, because splitCommand collapses
+ * newlines and would leave a glued operator (`vite dev&&node`) hidden inside a
+ * single token.
+ *
+ * Two classes make appending unsafe, and they fail differently:
+ * - Something starts a new command, so the appended flags land on the wrong
+ *   one: the control operators (`&&`, `||`, `;`, `|`, `&`) and a bare newline.
+ * - Something makes the shell discard the tail. A word-initial `#` opens a
+ *   comment and swallows every appended flag silently: the script exits 0 with
+ *   the framework on its own port, so the failure surfaces much later as a 502.
+ *
+ * Three classes of false positives are excluded:
+ * - Metacharacters inside single or double quotes (`'/foo&bar'`) — they are
+ *   part of an argument, not shell syntax, so quote state is tracked the same
+ *   way `splitCommand` tracks it.
+ * - `&` used as part of a shell redirection rather than a separator: `2>&1`
+ *   (duplicate a file descriptor) and `&>`/`>&` (redirect stdout+stderr) both
+ *   contain `&` adjacent to `>` but do not start a new command.
+ * - A `#` that does not start a word. `vite --tag v1#2` is one argument,
+ *   and `vite --define X=$(git rev-parse HEAD)` substitutes mid-word and still
+ *   accepts appended flags. Only a word-initial occurrence changes parsing.
+ *
+ * Subshells (`(vite dev)`) and command substitution (`` `printf vite` dev ``,
+ * `$(printf vite) dev`) are deliberately absent. Neither discards the tail, and
+ * the framework resolver already declines every one of those scripts because
+ * their first token is not a name it recognizes, so a guard clause for them
+ * would be unreachable. A regression test pins that outcome instead.
+ */
+function isUnsafeToAppendArgs(command: string): boolean {
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+  let atWordStart = true;
+  const chars = Array.from(command);
+  for (let i = 0; i < chars.length; i++) {
+    const ch = chars[i];
+    if (escaped) {
+      escaped = false;
+      // A backslash before a newline is a line continuation: the shell removes
+      // both characters and joins the lines, so whatever governed word
+      // position before it still governs after. `vite dev \<newline># note`
+      // reads as `vite dev # note`, and that `#` does open a comment.
+      if (ch === "\n" || ch === "\r") continue;
+      // Any other escaped character is part of the current word, so what
+      // follows it is not word-initial: `--open /foo\ #bar` is one argument.
+      atWordStart = false;
+      continue;
+    }
+    if (ch === "\\" && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      atWordStart = false;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      atWordStart = false;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+
+    if (ch === ";" || ch === "\n" || ch === "\r" || ch === "|") return true;
+    // A word-initial `#` opens a comment, so everything after it — including
+    // the flags we are about to append — is discarded by the shell. Word start
+    // is tracked rather than read off the previous character: an escaped space
+    // keeps the word open even though the raw character before `#` is a space.
+    if (ch === "#" && atWordStart) return true;
+    if (ch === "&") {
+      const prev = chars[i - 1];
+      const next = chars[i + 1];
+      // Only POSIX file-descriptor duplication is a redirection rather than a
+      // separator: `2>&1`, `>&2`, `2>&-`. `&>` and `>& file` are bash
+      // extensions, and package managers run scripts through `sh`, which is
+      // dash on Debian and Ubuntu. There `vite dev &> out.log --port 4567`
+      // backgrounds `vite dev` and runs the rest as its own command, so the
+      // appended flags never reach the framework.
+      if (prev === ">" && next !== undefined && /[0-9-]/.test(next)) continue;
+      return true;
+    }
+    atWordStart = ch === " " || ch === "\t";
+  }
+  return false;
+}
+
+function hasCliOption(args: string[], option: string): boolean {
+  return args.some((arg) => arg === option || arg.startsWith(`${option}=`));
+}
+
+/**
+ * Resolve the tokens of the package script a command delegates to, or null
+ * when the command is not `<pm> run <script>` or the script does not exist.
+ *
+ * Answers one question only: which command will run. Whether portless may
+ * safely append flags to that command is a separate question, asked by
+ * isSafeToInjectIntoScript. Conflating the two is its own defect: a script
+ * portless declines to append to still runs a framework, and the consumer that
+ * needs the framework's identity rather than its flags — the Expo LAN
+ * environment carve-out — must still get an answer.
+ */
+function resolvePackageScriptTokens(commandArgs: string[], packageDir: string): string[] | null {
+  if (commandArgs.length < 3) return null;
+
+  const runner = path.basename(commandArgs[0]);
+  if (!PACKAGE_SCRIPT_MANAGERS.has(runner)) return null;
+
+  const [, runSubcommand, scriptName] = commandArgs;
+  // Conservative shape match: `<pm> run <script>`. Runner flags between
+  // `run` and the script name (e.g. `bun run --bun dev`) are left alone.
+  if (runSubcommand !== "run" || scriptName.startsWith("-")) return null;
+
+  return resolveScript(scriptName, packageDir);
+}
+
+/**
+ * Decide whether portless may append flags to a resolved package script. Kept
+ * apart from resolving it: a script can be perfectly identifiable and still be
+ * one portless must not touch.
+ */
+function isSafeToInjectIntoScript(
+  scriptName: string,
+  rawScript: string[],
+  packageDir: string
+): boolean {
+  // A script the shell re-parses in a way appending would break. Test the raw
+  // script string, not the tokens: splitCommand collapses newlines and hides
+  // glued operators (`vite dev&&node`, `vite dev\nnode x`) inside a single
+  // token where a per-token check cannot see the separator, and it drops a
+  // trailing comment entirely.
+  const rawScriptText = resolveScriptRaw(scriptName, packageDir);
+  if (rawScriptText && isUnsafeToAppendArgs(rawScriptText)) return false;
+  // A script that ends its own option list keeps everything after `--` as
+  // positional data, so appended flags arrive as data too and the framework
+  // never reads them as options. Appending cannot reach past a `--` that lives
+  // inside the script, so leave the script alone.
+  if (rawScript.includes("--")) return false;
+  // Non-server subcommands need no check here: injectFrameworkFlags appends
+  // nothing for them.
+  return true;
+}
+
+/**
+ * Resolve which port-ignoring framework a command ultimately invokes, looking
+ * past package runners (`bunx vite dev`) and through one level of package
+ * script indirection (`bun run dev` where `"dev": "expo start"`). Returns null
+ * when the command reaches no framework portless knows about.
+ *
+ * Deciding which framework runs drives two independent effects, and both must
+ * read the same answer: the CLI flags appended below, and the environment
+ * `runApp` exports before spawning. Resolving the framework here while the env
+ * binder re-derived it from `path.basename(commandArgs[0])` is what left Expo
+ * package scripts with `HOST=127.0.0.1` in LAN mode, degrading Metro's HMR
+ * websocket — the exact condition the carve-out exists to avoid. Route every
+ * new consumer through this function rather than reading commandArgs[0].
+ *
+ * Deliberately independent of whether portless will inject flags: an Expo
+ * script portless declines to append to still runs Metro, and still must not
+ * get HOST in LAN mode. Shapes this cannot see through remain unresolved
+ * (a subshell or a leading command substitution hides the framework name from
+ * a tokenizer that does not parse shell syntax); those are recorded as a known
+ * gap rather than papered over.
+ */
+export function resolveFrameworkBasename(
+  commandArgs: string[],
+  packageDir: string = process.cwd()
+): string | null {
+  const direct = findFrameworkBasename(commandArgs);
+  if (direct) return direct;
+  const scriptTokens = resolvePackageScriptTokens(commandArgs, packageDir);
+  return scriptTokens ? findFrameworkBasename(scriptTokens) : null;
+}
+
+/**
+ * When the child command delegates to a package script (`<pm> run <script>`),
+ * the framework command lives inside package.json where injectFrameworkFlags
+ * cannot see it (it only inspects argv). Resolve the script, compute the flags
+ * the underlying framework needs, and forward them through the package manager
+ * so e.g. `bun run dev` becomes `bun run dev --port <n> --strictPort`.
+ *
+ * Covers zero-arg mode (`portless` resolving the dev script) and explicit
+ * delegation (`portless run npm run dev`). The script must exist in
+ * package.json at `packageDir` (the directory the child will run in).
+ */
+export function injectPackageScriptFrameworkFlags(
+  commandArgs: string[],
+  port: number,
+  packageDir: string = process.cwd()
+): void {
+  const rawScript = resolvePackageScriptTokens(commandArgs, packageDir);
+  if (!rawScript) return;
+  const [, , scriptName] = commandArgs;
+  if (!isSafeToInjectIntoScript(scriptName, rawScript, packageDir)) return;
+
+  // Probe the script plus any user-supplied trailing args so an existing
+  // --port/--host (in either place) suppresses injection of that flag.
+  // Each flag is independent: injectFrameworkFlags checks --port and --host
+  // separately, so an existing --port must not suppress a missing --host
+  // (and vice versa).
+  const userExtras = commandArgs.slice(3).filter((arg) => arg !== "--");
+  const probe = [...rawScript, ...userExtras];
+  const forwardedFlags = injectFrameworkFlags(probe, port);
+  if (forwardedFlags.length === 0) return;
+
+  // npm requires `--` before arguments meant for the package script.
+  // bun, pnpm, and yarn forward trailing arguments directly.
+  if (path.basename(commandArgs[0]) === "npm" && !commandArgs.includes("--")) {
+    commandArgs.push("--");
+  }
+  commandArgs.push(...forwardedFlags);
 }
 
 /**

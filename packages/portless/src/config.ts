@@ -148,6 +148,23 @@ export function resolveScript(scriptName: string, packageDir: string): string[] 
 }
 
 /**
+ * Return the raw (untokenized) script string for `scriptName`, or null when it
+ * is missing or empty. Unlike resolveScript, this preserves whitespace and
+ * command separators (newlines, operators) that splitCommand discards, so
+ * callers can detect compound scripts the tokenizer would flatten.
+ */
+export function resolveScriptRaw(scriptName: string, packageDir: string): string | null {
+  const pkgPath = path.join(packageDir, "package.json");
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf-8"));
+    const scriptValue = pkg?.scripts?.[scriptName];
+    return typeof scriptValue === "string" && scriptValue.trim() ? scriptValue : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Check if a package.json in `dir` has a specific script defined.
  */
 export function hasScript(scriptName: string, dir: string): boolean {
