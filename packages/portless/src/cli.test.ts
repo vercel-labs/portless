@@ -731,7 +731,7 @@ describe("CLI", () => {
       ["in run options", ["run", "--lan"]],
     ])("accepts global --lan %s", (_label, prefix) => {
       const { status, stdout } = run(
-        [...prefix, "node", "-e", "process.stdout.write(process.env.PORTLESS_LAN ?? '')"],
+        [...prefix, "node", "-e", "process.stdout.write(process.env.PORTLESS_LAN)"],
         { env: { PORTLESS: "0" } }
       );
       expect(status).toBe(0);
@@ -776,7 +776,7 @@ describe("CLI", () => {
           "--lan",
           "node",
           "-e",
-          "process.stdout.write(process.env.PORTLESS_LAN ?? '')",
+          "process.stdout.write(process.env.PORTLESS_LAN)",
         ],
         { env: { PORTLESS: "0" } }
       );
