@@ -653,7 +653,17 @@ function startProxyServer(
   };
 
   try {
-    watcher = fs.watch(routesPath, () => {
+    // Watch the containing directory rather than routes.json itself. Since
+    // saveRoutes() now replaces the file via rename (for atomicity), each
+    // write swaps in a new inode at that path; a watch on the file itself is
+    // bound to the old inode and goes silent after the first such rename. A
+    // directory watch keys events off the filename instead, so it keeps
+    // firing across renames. `filename` is filtered defensively because a
+    // few platforms don't report it, in which case any change is treated as
+    // relevant (reloadRoutes() is cheap and debounced).
+    const routesFilename = path.basename(routesPath);
+    watcher = fs.watch(store.dir, (_eventType, filename) => {
+      if (filename && filename !== routesFilename) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
     });
