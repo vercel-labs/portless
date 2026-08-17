@@ -1620,6 +1620,9 @@ ${colors.bold("Usage:")}
   When no command is given, runs the configured script (default: "dev")
   from package.json.
 
+  Ctrl+C is forwarded to the command. Portless waits for its process tree to
+  exit and terminates remaining descendants after a short grace period.
+
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Kill the existing process and take over its route

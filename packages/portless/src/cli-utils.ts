@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn } from "node:child_process";
 import { PORTLESS_HEADER } from "./proxy.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
@@ -109,6 +109,100 @@ export const SIGNAL_CODES: Record<string, number> = {
   SIGKILL: 9,
   SIGTERM: 15,
 };
+
+const COMMAND_SHUTDOWN_GRACE_MS = 5000;
+const COMMAND_SHUTDOWN_FORCE_MS = 10_000;
+const COMMAND_SHUTDOWN_POLL_MS = 50;
+
+type TrackedProcess = {
+  pid: number;
+  pgid: number;
+};
+
+function trackProcessTree(rootPid: number, tracked: Map<number, TrackedProcess>): void {
+  tracked.set(rootPid, { pid: rootPid, pgid: rootPid });
+  if (isWindows) {
+    return;
+  }
+
+  try {
+    const output = execFileSync("ps", ["-axo", "pid=,ppid=,pgid="], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    const rows = output
+      .trim()
+      .split("\n")
+      .map((line) => {
+        const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)$/);
+        if (!match) return null;
+        return {
+          pid: parseInt(match[1], 10),
+          ppid: parseInt(match[2], 10),
+          pgid: parseInt(match[3], 10),
+        };
+      })
+      .filter((row): row is { pid: number; ppid: number; pgid: number } => row !== null);
+
+    const descendants = new Set([rootPid]);
+    let foundDescendant = true;
+    while (foundDescendant) {
+      foundDescendant = false;
+      for (const row of rows) {
+        if (descendants.has(row.ppid) && !descendants.has(row.pid)) {
+          descendants.add(row.pid);
+          foundDescendant = true;
+        }
+      }
+    }
+
+    for (const row of rows) {
+      if (descendants.has(row.pid)) {
+        tracked.set(row.pid, { pid: row.pid, pgid: row.pgid });
+      }
+    }
+  } catch {
+    // Fall back to the root process group that was already tracked.
+  }
+}
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function hasRunningProcesses(tracked: Map<number, TrackedProcess>): boolean {
+  return [...tracked.keys()].some(isProcessRunning);
+}
+
+function signalTrackedProcesses(
+  tracked: Map<number, TrackedProcess>,
+  signal: NodeJS.Signals
+): void {
+  if (isWindows) {
+    for (const { pid } of tracked.values()) {
+      try {
+        process.kill(pid, signal);
+      } catch {
+        // Already dead
+      }
+    }
+    return;
+  }
+
+  const groups = new Set([...tracked.values()].map(({ pgid }) => pgid));
+  for (const pgid of groups) {
+    try {
+      process.kill(-pgid, signal);
+    } catch {
+      // Already dead
+    }
+  }
+}
 
 /** Return explicit IPv4 and IPv6 listener targets for the effective proxy mode. */
 export function getProxyBindTargets(lanMode: boolean): ProxyBindTarget[] {
@@ -1019,19 +1113,55 @@ export function spawnCommand(
       });
 
   let exiting = false;
+  let shutdownSignal: NodeJS.Signals | undefined;
+  let childExited = false;
+  const trackedProcesses = new Map<number, TrackedProcess>();
+  let graceTimer: NodeJS.Timeout | undefined;
+  let forceTimer: NodeJS.Timeout | undefined;
+  let shutdownPoll: NodeJS.Timeout | undefined;
 
   const cleanup = () => {
+    if (graceTimer) clearTimeout(graceTimer);
+    if (forceTimer) clearTimeout(forceTimer);
+    if (shutdownPoll) clearInterval(shutdownPoll);
     process.removeListener("SIGINT", onSigInt);
     process.removeListener("SIGTERM", onSigTerm);
     options?.onCleanup?.();
   };
 
-  const handleSignal = (signal: NodeJS.Signals) => {
+  const finish = (code: number) => {
     if (exiting) return;
     exiting = true;
-    killTree(child, signal);
     cleanup();
-    process.exit(128 + (SIGNAL_CODES[signal] || 15));
+    process.exit(code);
+  };
+
+  const finishShutdownIfComplete = () => {
+    if (!shutdownSignal || !childExited || hasRunningProcesses(trackedProcesses)) return;
+    finish(128 + (SIGNAL_CODES[shutdownSignal] || 15));
+  };
+
+  const handleSignal = (signal: NodeJS.Signals) => {
+    if (shutdownSignal) {
+      if (child.pid) trackProcessTree(child.pid, trackedProcesses);
+      signalTrackedProcesses(trackedProcesses, signal);
+      return;
+    }
+    shutdownSignal = signal;
+    if (child.pid) trackProcessTree(child.pid, trackedProcesses);
+    killTree(child, signal);
+
+    graceTimer = setTimeout(() => {
+      if (child.pid) trackProcessTree(child.pid, trackedProcesses);
+      signalTrackedProcesses(trackedProcesses, "SIGTERM");
+    }, COMMAND_SHUTDOWN_GRACE_MS);
+
+    forceTimer = setTimeout(() => {
+      if (child.pid) trackProcessTree(child.pid, trackedProcesses);
+      signalTrackedProcesses(trackedProcesses, "SIGKILL");
+    }, COMMAND_SHUTDOWN_FORCE_MS);
+
+    shutdownPoll = setInterval(finishShutdownIfComplete, COMMAND_SHUTDOWN_POLL_MS);
   };
 
   const onSigInt = () => handleSignal("SIGINT");
@@ -1041,24 +1171,26 @@ export function spawnCommand(
   process.on("SIGTERM", onSigTerm);
 
   child.on("error", (err) => {
-    if (exiting) return;
-    exiting = true;
+    if (exiting || shutdownSignal) return;
     console.error(`Failed to run command: ${err.message}`);
     if ((err as NodeJS.ErrnoException).code === "ENOENT") {
       console.error(`Is "${commandArgs[0]}" installed and in your PATH?`);
     }
-    cleanup();
-    process.exit(1);
+    finish(1);
   });
 
   child.on("exit", (code, signal) => {
     if (exiting) return;
-    exiting = true;
-    cleanup();
-    if (signal) {
-      process.exit(128 + (SIGNAL_CODES[signal] || 15));
+    childExited = true;
+    if (shutdownSignal) {
+      finishShutdownIfComplete();
+      return;
     }
-    process.exit(code ?? 1);
+    if (signal) {
+      finish(128 + (SIGNAL_CODES[signal] || 15));
+      return;
+    }
+    finish(code ?? 1);
   });
 }
 
