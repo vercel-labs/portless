@@ -24,12 +24,59 @@ async function findAvailablePort(preferred: number): Promise<number> {
   if (!(await isPortListening(preferred))) {
     return preferred;
   }
-  // Use portless's findFreePort (4000-4999 range) or nearby free port
-  // Try to keep DB-ish ports near original for familiarity
   for (let p = preferred + 1; p < preferred + 100; p++) {
     if (!(await isPortListening(p))) return p;
   }
   return await findFreePort();
+}
+
+function readEnvFile(cwd: string): Record<string, string> {
+  const envPaths = [path.join(cwd, ".env"), path.join(cwd, "backend/config/.env")];
+  const result: Record<string, string> = {};
+  for (const p of envPaths) {
+    if (!fs.existsSync(p)) continue;
+    const content = fs.readFileSync(p, "utf-8");
+    for (const line of content.split("\n")) {
+      const m = line.match(/^\s*([A-Z_]+)\s*=\s*"?([^"\n#]+)"?\s*$/);
+      if (m) result[m[1]] = m[2].trim();
+    }
+  }
+  return result;
+}
+
+function updateCorsForFrontend(cwd: string, newFrontendPort: number): void {
+  const backendEnv = path.join(cwd, "backend/config/.env");
+  if (!fs.existsSync(backendEnv)) return;
+  let content = fs.readFileSync(backendEnv, "utf-8");
+  const orig = content;
+  // Update CORS_ORIGINS to include new port
+  if (content.includes('CORS_ORIGINS=["http://localhost:3000"]')) {
+    content = content.replace(
+      'CORS_ORIGINS=["http://localhost:3000"]',
+      `CORS_ORIGINS=["http://localhost:${newFrontendPort}","http://localhost:3000"]`
+    );
+  } else if (
+    !content.includes(`http://localhost:${newFrontendPort}`) &&
+    content.includes("CORS_ORIGINS=")
+  ) {
+    content = content.replace(/CORS_ORIGINS=\[([^\]]+)\]/, (match, inner) => {
+      if (inner.includes(String(newFrontendPort))) return match;
+      return `CORS_ORIGINS=[${inner},"http://localhost:${newFrontendPort}"]`;
+    });
+  }
+  // Update FRONTEND_URL
+  if (content.includes("FRONTEND_URL=http://localhost:3000")) {
+    content = content.replace(
+      "FRONTEND_URL=http://localhost:3000",
+      `FRONTEND_URL=http://localhost:${newFrontendPort}`
+    );
+  }
+  if (content !== orig) {
+    fs.writeFileSync(backendEnv, content);
+    console.log(
+      colors.gray(`  Updated backend/config/.env FRONTEND_URL/CORS for :${newFrontendPort}`)
+    );
+  }
 }
 
 export async function handleCompose(args: string[]): Promise<void> {
@@ -56,16 +103,49 @@ export async function handleCompose(args: string[]): Promise<void> {
   }
 
   // Auto-assign free ports for any taken defaults
+  // Reuse existing .env values if already set (avoids flip-flop on restart)
+  const existingEnv = readEnvFile(cwd);
   const envOverrides: Record<string, string> = {};
   for (const { envVar, defaultPort } of COMPOSE_PORT_VARS) {
     if (process.env[envVar]) {
-      // User already exported - respect it
-      continue;
+      continue; // User exported - respect it
+    }
+    if (existingEnv[envVar] && existingEnv[envVar] !== String(defaultPort)) {
+      // Already has a custom port in .env (e.g. 5433 from previous run) - reuse it
+      // Only re-check if that custom port is still free for this project
+      const customPort = parseInt(existingEnv[envVar], 10);
+      if (!isNaN(customPort) && !(await isPortListening(customPort))) {
+        // Custom port is free (project down), but default is taken - keep custom
+        envOverrides[envVar] = existingEnv[envVar];
+        continue;
+      }
+      // Custom port is taken - but it may be by our own project; check if default is taken
+      if (await isPortListening(defaultPort)) {
+        // Default still taken, keep custom if it's ours, else find new
+        envOverrides[envVar] = existingEnv[envVar];
+        continue;
+      }
     }
     if (await isPortListening(defaultPort)) {
       const free = await findAvailablePort(defaultPort);
-      envOverrides[envVar] = String(free);
-      console.log(colors.yellow(`portless compose: ${defaultPort} taken, using ${envVar}=${free}`));
+      // If we already have a custom in .env that matches free, reuse
+      if (existingEnv[envVar] === String(free)) {
+        envOverrides[envVar] = existingEnv[envVar];
+      } else {
+        envOverrides[envVar] = String(free);
+        console.log(
+          colors.yellow(`portless compose: ${defaultPort} taken, using ${envVar}=${free}`)
+        );
+        if (envVar === "FRONTEND_PORT") {
+          updateCorsForFrontend(cwd, free);
+        }
+      }
+    } else if (existingEnv[envVar] && envVar === "FRONTEND_PORT") {
+      // Default is free but .env has custom - ensure CORS matches
+      const customPort = parseInt(existingEnv[envVar], 10);
+      if (!isNaN(customPort) && customPort !== defaultPort) {
+        updateCorsForFrontend(cwd, customPort);
+      }
     }
   }
 
