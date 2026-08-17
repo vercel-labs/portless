@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { findFreePort, isPortListening } from "./cli-utils.js";
@@ -49,7 +49,6 @@ function updateCorsForFrontend(cwd: string, newFrontendPort: number): void {
   if (!fs.existsSync(backendEnv)) return;
   let content = fs.readFileSync(backendEnv, "utf-8");
   const orig = content;
-  // Update CORS_ORIGINS to include new port
   if (content.includes('CORS_ORIGINS=["http://localhost:3000"]')) {
     content = content.replace(
       'CORS_ORIGINS=["http://localhost:3000"]',
@@ -64,7 +63,6 @@ function updateCorsForFrontend(cwd: string, newFrontendPort: number): void {
       return `CORS_ORIGINS=[${inner},"http://localhost:${newFrontendPort}"]`;
     });
   }
-  // Update FRONTEND_URL
   if (content.includes("FRONTEND_URL=http://localhost:3000")) {
     content = content.replace(
       "FRONTEND_URL=http://localhost:3000",
@@ -79,8 +77,43 @@ function updateCorsForFrontend(cwd: string, newFrontendPort: number): void {
   }
 }
 
+async function getProjectHostPorts(cwd: string): Promise<Set<number>> {
+  try {
+    const result = spawnSync("docker", ["compose", "ps", "--format", "json"], {
+      cwd,
+      encoding: "utf-8",
+      timeout: 5000,
+    });
+    if (result.status !== 0 || !result.stdout) return new Set();
+    const ports = new Set<number>();
+    for (const line of result.stdout.trim().split("\n")) {
+      if (!line) continue;
+      try {
+        const data = JSON.parse(line);
+        const publishers = data.Publishers || data.publishers || [];
+        for (const p of publishers) {
+          if (p.PublishedPort) ports.add(Number(p.PublishedPort));
+        }
+        if (data.Ports) {
+          const m = String(data.Ports).match(/(\d+)->/g);
+          if (m) m.forEach((s) => ports.add(Number(s.replace("->", ""))));
+        }
+      } catch {
+        /* ignore non-JSON line */ void 0;
+      }
+    }
+    return ports;
+  } catch {
+    return new Set();
+  }
+}
+
+async function isPortTakenForCompose(port: number, projectPorts: Set<number>): Promise<boolean> {
+  if (projectPorts.has(port)) return false;
+  return await isPortListening(port);
+}
+
 export async function handleCompose(args: string[]): Promise<void> {
-  // Strip leading "compose" if present
   if (args[0] === "compose") args = args.slice(1);
 
   if (args.length === 0 || args[0] === "--help" || args[0] === "-h") {
@@ -88,7 +121,6 @@ export async function handleCompose(args: string[]): Promise<void> {
     return;
   }
 
-  // Check if we're in a directory with docker-compose.yml
   const cwd = process.cwd();
   const composeFiles = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"];
   let foundCompose = false;
@@ -102,54 +134,58 @@ export async function handleCompose(args: string[]): Promise<void> {
     console.warn(colors.yellow(`Warning: No docker-compose.yml found in ${cwd}`));
   }
 
-  // Auto-assign free ports for any taken defaults
-  // Reuse existing .env values if already set (avoids flip-flop on restart)
-  const existingEnv = readEnvFile(cwd);
+  // Only auto-assign ports for commands that create containers (up/create). For restart/down/logs etc, reuse existing.
+  const subCommand = args[0];
+  const shouldAutoAssign = subCommand === "up" || subCommand === "create" || subCommand === "start";
   const envOverrides: Record<string, string> = {};
-  for (const { envVar, defaultPort } of COMPOSE_PORT_VARS) {
-    if (process.env[envVar]) {
-      continue; // User exported - respect it
-    }
-    if (existingEnv[envVar] && existingEnv[envVar] !== String(defaultPort)) {
-      // Already has a custom port in .env (e.g. 5433 from previous run) - reuse it
-      // Only re-check if that custom port is still free for this project
-      const customPort = parseInt(existingEnv[envVar], 10);
-      if (!isNaN(customPort) && !(await isPortListening(customPort))) {
-        // Custom port is free (project down), but default is taken - keep custom
-        envOverrides[envVar] = existingEnv[envVar];
-        continue;
-      }
-      // Custom port is taken - but it may be by our own project; check if default is taken
-      if (await isPortListening(defaultPort)) {
-        // Default still taken, keep custom if it's ours, else find new
-        envOverrides[envVar] = existingEnv[envVar];
-        continue;
-      }
-    }
-    if (await isPortListening(defaultPort)) {
-      const free = await findAvailablePort(defaultPort);
-      // If we already have a custom in .env that matches free, reuse
-      if (existingEnv[envVar] === String(free)) {
-        envOverrides[envVar] = existingEnv[envVar];
-      } else {
-        envOverrides[envVar] = String(free);
-        console.log(
-          colors.yellow(`portless compose: ${defaultPort} taken, using ${envVar}=${free}`)
-        );
-        if (envVar === "FRONTEND_PORT") {
-          updateCorsForFrontend(cwd, free);
+
+  if (shouldAutoAssign) {
+    const existingEnv = readEnvFile(cwd);
+    const projectPorts = await getProjectHostPorts(cwd);
+
+    for (const { envVar, defaultPort } of COMPOSE_PORT_VARS) {
+      if (process.env[envVar]) continue;
+
+      // If we already have a custom port in .env, reuse it if it's either free or is our own project's port
+      if (existingEnv[envVar] && existingEnv[envVar] !== String(defaultPort)) {
+        const customPort = parseInt(existingEnv[envVar], 10);
+        if (!isNaN(customPort)) {
+          const isCustomTaken = await isPortTakenForCompose(customPort, projectPorts);
+          // Keep custom if: custom is free, or custom is ours, or default is taken
+          if (
+            !isCustomTaken ||
+            projectPorts.has(customPort) ||
+            (await isPortTakenForCompose(defaultPort, projectPorts))
+          ) {
+            envOverrides[envVar] = existingEnv[envVar];
+            // Ensure CORS matches if frontend
+            if (envVar === "FRONTEND_PORT") updateCorsForFrontend(cwd, customPort);
+            continue;
+          }
         }
       }
-    } else if (existingEnv[envVar] && envVar === "FRONTEND_PORT") {
-      // Default is free but .env has custom - ensure CORS matches
-      const customPort = parseInt(existingEnv[envVar], 10);
-      if (!isNaN(customPort) && customPort !== defaultPort) {
-        updateCorsForFrontend(cwd, customPort);
+
+      if (await isPortTakenForCompose(defaultPort, projectPorts)) {
+        const free = await findAvailablePort(defaultPort);
+        if (existingEnv[envVar] === String(free)) {
+          envOverrides[envVar] = existingEnv[envVar];
+        } else {
+          envOverrides[envVar] = String(free);
+          console.log(
+            colors.yellow(`portless compose: ${defaultPort} taken, using ${envVar}=${free}`)
+          );
+          if (envVar === "FRONTEND_PORT") updateCorsForFrontend(cwd, free);
+        }
+      } else if (existingEnv[envVar] && envVar === "FRONTEND_PORT") {
+        const customPort = parseInt(existingEnv[envVar], 10);
+        if (!isNaN(customPort) && customPort !== defaultPort) {
+          updateCorsForFrontend(cwd, customPort);
+          envOverrides[envVar] = existingEnv[envVar];
+        }
       }
     }
   }
 
-  // Spawn docker compose with overrides
   const child = spawn("docker", ["compose", ...args], {
     stdio: "inherit",
     env: { ...process.env, ...envOverrides },
@@ -168,7 +204,6 @@ export async function handleCompose(args: string[]): Promise<void> {
     process.exit(exitCode);
   }
 
-  // If this was an `up` command, also hint about portless alias for HTTP services
   if (args[0] === "up") {
     const aliased = Object.entries(envOverrides)
       .filter(([k]) => k === "FRONTEND_PORT" || k === "API_PORT")
