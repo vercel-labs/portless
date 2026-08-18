@@ -1,11 +1,8 @@
-import { readFile } from "fs/promises";
-import { join } from "path";
 import { convertToModelMessages, stepCountIs, streamText } from "ai";
 import type { ModelMessage, UIMessage } from "ai";
 import { createBashTool } from "bash-tool";
 import { headers } from "next/headers";
-import { allDocsPages } from "@/lib/docs-navigation";
-import { mdxToCleanMarkdown } from "@/lib/mdx-to-markdown";
+import { loadAllDocsSources } from "@/lib/docs-source";
 import { minuteRateLimit, dailyRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
@@ -32,27 +29,10 @@ When answering questions:
 
 async function loadDocsFiles(): Promise<Record<string, string>> {
   const files: Record<string, string> = {};
-
-  const results = await Promise.allSettled(
-    allDocsPages.map(async (page) => {
-      const slug = page.href.replace(/^\//, "");
-      const filePath = slug
-        ? join(process.cwd(), "src", "app", slug, "page.mdx")
-        : join(process.cwd(), "src", "app", "page.mdx");
-
-      const raw = await readFile(filePath, "utf-8");
-      const md = mdxToCleanMarkdown(raw);
-      const fileName = slug ? `/${slug}.md` : "/index.md";
-      return { fileName, md };
-    })
-  );
-
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      files[result.value.fileName] = result.value.md;
-    }
+  const sources = await loadAllDocsSources();
+  for (const source of sources) {
+    files[source.markdownHref] = source.markdown;
   }
-
   return files;
 }
 

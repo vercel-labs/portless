@@ -18,6 +18,10 @@ export const metadata: Metadata = {
     template: "%s | portless",
   },
   description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+  alternates: {
+    canonical: "/",
+    types: { "text/markdown": "/index.md" },
+  },
   openGraph: {
     type: "website",
     locale: "en_US",
@@ -110,10 +114,21 @@ export default async function RootLayout({ children }: { children: React.ReactNo
   const [cookieStore, stars] = await Promise.all([cookies(), getStarCount()]);
   const chatOpen = cookieStore.get("docs-chat-open")?.value === "true";
   const chatWidth = Number(cookieStore.get("docs-chat-width")?.value) || 400;
+  const structuredData = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "portless",
+    url: "https://portless.sh",
+    description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
+  };
 
   return (
     <html lang="en" suppressHydrationWarning>
       <head>
+        <script
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(structuredData) }}
+        />
         {chatOpen && (
           <style
             dangerouslySetInnerHTML={{
