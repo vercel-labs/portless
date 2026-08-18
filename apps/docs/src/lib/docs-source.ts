@@ -54,6 +54,11 @@ export async function loadDocsSource(href: string): Promise<DocsSource | null> {
       markdown: mdxToCleanMarkdown(raw),
     }));
     sourcePromises.set(normalized, pending);
+    pending.catch(() => {
+      if (sourcePromises.get(normalized) === pending) {
+        sourcePromises.delete(normalized);
+      }
+    });
   }
 
   return pending;
