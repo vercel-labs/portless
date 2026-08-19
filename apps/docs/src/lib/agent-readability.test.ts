@@ -1,8 +1,8 @@
 import { describe, expect, test } from "vitest";
+import { shouldServeMarkdown } from "@vercel/agent-readability";
 import { GET as getMarkdown } from "../app/api/docs-md/[[...slug]]/route";
 import { allDocsPages } from "./docs-navigation";
 import { isSafePathSegments, loadAllDocsSources } from "./docs-source";
-import { isPreviewBot } from "./agent-routing";
 import { markdownForPathname } from "./page-markdown";
 
 describe("docs source", () => {
@@ -56,11 +56,25 @@ describe("public Markdown", () => {
 });
 
 describe("social previews", () => {
-  test.each(["Slackbot-LinkExpanding 1.0", "Discordbot/2.0"])("bypasses %s", (ua) => {
-    expect(isPreviewBot(ua)).toBe(true);
+  test.each([
+    "Slackbot-LinkExpanding 1.0",
+    "Discordbot/2.0",
+    "redditbot/1.0",
+    "bitlybot/3.0",
+    "Pinterestbot/1.0",
+  ])("keeps %s on HTML", (userAgent) => {
+    const result = shouldServeMarkdown({
+      headers: new Headers({ "user-agent": userAgent }),
+    });
+
+    expect(result.serve).toBe(false);
   });
 
-  test("does not bypass agents", () => {
-    expect(isPreviewBot("ClaudeBot/1.0")).toBe(false);
+  test("still detects agents", () => {
+    const result = shouldServeMarkdown({
+      headers: new Headers({ "user-agent": "ClaudeBot/1.0" }),
+    });
+
+    expect(result.serve).toBe(true);
   });
 });
