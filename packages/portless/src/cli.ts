@@ -2325,8 +2325,8 @@ ${colors.bold("Examples:")}
   }
 
   const hostnames = buildHostnames(aliasName, tlds);
-  const port = parseInt(aliasPort, 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
+  const port = /^\d+$/.test(aliasPort) ? Number(aliasPort) : NaN;
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
     console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
     process.exit(1);
   }
