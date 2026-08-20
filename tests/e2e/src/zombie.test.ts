@@ -242,6 +242,26 @@ describe("zombie process prevention", () => {
     expect(survivors).toEqual([]);
   });
 
+  it("SIGHUP kills the dev server and removes the route", async () => {
+    if (isWindows) return;
+
+    // SIGHUP is delivered when the controlling terminal goes away
+    // (tmux kill-session, ssh disconnect, parent shell exit). Without an
+    // explicit handler, Node terminates immediately and skips cleanup, leaving
+    // a stale routes.json entry and (with wrapper) an orphaned grandchild.
+    const { hostname, appPort } = await startCliApp("zombie-sighup", state, "wrapper.js");
+
+    state.cliChild!.kill("SIGHUP");
+    await sleep(2000);
+
+    const survivors = findPidsOnPort(appPort);
+    expect(survivors).toEqual([]);
+
+    const routesPath = path.join(state.stateDir!, "routes.json");
+    const routes: Array<{ hostname: string }> = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+    expect(routes.find((r) => r.hostname === hostname)).toBeUndefined();
+  });
+
   it("SIGKILL leaves orphan, portless prune cleans it up", async () => {
     if (isWindows) return;
 
