@@ -50,7 +50,6 @@ import {
   INTERNAL_LAN_IP_ENV,
   INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
-  RISKY_TLDS,
   WAIT_FOR_PROXY_INTERVAL_MS,
   WAIT_FOR_PROXY_MAX_ATTEMPTS,
   discoverState,
@@ -59,7 +58,11 @@ import {
   findPidsOnPort,
   getDefaultPort,
   getDefaultTlds,
+  getProxyBindTargets,
+  getRiskyTldReason,
   injectFrameworkFlags,
+  injectPackageScriptFrameworkFlags,
+  resolveFrameworkBasename,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -67,6 +70,7 @@ import {
   isProxyRunning,
   isWindows,
   killTree,
+  listenOnProxyInterface,
   parseTldList,
   readLanMarker,
   readCustomCertMarker,
@@ -484,6 +488,14 @@ function formatViteAllowedHosts(tlds: readonly string[]): string {
   return tlds.map((configuredTld) => `.${configuredTld}`).join(",");
 }
 
+function formatBindEndpoint(host: string, port: number): string {
+  return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+}
+
+function isUnavailableIpv6Bind(err: NodeJS.ErrnoException, host: string): boolean {
+  return host.includes(":") && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL");
+}
+
 function addRoutes(
   store: RouteStore,
   hostnames: readonly string[],
@@ -549,6 +561,9 @@ function startProxyServer(
   const isTls = !!tlsOptions;
   const mdnsSupport = isMdnsSupported();
   let activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
+  const lanModeActive = activeLanIp !== null;
+  const bindTargets = getProxyBindTargets(lanModeActive);
+  const primaryBindTarget = bindTargets[0]!;
   const lanIpPinned = !!process.env.PORTLESS_LAN_IP;
   let lanMonitor: ReturnType<typeof startLanIpMonitor> | null = null;
   if (lanIp && !mdnsSupport.supported) {
@@ -669,15 +684,29 @@ function startProxyServer(
   // Publish mDNS for routes that already exist at startup
   publishCachedRoutes();
 
-  const server = createProxyServer({
-    getRoutes: () => cachedRoutes,
-    proxyPort,
-    tld,
-    tlds,
-    strict,
-    onError: (msg) => console.error(colors.red(msg)),
-    tls: tlsOptions,
-  });
+  const createServer = () =>
+    createProxyServer({
+      getRoutes: () => cachedRoutes,
+      proxyPort,
+      tld,
+      tlds,
+      strict,
+      onError: (msg) => console.error(colors.red(msg)),
+      tls: tlsOptions,
+    });
+  const server = createServer();
+  const additionalServers = new Set<ReturnType<typeof createProxyServer>>();
+  const redirectServers = new Set<ReturnType<typeof createHttpRedirectServer>>();
+
+  const closeAuxiliaryServers = () => {
+    for (const auxiliaryServer of [...additionalServers, ...redirectServers]) {
+      try {
+        auxiliaryServer.close();
+      } catch {
+        // The listener may have failed before it started; nothing to close.
+      }
+    }
+  };
 
   server.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
@@ -697,23 +726,57 @@ function startProxyServer(
     } else {
       console.error(colors.red(`Proxy error: ${err.message}`));
     }
-    if (redirectServer) redirectServer.close();
+    closeAuxiliaryServers();
     process.exit(1);
   });
+
+  const proto = isTls ? "HTTPS/2" : "HTTP";
+  const tldLabel = tlds.length > 1 || tld !== DEFAULT_TLD ? ` (TLDs: ${formatTldList(tlds)})` : "";
+  const modeLabel = strict === false ? " (wildcard)" : "";
+
+  for (const bindTarget of bindTargets.slice(1)) {
+    const additionalServer = createServer();
+    additionalServers.add(additionalServer);
+    additionalServer.on("error", (err: NodeJS.ErrnoException) => {
+      additionalServers.delete(additionalServer);
+      if (!isUnavailableIpv6Bind(err, bindTarget.host)) {
+        console.warn(
+          colors.yellow(
+            `Could not listen on ${formatBindEndpoint(bindTarget.host, proxyPort)}: ${err.message}`
+          )
+        );
+      }
+    });
+    listenOnProxyInterface(additionalServer, proxyPort, bindTarget, () => {
+      console.log(
+        colors.green(
+          `${proto} proxy listening on ${formatBindEndpoint(bindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
+        )
+      );
+    });
+  }
 
   // When TLS is enabled, start a plain HTTP server on port 80 that redirects
   // to HTTPS. Best-effort: if port 80 is unavailable, skip silently (the main
   // proxy on 443 still works; users just won't get automatic redirects).
-  let redirectServer: ReturnType<typeof createHttpRedirectServer> | null = null;
   if (isTls && proxyPort !== 80) {
-    redirectServer = createHttpRedirectServer(proxyPort);
-    redirectServer.on("error", () => {
-      redirectServer = null;
-    });
-    redirectServer.listen(80);
+    for (const bindTarget of bindTargets) {
+      const redirectServer = createHttpRedirectServer(proxyPort);
+      redirectServers.add(redirectServer);
+      redirectServer.on("error", () => {
+        redirectServers.delete(redirectServer);
+      });
+      listenOnProxyInterface(redirectServer, 80, bindTarget, () => {
+        console.log(
+          colors.green(
+            `HTTP-to-HTTPS redirect listening on ${formatBindEndpoint(bindTarget.host, 80)}`
+          )
+        );
+      });
+    }
   }
 
-  server.listen(proxyPort, () => {
+  listenOnProxyInterface(server, proxyPort, primaryBindTarget, () => {
     // Save PID and port once the server is actually listening
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
@@ -722,12 +785,10 @@ function startProxyServer(
     writeTldsFile(store.dir, tlds);
     writeLanMarker(store.dir, activeLanIp);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
-    const proto = isTls ? "HTTPS/2" : "HTTP";
-    const tldLabel =
-      tlds.length > 1 || tld !== DEFAULT_TLD ? ` (TLDs: ${formatTldList(tlds)})` : "";
-    const modeLabel = strict === false ? " (wildcard)" : "";
     console.log(
-      colors.green(`${proto} proxy listening on port ${proxyPort}${tldLabel}${modeLabel}`)
+      colors.green(
+        `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
+      )
     );
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
@@ -747,9 +808,6 @@ function startProxyServer(
         });
       }
     }
-    if (redirectServer) {
-      console.log(colors.green("HTTP-to-HTTPS redirect listening on port 80"));
-    }
   });
 
   // Cleanup on exit
@@ -764,9 +822,7 @@ function startProxyServer(
       watcher.close();
     }
     if (activeLanIp) cleanupMdns();
-    if (redirectServer) {
-      redirectServer.close();
-    }
+    closeAuxiliaryServers();
     try {
       fs.unlinkSync(store.pidPath);
     } catch {
@@ -1452,9 +1508,11 @@ async function runApp(
   // Child servers always bind to localhost; the proxy handles cross-device LAN access.
   // Exception: Expo in LAN mode — Metro defaults to LAN and setting HOST=127.0.0.1
   // conflicts with its internal networking, causing HMR WebSocket degradation.
-  const basename = path.basename(commandArgs[0]);
-  const isExpo = basename === "expo";
-  const isExpoLan = isExpo && (lanMode || isLanEnvEnabled());
+  // Resolve the framework the same way the flag injectors do, through package
+  // runners and package scripts: `bun run dev` with `"dev": "expo start"` is
+  // still Expo, and reading commandArgs[0] here would see only `bun`.
+  const framework = resolveFrameworkBasename(commandArgs);
+  const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
   const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
@@ -1465,6 +1523,7 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
+  injectPackageScriptFrameworkFlags(commandArgs, port);
   injectFrameworkFlags(commandArgs, port);
 
   // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
@@ -1640,6 +1699,9 @@ ${colors.bold("Usage:")}
 
   When no command is given, runs the configured script (default: "dev")
   from package.json.
+
+  Ctrl+C is forwarded to the command. Portless waits for its process tree to
+  exit and terminates remaining descendants after a short grace period.
 
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
@@ -1884,11 +1946,24 @@ ${colors.bold("How it works:")}
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
      Expo, React Native) get --port and, when needed, --host flags
-     injected automatically
+     injected automatically, including through a package script whose command
+     starts with the framework. Only server commands (dev, serve, preview,
+     start, a bare vite, or vite [root]) get them; build, optimize, test and
+     the like reject them, and an invocation portless cannot classify is left
+     alone too. Expo --localhost, --lan and --tunnel modes are preserved while
+     the assigned port is still injected.
+     Portless also leaves a script alone when it is
+     compound (&&, |, ;), ends in a # comment, ends its own option list with
+     --, is env-prefixed (NODE_ENV=production vite), delegates to another
+     script, or is invoked with runner flags before the script name
+     (bun run --bun dev); set the port in those yourself
+  6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
 ${colors.bold("HTTP/2 + HTTPS (default):")}
   HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
+  WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441
+  extended CONNECT), so dev server HMR works through the proxy.
   On first use, portless generates a local CA and adds it to your
   system trust store. No browser warnings. Disable with --no-tls.
   On WSL, portless also adds the CA to the Windows user certificate store.
@@ -1896,6 +1971,8 @@ ${colors.bold("HTTP/2 + HTTPS (default):")}
 ${colors.bold("LAN mode:")}
   Use --lan to make services accessible from other devices (phones,
   tablets) on the same WiFi network via mDNS (.local domains).
+  Normal mode binds only to 127.0.0.1 and ::1.
+  LAN mode binds to 0.0.0.0 and ::.
   Useful for testing React Native / Expo apps on real devices.
   Expo keeps Metro's default LAN host behavior in this mode.
   Auto-detected LAN IPs follow network changes automatically.
@@ -1938,7 +2015,7 @@ ${colors.bold("Options:")}
   --cert <path>                 Use a custom TLS certificate
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost; repeat for more
+  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
   --wildcard                    Allow unregistered subdomains to fall back to parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
@@ -1955,7 +2032,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
-  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test)
+  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
@@ -2968,10 +3045,13 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
+  ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("LAN mode (--lan):")}
+  Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
+  LAN mode explicitly binds the proxy to 0.0.0.0 and ::.
   Makes services accessible from other devices on the same WiFi network
   via mDNS (.local domains). Useful for testing on real mobile devices.
   Auto-detects your LAN IP and follows changes automatically, or use
@@ -3053,7 +3133,9 @@ ${colors.bold("LAN mode (--lan):")}
     if (args[i] === "--tld") {
       const tldValue = args[i + 1];
       if (!tldValue || tldValue.startsWith("-")) {
-        console.error(colors.red("Error: --tld requires a TLD value (e.g. test, localhost)."));
+        console.error(
+          colors.red("Error: --tld requires a TLD value (e.g. test, dev.example.com).")
+        );
         process.exit(1);
       }
       tldFlagValues.push(tldValue);
@@ -3140,7 +3222,7 @@ ${colors.bold("LAN mode (--lan):")}
   }
 
   for (const configuredTld of tlds) {
-    const riskyReason = RISKY_TLDS.get(configuredTld);
+    const riskyReason = getRiskyTldReason(configuredTld);
     if (riskyReason && !lanMode) {
       console.warn(colors.yellow(`Warning: .${configuredTld}: ${riskyReason}`));
     }
@@ -4276,18 +4358,80 @@ async function main() {
     process.exit(1);
   }
 
-  // --lan / --ip / --lan-ip-auto: global flags that enable LAN mode.
-  // Strip from args and convert to env vars so all downstream code paths
-  // see them regardless of where the user placed them (e.g.
-  // `portless --lan run ...`, `portless proxy start --lan`).
-  // Only scan before the `--` separator to avoid consuming flags meant
-  // for the child command (e.g. `portless run tool -- --ip 0.0.0.0`).
-  //
-  // Helper: find a flag before `--`, strip it (and optionally its value)
-  // from args, and return the value (or true for boolean flags).
+  const globalBooleanFlags = new Set(["--lan", "--tailscale", "--funnel", "--ngrok"]);
+  const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
+  const childlessCommands = new Set([
+    "--help",
+    "-h",
+    "--version",
+    "-v",
+    "trust",
+    "clean",
+    "prune",
+    "list",
+    "doctor",
+    "get",
+    "alias",
+    "hosts",
+    "proxy",
+    "service",
+  ]);
+
+  const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
+    const arg = args[index];
+    if (globalBooleanFlags.has(arg) || arg === "--force" || arg === "--help" || arg === "-h") {
+      return index + 1;
+    }
+    if (globalValueFlags.has(arg) || localValueFlags.has(arg)) {
+      return index + 2;
+    }
+    return null;
+  };
+
+  const globalFlagEnd = (): number => {
+    const separator = args.indexOf("--");
+    const limit = separator === -1 ? args.length : separator;
+    const leadingValueFlags = new Set(["--app-port"]);
+    let index = 0;
+
+    while (index < limit) {
+      const next = advancePortlessFlag(index, leadingValueFlags);
+      if (next === null) break;
+      index = next;
+    }
+
+    if (index >= limit) return limit;
+    const mode = args[index];
+    if (childlessCommands.has(mode)) return limit;
+
+    if (mode === "run") {
+      index++;
+      const runValueFlags = new Set(["--name", "--app-port"]);
+      while (index < limit) {
+        const next = advancePortlessFlag(index, runValueFlags);
+        if (next === null) break;
+        index = next;
+      }
+      return index;
+    }
+
+    if (mode === "--name") {
+      index += 2;
+    } else {
+      index++;
+    }
+
+    const namedValueFlags = new Set(["--app-port"]);
+    while (index < limit) {
+      const next = advancePortlessFlag(index, namedValueFlags);
+      if (next === null) break;
+      index = next;
+    }
+    return index;
+  };
+
   const stripGlobalFlag = (flag: string, hasValue: boolean): string | boolean | null => {
-    const sep = args.indexOf("--");
-    const end = sep === -1 ? args.length : sep;
+    const end = globalFlagEnd();
     const idx = args.indexOf(flag);
     if (idx === -1 || idx >= end) return null;
     if (!hasValue) {

@@ -1,8 +1,51 @@
 # Changelog
 
-## 0.15.3
+## 0.15.6
 
 <!-- release:start -->
+
+### New Features
+
+- **Agent-readable documentation**: The documentation site now exposes clean Markdown pages and an `llms.txt` index so agents can discover and consume the docs directly. (#387)
+
+### Bug Fixes
+
+- **Framework flags through package scripts**: Frameworks that ignore `PORT` now receive the assigned `--port` and `--host` flags when launched through supported package-manager scripts, while non-server and unsafe scripts are left untouched. (#366)
+- **Windows service lifetime**: The Windows startup service now registers a UTF-16 Task Scheduler definition with no execution time limit and replaces existing tasks atomically. (#381)
+- **Ctrl+C process cleanup**: Interrupt handling now waits for the command's process tree to exit and terminates remaining descendants after a short grace period. (#385)
+
+### Contributors
+
+- @Railly
+- @EfeDurmaz16
+- @JohnPhamous
+<!-- release:end -->
+
+## 0.15.5
+
+### Bug Fixes
+
+- **Multi-segment custom TLDs**: `--tld` and `PORTLESS_TLD` now accept dotted DNS names such as `dev.example.com`, so local URLs can mirror production structure. `validateTld` checks per-label DNS rules and the 253-character total limit, overlapping TLDs resolve by longest match, and cert cache filenames stay under the filesystem name limit for long hostnames. (#365)
+- **WebSocket over HTTP/2**: Proxy now advertises RFC 8441 extended CONNECT and bridges `:protocol websocket` streams to an HTTP/1.1 upgrade against the backend, fixing dev server HMR for browsers that negotiate h2 over ALPN. Plain-HTTP upgrades on the TLS port are proxied instead of dropped, and a backend that rejects the handshake or answers with a bad `Sec-WebSocket-Accept` now gets a 502 instead of a silently destroyed socket. (#363)
+
+### Contributors
+
+- @Railly
+- @KingPsychopath
+- @erichurkman
+- @sanjevirau
+
+## 0.15.4
+
+### Bug Fixes
+
+- **Loopback-only proxy binding**: Outside LAN mode, the proxy and HTTP redirect listeners now bind only to `127.0.0.1` and `::1`, so Portless routes cannot be reached through LAN, VPN, or other network interfaces. LAN mode still binds to all interfaces explicitly. (#361)
+
+### Contributors
+
+- @ctate
+
+## 0.15.3
 
 ### Bug Fixes
 
@@ -13,7 +56,6 @@
 
 - @ctate
 - @gerardbalaoro
-<!-- release:end -->
 
 ## 0.15.2
 

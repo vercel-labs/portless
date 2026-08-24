@@ -125,7 +125,8 @@ export type ServiceSpec =
       scriptDir: string;
       scriptPath: string;
       script: string;
-      taskRun: string;
+      taskXmlPath: string;
+      taskXml: string;
       createArgs: string[];
       runArgs: string[];
       deleteArgs: string[];
@@ -518,6 +519,49 @@ function buildWindowsScript(ctx: ServiceContext, command: string[]): string {
   return `@echo off\r\n${setEnv}\r\n${proxyCommand}\r\n`;
 }
 
+function buildWindowsTaskXml(scriptPath: string): string {
+  const taskArguments = `/d /s /c "${windowsQuote(scriptPath)}"`;
+  return `\uFEFF<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.3" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Portless HTTPS proxy</Description>
+  </RegistrationInfo>
+  <Triggers>
+    <BootTrigger>
+      <Enabled>true</Enabled>
+    </BootTrigger>
+  </Triggers>
+  <Principals>
+    <Principal id="System">
+      <UserId>S-1-5-18</UserId>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+  <Actions Context="System">
+    <Exec>
+      <Command>cmd.exe</Command>
+      <Arguments>${xmlEscape(taskArguments)}</Arguments>
+    </Exec>
+  </Actions>
+</Task>
+`;
+}
+
 export function buildServiceSpec(options: {
   platform: SupportedPlatform;
   nodePath: string;
@@ -596,8 +640,9 @@ export function buildServiceSpec(options: {
 
   const scriptDir = path.win32.join(ctx.programData, "portless", "service");
   const scriptPath = path.win32.join(scriptDir, "portless-service.cmd");
+  const taskXmlPath = path.win32.join(scriptDir, "portless-task.xml");
   const script = buildWindowsScript(ctx, proxyCommand);
-  const taskRun = windowsQuote(scriptPath);
+  const taskXml = buildWindowsTaskXml(scriptPath);
   return {
     platform: "win32",
     taskName: WINDOWS_TASK_NAME,
@@ -606,21 +651,9 @@ export function buildServiceSpec(options: {
     scriptDir,
     scriptPath,
     script,
-    taskRun,
-    createArgs: [
-      "/Create",
-      "/TN",
-      WINDOWS_TASK_NAME,
-      "/SC",
-      "ONSTART",
-      "/RU",
-      "SYSTEM",
-      "/RL",
-      "HIGHEST",
-      "/TR",
-      taskRun,
-      "/F",
-    ],
+    taskXmlPath,
+    taskXml,
+    createArgs: ["/Create", "/TN", WINDOWS_TASK_NAME, "/XML", taskXmlPath, "/F"],
     runArgs: ["/Run", "/TN", WINDOWS_TASK_NAME],
     deleteArgs: ["/Delete", "/TN", WINDOWS_TASK_NAME, "/F"],
     queryArgs: ["/Query", "/TN", WINDOWS_TASK_NAME, "/FO", "LIST", "/V"],
@@ -1009,11 +1042,12 @@ async function installService(
     runRequired(runner, "systemctl", ["enable", spec.serviceName]);
     runRequired(runner, "systemctl", ["restart", spec.serviceName]);
   } else {
-    runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
-    await stopExistingProxy(entryScript, runner, spec.config.proxyPort);
     fs.mkdirSync(spec.scriptDir, { recursive: true });
     fs.writeFileSync(spec.scriptPath, spec.script);
+    fs.writeFileSync(spec.taskXmlPath, spec.taskXml, "utf16le");
     runRequired(runner, "schtasks", spec.createArgs);
+    runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
+    await stopExistingProxy(entryScript, runner, spec.config.proxyPort);
     runOptional(runner, "schtasks", spec.runArgs);
   }
 

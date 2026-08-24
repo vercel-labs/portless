@@ -172,12 +172,24 @@ describe("buildServiceSpec", () => {
     expect(spec.platform).toBe("win32");
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
     expect(spec.taskName).toBe("Portless Proxy");
-    expect(spec.createArgs).toContain("/SC");
-    expect(spec.createArgs).toContain("ONSTART");
-    expect(spec.createArgs).toContain("/RU");
-    expect(spec.createArgs).toContain("SYSTEM");
     expect(spec.scriptPath).toBe("C:\\ProgramData\\portless\\service\\portless-service.cmd");
-    expect(spec.taskRun).toBe('"C:\\ProgramData\\portless\\service\\portless-service.cmd"');
+    expect(spec.taskXmlPath).toBe("C:\\ProgramData\\portless\\service\\portless-task.xml");
+    expect(spec.createArgs).toEqual([
+      "/Create",
+      "/TN",
+      "Portless Proxy",
+      "/XML",
+      "C:\\ProgramData\\portless\\service\\portless-task.xml",
+      "/F",
+    ]);
+    expect(spec.taskXml).toContain("<BootTrigger>");
+    expect(spec.taskXml).toContain("<UserId>S-1-5-18</UserId>");
+    expect(spec.taskXml).toContain("<RunLevel>HighestAvailable</RunLevel>");
+    expect(spec.taskXml).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    expect(spec.taskXml).toContain("<Command>cmd.exe</Command>");
+    expect(spec.taskXml).toContain(
+      "<Arguments>/d /s /c &quot;&quot;C:\\ProgramData\\portless\\service\\portless-service.cmd&quot;&quot;</Arguments>"
+    );
     expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\Alice\\.portless");
     expect(spec.script).toContain('"C:\\Program Files\\nodejs\\node.exe"');
     expect(spec.script).toContain("proxy");
@@ -427,6 +439,270 @@ describe("handleService", () => {
     expect(writeFileSync).not.toHaveBeenCalled();
     const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
     expect(output).toContain("LAN mode requires mDNS publishing");
+  });
+
+  it("registers the Windows task with no execution time limit before starting it", async () => {
+    setPlatform("win32");
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalProgramData = process.env.ProgramData;
+    process.env.USERPROFILE = "C:\\Users\\Alice";
+    process.env.ProgramData = "C:\\ProgramData";
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    try {
+      await handleService(["service", "install"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      });
+    } finally {
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalProgramData === undefined) {
+        delete process.env.ProgramData;
+      } else {
+        process.env.ProgramData = originalProgramData;
+      }
+    }
+
+    const calls = runner.mock.calls.map(([command, args]) => ({ command, args }));
+    const createIndex = calls.findIndex(
+      (call) => call.command === "schtasks" && call.args[0] === "/Create"
+    );
+    const runIndex = calls.findIndex(
+      (call) => call.command === "schtasks" && call.args[0] === "/Run"
+    );
+    const taskXmlWrite = vi
+      .mocked(writeFileSync)
+      .mock.calls.find(
+        ([file]) => file === "C:\\ProgramData\\portless\\service\\portless-task.xml"
+      );
+
+    expect(createIndex).toBeGreaterThanOrEqual(0);
+    expect(runIndex).toBeGreaterThan(createIndex);
+    expect(calls.some((call) => call.command === "powershell.exe")).toBe(false);
+    expect(taskXmlWrite?.[1]).toContain("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>");
+    expect(taskXmlWrite?.[2]).toBe("utf16le");
+  });
+
+  it("does not start a Windows task when atomic registration fails", async () => {
+    setPlatform("win32");
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalProgramData = process.env.ProgramData;
+    process.env.USERPROFILE = "C:\\Users\\Alice";
+    process.env.ProgramData = "C:\\ProgramData";
+    const runner = vi.fn((command: string, args: string[]) => ({
+      status: command === "schtasks" && args[0] === "/Create" ? 1 : 0,
+      stdout: "",
+      stderr: command === "schtasks" && args[0] === "/Create" ? "registration failed" : "",
+    }));
+
+    try {
+      await expect(
+        handleService(["service", "install"], {
+          entryScript: "C:\\cli.js",
+          runner,
+        })
+      ).rejects.toThrow("process.exit");
+    } finally {
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalProgramData === undefined) {
+        delete process.env.ProgramData;
+      } else {
+        process.env.ProgramData = originalProgramData;
+      }
+    }
+
+    const calls = runner.mock.calls.map(([command, args]) => ({ command, args }));
+    expect(calls.some((call) => call.command === "powershell.exe")).toBe(false);
+    expect(calls.some((call) => call.command === "schtasks" && call.args[0] === "/Run")).toBe(
+      false
+    );
+    expect(errorSpy.mock.calls.flat().join(" ")).toContain("registration failed");
+  });
+
+  it("does not stop the previous Windows task when replacement registration fails", async () => {
+    setPlatform("win32");
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalProgramData = process.env.ProgramData;
+    process.env.USERPROFILE = "C:\\Users\\Alice";
+    process.env.ProgramData = "C:\\ProgramData";
+    const runner = vi.fn((command: string, args: string[]) => ({
+      status: command === "schtasks" && args[0] === "/Create" ? 1 : 0,
+      stdout: "",
+      stderr: command === "schtasks" && args[0] === "/Create" ? "registration failed" : "",
+    }));
+
+    try {
+      await expect(
+        handleService(["service", "install"], {
+          entryScript: "C:\\cli.js",
+          runner,
+        })
+      ).rejects.toThrow("process.exit");
+    } finally {
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalProgramData === undefined) {
+        delete process.env.ProgramData;
+      } else {
+        process.env.ProgramData = originalProgramData;
+      }
+    }
+
+    const taskCalls = runner.mock.calls
+      .filter(([command]) => command === "schtasks")
+      .map(([, args]) => args[0]);
+    expect(taskCalls).toEqual(["/Create"]);
+    expect(taskCalls).not.toContain("/Delete");
+    expect(
+      runner.mock.calls.some(
+        ([command, args]) =>
+          command === process.execPath && args.join(" ") === "C:\\cli.js proxy stop --port 443"
+      )
+    ).toBe(false);
+  });
+
+  it("keeps an atomically registered Windows task when immediate start fails", async () => {
+    setPlatform("win32");
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalProgramData = process.env.ProgramData;
+    process.env.USERPROFILE = "C:\\Users\\Alice";
+    process.env.ProgramData = "C:\\ProgramData";
+    const runner = vi.fn((command: string, args: string[]) => ({
+      status: command === "schtasks" && args[0] === "/Run" ? 1 : 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    try {
+      await handleService(["service", "install"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      });
+    } finally {
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalProgramData === undefined) {
+        delete process.env.ProgramData;
+      } else {
+        process.env.ProgramData = originalProgramData;
+      }
+    }
+
+    const calls = runner.mock.calls.map(([command, args]) => ({ command, args }));
+    expect(calls.some((call) => call.command === "schtasks" && call.args[0] === "/Create")).toBe(
+      true
+    );
+    expect(calls.some((call) => call.command === "schtasks" && call.args[0] === "/Delete")).toBe(
+      false
+    );
+    expect(logSpy.mock.calls.flat().join(" ")).toContain("Portless service installed.");
+  });
+
+  it("removes Windows service files even when no task was registered", async () => {
+    setPlatform("win32");
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalProgramData = process.env.ProgramData;
+    process.env.USERPROFILE = "C:\\Users\\Alice";
+    process.env.ProgramData = "C:\\ProgramData";
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 1,
+      stdout: "",
+      stderr: "",
+    }));
+
+    try {
+      await handleService(["service", "uninstall"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      });
+    } finally {
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalProgramData === undefined) {
+        delete process.env.ProgramData;
+      } else {
+        process.env.ProgramData = originalProgramData;
+      }
+    }
+
+    expect(rmSync).toHaveBeenCalledWith("C:\\ProgramData\\portless\\service", {
+      recursive: true,
+      force: true,
+    });
+  });
+
+  it("repeated Windows installs always register the PT0S task definition", async () => {
+    setPlatform("win32");
+    const originalUserProfile = process.env.USERPROFILE;
+    const originalProgramData = process.env.ProgramData;
+    process.env.USERPROFILE = "C:\\Users\\Alice";
+    process.env.ProgramData = "C:\\ProgramData";
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 0,
+      stdout: "",
+      stderr: "",
+    }));
+
+    try {
+      await handleService(["service", "install"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      });
+      await handleService(["service", "install"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      });
+    } finally {
+      if (originalUserProfile === undefined) {
+        delete process.env.USERPROFILE;
+      } else {
+        process.env.USERPROFILE = originalUserProfile;
+      }
+      if (originalProgramData === undefined) {
+        delete process.env.ProgramData;
+      } else {
+        process.env.ProgramData = originalProgramData;
+      }
+    }
+
+    const taskXmlWrites = vi
+      .mocked(writeFileSync)
+      .mock.calls.filter(
+        ([file]) => file === "C:\\ProgramData\\portless\\service\\portless-task.xml"
+      );
+    const createCalls = runner.mock.calls.filter(
+      ([command, args]) => command === "schtasks" && args[0] === "/Create"
+    );
+    expect(taskXmlWrites).toHaveLength(2);
+    expect(
+      taskXmlWrites.every(([, content]) =>
+        String(content).includes("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>")
+      )
+    ).toBe(true);
+    expect(taskXmlWrites.every(([, , encoding]) => encoding === "utf16le")).toBe(true);
+    expect(createCalls).toHaveLength(2);
+    expect(createCalls.every(([, args]) => args.includes("/XML"))).toBe(true);
   });
 
   it("stops an existing proxy before restarting the Linux service", async () => {

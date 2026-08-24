@@ -1,4 +1,6 @@
 minimumReleaseAge: 2880
+minimumReleaseAgeExclude:
+  - "@vercel/agent-readability@0.5.1"
 
 allowBuilds:
   "@mongodb-js/zstd": false

@@ -20,10 +20,15 @@ import {
   getDefaultTld,
   getDefaultTlds,
   getProtocolPort,
+  getProxyBindTargets,
+  getRiskyTldReason,
   isHttpsEnvDisabled,
   injectFrameworkFlags,
+  injectPackageScriptFrameworkFlags,
+  resolveFrameworkBasename,
   isPortListening,
   isProxyRunning,
+  listenOnProxyInterface,
   parsePidFromNetstat,
   parseTldList,
   readLanMarker,
@@ -37,6 +42,80 @@ import {
   writeTldsFile,
   writeTlsMarker,
 } from "./cli-utils.js";
+
+describe("proxy listener interface", () => {
+  it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
+    expect(getProxyBindTargets(false)).toEqual([
+      { host: "127.0.0.1" },
+      { host: "::1", ipv6Only: true },
+    ]);
+  });
+
+  it("uses IPv4 and IPv6 unspecified addresses in LAN mode", () => {
+    expect(getProxyBindTargets(true)).toEqual([
+      { host: "0.0.0.0" },
+      { host: "::", ipv6Only: true },
+    ]);
+  });
+
+  it("binds IPv4 loopback outside LAN mode", async () => {
+    const target = getProxyBindTargets(false)[0]!;
+
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      listenOnProxyInterface(server, 0, target, resolve);
+    });
+
+    try {
+      const address = server.address();
+      expect(address && typeof address !== "string" ? address.address : null).toBe("127.0.0.1");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("binds IPv6 loopback outside LAN mode when available", async (ctx) => {
+    const target = getProxyBindTargets(false)[1]!;
+
+    const server = net.createServer();
+    const ipv6Available = await new Promise<boolean>((resolve, reject) => {
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        if (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL") {
+          resolve(false);
+        } else {
+          reject(err);
+        }
+      });
+      listenOnProxyInterface(server, 0, target, () => resolve(true));
+    });
+    if (!ipv6Available) return ctx.skip();
+
+    try {
+      const address = server.address();
+      expect(address && typeof address !== "string" ? address.address : null).toBe("::1");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
+  it("binds the IPv4 unspecified address in LAN mode", async () => {
+    const target = getProxyBindTargets(true)[0]!;
+
+    const server = net.createServer();
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      listenOnProxyInterface(server, 0, target, resolve);
+    });
+
+    try {
+      const address = server.address();
+      expect(address && typeof address !== "string" ? address.address : null).toBe("0.0.0.0");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
 
 describe("findFreePort", () => {
   it("returns a port in the default range", async () => {
@@ -418,6 +497,12 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["vite", "dev", "--port", "3000", "--host", "127.0.0.1"]);
   });
 
+  it("skips injection when flags use the --flag=value form", () => {
+    const args = ["vite", "dev", "--port=3000", "--host=0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "dev", "--port=3000", "--host=0.0.0.0"]);
+  });
+
   it("skips --host injection when --host is already present", () => {
     const args = ["vite", "dev", "--host", "0.0.0.0"];
     injectFrameworkFlags(args, 4567);
@@ -513,6 +598,215 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual([]);
   });
 
+  // `vite optimize --port 4567` exits with `CACError: Unknown option --port`.
+
+  it.each([
+    ["vite", "build"],
+    ["vite", "optimize"],
+    ["vp", "test"],
+    ["vp", "build"],
+    ["astro", "check"],
+    ["expo", "export"],
+    ["ng", "generate"],
+    ["react-router", "typegen"],
+    ["rsbuild", "inspect"],
+    ["react-native", "bundle"],
+  ])("does not inject into %s %s", (framework, subcommand) => {
+    const args = [framework, subcommand];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([framework, subcommand]);
+  });
+
+  it("does not inject into a runner-wrapped non-server subcommand", () => {
+    const args = ["bunx", "--bun", "vite", "optimize"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["bunx", "--bun", "vite", "optimize"]);
+  });
+
+  // A flag value that happens to spell a server subcommand (`--mode dev`) must
+  // not be read as one. `dev`, `serve` and `preview` are ordinary mode names.
+
+  it.each([
+    [["vite", "--mode", "production", "build"]],
+    [["vite", "--mode", "dev", "build"]],
+    [["vite", "--mode", "preview", "build"]],
+    [["vite", "-m", "dev", "optimize"]],
+    [["vite", "--mode=dev", "build"]],
+    [["vite", "--logLevel", "dev", "optimize"]],
+    [["rsbuild", "--mode", "dev", "build"]],
+    [["rsbuild", "--env-mode", "dev", "build"]],
+    [["bunx", "--bun", "vite", "--mode", "dev", "build"]],
+  ])("does not inject when a flag value precedes %j", (command) => {
+    const args = [...command];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(command);
+  });
+
+  it("injects for a bare rsbuild dev server behind a consumed flag value", () => {
+    // Distinguishes arity from the unknown-grammar bail: without rsbuild's own
+    // value flags, `production` would read as an unrecognized subcommand.
+    const args = ["rsbuild", "--env-mode", "production"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "rsbuild",
+      "--env-mode",
+      "production",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects for expo serve, which serves the export on a port", () => {
+    const args = ["expo", "serve"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["expo", "serve", "--port", "4567", "--host", "localhost"]);
+  });
+
+  it("does not inject when the flag grammar of the CLI is unknown", () => {
+    // `vp` declares no value flags, so `--mode dev build` and `--open build`
+    // cannot both be resolved and the subcommand stays unidentified.
+    const args = ["vp", "--mode", "dev", "build"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vp", "--mode", "dev", "build"]);
+  });
+
+  it("injects when a flag follows the server subcommand of an unlisted grammar", () => {
+    const args = ["astro", "dev", "--config", "x.ts"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "astro",
+      "dev",
+      "--config",
+      "x.ts",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects for preview, which serves the built output on a port", () => {
+    const args = ["vite", "preview"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "preview",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects for a bare invocation whose default command is the dev server", () => {
+    const args = ["vite"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vite", "--port", "4567", "--strictPort", "--host", "127.0.0.1"]);
+
+    const expoArgs = ["expo"];
+    injectFrameworkFlags(expoArgs, 4567);
+    expect(expoArgs).toEqual(["expo", "--port", "4567", "--host", "localhost"]);
+  });
+
+  it("does not inject for a bare invocation that only prints help", () => {
+    const args = ["astro"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["astro"]);
+  });
+
+  it("injects past a root positional that follows a server subcommand", () => {
+    const args = ["vite", "dev", "./app"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "dev",
+      "./app",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("treats a Vite positional root as the default server command", () => {
+    const args = ["vite", "./app"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "./app",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects when only a consumed flag value precedes the default command", () => {
+    const args = ["vite", "--config", "./cfg.ts"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "--config",
+      "./cfg.ts",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects when a consumed flag value precedes the server subcommand", () => {
+    const args = ["vite", "--logLevel", "info", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "--logLevel",
+      "info",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("places flags before a bare -- so the framework parses them as options", () => {
+    // Appended past `--` they arrive as positional data: vite keeps port 5173.
+    const args = ["vite", "dev", "--", "--mode", "build"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+      "--",
+      "--mode",
+      "build",
+    ]);
+  });
+
+  it("returns the flags it added", () => {
+    expect(injectFrameworkFlags(["vite", "dev"], 4567)).toEqual([
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+    expect(injectFrameworkFlags(["vite", "optimize"], 4567)).toEqual([]);
+    expect(injectFrameworkFlags(["node", "server.js"], 4567)).toEqual([]);
+  });
+
   // Package runner support (issue #146: bunx --bun vite dev gives 502)
 
   // Simple runners (npx, bunx, pnpx)
@@ -569,6 +863,22 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual([
       "npx",
       "--yes",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("keeps an npx option separator before the framework command", () => {
+    const args = ["npx", "--", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--",
       "vite",
       "dev",
       "--port",
@@ -722,6 +1032,50 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["bunx", "--bun", "vite", "dev", "--port", "3000", "--host", "0.0.0.0"]);
   });
 
+  it("does not treat runner options as framework options", () => {
+    const args = ["npx", "--package=host-tool", "--", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--package=host-tool",
+      "--",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("consumes separate runner option values before the framework command", () => {
+    const args = ["npx", "--package", "vite", "--", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npx",
+      "--package",
+      "vite",
+      "--",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it.each(["--localhost", "--lan", "--tunnel"])(
+    "preserves Expo connection mode %s while still injecting the port",
+    (mode) => {
+      const args = ["expo", "start", mode];
+      injectFrameworkFlags(args, 4567);
+      expect(args).toEqual(["expo", "start", mode, "--port", "4567"]);
+    }
+  );
+
   // Negative cases: runner with non-framework commands
 
   it("does not inject for bunx with non-framework command", () => {
@@ -772,6 +1126,433 @@ describe("injectFrameworkFlags", () => {
     const args = ["yarn", "--silent"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["yarn", "--silent"]);
+  });
+});
+
+describe("injectPackageScriptFrameworkFlags", () => {
+  let pkgDir: string;
+
+  beforeEach(() => {
+    pkgDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-pkg-script-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pkgDir, { recursive: true, force: true });
+  });
+
+  function writeScripts(scripts: Record<string, string>) {
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ name: "test-app", scripts })
+    );
+  }
+
+  it("forwards vite flags through bun run <script>", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  it("inserts -- before forwarded flags for npm run <script>", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["npm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["npm", "run", "dev", "--", "--port", "4567", "--strictPort"]);
+  });
+
+  it("forwards flags directly for pnpm run <script>", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["pnpm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["pnpm", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  it("forwards flags directly for yarn run <script>", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["yarn", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["yarn", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  it("forwards --host too when the script does not set it", () => {
+    writeScripts({ dev: "vite dev" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("does not forward when the script already sets --port", () => {
+    writeScripts({ dev: "vite dev --port 5000 --host 127.0.0.1" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("does not duplicate --port supplied by user trailing args", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["npm", "run", "dev", "--", "--port", "3000"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["npm", "run", "dev", "--", "--port", "3000"]);
+  });
+
+  it("does not duplicate --port=<number> supplied by the script or user", () => {
+    writeScripts({ dev: "vite dev --port=5000 --host=127.0.0.1" });
+    const scriptArgs = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(scriptArgs, 4567, pkgDir);
+    expect(scriptArgs).toEqual(["bun", "run", "dev"]);
+
+    writeScripts({ dev: "vite dev --host=127.0.0.1" });
+    const userArgs = ["bun", "run", "dev", "--port=3000"];
+    injectPackageScriptFrameworkFlags(userArgs, 4567, pkgDir);
+    expect(userArgs).toEqual(["bun", "run", "dev", "--port=3000"]);
+  });
+
+  it("does not forward flags to compound scripts", () => {
+    writeScripts({ dev: "vite dev && node second.js" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("does not forward flags to compound scripts with glued operators", () => {
+    writeScripts({ dev: "vite dev&&node second.js" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("does not forward flags to compound scripts separated by a newline", () => {
+    writeScripts({ dev: "vite dev\nnode second.js" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("does not forward flags to compound scripts piped between commands", () => {
+    writeScripts({ dev: "vite dev | tee log.txt" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still forwards flags when a shell metacharacter is inside quotes (single command)", () => {
+    writeScripts({ dev: "vite dev --open '/foo&bar'" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("still forwards flags when the script redirects output (single command)", () => {
+    writeScripts({ dev: "vite dev >vite.log 2>&1" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects the missing --host even when --port is already present in the script", () => {
+    writeScripts({ dev: "expo start --port 4567" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev", "--host", "localhost"]);
+  });
+
+  it.each(["--localhost", "--lan", "--tunnel"])(
+    "preserves Expo connection mode %s through a package script",
+    (mode) => {
+      writeScripts({ dev: `expo start ${mode}` });
+      const args = ["pnpm", "run", "dev"];
+      injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+      expect(args).toEqual(["pnpm", "run", "dev", "--port", "4567"]);
+    }
+  );
+
+  it("injects the missing --port even when --host is already present in the script", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["bun", "run", "dev", "--", "--host", "0.0.0.0"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--",
+      "--host",
+      "0.0.0.0",
+      "--port",
+      "4567",
+      "--strictPort",
+    ]);
+  });
+
+  it("does not forward server flags to framework build commands", () => {
+    writeScripts({ build: "vite build" });
+    const args = ["bun", "run", "build"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "build"]);
+  });
+
+  it("does not forward server flags to runner-wrapped build commands", () => {
+    writeScripts({ build: "bunx vite build" });
+    const args = ["bun", "run", "build"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "build"]);
+  });
+
+  it("does not forward server flags when a flag value precedes the build subcommand", () => {
+    writeScripts({ build: "vite --mode production build" });
+    const args = ["bun", "run", "build"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "build"]);
+  });
+
+  it("does not forward server flags to non-server subcommands beyond build", () => {
+    writeScripts({
+      optimize: "vite optimize",
+      test: "vp test",
+      export: "expo export",
+      check: "astro check",
+    });
+    for (const script of ["optimize", "test", "export", "check"]) {
+      const args = ["bun", "run", script];
+      injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+      expect(args).toEqual(["bun", "run", script]);
+    }
+  });
+
+  it("does not forward into a script that ends its own option list", () => {
+    // Appending cannot reach past the script's own `--`, so the flags would
+    // arrive as positional data and the framework would keep its default port.
+    writeScripts({ dev: "vite dev -- --extra" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("forwards server flags to preview, the other server subcommand", () => {
+    writeScripts({ preview: "vite preview" });
+    const args = ["bun", "run", "preview"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "preview",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("does not forward for non-framework scripts", () => {
+    writeScripts({ dev: "node server.js" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("resolves package runners inside the script (bunx vite dev)", () => {
+    writeScripts({ dev: "bunx vite dev --host 127.0.0.1" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  it("ignores commands that are not <pm> run <script>", () => {
+    writeScripts({ dev: "vite dev" });
+    for (const args of [
+      ["vite", "dev"],
+      ["bun", "dev"],
+      ["bun", "run", "--bun"],
+      ["bunx", "vite", "dev"],
+      ["cargo", "run", "dev"],
+    ]) {
+      const before = [...args];
+      injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+      expect(args).toEqual(before);
+    }
+  });
+
+  it("ignores scripts that do not exist in package.json", () => {
+    writeScripts({ start: "vite dev" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("resolves the runner through an absolute path", () => {
+    writeScripts({ dev: "vite dev --host 127.0.0.1" });
+    const args = ["/usr/local/bin/bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["/usr/local/bin/bun", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  // A trailing comment makes the shell discard everything appended after it,
+  // so injection would look successful and deliver nothing.
+  it("skips a script ending in a shell comment", () => {
+    writeScripts({ dev: "vite dev # keep this note" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("skips a script with a comment after the framework flags", () => {
+    writeScripts({ dev: "vite dev --open  # opens a browser" });
+    const args = ["npm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["npm", "run", "dev"]);
+  });
+
+  // Not a guard clause: the resolver declines these because "(vite" is not a
+  // framework name. Pinned so a future resolver that tokenizes shell syntax
+  // does not start injecting into them.
+  it("skips a subshell script", () => {
+    writeScripts({ dev: "(vite dev)" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still injects when # is inside a word or quoted", () => {
+    writeScripts({ dev: "vite dev --tag v1#2" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  // A backslash-newline is a line continuation, not an escaped character: the
+  // shell joins the lines and the `#` still opens a comment.
+  it("skips a script whose comment follows a line continuation", () => {
+    writeScripts({ dev: "vite dev \\\n# note" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still injects when an escaped space precedes a #", () => {
+    // `--open /foo\ #bar` is a single argument, not a comment: the space is
+    // escaped, so the `#` does not begin a word.
+    writeScripts({ dev: "vite dev --open /foo\\ #bar" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("still injects when a script substitutes a command mid-word", () => {
+    writeScripts({ dev: "vite dev --define SHA=$(git rev-parse HEAD)" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+});
+
+describe("resolveFrameworkBasename", () => {
+  let pkgDir: string;
+
+  beforeEach(() => {
+    pkgDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-fw-resolve-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pkgDir, { recursive: true, force: true });
+  });
+
+  function writeScripts(scripts: Record<string, string>) {
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({ name: "test-app", scripts })
+    );
+  }
+
+  it("resolves a direct invocation", () => {
+    expect(resolveFrameworkBasename(["vite", "dev"], pkgDir)).toBe("vite");
+  });
+
+  it("resolves through a package runner", () => {
+    expect(resolveFrameworkBasename(["bunx", "--bun", "vite", "dev"], pkgDir)).toBe("vite");
+  });
+
+  // The env binder in cli.ts uses this to decide whether to export HOST.
+  // Reading commandArgs[0] there saw `bun` and broke Expo's HMR in LAN mode.
+  it("resolves expo through a package script", () => {
+    writeScripts({ dev: "expo start" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
+  });
+
+  // Resolution and append-safety are different questions. A script portless
+  // refuses to append flags to still runs Metro, and the LAN carve-out that
+  // suppresses HOST keys off the framework, not off whether flags were added.
+  it("still identifies expo in a script portless will not append to", () => {
+    writeScripts({ dev: "expo start --port 4567 # note" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev"]);
+  });
+
+  it("still identifies expo in a build script", () => {
+    writeScripts({ dev: "expo build" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBe("expo");
+  });
+
+  it("returns null when no known framework is reached", () => {
+    writeScripts({ dev: "node server.js" });
+    expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBeNull();
+    expect(resolveFrameworkBasename(["node", "server.js"], pkgDir)).toBeNull();
   });
 });
 
@@ -865,6 +1646,10 @@ describe("parseTldList", () => {
 
   it("rejects empty list entries", () => {
     expect(() => parseTldList("test,")).toThrow("TLD cannot be empty");
+  });
+
+  it("accepts a mix of single- and multi-segment TLDs", () => {
+    expect(parseTldList("localhost,dev.example.com")).toEqual(["localhost", "dev.example.com"]);
   });
 });
 
@@ -1037,6 +1822,46 @@ describe("readTldFromDir / writeTldFile", () => {
     writeTldFile(tmpDir, DEFAULT_TLD);
     expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
   });
+
+  it("skips invalid persisted entries instead of resetting the whole list", () => {
+    const tooLong = "a".repeat(70);
+    fs.writeFileSync(
+      path.join(tmpDir, "proxy.tlds"),
+      JSON.stringify(["test", tooLong, "internal"])
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(readTldsFromDir(tmpDir)).toEqual(["test", "internal"]);
+      expect(warn).toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("getRiskyTldReason", () => {
+  it("matches exact risky TLDs", () => {
+    expect(getRiskyTldReason("dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("app")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("com")).toMatch(/public TLD/);
+  });
+
+  it("matches multi-segment TLDs under tree-wide risky suffixes", () => {
+    expect(getRiskyTldReason("example.dev")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("myapp.app")).toMatch(/HSTS/);
+    expect(getRiskyTldReason("foo.local")).toMatch(/mDNS/);
+  });
+
+  it("does not suffix-match ownership-class TLDs", () => {
+    expect(getRiskyTldReason("dev.example.com")).toBeUndefined();
+    expect(getRiskyTldReason("internal.example.org")).toBeUndefined();
+  });
+
+  it("returns undefined for safe TLDs", () => {
+    expect(getRiskyTldReason("test")).toBeUndefined();
+    expect(getRiskyTldReason("dev.internal")).toBeUndefined();
+    expect(getRiskyTldReason("devx")).toBeUndefined();
+  });
 });
 
 describe("validateTld", () => {
@@ -1051,10 +1876,41 @@ describe("validateTld", () => {
   });
 
   it("rejects TLDs with invalid characters", () => {
-    expect(validateTld("my-tld")).toMatch(/must contain only/);
-    expect(validateTld("my.tld")).toMatch(/must contain only/);
     expect(validateTld("MY_TLD")).toMatch(/must contain only/);
     expect(validateTld("tld!")).toMatch(/must contain only/);
+    expect(validateTld("my tld")).toMatch(/must contain only/);
+  });
+
+  it("accepts multi-segment TLDs", () => {
+    expect(validateTld("dev.example.com")).toBeNull();
+    expect(validateTld("local.example.dev")).toBeNull();
+    expect(validateTld("a.b.c.d.e")).toBeNull();
+  });
+
+  it("accepts hyphens inside labels", () => {
+    expect(validateTld("my-tld")).toBeNull();
+    expect(validateTld("dev.my-network.com")).toBeNull();
+  });
+
+  it("rejects empty labels", () => {
+    expect(validateTld(".example.com")).toMatch(/labels cannot be empty/);
+    expect(validateTld("example.com.")).toMatch(/labels cannot be empty/);
+    expect(validateTld("example..com")).toMatch(/labels cannot be empty/);
+  });
+
+  it("rejects hyphens at label edges", () => {
+    expect(validateTld("-bad.example.com")).toMatch(/must contain only/);
+    expect(validateTld("bad-.example.com")).toMatch(/must contain only/);
+  });
+
+  it("rejects labels over 63 characters", () => {
+    expect(validateTld(`${"a".repeat(64)}.example.com`)).toMatch(/63-character/);
+  });
+
+  it("rejects TLDs over 253 characters", () => {
+    const label = "a".repeat(63);
+    const long = [label, label, label, label, "example"].join(".");
+    expect(validateTld(long)).toMatch(/253-character/);
   });
 
   it("allows public TLDs (they produce warnings elsewhere)", () => {
