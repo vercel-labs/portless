@@ -1,8 +1,137 @@
 # Changelog
 
-## 0.13.0
+## 0.15.6
 
 <!-- release:start -->
+
+### New Features
+
+- **Agent-readable documentation**: The documentation site now exposes clean Markdown pages and an `llms.txt` index so agents can discover and consume the docs directly. (#387)
+
+### Bug Fixes
+
+- **Framework flags through package scripts**: Frameworks that ignore `PORT` now receive the assigned `--port` and `--host` flags when launched through supported package-manager scripts, while non-server and unsafe scripts are left untouched. (#366)
+- **Windows service lifetime**: The Windows startup service now registers a UTF-16 Task Scheduler definition with no execution time limit and replaces existing tasks atomically. (#381)
+- **Ctrl+C process cleanup**: Interrupt handling now waits for the command's process tree to exit and terminates remaining descendants after a short grace period. (#385)
+
+### Contributors
+
+- @Railly
+- @EfeDurmaz16
+- @JohnPhamous
+<!-- release:end -->
+
+## 0.15.5
+
+### Bug Fixes
+
+- **Multi-segment custom TLDs**: `--tld` and `PORTLESS_TLD` now accept dotted DNS names such as `dev.example.com`, so local URLs can mirror production structure. `validateTld` checks per-label DNS rules and the 253-character total limit, overlapping TLDs resolve by longest match, and cert cache filenames stay under the filesystem name limit for long hostnames. (#365)
+- **WebSocket over HTTP/2**: Proxy now advertises RFC 8441 extended CONNECT and bridges `:protocol websocket` streams to an HTTP/1.1 upgrade against the backend, fixing dev server HMR for browsers that negotiate h2 over ALPN. Plain-HTTP upgrades on the TLS port are proxied instead of dropped, and a backend that rejects the handshake or answers with a bad `Sec-WebSocket-Accept` now gets a 502 instead of a silently destroyed socket. (#363)
+
+### Contributors
+
+- @Railly
+- @KingPsychopath
+- @erichurkman
+- @sanjevirau
+
+## 0.15.4
+
+### Bug Fixes
+
+- **Loopback-only proxy binding**: Outside LAN mode, the proxy and HTTP redirect listeners now bind only to `127.0.0.1` and `::1`, so Portless routes cannot be reached through LAN, VPN, or other network interfaces. LAN mode still binds to all interfaces explicitly. (#361)
+
+### Contributors
+
+- @ctate
+
+## 0.15.3
+
+### Bug Fixes
+
+- **State directory under sudo**: Portless now resolves per-user state from the original sudo user's home, so an elevated proxy and unprivileged app processes share the same routes instead of writing to separate state directories. (#357)
+- **Windows and WSL CA trust**: On WSL, `portless trust` now installs the local CA in both Linux and Windows trust stores, while `portless clean` removes the exact certificate from both. Failed trust-store cleanup preserves the CA identity for safe retries, including on native Windows. (#357)
+
+### Contributors
+
+- @ctate
+- @gerardbalaoro
+
+## 0.15.2
+
+### Bug Fixes
+
+- **Tailscale funnel routing**: Proxy now routes requests addressed to a route's Tailscale funnel or serve hostname, so `--funnel` and `--tailscale` apps reached at `<device>.ts.net` no longer return a 404, including when several apps share one hostname on different ports. (#352)
+- **IPv6-only dev servers return 502**: Proxy now dials upstreams over both loopback families, fixing 502s when a dev server binds `::1` only, such as Vite on Node 17+. (#353)
+- **Worktree prefix in multi-app mode**: Bare `portless` in a monorepo worktree now applies the branch prefix in multi-app mode as it already did for single apps, so hostnames no longer collide across worktrees. (#355)
+
+### Contributors
+
+- @Railly
+- @ahfoysal
+
+## 0.15.1
+
+### New Features
+
+- **Multi-TLD proxy support**: `--tld` is now repeatable and `PORTLESS_TLD` accepts comma separated values, so one proxy can serve the same app names across multiple TLDs. Routes, TLS, service state, hosts sync, framework environment, and workspace launches now use the full configured TLD list. (#344)
+
+### Contributors
+
+- @ctate
+
+## 0.15.0
+
+### New Features
+
+- **`portless doctor`**: New read only diagnostics command checks Node.js, the state directory, proxy liveness, route entries, hostname resolution, HTTPS CA trust, and LAN prerequisites, then prints suggested fixes. (#337)
+
+### Bug Fixes
+
+- **HTTP/2 Host forwarding**: Proxy now forwards HTTP/2 `:authority` as `Host` to HTTP/1.1 backends, fixing apps that depend on Host and previously saw `127.0.0.1` for browser traffic. (#328)
+- **`--force` takeover cleanup**: Exit cleanup now removes only routes still owned by the exiting process, so a forced takeover does not deregister the new owner's route. (#328)
+
+### Contributors
+
+- @ctate
+
+## 0.14.0
+
+### New Features
+
+- **ngrok sharing**: New `--ngrok` flag exposes portless apps publicly through ngrok while keeping the local `.localhost` URL. Also configurable with `PORTLESS_NGROK=1`; child processes receive `PORTLESS_NGROK_URL`, and `portless list` shows active ngrok URLs. (#323)
+
+### Improvements
+
+- **ngrok tunnel lifecycle**: Portless now checks for the ngrok CLI before starting an app, surfaces install and authentication guidance, removes stopped ngrok URLs from route state, and terminates tunnel processes during app cleanup. (#323)
+
+### Contributors
+
+- @ctate
+
+## 0.13.1
+
+### New Features
+
+- **Configurable startup services**: `portless service install` now persists proxy options such as `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, `--key`, and `--state-dir` into launchd, systemd, and Task Scheduler. `portless service status` now reports the installed service port, HTTPS mode, TLD, LAN mode, wildcard mode, and state directory.
+
+### Bug Fixes
+
+- **Service reinstall port changes**: Reinstalling the startup service with a different port now stops any existing proxy on the previous port before starting the new service.
+- **Service install validation**: LAN service installs now fail early on platforms that cannot publish mDNS records, and service paths such as `~` are normalized before writing native service files.
+
+### Requirements
+
+- **Node.js 24**: The published package now requires Node.js 24 or newer, and repository development uses pnpm 11 with a minimum release age policy. (#307)
+
+### Contributors
+
+- @ctate
+- @skaldebane
+- @ItalianScallian
+- @neefrehman
+
+## 0.13.0
 
 ### New Features
 
@@ -16,7 +145,6 @@
 
 - @ctate
 - @Anshuman71
-<!-- release:end -->
 
 ## 0.12.0
 

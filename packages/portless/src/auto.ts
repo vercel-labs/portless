@@ -159,6 +159,16 @@ export interface WorktreePrefix {
   source: string;
 }
 
+/**
+ * Prepend a worktree prefix to a base hostname, or return the base name
+ * unchanged when not in a worktree. Both single-app and multi-app modes
+ * use this so a bare `portless` in a git worktree produces the same
+ * `<prefix>.<name>` hostnames in either layout.
+ */
+export function applyWorktreePrefix(baseName: string, worktree: WorktreePrefix | null): string {
+  return worktree ? `${worktree.prefix}.${baseName}` : baseName;
+}
+
 /** Branch names that represent the default/primary checkout — no prefix needed. */
 const DEFAULT_BRANCHES = new Set(["main", "master"]);
 

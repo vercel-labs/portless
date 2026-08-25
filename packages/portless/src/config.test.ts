@@ -576,7 +576,7 @@ describe("detectPackageManager", () => {
   it("reads packageManager field from package.json", () => {
     fs.writeFileSync(
       path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", packageManager: "pnpm@9.15.4" })
+      JSON.stringify({ name: "test", packageManager: "pnpm@11.1.3" })
     );
     expect(detectPackageManager(tmpDir)).toBe("pnpm");
   });

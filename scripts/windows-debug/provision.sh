@@ -141,10 +141,11 @@ $env:PATH = "C:\Program Files\Git\cmd;$env:PATH"
 [Environment]::SetEnvironmentVariable("PATH", "C:\Program Files\Git\cmd;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'))", "Machine")
 Log "Git installed: $(git --version)"
 
-# Install Node.js LTS (v20)
+# Install Node.js 24
 Log "Installing Node.js..."
+$nodeVersion = "24.15.0"
 $nodeInstaller = "$env:TEMP\node-installer.msi"
-Invoke-WebRequest -Uri "https://nodejs.org/dist/v20.19.0/node-v20.19.0-x64.msi" -OutFile $nodeInstaller
+Invoke-WebRequest -Uri "https://nodejs.org/dist/v$nodeVersion/node-v$nodeVersion-x64.msi" -OutFile $nodeInstaller
 Start-Process msiexec.exe -ArgumentList "/i `"$nodeInstaller`" /quiet /norestart" -Wait
 $env:PATH = "C:\Program Files\nodejs;$env:PATH"
 [Environment]::SetEnvironmentVariable("PATH", "C:\Program Files\nodejs;$([Environment]::GetEnvironmentVariable('PATH', 'Machine'))", "Machine")
@@ -153,7 +154,7 @@ Log "Node.js installed: $(node --version)"
 # Install pnpm via corepack
 Log "Installing pnpm..."
 corepack enable
-corepack prepare pnpm@latest --activate
+corepack prepare pnpm@11.1.3 --activate
 Log "pnpm installed: $(pnpm --version)"
 
 # Install OpenSSL (Shining Light builds, widely used on Windows)

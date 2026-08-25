@@ -1,3 +1,17 @@
+minimumReleaseAge: 2880
+minimumReleaseAgeExclude:
+  - "@vercel/agent-readability@0.5.1"
+
+allowBuilds:
+  "@mongodb-js/zstd": false
+  "@parcel/watcher": false
+  esbuild: false
+  lmdb: false
+  msgpackr-extract: false
+  msw: false
+  node-liblzma: false
+  sharp: false
+
 packages:
   - "packages/*"
   - "apps/*"

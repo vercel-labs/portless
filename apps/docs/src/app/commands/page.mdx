@@ -60,8 +60,26 @@ portless docs.myapp next dev
       <td>`--force`</td>
       <td>Override an existing route registered by another process</td>
     </tr>
+    <tr>
+      <td>`--tailscale`</td>
+      <td>Share the app on your Tailscale network.</td>
+    </tr>
+    <tr>
+      <td>`--funnel`</td>
+      <td>Share the app publicly via Tailscale Funnel.</td>
+    </tr>
+    <tr>
+      <td>`--ngrok`</td>
+      <td>Share the app publicly via ngrok.</td>
+    </tr>
   </tbody>
 </table>
+
+```bash
+portless myapp --tailscale next dev
+portless myapp --funnel next dev
+portless myapp --ngrok next dev
+```
 
 ## Get a service URL
 
@@ -100,6 +118,14 @@ portless list
 ```
 
 Shows active routes and their assigned ports.
+
+## Doctor
+
+```bash
+portless doctor
+```
+
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
 
 ## Trust the CA
 
@@ -164,7 +190,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--tld <tld>`</td>
-      <td>Use a custom TLD instead of `.localhost` (e.g. `test`). Hostnames still sync to `/etc/hosts` by default.</td>
+      <td>Use a custom TLD instead of `.localhost` (e.g. `test`, `dev.example.com`). Repeat for more TLDs. Hostnames still sync to `/etc/hosts` by default.</td>
     </tr>
     <tr>
       <td>`--cert <path>`</td>
@@ -191,11 +217,16 @@ portless proxy stop
 
 ```bash
 portless service install
+portless service install --lan
+portless service install --wildcard
+PORTLESS_STATE_DIR=~/.portless-lan PORTLESS_LAN=1 portless service install
 portless service status
 portless service uninstall
 ```
 
-Installs the proxy as an OS startup service using the default clean URL behavior: HTTPS on port 443 with `.localhost` names. macOS and Linux use a root-owned service so port 443 can bind at boot. Windows uses a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
+Installs the proxy as an OS startup service. The default is HTTPS on port 443 with `.localhost` names, but `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+
+The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLDs, LAN mode, wildcard mode, and state directory. macOS and Linux use a root-owned service so port 443 can bind at boot. Windows uses a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
 ### LAN mode
 
@@ -206,6 +237,8 @@ portless proxy start --lan
 portless proxy start --lan --https
 portless proxy start --lan --ip 192.168.1.42   # manual IP override
 ```
+
+Without LAN mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` and `::1`. LAN mode explicitly binds them to `0.0.0.0` and `::`.
 
 Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
 

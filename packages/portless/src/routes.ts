@@ -7,13 +7,13 @@ import { fixOwnership, isErrnoException } from "./utils.js";
 const STALE_LOCK_THRESHOLD_MS = 10_000;
 
 /** Total time budget (ms) for acquiring the file lock before giving up. */
-const LOCK_TIMEOUT_MS = 5_000;
+const LOCK_TIMEOUT_MS = 15_000;
 
 /** Initial delay (ms) between lock acquisition retries (doubles each attempt). */
 const LOCK_RETRY_BASE_MS = 10;
 
 /** Maximum delay (ms) between lock acquisition retries. */
-const LOCK_RETRY_CAP_MS = 500;
+const LOCK_RETRY_CAP_MS = 100;
 
 /** File permission mode for route and state files. */
 export const FILE_MODE = 0o644;
@@ -26,7 +26,17 @@ export interface RouteMapping extends RouteInfo {
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
+  ngrokUrl?: string;
+  ngrokPid?: number;
 }
+
+type RouteMetadataPatch = {
+  tailscaleUrl?: string | null;
+  tailscaleHttpsPort?: number | null;
+  tailscaleFunnel?: boolean | null;
+  ngrokUrl?: string | null;
+  ngrokPid?: number | null;
+};
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
@@ -255,13 +265,17 @@ export class RouteStore {
       try {
         parsed = JSON.parse(raw);
       } catch {
+        this.onWarning?.(`Corrupted routes file (invalid JSON): ${this.routesPath}`);
         return [];
       }
       if (!Array.isArray(parsed)) {
+        this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
         return [];
       }
       return parsed.filter(isValidRoute);
-    } catch {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.onWarning?.(`Could not read routes file: ${message}`);
       return [];
     }
   }
@@ -299,10 +313,7 @@ export class RouteStore {
    * Update metadata on an existing route entry. Only provided fields are
    * merged; the route must already exist (matched by hostname).
    */
-  updateRoute(
-    hostname: string,
-    fields: Partial<Pick<RouteMapping, "tailscaleUrl" | "tailscaleHttpsPort" | "tailscaleFunnel">>
-  ): void {
+  updateRoute(hostname: string, fields: RouteMetadataPatch): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -311,23 +322,49 @@ export class RouteStore {
       const routes = this.loadRoutes(true);
       const route = routes.find((r) => r.hostname === hostname);
       if (!route) return;
-      if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
-      if (fields.tailscaleHttpsPort !== undefined)
-        route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
-      if (fields.tailscaleFunnel !== undefined) route.tailscaleFunnel = fields.tailscaleFunnel;
+      if ("tailscaleUrl" in fields) {
+        if (fields.tailscaleUrl === null) delete route.tailscaleUrl;
+        else if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
+      }
+      if ("tailscaleHttpsPort" in fields) {
+        if (fields.tailscaleHttpsPort === null) delete route.tailscaleHttpsPort;
+        else if (fields.tailscaleHttpsPort !== undefined)
+          route.tailscaleHttpsPort = fields.tailscaleHttpsPort;
+      }
+      if ("tailscaleFunnel" in fields) {
+        if (fields.tailscaleFunnel === null) delete route.tailscaleFunnel;
+        else if (fields.tailscaleFunnel !== undefined)
+          route.tailscaleFunnel = fields.tailscaleFunnel;
+      }
+      if ("ngrokUrl" in fields) {
+        if (fields.ngrokUrl === null) delete route.ngrokUrl;
+        else if (fields.ngrokUrl !== undefined) route.ngrokUrl = fields.ngrokUrl;
+      }
+      if ("ngrokPid" in fields) {
+        if (fields.ngrokPid === null) delete route.ngrokPid;
+        else if (fields.ngrokPid !== undefined) route.ngrokPid = fields.ngrokPid;
+      }
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();
     }
   }
 
-  removeRoute(hostname: string): void {
+  /**
+   * Remove a route by hostname. When `ownerPid` is provided, the entry is
+   * only removed while it is still owned by that pid. Exit cleanups must
+   * pass their own pid: after a `--force` takeover the killed process would
+   * otherwise deregister the route the new owner just registered.
+   */
+  removeRoute(hostname: string, ownerPid?: number): void {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
-      const routes = this.loadRoutes(true).filter((r) => r.hostname !== hostname);
+      const routes = this.loadRoutes(true).filter(
+        (r) => r.hostname !== hostname || (ownerPid !== undefined && r.pid !== ownerPid)
+      );
       this.saveRoutes(routes);
     } finally {
       this.releaseLock();

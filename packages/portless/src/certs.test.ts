@@ -1,11 +1,19 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFileSync } from "node:child_process";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import {
+  createSNICallback,
+  ensureCerts,
+  isCATrusted,
+  sanitizeHostForFilename,
+  trustCA,
+  untrustCA,
+  untrustCALinux,
+} from "./certs.js";
 
 /**
  * Return the signature algorithm string for a PEM cert file using openssl.
@@ -19,6 +27,40 @@ function getCertSignatureAlgo(certPath: string): string {
   const match = text.match(/Signature Algorithm:\s*(\S+)/i);
   return match ? match[1].toLowerCase() : "";
 }
+
+describe("sanitizeHostForFilename", () => {
+  // Longest suffix the cert cache appends to the sanitized base.
+  const SUFFIX_LEN = "-key.pem".length;
+  const NAME_MAX = 255;
+
+  it("keeps short hostnames readable and unchanged apart from dots", () => {
+    expect(sanitizeHostForFilename("myapp.dev.example.com")).toBe("myapp_dev_example_com");
+  });
+
+  it("bounds the composed cert filename under NAME_MAX for a max-length hostname", () => {
+    // A 253-char hostname is valid DNS (multi-segment TLD) but its naive
+    // sanitized filename would overflow NAME_MAX and fail with ENAMETOOLONG.
+    const label = "a".repeat(63);
+    const hostname = `x.${label}.${label}.${label}.${"b".repeat(57)}`;
+    expect(hostname.length).toBeGreaterThan(NAME_MAX - SUFFIX_LEN);
+    const safe = sanitizeHostForFilename(hostname);
+    expect(safe.length + SUFFIX_LEN).toBeLessThanOrEqual(NAME_MAX);
+  });
+
+  it("is deterministic so the cert cache still hits for the same host", () => {
+    const label = "a".repeat(63);
+    const hostname = `x.${label}.${label}.${label}.${"b".repeat(57)}`;
+    expect(sanitizeHostForFilename(hostname)).toBe(sanitizeHostForFilename(hostname));
+  });
+
+  it("maps distinct overflowing hostnames to distinct filenames", () => {
+    const label = "a".repeat(63);
+    const base = `${label}.${label}.${label}`;
+    const a = sanitizeHostForFilename(`app1.${base}.${"b".repeat(57)}`);
+    const b = sanitizeHostForFilename(`app2.${base}.${"b".repeat(57)}`);
+    expect(a).not.toBe(b);
+  });
+});
 
 describe("ensureCerts", () => {
   let tmpDir: string;
@@ -269,6 +311,26 @@ describe("createSNICallback", () => {
     expect(cert.subjectAltName).toContain("DNS:chat.myapp.localhost");
   });
 
+  it("generates per-hostname cert for multi-segment TLDs (issue #260)", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey, "local.example.dev");
+    const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
+      sniCallback("myapp.local.example.dev", (err, ctx) => {
+        if (err) reject(err);
+        else resolve(ctx);
+      });
+    });
+
+    expect(ctx).toBeDefined();
+
+    const hostCertPath = path.join(tmpDir, "host-certs", "myapp_local_example_dev.pem");
+    expect(fs.existsSync(hostCertPath)).toBe(true);
+
+    const cert = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
+    expect(cert.subjectAltName).toContain("DNS:myapp.local.example.dev");
+    // A sibling wildcard at the TLD level covers other apps under the same TLD
+    expect(cert.subjectAltName).toContain("DNS:*.local.example.dev");
+  });
+
   it("generates cert for a hostname longer than 64 characters (X.509 CN limit)", async () => {
     // Construct a hostname that exceeds the 64-char CN limit:
     // "inngest.ap.very-long-branch-name-that-exceeds-the-cn-limit.dev" = 63+ chars
@@ -410,5 +472,59 @@ describe("untrustCA", () => {
 
   it("returns removed when ca.pem is missing", () => {
     expect(untrustCA(tmpDir)).toEqual({ removed: true });
+  });
+
+  it("retries a failed Linux trust refresh after the source certificate is gone", () => {
+    const { caPath } = ensureCerts(tmpDir);
+    const trustDir = path.join(tmpDir, "linux-trust");
+    const installedCA = path.join(trustDir, "portless-ca.crt");
+    const config = { certDir: trustDir, updateCommand: "refresh-linux-trust" };
+    fs.mkdirSync(trustDir);
+    fs.copyFileSync(caPath, installedCA);
+
+    const runUpdate = vi
+      .fn<(command: string) => void>()
+      .mockImplementationOnce(() => {
+        throw new Error("trust refresh failed");
+      })
+      .mockImplementationOnce(() => undefined);
+
+    const first = untrustCALinux(tmpDir, {
+      configs: [config],
+      activeConfig: config,
+      runUpdate,
+    });
+
+    expect(first).toEqual({ removed: false, error: "trust refresh failed" });
+    expect(fs.existsSync(installedCA)).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "ca.pem"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "ca-key.pem"))).toBe(true);
+
+    const second = untrustCALinux(tmpDir, {
+      configs: [config],
+      activeConfig: config,
+      runUpdate,
+    });
+
+    expect(second).toEqual({ removed: true });
+    expect(runUpdate).toHaveBeenNthCalledWith(1, "refresh-linux-trust");
+    expect(runUpdate).toHaveBeenNthCalledWith(2, "refresh-linux-trust");
+  });
+
+  it("does not refresh Linux trust when the CA was never installed", () => {
+    ensureCerts(tmpDir);
+    const trustDir = path.join(tmpDir, "linux-trust");
+    const config = { certDir: trustDir, updateCommand: "refresh-linux-trust" };
+    const runUpdate = vi.fn<(command: string) => void>();
+    fs.mkdirSync(trustDir);
+
+    expect(
+      untrustCALinux(tmpDir, {
+        configs: [config],
+        activeConfig: config,
+        runUpdate,
+      })
+    ).toEqual({ removed: true });
+    expect(runUpdate).not.toHaveBeenCalled();
   });
 });
