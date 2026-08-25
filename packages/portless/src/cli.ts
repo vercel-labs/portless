@@ -1889,6 +1889,8 @@ ${colors.bold("Options:")}
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo on macOS/Linux
+                                Failed elevation exits nonzero without changing ports
+                                Use -p 1355 explicitly to avoid sudo (URLs include :1355)
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -2886,6 +2888,11 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
+${colors.bold("Privileges:")}
+  Standard ports request sudo on macOS/Linux. Failed elevation exits
+  nonzero without starting on another port. Retry the requested command
+  and complete elevation, or explicitly use -p 1355 (URLs include :1355).
+
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
   LAN mode explicitly binds the proxy to 0.0.0.0 and ::.
@@ -3078,7 +3085,7 @@ ${colors.bold("LAN mode (--lan):")}
     console.warn(colors.cyan("  portless hosts sync"));
   }
 
-  let store = new RouteStore(stateDir, {
+  const store = new RouteStore(stateDir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
@@ -3149,8 +3156,7 @@ ${colors.bold("LAN mode (--lan):")}
     useWildcard: desiredWildcard,
   };
 
-  // Privileged ports require root on Unix. Auto-elevate with sudo when
-  // possible, falling back to the unprivileged port when sudo is unavailable.
+  // Privileged ports require root on Unix. Auto-elevate with sudo when possible.
   if (!isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
     const startArgs = [
       process.execPath,
@@ -3172,15 +3178,11 @@ ${colors.bold("LAN mode (--lan):")}
         proxyPort,
       }).args,
     ];
-    const fallbackCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, resolvedConfig);
-    const currentCommand = formatProxyStartCommand(proxyPort, resolvedConfig);
+    const recoveryCommand = formatProxyStartCommand(proxyPort, resolvedConfig);
 
     console.log(
       colors.yellow(`Port ${proxyPort} requires elevated privileges. Requesting sudo...`)
     );
-    if (!hasExplicitPort) {
-      console.log(colors.gray(`(To skip sudo, use an unprivileged port: ${fallbackCommand})`));
-    }
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -3201,40 +3203,21 @@ ${colors.bold("LAN mode (--lan):")}
       return;
     }
 
-    if (result.signal) {
-      process.exit(1);
-    }
-
-    // sudo failed: fall back to the unprivileged port if the user didn't
-    // explicitly request a privileged one.
-    if (!hasExplicitPort) {
-      proxyPort = FALLBACK_PROXY_PORT;
-      console.log(colors.yellow(`Falling back to port ${proxyPort}.`));
-      console.log(
-        colors.blue(`For clean URLs without port numbers, re-run and accept the sudo prompt:`)
-      );
-      console.log(colors.cyan(`  ${fallbackCommand}`));
-
-      if (await isProxyRunning(proxyPort)) {
-        console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
-        return;
-      }
-
-      // Re-initialize state for the fallback port and fall through to the
-      // normal startup path below.
-      stateDir = resolveStateDir(proxyPort);
-      store = new RouteStore(stateDir, {
-        onWarning: (msg: string) => console.warn(colors.yellow(msg)),
-      });
-    } else {
-      // Explicit port was requested but sudo failed; error out.
-      console.error(
-        colors.red(`Error: Port ${proxyPort} requires elevated privileges and sudo failed.`)
-      );
-      console.error(colors.blue("Try again (portless will prompt for sudo):"));
-      console.error(colors.cyan(`  ${currentCommand}`));
-      process.exit(1);
-    }
+    const failure = result.error
+      ? result.error.message
+      : result.signal
+        ? `terminated by signal ${result.signal}`
+        : result.status === null
+          ? "did not return an exit status"
+          : `exited with status ${result.status}`;
+    console.error(
+      colors.red(
+        `Error: Port ${proxyPort} requires elevated privileges, but sudo elevation failed: ${failure}.`
+      )
+    );
+    console.error(colors.blue("Resolve the sudo error, then rerun the requested startup:"));
+    console.error(colors.cyan(`  ${recoveryCommand}`));
+    process.exit(1);
   }
 
   // Prepare TLS options if HTTPS is requested

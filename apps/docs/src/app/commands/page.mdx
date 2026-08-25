@@ -160,6 +160,8 @@ Finds and kills orphaned dev server processes left behind by crashed portless se
 portless proxy start
 ```
 
+On macOS and Linux, standard ports request sudo. If elevation fails, the command exits nonzero without starting or persisting a proxy on another port. Resolve the sudo error and retry `portless proxy start`. To avoid sudo explicitly, use `portless proxy start -p 1355`; URLs then include `:1355`. Windows does not require elevation.
+
 <table>
   <thead>
     <tr>
@@ -170,7 +172,7 @@ portless proxy start
   <tbody>
     <tr>
       <td>`-p, --port <number>`</td>
-      <td>Proxy port (default: 443, or 80 with `--no-tls`). Auto-elevates with sudo.</td>
+      <td>Proxy port (default: 443, or 80 with `--no-tls`). Standard ports request sudo on macOS/Linux, and failed elevation exits nonzero.</td>
     </tr>
     <tr>
       <td>`--no-tls`</td>

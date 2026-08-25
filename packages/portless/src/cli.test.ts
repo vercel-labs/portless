@@ -205,6 +205,8 @@ describe("CLI", () => {
       expect(stdout).toContain("PORTLESS_NGROK");
       expect(stdout).toContain("PORTLESS_NGROK_URL");
       expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("Failed elevation exits nonzero without changing ports");
+      expect(stdout).toContain("Use -p 1355 explicitly to avoid sudo (URLs include :1355)");
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -949,6 +951,8 @@ describe("CLI", () => {
       expect(stdout).toContain("portless proxy");
       expect(stdout).toContain("start");
       expect(stdout).toContain("stop");
+      expect(stdout).toContain("Failed elevation exits");
+      expect(stdout).toContain("explicitly use -p 1355 (URLs include :1355)");
     });
 
     it("prints help with -h", () => {
@@ -998,6 +1002,109 @@ describe("CLI", () => {
         expect(stderr).toContain("portless proxy stop");
       } finally {
         await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe.skipIf(process.platform === "win32")("privileged proxy startup", () => {
+    function writeNonRootPreload(dir: string): string {
+      const preloadPath = path.join(dir, "non-root-preload.cjs");
+      fs.writeFileSync(
+        preloadPath,
+        'Object.defineProperty(process, "getuid", { value: () => 1000, configurable: true });\n'
+      );
+      return preloadPath;
+    }
+
+    function cleanupRecordedProxy(stateDir: string): void {
+      const pidPath = path.join(stateDir, "proxy.pid");
+      if (!fs.existsSync(pidPath)) return;
+      const pid = Number.parseInt(fs.readFileSync(pidPath, "utf-8"), 10);
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return;
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // The daemon may have already exited.
+      }
+    }
+
+    it("exits nonzero without starting or persisting a fallback when sudo fails", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-sudo-failure-"));
+      const stateDir = path.join(tmpDir, "state");
+      const fakeBinDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(fakeBinDir);
+      const fakeSudoPath = path.join(fakeBinDir, "sudo");
+      fs.writeFileSync(fakeSudoPath, "#!/bin/sh\nexit 23\n");
+      fs.chmodSync(fakeSudoPath, 0o755);
+      const preloadPath = writeNonRootPreload(tmpDir);
+      const certPath = path.join(tmpDir, "cert.pem");
+      const keyPath = path.join(tmpDir, "key.pem");
+      const env = {
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        PORTLESS_STATE_DIR: stateDir,
+        NODE_OPTIONS: `--require=${preloadPath}`,
+      };
+      const args = [
+        "proxy",
+        "start",
+        "--cert",
+        certPath,
+        "--key",
+        keyPath,
+        "--tld",
+        "test",
+        "--wildcard",
+      ];
+
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const result = run(args, { env });
+          const output = result.stdout + result.stderr;
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain(
+            "Error: Port 443 requires elevated privileges, but sudo elevation failed"
+          );
+          expect(result.stderr).toContain(
+            `sudo portless proxy start --cert ${certPath} --key ${keyPath} --tld test --wildcard`
+          );
+          expect(output).not.toContain("Falling back");
+          expect(output).not.toContain("proxy start -p 1355");
+          expect(output).not.toContain("already running on port 1355");
+          expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
+        }
+      } finally {
+        cleanupRecordedProxy(stateDir);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("uses the same fatal path when sudo cannot be spawned", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-missing-sudo-"));
+      const stateDir = path.join(tmpDir, "state");
+      const emptyBinDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(emptyBinDir);
+      const preloadPath = writeNonRootPreload(tmpDir);
+
+      try {
+        const result = run(["proxy", "start"], {
+          env: {
+            PATH: emptyBinDir,
+            PORTLESS_STATE_DIR: stateDir,
+            NODE_OPTIONS: `--require=${preloadPath}`,
+          },
+        });
+        const output = result.stdout + result.stderr;
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("sudo elevation failed");
+        expect(result.stderr).toContain("spawnSync sudo ENOENT");
+        expect(result.stderr).toContain("sudo portless proxy start --https");
+        expect(output).not.toContain("Falling back");
+        expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
+      } finally {
+        cleanupRecordedProxy(stateDir);
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
@@ -1704,6 +1811,17 @@ describe("CLI", () => {
       expect(start.stdout).toContain(`proxy started on port ${testPort}`);
 
       const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      expect(stop.stdout).toContain("Proxy stopped");
+    });
+
+    it("starts and stops an explicitly selected unprivileged port", () => {
+      const env = { PORTLESS_STATE_DIR: tmpDir };
+      const start = run(["proxy", "start", "-p", String(testPort), "--no-tls"], { env });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain(`proxy started on port ${testPort}`);
+
+      const stop = run(["proxy", "stop", "-p", String(testPort)], { env });
       expect(stop.status).toBe(0);
       expect(stop.stdout).toContain("Proxy stopped");
     });

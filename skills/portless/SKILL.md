@@ -161,7 +161,7 @@ period.
 
 ## How It Works
 
-1. `portless proxy start` starts an HTTPS reverse proxy on port 443 as a background daemon. Auto-elevates with sudo on macOS/Linux; falls back to port 1355 if sudo is unavailable. Use `--no-tls` for plain HTTP on port 80. Configurable with `-p` / `--port` or the `PORTLESS_PORT` env var. The proxy also auto-starts when you run an app.
+1. `portless proxy start` starts an HTTPS reverse proxy on port 443 as a background daemon. It auto-elevates with sudo on macOS/Linux. Failed elevation exits nonzero without starting on another port. Resolve the sudo error and retry, or explicitly use `-p 1355`; those URLs include `:1355`. Use `--no-tls` for plain HTTP on port 80. Configurable with `-p` / `--port` or the `PORTLESS_PORT` env var. The proxy also auto-starts when you run an app.
 2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `https://<name>.localhost`; the proxy forwards to the app's assigned port
 
@@ -396,11 +396,11 @@ For other frameworks that don't read `PORT`, pass the port manually:
 
 ### Permission errors
 
-The default ports (80 for HTTP, 443 for HTTPS) require `sudo` on macOS and Linux. Portless auto-elevates with sudo when needed. If sudo is unavailable, it falls back to port 1355 (no sudo needed). On Windows, no elevation is required.
+The default ports (80 for HTTP, 443 for HTTPS) require `sudo` on macOS and Linux. Portless auto-elevates with sudo when needed. If elevation fails, portless exits nonzero without starting or persisting another endpoint. Resolve the sudo error and retry the requested startup. To avoid sudo, explicitly select port 1355; URLs then include `:1355`. On Windows, no elevation is required.
 
 ```bash
 portless proxy start --https           # Auto-elevates with sudo for port 443
-portless proxy start -p 1355 --https   # No sudo needed (URLs include :1355)
+portless proxy start -p 1355 --https   # Explicit alternative; URLs include :1355
 portless proxy stop                    # Stop (use sudo if started with sudo)
 ```
 

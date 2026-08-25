@@ -17,7 +17,7 @@ import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 /** True when running on Windows. */
 export const isWindows = process.platform === "win32";
 
-/** Unprivileged fallback port used when standard ports are unavailable. */
+/** Well-known unprivileged port retained for explicit configuration and legacy discovery. */
 export const FALLBACK_PROXY_PORT = 1355;
 
 /**
@@ -785,7 +785,7 @@ export async function discoverState(): Promise<{
 
   // State files didn't help. Probe well-known ports as a last resort.
   // Standard ports first (443, 80) since those are the new defaults, then the
-  // legacy fallback port, then any PORTLESS_PORT override.
+  // legacy unprivileged port, then any PORTLESS_PORT override.
   const configuredPort = getDefaultPort();
   const probePorts = new Set([443, 80, FALLBACK_PROXY_PORT, configuredPort]);
   for (const port of probePorts) {
