@@ -4,6 +4,7 @@ import {
   formatUrl,
   isErrnoException,
   isProcessAlive,
+  normalizePathPrefix,
   parseHostname,
   parseHostnames,
   resolveUserHome,
@@ -113,6 +114,58 @@ describe("isErrnoException", () => {
   });
 });
 
+describe("normalizePathPrefix", () => {
+  it("returns undefined for undefined input", () => {
+    expect(normalizePathPrefix(undefined)).toBeUndefined();
+  });
+
+  it("returns undefined for '/'", () => {
+    expect(normalizePathPrefix("/")).toBeUndefined();
+  });
+
+  it("returns undefined for empty string", () => {
+    expect(normalizePathPrefix("")).toBeUndefined();
+  });
+
+  it("adds leading slash if missing", () => {
+    expect(normalizePathPrefix("settings")).toBe("/settings");
+  });
+
+  it("strips trailing slash", () => {
+    expect(normalizePathPrefix("/settings/")).toBe("/settings");
+  });
+
+  it("preserves valid path", () => {
+    expect(normalizePathPrefix("/settings")).toBe("/settings");
+  });
+
+  it("handles nested paths", () => {
+    expect(normalizePathPrefix("/app/settings")).toBe("/app/settings");
+  });
+
+  it("allows dots in paths", () => {
+    expect(normalizePathPrefix("/api/v2.0")).toBe("/api/v2.0");
+  });
+
+  it("throws for paths with invalid characters", () => {
+    expect(() => normalizePathPrefix("/set tings")).toThrow("Invalid path prefix");
+  });
+
+  it("throws for paths with empty segments (//)", () => {
+    expect(() => normalizePathPrefix("/api//v1")).toThrow("empty path segments");
+  });
+
+  it("throws for paths containing .. segments", () => {
+    expect(() => normalizePathPrefix("/..")).toThrow('".." segments');
+    expect(() => normalizePathPrefix("/api/../etc")).toThrow('".." segments');
+  });
+
+  it("allows dots within a segment (not standalone ..)", () => {
+    expect(normalizePathPrefix("/v1.2.3")).toBe("/v1.2.3");
+    expect(normalizePathPrefix("/...")).toBe("/...");
+  });
+});
+
 describe("isProcessAlive", () => {
   it("returns true when signal 0 succeeds", () => {
     vi.spyOn(process, "kill").mockImplementation(() => true);
@@ -157,6 +210,22 @@ describe("formatUrl", () => {
     expect(formatUrl("myapp.localhost", 1355)).toBe("http://myapp.localhost:1355");
     expect(formatUrl("myapp.localhost", 8080)).toBe("http://myapp.localhost:8080");
     expect(formatUrl("myapp.localhost", 3000)).toBe("http://myapp.localhost:3000");
+  });
+
+  it("appends path prefix to URL", () => {
+    expect(formatUrl("myapp.localhost", 1355, false, "/settings")).toBe(
+      "http://myapp.localhost:1355/settings"
+    );
+  });
+
+  it("appends path prefix with HTTPS", () => {
+    expect(formatUrl("myapp.localhost", 443, true, "/metrics")).toBe(
+      "https://myapp.localhost/metrics"
+    );
+  });
+
+  it("ignores undefined path prefix", () => {
+    expect(formatUrl("myapp.localhost", 1355, false)).toBe("http://myapp.localhost:1355");
   });
 });
 

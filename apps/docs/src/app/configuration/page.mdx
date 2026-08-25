@@ -60,6 +60,15 @@ The name is inferred from `package.json` if not set in config. The script defaul
       </td>
     </tr>
     <tr>
+      <td>`path`</td>
+      <td>string</td>
+      <td></td>
+      <td>
+        URL path prefix for path-based routing (e.g. `/api`). Apps sharing a `name` with different
+        `path` values are dispatched by longest prefix under one hostname.
+      </td>
+    </tr>
+    <tr>
       <td>`apps`</td>
       <td>object</td>
       <td></td>
@@ -74,7 +83,7 @@ The name is inferred from `package.json` if not set in config. The script defaul
   </tbody>
 </table>
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `path`). When `apps` is present, top-level fields apply only in single-app mode.
 
 ### package.json "portless" key
 
@@ -184,6 +193,11 @@ For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.js
       <td>`PORTLESS_APP_PORT`</td>
       <td>Use a fixed port for the app (skip auto-assignment)</td>
       <td>random 4000 to 4999</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_PATH`</td>
+      <td>Path prefix for path-based routing (e.g. `/api`)</td>
+      <td>none</td>
     </tr>
     <tr>
       <td>`PORTLESS_SYNC_HOSTS`</td>

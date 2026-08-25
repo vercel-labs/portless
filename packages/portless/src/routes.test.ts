@@ -418,6 +418,128 @@ describe("RouteStore", () => {
     }, 10_000);
   });
 
+  describe("pathPrefix support", () => {
+    it("adds route with pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false, "/settings");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0]).toEqual({
+        hostname: "app.localhost",
+        port: 4001,
+        pid: process.pid,
+        pathPrefix: "/settings",
+      });
+    });
+
+    it("allows same hostname with different pathPrefixes", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/settings");
+      store.addRoute("app.localhost", 4003, process.pid, false, "/metrics");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(3);
+      const ports = routes.map((r) => r.port).sort();
+      expect(ports).toEqual([4001, 4002, 4003]);
+    });
+
+    it("detects conflict on same hostname + pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false, "/settings");
+      // Same PID re-registering replaces the route
+      store.addRoute("app.localhost", 4099, process.pid, false, "/settings");
+      const routes = store.loadRoutes();
+      const settingsRoute = routes.find((r) => r.pathPrefix === "/settings");
+      expect(settingsRoute?.port).toBe(4099);
+    });
+
+    it("removes route by hostname + pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/settings");
+      store.removeRoute("app.localhost", undefined, "/settings");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].port).toBe(4001);
+      expect(routes[0].pathPrefix).toBeUndefined();
+    });
+
+    it("removeRoute without pathPrefix only removes root route", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/settings");
+      store.removeRoute("app.localhost");
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].pathPrefix).toBe("/settings");
+    });
+
+    it("updateRoute targets the entry matching hostname + pathPrefix", () => {
+      store.addRoute("app.localhost", 4001, process.pid, false);
+      store.addRoute("app.localhost", 4002, process.pid, false, "/api");
+      store.updateRoute(
+        "app.localhost",
+        { ngrokUrl: "https://x.ngrok.app", ngrokPid: 123 },
+        "/api"
+      );
+      const routes = store.loadRoutes();
+      const root = routes.find((r) => r.pathPrefix === undefined);
+      const api = routes.find((r) => r.pathPrefix === "/api");
+      expect(root?.ngrokUrl).toBeUndefined();
+      expect(api?.ngrokUrl).toBe("https://x.ngrok.app");
+      expect(api?.ngrokPid).toBe(123);
+    });
+
+    it("removeRoute with ownerPid respects ownership for path routes", () => {
+      store.addRoute("app.localhost", 4002, process.pid, false, "/api");
+      // A different pid must not be able to deregister the route (post-takeover guard).
+      store.removeRoute("app.localhost", process.pid + 1, "/api");
+      expect(store.loadRoutes()).toHaveLength(1);
+      store.removeRoute("app.localhost", process.pid, "/api");
+      expect(store.loadRoutes()).toHaveLength(0);
+    });
+
+    it("RouteConflictError message includes the path prefix", () => {
+      const err = new RouteConflictError("app.localhost", 123, "/api");
+      expect(err.message).toContain('"app.localhost/api"');
+    });
+
+    it("loads routes.json with pathPrefix field from disk", () => {
+      store.ensureDir();
+      const routes = [
+        { hostname: "app.localhost", port: 4001, pid: process.pid },
+        { hostname: "app.localhost", port: 4002, pid: process.pid, pathPrefix: "/settings" },
+      ];
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const loaded = store.loadRoutes();
+      expect(loaded).toHaveLength(2);
+      expect(loaded[0].pathPrefix).toBeUndefined();
+      expect(loaded[1].pathPrefix).toBe("/settings");
+    });
+
+    it("throws RouteConflictError when same (hostname, pathPrefix) is owned by another live process", () => {
+      const child = spawn("node", ["-e", "setTimeout(()=>{},60000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      const otherPid = child.pid!;
+      try {
+        store.addRoute("app.localhost", 4001, otherPid, false, "/settings");
+        // Different hostname or different prefix should not conflict.
+        expect(() => store.addRoute("app.localhost", 4002, process.pid)).not.toThrow();
+        expect(() =>
+          store.addRoute("app.localhost", 4003, process.pid, false, "/other")
+        ).not.toThrow();
+        // Same (hostname, pathPrefix) owned by the other live PID conflicts.
+        expect(() =>
+          store.addRoute("app.localhost", 4099, process.pid, false, "/settings")
+        ).toThrow(RouteConflictError);
+      } finally {
+        try {
+          process.kill(otherPid, "SIGTERM");
+        } catch {
+          // already dead
+        }
+      }
+    });
+  });
+
   describe("tailscale metadata", () => {
     it("persists and loads tailscale fields via updateRoute", () => {
       store.addRoute("myapp.localhost", 4123, process.pid);
