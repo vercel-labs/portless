@@ -1125,8 +1125,13 @@ async function ensureProxyRunning(
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
 
+  if (result.status !== null && result.status !== 0) {
+    process.exit(1);
+    return { started: false };
+  }
+
   let discovered: Awaited<ReturnType<typeof discoverState>> | null = null;
-  if (!result.signal) {
+  if (!result.error && !result.signal && result.status === 0) {
     for (let i = 0; i < WAIT_FOR_PROXY_MAX_ATTEMPTS; i++) {
       await new Promise((r) => setTimeout(r, WAIT_FOR_PROXY_INTERVAL_MS));
       const state = await discoverState();

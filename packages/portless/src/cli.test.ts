@@ -1008,11 +1008,18 @@ describe("CLI", () => {
   });
 
   describe.skipIf(process.platform === "win32")("privileged proxy startup", () => {
-    function writeNonRootPreload(dir: string): string {
+    function writeNonRootPreload(dir: string, interactive = false): string {
       const preloadPath = path.join(dir, "non-root-preload.cjs");
       fs.writeFileSync(
         preloadPath,
-        'Object.defineProperty(process, "getuid", { value: () => 1000, configurable: true });\n'
+        [
+          'Object.defineProperty(process, "getuid", { value: () => 1000, configurable: true });',
+          ...(interactive
+            ? [
+                'Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });',
+              ]
+            : []),
+        ].join("\n") + "\n"
       );
       return preloadPath;
     }
@@ -1101,6 +1108,43 @@ describe("CLI", () => {
         expect(result.stderr).toContain("spawnSync sudo ENOENT");
         expect(result.stderr).toContain("sudo portless proxy start --https");
         expect(output).not.toContain("Falling back");
+        expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
+      } finally {
+        cleanupRecordedProxy(stateDir);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("propagates an interactive auto-start child failure immediately", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-auto-start-failure-"));
+      const stateDir = path.join(tmpDir, "state");
+      const fakeBinDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(fakeBinDir);
+      const fakeSudoPath = path.join(fakeBinDir, "sudo");
+      fs.writeFileSync(fakeSudoPath, "#!/bin/sh\nexit 23\n");
+      fs.chmodSync(fakeSudoPath, 0o755);
+      const preloadPath = writeNonRootPreload(tmpDir, true);
+
+      try {
+        const startedAt = performance.now();
+        const result = run(["review-app", process.execPath, "-e", "process.exit(0)"], {
+          env: {
+            PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_STATE_DIR: stateDir,
+            PORTLESS_HTTPS: "0",
+            NODE_OPTIONS: `--require=${preloadPath}`,
+            CI: undefined,
+          },
+        });
+        const elapsedMs = performance.now() - startedAt;
+        const output = result.stdout + result.stderr;
+        expect(result.status).toBe(1);
+        expect(elapsedMs).toBeLessThan(2_000);
+        expect(output).toContain(
+          "Error: Port 80 requires elevated privileges, but sudo elevation failed"
+        );
+        expect(output).not.toContain("Failed to start proxy.");
         expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(false);
         expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
       } finally {
