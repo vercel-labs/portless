@@ -204,6 +204,15 @@ portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
+The branch is a good default, but it is only a guess at what you call the checkout. Worktree tooling often names branches on a pattern you never say aloud, and only the last `/` segment is used, so `worktree-fix-ui` or `jd/fix-ui` becomes a hostname nobody recognizes. `--name` cannot fix that: it replaces the base name and the prefix is still prepended. Use `--prefix` to choose the prefix itself:
+
+```bash
+portless run --prefix fix-ui next dev   # -> https://fix-ui.myapp.localhost
+portless run --prefix "" next dev       # -> https://myapp.localhost (no prefix)
+```
+
+`PORTLESS_PREFIX` does the same for a whole shell, which is what a worktree manager should export when it opens one.
+
 ## Custom TLD
 
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
@@ -445,6 +454,7 @@ PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
 PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode
 PORTLESS_TLD=<tld>[,<tld>]       Use one or more TLDs (e.g. localhost,test)
+PORTLESS_PREFIX=<prefix>         Set the worktree prefix ("" for none, same as --prefix)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)

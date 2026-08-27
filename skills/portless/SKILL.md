@@ -147,6 +147,15 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+The prefix comes from the branch, using only the last `/` segment. When the branch is not what the checkout is called (`worktree-fix-ui`, `jd/fix-ui`), set the prefix yourself. `--name` will not do it: that replaces the base name and the prefix is still prepended.
+
+```bash
+portless run --prefix fix-ui next dev   # -> https://fix-ui.myapp.localhost
+portless run --prefix "" next dev       # -> https://myapp.localhost (no prefix)
+```
+
+`PORTLESS_PREFIX` is the same setting for a whole shell.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -189,6 +198,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
 | `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                             |
 | `PORTLESS_TLD`        | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
+| `PORTLESS_PREFIX`     | Set the worktree prefix, `""` for none (same as `--prefix`)                    |
 | `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent             |
 | `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
 | `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
@@ -290,6 +300,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
+| `portless run --prefix <prefix> <cmd>`            | Set the worktree prefix ("" for none)                          |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
 | `portless get <name> --no-worktree`               | Print URL without worktree prefix                              |

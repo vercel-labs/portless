@@ -1642,12 +1642,18 @@ ${colors.bold("Name inference (in order):")}
   In git worktrees, the branch name is prepended as a subdomain prefix
   (e.g. feature-auth.myapp.localhost).
 
+  Use --prefix to choose that prefix yourself when the branch name is not what
+  you call the checkout, or --prefix "" for no prefix at all. PORTLESS_PREFIX
+  does the same thing for a whole shell.
+
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
+  portless run --prefix auth next dev  # -> https://auth.<project>.localhost
+  portless run --prefix "" next dev    # -> https://<project>.localhost
 `);
       process.exit(0);
     } else if (args[i] === "--force") {
@@ -1663,13 +1669,26 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (args[i] === "--prefix") {
+      i++;
+      if (args[i] === undefined || (args[i].startsWith("-") && args[i] !== "")) {
+        console.error(colors.red("Error: --prefix requires a value."));
+        console.error(colors.cyan("  portless run --prefix <prefix> <command...>"));
+        console.error(colors.cyan('  portless run --prefix "" <command...>   # no prefix'));
+        process.exit(1);
+      }
+      // Assigned to the environment rather than threaded as a value: the prefix
+      // is consumed by detectWorktreePrefix(), which several call sites reach
+      // with no arguments, and PORTLESS_PREFIX is already the documented way to
+      // say this. One reader, one meaning.
+      process.env.PORTLESS_PREFIX = args[i];
     } else if (applySharingFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --help"
+          "Known flags: --name, --prefix, --force, --app-port, --tailscale, --funnel, --ngrok, --help"
         )
       );
       process.exit(1);
@@ -1886,6 +1905,7 @@ ${colors.bold("ngrok sharing:")}
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees
+  --prefix <prefix>             Set the worktree prefix yourself ("" for none)
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo on macOS/Linux
@@ -4222,7 +4242,7 @@ async function main() {
 
     if (mode === "run") {
       index++;
-      const runValueFlags = new Set(["--name", "--app-port"]);
+      const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
       while (index < limit) {
         const next = advancePortlessFlag(index, runValueFlags);
         if (next === null) break;
