@@ -1,8 +1,27 @@
 # Changelog
 
-## 0.15.5
+## 0.15.6
 
 <!-- release:start -->
+
+### New Features
+
+- **Agent-readable documentation**: The documentation site now exposes clean Markdown pages and an `llms.txt` index so agents can discover and consume the docs directly. (#387)
+
+### Bug Fixes
+
+- **Framework flags through package scripts**: Frameworks that ignore `PORT` now receive the assigned `--port` and `--host` flags when launched through supported package-manager scripts, while non-server and unsafe scripts are left untouched. (#366)
+- **Windows service lifetime**: The Windows startup service now registers a UTF-16 Task Scheduler definition with no execution time limit and replaces existing tasks atomically. (#381)
+- **Ctrl+C process cleanup**: Interrupt handling now waits for the command's process tree to exit and terminates remaining descendants after a short grace period. (#385)
+
+### Contributors
+
+- @Railly
+- @EfeDurmaz16
+- @JohnPhamous
+<!-- release:end -->
+
+## 0.15.5
 
 ### Bug Fixes
 
@@ -15,7 +34,6 @@
 - @KingPsychopath
 - @erichurkman
 - @sanjevirau
-<!-- release:end -->
 
 ## 0.15.4
 

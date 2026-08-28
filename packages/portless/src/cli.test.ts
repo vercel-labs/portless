@@ -1206,9 +1206,10 @@ describe("CLI", () => {
           dnsPreloadPath,
           [
             'const dns = require("node:dns");',
-            "dns.lookup = (_hostname, _options, callback) => {",
+            "dns.lookup = (_hostname, options, callback) => {",
+            '  const done = typeof options === "function" ? options : callback;',
             '  const error = Object.assign(new Error("not found"), { code: "ENOTFOUND" });',
-            "  queueMicrotask(() => callback(error));",
+            "  queueMicrotask(() => done(error));",
             "};",
           ].join("\n")
         );

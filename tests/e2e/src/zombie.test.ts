@@ -101,6 +101,26 @@ async function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+async function waitForPortToClose(port: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (findPidsOnPort(port).length === 0) return true;
+    await sleep(50);
+  }
+  return findPidsOnPort(port).length === 0;
+}
+
+async function waitForChildToExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return true;
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve(false), timeoutMs);
+    child.once("exit", () => {
+      clearTimeout(timeout);
+      resolve(true);
+    });
+  });
+}
+
 interface TestState {
   stateDir?: string;
   cliChild?: ChildProcess;
@@ -108,10 +128,11 @@ interface TestState {
 }
 
 async function cleanupTestState(state: TestState): Promise<void> {
-  if (state.cliChild && !state.cliChild.killed) {
+  if (state.cliChild && state.cliChild.exitCode === null && state.cliChild.signalCode === null) {
     state.cliChild.kill("SIGTERM");
-    await sleep(1000);
-    if (!state.cliChild.killed) state.cliChild.kill("SIGKILL");
+    if (!(await waitForChildToExit(state.cliChild, 1000))) {
+      state.cliChild.kill("SIGKILL");
+    }
   }
   if (state.appPort) killPort(state.appPort);
 
@@ -165,8 +186,14 @@ async function startCliApp(
     stdio: ["ignore", "pipe", "pipe"],
   });
 
-  state.cliChild.stdout!.on("data", () => {});
-  state.cliChild.stderr!.on("data", () => {});
+  let stdout = "";
+  let stderr = "";
+  state.cliChild.stdout!.on("data", (chunk: Buffer) => {
+    stdout += chunk.toString();
+  });
+  state.cliChild.stderr!.on("data", (chunk: Buffer) => {
+    stderr += chunk.toString();
+  });
 
   const hostname = `${appName}.localhost`;
   const deadline = Date.now() + 30_000;
@@ -198,7 +225,7 @@ async function startCliApp(
     }
     await sleep(500);
   }
-  expect(ready).toBe(true);
+  expect(ready, `CLI did not become ready.\nstdout:\n${stdout}\nstderr:\n${stderr}`).toBe(true);
 
   const routesPath = path.join(state.stateDir, "routes.json");
   const routes: Array<{ hostname: string; port: number; pid: number }> = JSON.parse(
@@ -240,6 +267,33 @@ describe("zombie process prevention", () => {
     // grandchild survives because child.kill() only kills /bin/sh.
     const survivors = findPidsOnPort(appPort);
     expect(survivors).toEqual([]);
+  });
+
+  it("SIGINT stops the command's dev server before exiting", async () => {
+    if (isWindows) return;
+
+    const { appPort } = await startCliApp("zombie-sigint", state, "stubborn-wrapper.js");
+
+    state.cliChild!.kill("SIGINT");
+    const cliExited = await waitForChildToExit(state.cliChild!, 10_000);
+    const portClosed = await waitForPortToClose(appPort, 1000);
+
+    expect({ cliExited, portClosed }).toEqual({ cliExited: true, portClosed: true });
+  });
+
+  it("forwards a second SIGINT while the command is shutting down", async () => {
+    if (isWindows) return;
+
+    const { appPort } = await startCliApp("zombie-second-sigint", state, "stubborn-wrapper.js");
+
+    state.cliChild!.kill("SIGINT");
+    await sleep(100);
+    state.cliChild!.kill("SIGINT");
+
+    const cliExited = await waitForChildToExit(state.cliChild!, 2000);
+    const portClosed = await waitForPortToClose(appPort, 2000);
+
+    expect({ cliExited, portClosed }).toEqual({ cliExited: true, portClosed: true });
   });
 
   it("SIGKILL leaves orphan, portless prune cleans it up", async () => {

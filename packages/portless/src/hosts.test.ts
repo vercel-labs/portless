@@ -166,9 +166,29 @@ describe("shouldAutoSyncHosts", () => {
 // ---------------------------------------------------------------------------
 
 describe("checkHostResolution", () => {
-  it("resolves localhost to 127.0.0.1", async () => {
+  it("accepts localhost through either loopback family", async () => {
     const result = await checkHostResolution("localhost");
     expect(result).toBe(true);
+  });
+
+  it("accepts IPv4 loopback", async () => {
+    const result = await checkHostResolution("127.0.0.1");
+    expect(result).toBe(true);
+  });
+
+  it("accepts IPv6 loopback", async () => {
+    const result = await checkHostResolution("::1");
+    expect(result).toBe(true);
+  });
+
+  it("rejects non-loopback IPv4", async () => {
+    const result = await checkHostResolution("198.51.100.7");
+    expect(result).toBe(false);
+  });
+
+  it("rejects non-loopback IPv6", async () => {
+    const result = await checkHostResolution("2001:db8::1");
+    expect(result).toBe(false);
   });
 
   it("returns false for a nonexistent domain", async () => {

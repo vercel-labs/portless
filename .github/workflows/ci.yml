@@ -64,3 +64,70 @@ jobs:
       - run: pnpm build
 
       - run: pnpm test
+
+      - name: Install and verify the Windows service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          $stateDir = "C:\portless-ci-state"
+          node packages/portless/dist/cli.js service install `
+            --no-tls `
+            --port 18080 `
+            --state-dir $stateDir
+
+          $task = Get-ScheduledTask -TaskName "Portless Proxy"
+          if ([string]$task.Settings.ExecutionTimeLimit -ne "PT0S") {
+            throw "Expected zero execution time limit, got $($task.Settings.ExecutionTimeLimit)"
+          }
+          if ($task.Principal.UserId -notin @("SYSTEM", "S-1-5-18")) {
+            throw "Expected SYSTEM principal, got $($task.Principal.UserId)"
+          }
+          if ($task.Principal.RunLevel -ne "Highest") {
+            throw "Expected highest run level, got $($task.Principal.RunLevel)"
+          }
+          if (-not ($task.Triggers | Where-Object {
+            $_.CimClass.CimClassName -eq "MSFT_TaskBootTrigger"
+          })) {
+            throw "Expected a boot trigger"
+          }
+          if ($task.Actions.Execute -notmatch "(?i)cmd(\.exe)?$") {
+            throw "Expected cmd.exe action, got $($task.Actions.Execute)"
+          }
+
+          Export-ScheduledTask -TaskName "Portless Proxy" | Set-Content portless-task.xml
+          if ((Get-Content portless-task.xml -Raw) -notmatch "<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>") {
+            throw "Exported task XML does not contain PT0S"
+          }
+
+          $listening = $false
+          for ($attempt = 0; $attempt -lt 20; $attempt++) {
+            if (Get-NetTCPConnection -LocalPort 18080 -State Listen -ErrorAction SilentlyContinue) {
+              $listening = $true
+              break
+            }
+            Start-Sleep -Milliseconds 500
+          }
+          if (-not $listening) {
+            schtasks /Query /TN "Portless Proxy" /FO LIST /V
+            throw "Portless service did not listen on port 18080"
+          }
+
+          node packages/portless/dist/cli.js service status | Tee-Object service-status.txt
+
+      - name: Upload Windows service evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-service-evidence
+          path: |
+            portless-task.xml
+            service-status.txt
+
+      - name: Uninstall Windows service
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $PSNativeCommandUseErrorActionPreference = $true
+          node packages/portless/dist/cli.js service uninstall

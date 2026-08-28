@@ -2044,6 +2044,18 @@ describe("reportHostsSync", () => {
     expect(warnings).toEqual([]);
   });
 
+  it("does not warn when the system resolver selects IPv6 loopback", async () => {
+    await reportHostsSync(["::1"], 1, false, false, onWarn, acted);
+    expect(warnings).toEqual([]);
+  });
+
+  it("warns when the system resolver selects non-loopback IPv6", async () => {
+    await reportHostsSync(["2001:db8::1"], 1, false, false, onWarn, acted);
+    expect(warnings).toEqual([
+      "2001:db8::1 will not resolve. Run: portless hosts sync",
+    ]);
+  });
+
   it("warns naming only the hostnames that do not resolve", async () => {
     await reportHostsSync(
       ["good.test", "bad.test"],

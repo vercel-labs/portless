@@ -146,17 +146,17 @@ export function getManagedHostnames(): string[] {
 }
 
 /**
- * Check whether a hostname resolves to 127.0.0.1 via the system DNS resolver.
- * Returns true if resolution works, false otherwise.
+ * Check whether the system DNS resolver selects an address where the local
+ * proxy listens.
  */
 export function checkHostResolution(hostname: string): Promise<boolean> {
   return new Promise((resolve) => {
-    dns.lookup(hostname, { family: 4 }, (err, address) => {
+    dns.lookup(hostname, (err, address) => {
       if (err) {
         resolve(false);
         return;
       }
-      resolve(address === "127.0.0.1");
+      resolve(address === "127.0.0.1" || address === "::1");
     });
   });
 }

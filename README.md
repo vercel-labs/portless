@@ -166,6 +166,10 @@ With a `portless.json`, you can simplify to:
 
 Then run `portless` or `portless run` to go through the proxy.
 
+When you press Ctrl+C, portless forwards the interrupt and waits for the command's process tree to
+exit. Press Ctrl+C again to forward another interrupt. Any remaining descendants are terminated
+after a short grace period.
+
 ## Subdomains
 
 Organize services with subdomains:

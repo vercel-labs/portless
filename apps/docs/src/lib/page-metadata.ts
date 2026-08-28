@@ -14,6 +14,10 @@ export function pageMetadata(slug: string): Metadata {
 
   return {
     title: displayTitle,
+    alternates: {
+      canonical: `/${slug}`,
+      types: { "text/markdown": `/${slug}.md` },
+    },
     openGraph: {
       type: "website",
       locale: "en_US",
