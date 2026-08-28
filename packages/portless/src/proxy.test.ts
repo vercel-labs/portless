@@ -8,6 +8,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createProxyServer, HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_VERSION_HEADER } from "./hosts-sync-auth.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
@@ -19,7 +20,12 @@ type AnyServer = http.Server | ProxyServer;
 
 function request(
   server: AnyServer,
-  options: { host?: string; path?: string; method?: string }
+  options: {
+    host?: string;
+    path?: string;
+    method?: string;
+    headers?: http.OutgoingHttpHeaders;
+  }
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
     const addr = server.address();
@@ -32,7 +38,7 @@ function request(
         port: addr.port,
         path: options.path || "/",
         method: options.method || "GET",
-        headers: { host: options.host || "" },
+        headers: { host: options.host || "", ...options.headers },
       },
       (res) => {
         let body = "";
@@ -2240,6 +2246,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
 describe("internal hosts-sync route", () => {
   const servers: AnyServer[] = [];
+  const token = "a".repeat(64);
 
   afterEach(async () => {
     for (const server of servers) {
@@ -2256,6 +2263,7 @@ describe("internal hosts-sync route", () => {
       getRoutes: () => routes,
       proxyPort: TEST_PROXY_PORT,
       onHostsSyncRequest,
+      hostsSyncToken: token,
     });
     servers.push(server);
     return listen(server).then(() => server);
@@ -2268,10 +2276,63 @@ describe("internal hosts-sync route", () => {
       return "acted";
     });
     for (const host of ["127.0.0.1", "127.0.0.1:1355", "[::1]", "[::1]:1355"]) {
-      const res = await request(server, { host, path: HOSTS_SYNC_PATH, method: "POST" });
+      const res = await request(server, {
+        host,
+        path: HOSTS_SYNC_PATH,
+        method: "POST",
+        headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
+      });
       expect(res.status).toBe(204);
     }
     expect(calls).toBe(4);
+  });
+
+  it("accepts an IPv6 loopback peer with canonical authority", async (ctx) => {
+    let calls = 0;
+    const server = createProxyServer({
+      getRoutes: () => [],
+      proxyPort: TEST_PROXY_PORT,
+      onHostsSyncRequest: () => {
+        calls += 1;
+        return "acted";
+      },
+      hostsSyncToken: token,
+    });
+    servers.push(server);
+    const available = await new Promise<boolean>((resolve, reject) => {
+      server.once("error", (error: NodeJS.ErrnoException) => {
+        if (error.code === "EAFNOSUPPORT" || error.code === "EADDRNOTAVAIL") {
+          resolve(false);
+        } else {
+          reject(error);
+        }
+      });
+      server.listen(0, "::1", () => resolve(true));
+    });
+    if (!available) return ctx.skip();
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+
+    const status = await new Promise<number>((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: "::1",
+          port: address.port,
+          path: HOSTS_SYNC_PATH,
+          method: "POST",
+          headers: { host: "[::1]", [HOSTS_SYNC_AUTH_HEADER]: token },
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve(res.statusCode ?? 0));
+        }
+      );
+      req.on("error", reject);
+      req.end();
+    });
+
+    expect(status).toBe(204);
+    expect(calls).toBe(1);
   });
 
   it("proxies a registered hostname beginning with 127", async () => {
@@ -2289,6 +2350,7 @@ describe("internal hosts-sync route", () => {
     });
     expect(res.status).toBe(200);
     expect(res.body).toBe("app response");
+    expect(res.headers[HOSTS_SYNC_AUTH_VERSION_HEADER]).toBeUndefined();
   });
 
   it("refuses a canonical loopback authority from a non-loopback peer", async (ctx) => {
@@ -2301,6 +2363,7 @@ describe("internal hosts-sync route", () => {
       getRoutes: () => [],
       proxyPort: TEST_PROXY_PORT,
       onHostsSyncRequest: () => "acted",
+      hostsSyncToken: token,
     });
     servers.push(server);
     await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", () => resolve()));
@@ -2314,7 +2377,7 @@ describe("internal hosts-sync route", () => {
           port: address.port,
           path: HOSTS_SYNC_PATH,
           method: "POST",
-          headers: { host: "127.0.0.1" },
+          headers: { host: "127.0.0.1", [HOSTS_SYNC_AUTH_HEADER]: token },
         },
         (res) => {
           res.resume();
@@ -2333,6 +2396,7 @@ describe("internal hosts-sync route", () => {
       host: "127.0.0.1",
       path: HOSTS_SYNC_PATH,
       method: "POST",
+      headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
     });
     expect(res.status).toBe(404);
   });
@@ -2343,6 +2407,7 @@ describe("internal hosts-sync route", () => {
       host: "127.0.0.1",
       path: HOSTS_SYNC_PATH,
       method: "POST",
+      headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
     });
     expect(res.status).toBe(409);
   });
@@ -2351,7 +2416,12 @@ describe("internal hosts-sync route", () => {
     "does not accept alternate authority %s",
     async (host) => {
       const server = await start(() => "acted");
-      const res = await request(server, { host, path: HOSTS_SYNC_PATH, method: "POST" });
+      const res = await request(server, {
+        host,
+        path: HOSTS_SYNC_PATH,
+        method: "POST",
+        headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
+      });
       expect(res.status).not.toBe(204);
     }
   );

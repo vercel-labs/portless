@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
@@ -10,6 +11,17 @@ import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
+import {
+  HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
+  HOSTS_SYNC_AUTH_HEADER,
+  HOSTS_SYNC_AUTH_PROOF_HEADER,
+  HOSTS_SYNC_AUTH_VERSION,
+  HOSTS_SYNC_AUTH_VERSION_HEADER,
+  createHostsSyncProof,
+  generateHostsSyncChallenge,
+  isValidHostsSyncToken,
+  readHostsSyncToken,
+} from "./hosts-sync-auth.js";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -918,7 +930,61 @@ const UNTRIGGERED_SYNC_CEILING_MS = 3500;
 
 export type HostsSyncTrigger = "acted" | "absent" | "disabled" | "mute";
 
-export function triggerHostsSync(port: number, tls = false): Promise<HostsSyncTrigger> {
+function probeHostsSyncAuth(
+  port: number,
+  tls: boolean,
+  token: string | null,
+  challenge: string,
+  signal: AbortSignal
+): Promise<"available" | "absent" | "mute"> {
+  return new Promise((resolve) => {
+    const requestFn = tls ? https.request : http.request;
+    const req = requestFn(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: "/",
+        method: "HEAD",
+        headers: { [HOSTS_SYNC_AUTH_CHALLENGE_HEADER]: challenge },
+        signal,
+        ...(tls ? { rejectUnauthorized: false } : {}),
+      },
+      (res) => {
+        const expectedProof = token ? createHostsSyncProof(token, challenge) : null;
+        const suppliedProof = res.headers[HOSTS_SYNC_AUTH_PROOF_HEADER];
+        const available =
+          res.headers[PORTLESS_HEADER.toLowerCase()] === "1" &&
+          res.headers[HOSTS_SYNC_AUTH_VERSION_HEADER] === HOSTS_SYNC_AUTH_VERSION &&
+          typeof suppliedProof === "string" &&
+          expectedProof !== null &&
+          isValidHostsSyncToken(suppliedProof) &&
+          crypto.timingSafeEqual(Buffer.from(suppliedProof), Buffer.from(expectedProof));
+        res.resume();
+        res.on("end", () => resolve(available ? "available" : "mute"));
+        res.on("error", () => resolve("mute"));
+      }
+    );
+    req.on("error", (err: NodeJS.ErrnoException) => {
+      resolve(err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? "absent" : "mute");
+    });
+    req.end();
+  });
+}
+
+export async function triggerHostsSync(
+  port: number,
+  tls = false,
+  stateDir = resolveStateDir(port)
+): Promise<HostsSyncTrigger> {
+  const deadline = Date.now() + HOSTS_SYNC_TRIGGER_TIMEOUT_MS;
+  const signal = AbortSignal.timeout(HOSTS_SYNC_TRIGGER_TIMEOUT_MS);
+  const token = readHostsSyncToken(stateDir);
+  const challenge = generateHostsSyncChallenge();
+  const capability = await probeHostsSyncAuth(port, tls, token, challenge, signal);
+  if (capability !== "available") return capability;
+  if (!token) return Promise.resolve("mute");
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return Promise.resolve("mute");
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(
@@ -927,7 +993,8 @@ export function triggerHostsSync(port: number, tls = false): Promise<HostsSyncTr
         port,
         path: HOSTS_SYNC_PATH,
         method: "POST",
-        timeout: HOSTS_SYNC_TRIGGER_TIMEOUT_MS,
+        headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
+        signal,
         ...(tls ? { rejectUnauthorized: false } : {}),
       },
       (res) => {
@@ -940,10 +1007,6 @@ export function triggerHostsSync(port: number, tls = false): Promise<HostsSyncTr
     );
     req.on("error", (err: NodeJS.ErrnoException) => {
       resolve(err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? "absent" : "mute");
-    });
-    req.on("timeout", () => {
-      req.destroy();
-      resolve("mute");
     });
     req.end();
   });

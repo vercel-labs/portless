@@ -44,6 +44,8 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
     fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+    fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-token"), "token");
+    fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-token.tmp"), "token");
     fs.mkdirSync(path.join(tmpDir, "host-certs"));
     fs.writeFileSync(path.join(tmpDir, "host-certs", "x.pem"), "x");
 
@@ -57,6 +59,8 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "ca.trust-refresh-pending"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.custom-cert"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-token"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-token.tmp"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "host-certs"))).toBe(false);
     expect(fs.readFileSync(path.join(tmpDir, "user-notes.txt"), "utf-8")).toBe("keep me");
   });

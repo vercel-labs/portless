@@ -29,6 +29,7 @@ export interface ProxyServerOptions {
   onError?: (message: string) => void;
   /** Run the daemon-owned hosts sync for the current route table. */
   onHostsSyncRequest?: () => "acted" | "disabled";
+  hostsSyncToken?: string;
   /** When provided, enables HTTP/2 over TLS (HTTPS). */
   tls?: {
     cert: Buffer;

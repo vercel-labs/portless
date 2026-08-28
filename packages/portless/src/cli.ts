@@ -10,6 +10,11 @@ import { StringDecoder } from "node:string_decoder";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
+  generateHostsSyncToken,
+  removeHostsSyncToken,
+  writeHostsSyncToken,
+} from "./hosts-sync-auth.js";
+import {
   fixOwnership,
   formatUrl,
   isErrnoException,
@@ -592,6 +597,7 @@ function startProxyServer(
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
   const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
+  const hostsSyncToken = generateHostsSyncToken();
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
@@ -709,6 +715,7 @@ function startProxyServer(
       strict,
       onError: (msg) => console.error(colors.red(msg)),
       onHostsSyncRequest,
+      hostsSyncToken,
       tls: tlsOptions,
     });
   const server = createServer();
@@ -794,6 +801,9 @@ function startProxyServer(
   }
 
   listenOnProxyInterface(server, proxyPort, primaryBindTarget, () => {
+    if (!writeHostsSyncToken(store.dir, hostsSyncToken)) {
+      console.warn(colors.yellow("Could not publish hosts sync authorization."));
+    }
     // Save PID and port once the server is actually listening
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
@@ -854,6 +864,7 @@ function startProxyServer(
     writeCustomCertMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
     writeLanMarker(store.dir, null);
+    removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
