@@ -9,8 +9,6 @@ import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
   HOSTS_SYNC_AUTH_PROOF_HEADER,
-  HOSTS_SYNC_AUTH_VERSION,
-  HOSTS_SYNC_AUTH_VERSION_HEADER,
   createHostsSyncProof,
   isValidHostsSyncToken,
 } from "./hosts-sync-auth.js";
@@ -260,7 +258,6 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           ? createHostsSyncProof(hostsSyncToken, challenge)
           : null;
       if (proof) {
-        res.setHeader(HOSTS_SYNC_AUTH_VERSION_HEADER, HOSTS_SYNC_AUTH_VERSION);
         res.setHeader(HOSTS_SYNC_AUTH_PROOF_HEADER, proof);
         res.setHeader("Cache-Control", "no-store");
       }

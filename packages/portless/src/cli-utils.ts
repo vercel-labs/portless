@@ -15,8 +15,6 @@ import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
   HOSTS_SYNC_AUTH_PROOF_HEADER,
-  HOSTS_SYNC_AUTH_VERSION,
-  HOSTS_SYNC_AUTH_VERSION_HEADER,
   createHostsSyncProof,
   generateHostsSyncChallenge,
   isValidHostsSyncToken,
@@ -954,7 +952,6 @@ function probeHostsSyncAuth(
         const suppliedProof = res.headers[HOSTS_SYNC_AUTH_PROOF_HEADER];
         const available =
           res.headers[PORTLESS_HEADER.toLowerCase()] === "1" &&
-          res.headers[HOSTS_SYNC_AUTH_VERSION_HEADER] === HOSTS_SYNC_AUTH_VERSION &&
           typeof suppliedProof === "string" &&
           expectedProof !== null &&
           isValidHostsSyncToken(suppliedProof) &&
@@ -976,15 +973,12 @@ export async function triggerHostsSync(
   tls = false,
   stateDir = resolveStateDir(port)
 ): Promise<HostsSyncTrigger> {
-  const deadline = Date.now() + HOSTS_SYNC_TRIGGER_TIMEOUT_MS;
   const signal = AbortSignal.timeout(HOSTS_SYNC_TRIGGER_TIMEOUT_MS);
   const token = readHostsSyncToken(stateDir);
   const challenge = generateHostsSyncChallenge();
   const capability = await probeHostsSyncAuth(port, tls, token, challenge, signal);
   if (capability !== "available") return capability;
   if (!token) return Promise.resolve("mute");
-  const remainingMs = deadline - Date.now();
-  if (remainingMs <= 0) return Promise.resolve("mute");
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(

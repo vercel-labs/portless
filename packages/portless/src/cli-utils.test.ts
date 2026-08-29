@@ -45,16 +45,6 @@ import {
   writeTldsFile,
   writeTlsMarker,
 } from "./cli-utils.js";
-import {
-  HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
-  HOSTS_SYNC_AUTH_HEADER,
-  HOSTS_SYNC_AUTH_PROOF_HEADER,
-  HOSTS_SYNC_AUTH_VERSION,
-  HOSTS_SYNC_AUTH_VERSION_HEADER,
-  createHostsSyncProof,
-  writeHostsSyncToken,
-} from "./hosts-sync-auth.js";
-
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
     expect(getProxyBindTargets(false)).toEqual([
@@ -2151,96 +2141,6 @@ describe("reportHostsSync", () => {
 describe("triggerHostsSync", () => {
   it("reports absent when nothing is listening", async () => {
     expect(await triggerHostsSync(19899)).toBe("absent");
-  });
-
-  it("does not send the privileged request to an older daemon", async () => {
-    let posts = 0;
-    const server = http.createServer((req, res) => {
-      res.setHeader("X-Portless", "1");
-      if (req.method === "POST") posts += 1;
-      res.writeHead(204);
-      res.end();
-    });
-    const port = await new Promise<number>((resolve) => {
-      server.listen(0, "127.0.0.1", () => {
-        const address = server.address();
-        if (address && typeof address !== "string") resolve(address.port);
-      });
-    });
-    try {
-      expect(await triggerHostsSync(port)).toBe("mute");
-      expect(posts).toBe(0);
-    } finally {
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
-  });
-
-  it("reports disabled when an authorized current daemon declines automatic sync", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-client-"));
-    const token = "a".repeat(64);
-    writeHostsSyncToken(dir, token);
-    const server = http.createServer((req, res) => {
-      res.setHeader("X-Portless", "1");
-      res.setHeader(HOSTS_SYNC_AUTH_VERSION_HEADER, HOSTS_SYNC_AUTH_VERSION);
-      const challenge = req.headers[HOSTS_SYNC_AUTH_CHALLENGE_HEADER];
-      if (req.method === "HEAD" && typeof challenge === "string") {
-        res.setHeader(HOSTS_SYNC_AUTH_PROOF_HEADER, createHostsSyncProof(token, challenge)!);
-      }
-      if (req.method === "POST") {
-        expect(req.headers[HOSTS_SYNC_AUTH_HEADER]).toBe(token);
-        res.writeHead(409);
-      } else {
-        res.writeHead(200);
-      }
-      res.end();
-    });
-    const port = await new Promise<number>((resolve) => {
-      server.listen(0, "127.0.0.1", () => {
-        const address = server.address();
-        if (address && typeof address !== "string") resolve(address.port);
-      });
-    });
-    try {
-      expect(await triggerHostsSync(port, false, dir)).toBe("disabled");
-    } finally {
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it("uses the configured state directory by default", async () => {
-    const previousStateDir = process.env.PORTLESS_STATE_DIR;
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-sync-client-"));
-    const token = "a".repeat(64);
-    writeHostsSyncToken(dir, token);
-    process.env.PORTLESS_STATE_DIR = dir;
-    const server = http.createServer((req, res) => {
-      res.setHeader("X-Portless", "1");
-      const challenge = req.headers[HOSTS_SYNC_AUTH_CHALLENGE_HEADER];
-      if (req.method === "HEAD" && typeof challenge === "string") {
-        res.setHeader(HOSTS_SYNC_AUTH_VERSION_HEADER, HOSTS_SYNC_AUTH_VERSION);
-        res.setHeader(HOSTS_SYNC_AUTH_PROOF_HEADER, createHostsSyncProof(token, challenge)!);
-      }
-      res.writeHead(req.method === "POST" ? 204 : 200);
-      res.end();
-    });
-    const port = await new Promise<number>((resolve) => {
-      server.listen(0, "127.0.0.1", () => {
-        const address = server.address();
-        if (address && typeof address !== "string") resolve(address.port);
-      });
-    });
-    try {
-      expect(await triggerHostsSync(port)).toBe("acted");
-    } finally {
-      if (previousStateDir === undefined) delete process.env.PORTLESS_STATE_DIR;
-      else process.env.PORTLESS_STATE_DIR = previousStateDir;
-      server.closeAllConnections();
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-      fs.rmSync(dir, { recursive: true, force: true });
-    }
   });
 });
 

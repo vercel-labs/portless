@@ -8,7 +8,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createProxyServer, HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
-import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_VERSION_HEADER } from "./hosts-sync-auth.js";
+import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_PROOF_HEADER } from "./hosts-sync-auth.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
@@ -21,6 +21,7 @@ type AnyServer = http.Server | ProxyServer;
 function request(
   server: AnyServer,
   options: {
+    hostname?: string;
     host?: string;
     path?: string;
     method?: string;
@@ -34,7 +35,7 @@ function request(
     }
     const req = http.request(
       {
-        hostname: "127.0.0.1",
+        hostname: options.hostname || "127.0.0.1",
         port: addr.port,
         path: options.path || "/",
         method: options.method || "GET",
@@ -2310,28 +2311,15 @@ describe("internal hosts-sync route", () => {
       server.listen(0, "::1", () => resolve(true));
     });
     if (!available) return ctx.skip();
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("no address");
-
-    const status = await new Promise<number>((resolve, reject) => {
-      const req = http.request(
-        {
-          hostname: "::1",
-          port: address.port,
-          path: HOSTS_SYNC_PATH,
-          method: "POST",
-          headers: { host: "[::1]", [HOSTS_SYNC_AUTH_HEADER]: token },
-        },
-        (res) => {
-          res.resume();
-          res.on("end", () => resolve(res.statusCode ?? 0));
-        }
-      );
-      req.on("error", reject);
-      req.end();
+    const res = await request(server, {
+      hostname: "::1",
+      host: "[::1]",
+      path: HOSTS_SYNC_PATH,
+      method: "POST",
+      headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
     });
 
-    expect(status).toBe(204);
+    expect(res.status).toBe(204);
     expect(calls).toBe(1);
   });
 
@@ -2350,7 +2338,7 @@ describe("internal hosts-sync route", () => {
     });
     expect(res.status).toBe(200);
     expect(res.body).toBe("app response");
-    expect(res.headers[HOSTS_SYNC_AUTH_VERSION_HEADER]).toBeUndefined();
+    expect(res.headers[HOSTS_SYNC_AUTH_PROOF_HEADER]).toBeUndefined();
   });
 
   it("refuses a canonical loopback authority from a non-loopback peer", async (ctx) => {
@@ -2410,6 +2398,57 @@ describe("internal hosts-sync route", () => {
       headers: { [HOSTS_SYNC_AUTH_HEADER]: token },
     });
     expect(res.status).toBe(409);
+  });
+
+  const rejectedRequests: [string, http.OutgoingHttpHeaders][] = [
+    ["missing authorization", {}],
+    ["malformed authorization", { [HOSTS_SYNC_AUTH_HEADER]: "not-a-token" }],
+    ["incorrect authorization", { [HOSTS_SYNC_AUTH_HEADER]: "b".repeat(64) }],
+    ["duplicated authorization", { [HOSTS_SYNC_AUTH_HEADER]: [token, token] }],
+    ["browser origin", { [HOSTS_SYNC_AUTH_HEADER]: token, origin: "https://attacker.example" }],
+    ...["cross-site", "same-site", "same-origin", "none"].map(
+      (site): [string, http.OutgoingHttpHeaders] => [
+        `browser fetch metadata ${site}`,
+        { [HOSTS_SYNC_AUTH_HEADER]: token, "sec-fetch-site": site },
+      ]
+    ),
+  ];
+
+  it.each(rejectedRequests)("rejects %s before the callback", async (_name, headers) => {
+    let calls = 0;
+    const server = await start(() => {
+      calls += 1;
+      return "acted";
+    });
+    const res = await request(server, {
+      host: "127.0.0.1",
+      path: HOSTS_SYNC_PATH,
+      method: "POST",
+      headers,
+    });
+    expect(res.status).toBe(401);
+    expect(calls).toBe(0);
+  });
+
+  it("does not dispatch a browser preflight", async () => {
+    let calls = 0;
+    const server = await start(() => {
+      calls += 1;
+      return "acted";
+    });
+    const res = await request(server, {
+      host: "127.0.0.1",
+      path: HOSTS_SYNC_PATH,
+      method: "OPTIONS",
+      headers: {
+        origin: "https://attacker.example",
+        "access-control-request-method": "POST",
+        "access-control-request-headers": HOSTS_SYNC_AUTH_HEADER,
+      },
+    });
+    expect(res.status).not.toBe(204);
+    expect(res.headers["access-control-allow-origin"]).toBeUndefined();
+    expect(calls).toBe(0);
   });
 
   it.each(["127.1", "2130706433", "127.0.0.1@evil.test"])(

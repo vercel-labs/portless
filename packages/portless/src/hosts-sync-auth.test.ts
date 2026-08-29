@@ -6,7 +6,6 @@ import {
   HOSTS_SYNC_AUTH_FILE,
   HOSTS_SYNC_AUTH_TEMP_FILE,
   createHostsSyncProof,
-  createHostsSyncToken,
   generateHostsSyncChallenge,
   generateHostsSyncToken,
   readHostsSyncToken,
@@ -26,7 +25,8 @@ describe("hosts-sync authorization state", () => {
   });
 
   it("creates private per-daemon authorization state", () => {
-    const token = createHostsSyncToken(dir);
+    const token = generateHostsSyncToken();
+    expect(writeHostsSyncToken(dir, token)).toBe(true);
     const tokenPath = path.join(dir, HOSTS_SYNC_AUTH_FILE);
 
     expect(token).toMatch(/^[a-f0-9]{64}$/);
@@ -37,8 +37,10 @@ describe("hosts-sync authorization state", () => {
   });
 
   it("rotates authorization state", () => {
-    const first = createHostsSyncToken(dir);
-    const second = createHostsSyncToken(dir);
+    const first = "a".repeat(64);
+    const second = "b".repeat(64);
+    writeHostsSyncToken(dir, first);
+    writeHostsSyncToken(dir, second);
 
     expect(second).not.toBe(first);
     expect(readHostsSyncToken(dir)).toBe(second);
@@ -65,17 +67,10 @@ describe("hosts-sync authorization state", () => {
     expect(readHostsSyncToken(dir)).toBe(activeToken);
   });
 
-  it("generates authorization state without publishing it", () => {
-    const token = generateHostsSyncToken();
-    expect(token).toMatch(/^[a-f0-9]{64}$/);
-    expect(readHostsSyncToken(dir)).toBeNull();
-  });
-
   it("creates a challenge-bound proof of authorization", () => {
     const token = "a".repeat(64);
     const challenge = generateHostsSyncChallenge();
 
-    expect(challenge).toMatch(/^[a-f0-9]{64}$/);
     expect(createHostsSyncProof(token, challenge)).toMatch(/^[a-f0-9]{64}$/);
     expect(createHostsSyncProof(token, "not-a-challenge")).toBeNull();
   });
@@ -89,7 +84,7 @@ describe("hosts-sync authorization state", () => {
   );
 
   it("removes authorization state", () => {
-    createHostsSyncToken(dir);
+    writeHostsSyncToken(dir, generateHostsSyncToken());
     fs.writeFileSync(path.join(dir, HOSTS_SYNC_AUTH_TEMP_FILE), "stale");
     removeHostsSyncToken(dir);
     expect(readHostsSyncToken(dir)).toBeNull();

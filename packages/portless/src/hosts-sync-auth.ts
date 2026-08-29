@@ -8,8 +8,6 @@ export const HOSTS_SYNC_AUTH_TEMP_FILE = `${HOSTS_SYNC_AUTH_FILE}.tmp`;
 export const HOSTS_SYNC_AUTH_HEADER = "x-portless-hosts-sync-token";
 export const HOSTS_SYNC_AUTH_CHALLENGE_HEADER = "x-portless-hosts-sync-challenge";
 export const HOSTS_SYNC_AUTH_PROOF_HEADER = "x-portless-hosts-sync-proof";
-export const HOSTS_SYNC_AUTH_VERSION = "1";
-export const HOSTS_SYNC_AUTH_VERSION_HEADER = "x-portless-hosts-sync-auth";
 
 const HOSTS_SYNC_AUTH_PATTERN = /^[a-f0-9]{64}$/;
 
@@ -21,9 +19,7 @@ export function generateHostsSyncToken(): string {
   return crypto.randomBytes(32).toString("hex");
 }
 
-export function generateHostsSyncChallenge(): string {
-  return crypto.randomBytes(32).toString("hex");
-}
+export const generateHostsSyncChallenge = generateHostsSyncToken;
 
 export function createHostsSyncProof(token: string, challenge: string): string | null {
   if (!isValidHostsSyncToken(token) || !HOSTS_SYNC_AUTH_PATTERN.test(challenge)) return null;
@@ -48,11 +44,6 @@ export function writeHostsSyncToken(dir: string, token: string): boolean {
     }
     return false;
   }
-}
-
-export function createHostsSyncToken(dir: string): string | null {
-  const token = generateHostsSyncToken();
-  return writeHostsSyncToken(dir, token) ? token : null;
 }
 
 export function readHostsSyncToken(dir: string): string | null {
