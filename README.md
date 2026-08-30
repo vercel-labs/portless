@@ -21,6 +21,15 @@ npm install -g portless
 npm install -D portless
 ```
 
+**Agent skills for Pi and OMP:**
+
+```bash
+pi install npm:portless
+omp install portless
+```
+
+These commands install the bundled Portless and OAuth skills. Install the CLI globally or as a project dependency as shown above.
+
 > portless is pre-1.0. When installed per-project, different contributors may run different versions. The state directory format may change between releases, which can require re-running `portless trust`.
 
 ## Run your app

@@ -15,7 +15,9 @@
     "portless": "./dist/cli.js"
   },
   "files": [
-    "dist"
+    "dist",
+    "skills",
+    "examples/google-oauth"
   ],
   "engines": {
     "node": ">=24"
@@ -30,17 +32,25 @@
     "dev": "tsup --watch",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
-    "prepublishOnly": "cp ../../README.md . && pnpm build",
+    "prepack": "rm -rf skills examples && cp -R ../../skills ./skills && mkdir -p examples && cp -R ../../examples/google-oauth ./examples/google-oauth && cp ../../README.md . && pnpm build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "type-check": "tsc --noEmit"
   },
+  "pi": {
+    "skills": [
+      "./skills"
+    ]
+  },
   "keywords": [
     "local",
     "development",
     "proxy",
-    "localhost"
+    "localhost",
+    "pi-package",
+    "agent-skills",
+    "oh-my-pi"
   ],
   "author": "Vercel Labs",
   "license": "Apache-2.0",
