@@ -1510,12 +1510,22 @@ async function runApp(
   // Child servers always bind to localhost; the proxy handles cross-device LAN access.
   // Exception: Expo in LAN mode — Metro defaults to LAN and setting HOST=127.0.0.1
   // conflicts with its internal networking, causing HMR WebSocket degradation.
-  // Resolve the framework the same way the flag injectors do, through package
+  // Exception: bun --bun — Bun's native runtime uses HOST to configure WebSocket
+  // origin validation, so HOST=127.0.0.1 causes Next.js fast refresh to fail.
+  // Omitting HOST lets the server bind to all interfaces (0.0.0.0); the proxy
+  // still reaches it via 127.0.0.1. Frameworks that need explicit binding
+  // (e.g. Vite) still get --host 127.0.0.1 via injectFrameworkFlags below.
+  //
+  // Expo is resolved the same way the flag injectors resolve it, through package
   // runners and package scripts: `bun run dev` with `"dev": "expo start"` is
-  // still Expo, and reading commandArgs[0] here would see only `bun`.
+  // still Expo, and reading commandArgs[0] here would see only `bun`. The bun
+  // check is deliberately literal instead: it is about the runtime portless is
+  // invoking right now, which is visible in argv and nowhere else.
   const framework = resolveFrameworkBasename(commandArgs);
   const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
-  const hostBind = isExpoLan ? undefined : "127.0.0.1";
+  const isBunNativeRuntime =
+    path.basename(commandArgs[0]) === "bun" && commandArgs.includes("--bun");
+  const hostBind = isExpoLan || isBunNativeRuntime ? undefined : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
   // was started with --lan separately and discovered from the state marker,
