@@ -185,6 +185,28 @@ function branchToPrefix(branch: string): string | null {
 }
 
 /**
+ * Read an explicit prefix from `PORTLESS_PREFIX`, when it is set.
+ *
+ * Returns `undefined` when the variable is absent, meaning "no opinion, go and
+ * ask git". An empty value is an opinion: it means no prefix at all, and is how
+ * a single worktree opts out of prefixing without opting out of portless.
+ *
+ * The branch is a good default but it is only a guess at what the checkout is
+ * called. Worktree tooling often names branches on a pattern the person never
+ * says aloud, and `branchToPrefix` splits on `/` alone, so a `worktree-auth`
+ * or `jd/auth` branch becomes a hostname nobody recognizes. `--name` cannot fix
+ * it: it replaces the base name and the prefix is still prepended in front.
+ */
+function prefixFromEnv(): WorktreePrefix | null | undefined {
+  const raw = process.env.PORTLESS_PREFIX;
+  if (raw === undefined) return undefined;
+
+  const prefix = sanitizeForHostname(raw);
+  if (!prefix) return null;
+  return { prefix, source: "PORTLESS_PREFIX" };
+}
+
+/**
  * Detect if the current directory is inside a multi-worktree git repo and
  * return the current branch name as a prefix for hostname composition.
  *
@@ -198,6 +220,10 @@ function branchToPrefix(branch: string): string | null {
  * Falls back to parsing `.git` file + HEAD when git CLI is unavailable.
  */
 export function detectWorktreePrefix(cwd: string = process.cwd()): WorktreePrefix | null {
+  // An explicit prefix wins over anything git can tell us.
+  const override = prefixFromEnv();
+  if (override !== undefined) return override;
+
   // Primary: git CLI
   const cliResult = detectWorktreeViaCli(cwd);
   if (cliResult !== undefined) return cliResult;
