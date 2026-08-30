@@ -894,6 +894,27 @@ describe("CLI", () => {
       expect(stderr).toContain("Invalid port");
     });
 
+    it("exits 1 for port arguments with leftover suffixes", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-port-"));
+      try {
+        for (const aliasPort of ["192.168.1.1:8123", "8123abc", "81.23"]) {
+          const { status, stderr } = run(["alias", "mydb", aliasPort], {
+            env: { PORTLESS_STATE_DIR: tmpDir },
+          });
+          expect(status).toBe(1);
+          expect(stderr).toContain(`Error: Invalid port "${aliasPort}". Must be 1-65535.`);
+        }
+
+        const routesPath = path.join(tmpDir, "routes.json");
+        if (fs.existsSync(routesPath)) {
+          const routes = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as unknown;
+          expect(routes).toEqual([]);
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("exits 1 when --remove has no name", () => {
       const { status, stderr } = run(["alias", "--remove"]);
       expect(status).toBe(1);
