@@ -44,6 +44,7 @@ import {
   inferProjectName,
   detectWorktreePrefix,
   applyWorktreePrefix,
+  buildPeerUrlEnv,
   truncateLabel,
   sanitizeForHostname,
 } from "./auto.js";
@@ -1982,10 +1983,20 @@ ${colors.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
   HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
   PORTLESS_URL                  Primary public URL of the app
+  PORTLESS_URL_<APP>            URL of each app in a monorepo run (see below)
   PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
   PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
   PORTLESS_NGROK_URL            ngrok URL of the app (when --ngrok is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
+
+${colors.bold("Referencing another app (monorepo run):")}
+  A monorepo run gives every app the URL of every app, including itself, as
+  PORTLESS_URL_<APP>. The name comes from the app name uppercased with dots and
+  dashes as underscores (api.myrepo -> PORTLESS_URL_API_MYREPO), and does not
+  change in a git worktree even though the URL it holds gains the branch prefix.
+  So a service reads its peers from committed config, with no hardcoded host:
+    fetch(process.env.PORTLESS_URL_API_MYREPO + "/health")
+  Outside a monorepo run, "portless get <name>" prints the same URL.
 
 ${colors.bold("Safari / DNS:")}
   .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
@@ -3584,6 +3595,8 @@ interface MultiAppEntry {
   pkg: WorkspacePackage;
   /** Portless hostname (e.g. "web.json-render") */
   name: string;
+  /** Hostname before any worktree prefix, which names this app's peer URL variable */
+  baseName: string;
   /** Human-readable package label for display (e.g. "web") */
   label: string;
   commandArgs: string[];
@@ -3632,6 +3645,30 @@ function pipeOutput(child: ReturnType<typeof spawn>, prefix: string): void {
   prefixStream(child.stderr, process.stderr, prefix);
 }
 
+/**
+ * Peer URLs handed to every app in a multi-app run. An app URL depends only on
+ * its name, the proxy port and the TLDs, never on the app's own port, so the
+ * whole map is known before the first app is spawned.
+ *
+ * Apps that run their own `portless` are left out: they register their own
+ * routes, so this process does not own their URL.
+ */
+function buildPeerUrls(
+  proxiedApps: MultiAppEntry[],
+  proxyPort: number,
+  tls: boolean,
+  tlds: string[]
+): Record<string, string> {
+  const peers = proxiedApps
+    .filter((app) => app.commandArgs[0] !== "portless")
+    .map((app) => ({
+      baseName: app.baseName,
+      url: formatUrls(buildHostnames(app.name, tlds), proxyPort, tls)[0]!,
+    }));
+
+  return buildPeerUrlEnv(peers, (msg) => console.warn(colors.yellow(msg)));
+}
+
 async function spawnProxiedApp(
   app: MultiAppEntry,
   stateDir: string,
@@ -3639,7 +3676,8 @@ async function spawnProxiedApp(
   tls: boolean,
   tlds: string[],
   lanMode: boolean,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<string, number | null>,
+  peerUrls: Record<string, string>
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
@@ -3674,6 +3712,7 @@ async function spawnProxiedApp(
 
     env = {
       ...pkgEnv,
+      ...peerUrls,
       PORT: String(appPort),
       HOST: "127.0.0.1",
       PORTLESS_URL: url,
@@ -3842,9 +3881,18 @@ async function handleDefaultMulti(
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
+    const baseName = name;
     name = applyWorktreePrefix(name, worktree);
 
-    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+    apps.push({
+      pkg,
+      name,
+      baseName,
+      label,
+      commandArgs,
+      appPort: appOverride.appPort,
+      proxied,
+    });
   }
 
   if (apps.length === 0) {
@@ -3924,6 +3972,7 @@ async function runWithTurbo(
   const manifest: Record<string, ManifestEntry> = {};
   const routes: { hostnames: string[] }[] = [];
   const appUrls: { label: string; url: string }[] = [];
+  const peerUrls = buildPeerUrls(proxiedApps, proxyPort, tls, tlds);
 
   for (const app of proxiedApps) {
     const usesPortless = app.commandArgs[0] === "portless";
@@ -3943,6 +3992,7 @@ async function runWithTurbo(
     routes.push({ hostnames });
 
     const entry: ManifestEntry = {
+      ...peerUrls,
       PORT: String(appPort),
       HOST: "127.0.0.1",
       PORTLESS_URL: url,
@@ -4036,6 +4086,7 @@ async function runWithDirectSpawn(
   const exitCodes = new Map<string, number | null>();
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
+  const peerUrls = buildPeerUrls(proxiedApps, proxyPort, tls, tlds);
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
@@ -4047,7 +4098,8 @@ async function runWithDirectSpawn(
       tls,
       tlds,
       lanMode,
-      exitCodes
+      exitCodes,
+      peerUrls
     );
     children.push(child);
     if (route) routeEntries.push(route);

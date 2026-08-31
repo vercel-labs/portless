@@ -147,6 +147,16 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+### Referencing another app
+
+A monorepo run gives every app the URL of every app, itself included, as `PORTLESS_URL_<APP>`. The name is the app name uppercased with dots and dashes as underscores (`api.myrepo` becomes `PORTLESS_URL_API_MYREPO`). The name is the same in every worktree while its value carries the branch prefix, so a cross-service reference can live in committed config instead of a hardcoded hostname a worktree would invalidate:
+
+```ts
+const api = process.env.PORTLESS_URL_API_MYREPO ?? "https://api.myrepo.localhost";
+```
+
+Names that differ only in punctuation (`web.api` and `web-api`) collapse to one variable; the first keeps it and portless reports the second. An app whose dev script is itself `portless` registers its own route and gets no variable. Outside a monorepo run, use `portless get <name>`, e.g. `API_URL=$(portless get api.myrepo)`.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -181,21 +191,22 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable              | Description                                                                    |
-| --------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                            |
-| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`        | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`      | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_STATE_DIR`  | Override the state directory                                                   |
-| `PORTLESS=0`          | Bypass the proxy, run the command directly                                     |
+| Variable              | Description                                                                      |
+| --------------------- | -------------------------------------------------------------------------------- |
+| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)            |
+| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                              |
+| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                  |
+| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                       |
+| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                               |
+| `PORTLESS_TLD`        | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com)   |
+| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent               |
+| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)                    |
+| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)       |
+| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)      |
+| `PORTLESS_NGROK`      | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                  |
+| `PORTLESS_STATE_DIR`  | Override the state directory                                                     |
+| `PORTLESS_URL_<APP>`  | Set by portless: URL of each app in a monorepo run (see Referencing another app) |
+| `PORTLESS=0`          | Bypass the proxy, run the command directly                                       |
 
 ### HTTP/2 + HTTPS
 
