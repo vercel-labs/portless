@@ -2419,4 +2419,125 @@ describe("CLI", () => {
       60_000
     );
   });
+
+  describe("multi-app peer URLs", () => {
+    // Skipped on Windows for the same reason as multi-app worktree routing:
+    // spawnChildProcess runs `npm run dev` without a shell, which fails on
+    // npm.cmd. The peer URL map itself is platform-agnostic and unit-tested in
+    // auto.test.ts.
+    it.skipIf(process.platform === "win32")(
+      "gives every app its peers' URLs, named from the base name in a worktree",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-peer-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-peer-state-"));
+        const proxyPort = await getFreePort();
+        const capFile = (name: string) => path.join(stateDir, `peers-${name}.json`);
+        const readCap = (name: string) => {
+          try {
+            return fs.readFileSync(capFile(name), "utf-8");
+          } catch {
+            return "";
+          }
+        };
+        let cli: ReturnType<typeof spawn> | undefined;
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+
+          // Fake a linked worktree on branch feature-x, so hostnames carry a
+          // prefix that the variable names must not inherit.
+          const gitdir = path.join(root, "fake-bare.git", "worktrees", "wt");
+          fs.mkdirSync(gitdir, { recursive: true });
+          fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-x\n");
+          fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
+
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "capture.cjs"),
+              `require("node:fs").writeFileSync(${JSON.stringify(capFile(name))}, JSON.stringify({\n` +
+                `  self: process.env.PORTLESS_URL || "",\n` +
+                `  web: process.env.PORTLESS_URL_WEB_MYREPO || "",\n` +
+                `  api: process.env.PORTLESS_URL_API_MYREPO || "",\n` +
+                `}));\n`
+            );
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                version: "0.0.0",
+                scripts: { dev: "node capture.cjs" },
+                portless: { proxy: true },
+              })
+            );
+          }
+
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_PORT = proxyPort.toString();
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.NO_COLOR = "1";
+
+          let output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          for (let i = 0; i < 60; i++) {
+            if (readCap("web") && readCap("api")) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+
+          const rawWeb = readCap("web");
+          const rawApi = readCap("api");
+          if (!rawWeb || !rawApi) {
+            throw new Error(
+              `capture incomplete (web=${JSON.stringify(rawWeb)}, api=${JSON.stringify(rawApi)}). CLI output:\n${output}`
+            );
+          }
+
+          const web = JSON.parse(rawWeb) as Record<string, string>;
+          const api = JSON.parse(rawApi) as Record<string, string>;
+
+          const webUrl = `http://feature-x.web.myrepo.localhost:${proxyPort}`;
+          const apiUrl = `http://feature-x.api.myrepo.localhost:${proxyPort}`;
+
+          // Each app can reach its peer without knowing the branch.
+          expect(web.api).toBe(apiUrl);
+          expect(api.web).toBe(webUrl);
+
+          // The map is the same for every app, own entry included, and agrees
+          // with the app's own PORTLESS_URL.
+          expect(web.web).toBe(webUrl);
+          expect(api.api).toBe(apiUrl);
+          expect(web.self).toBe(webUrl);
+          expect(api.self).toBe(apiUrl);
+        } finally {
+          if (cli) await stopChild(cli);
+          run(["proxy", "stop"], {
+            env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" },
+          });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+  });
 });

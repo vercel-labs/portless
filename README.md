@@ -204,6 +204,29 @@ portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
+### Referencing another app
+
+A service that calls another service cannot hardcode its hostname, because the worktree prefix moves it. A monorepo run therefore gives every app the URL of every app, itself included:
+
+```bash
+PORTLESS_URL_WEB_MYREPO=https://fix-ui.web.myrepo.localhost
+PORTLESS_URL_API_MYREPO=https://fix-ui.api.myrepo.localhost
+```
+
+The variable is named from the app name uppercased, with dots and dashes as underscores (`api.myrepo` becomes `PORTLESS_URL_API_MYREPO`). That name is the same in every worktree, while the URL it holds carries the branch prefix, so the reference can live in committed config:
+
+```ts
+const api = process.env.PORTLESS_URL_API_MYREPO ?? "https://api.myrepo.localhost";
+```
+
+Two apps whose names differ only in punctuation (`web.api` and `web-api`) collapse to one variable name. The first keeps it and portless reports the second, rather than handing out a URL for the wrong app.
+
+An app whose dev script is itself `portless` registers its own route, so this process does not know its URL and it gets no variable. Outside a monorepo run, `portless get <name>` prints the same URL for wiring one app at a time:
+
+```bash
+API_URL=$(portless get api.myrepo)
+```
+
 ## Custom TLD
 
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
@@ -456,6 +479,7 @@ PORTLESS_STATE_DIR=<path>        Override the state directory
 PORT                             Ephemeral port the child should listen on
 HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode)
 PORTLESS_URL                     Primary public URL (e.g. https://myapp.localhost)
+PORTLESS_URL_<APP>               URL of each app in a monorepo run (e.g. PORTLESS_URL_API_MYREPO)
 PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is active)
 PORTLESS_NGROK_URL               ngrok URL of the app (when --ngrok is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)

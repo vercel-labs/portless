@@ -9,6 +9,8 @@ import {
   inferProjectName,
   detectWorktreePrefix,
   applyWorktreePrefix,
+  peerUrlEnvName,
+  buildPeerUrlEnv,
 } from "./auto.js";
 
 // ---------------------------------------------------------------------------
@@ -479,5 +481,84 @@ describe("applyWorktreePrefix", () => {
     expect(applyWorktreePrefix("api", { prefix: "feature-x", source: "git branch" })).toBe(
       "feature-x.api"
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// peerUrlEnvName
+// ---------------------------------------------------------------------------
+
+describe("peerUrlEnvName", () => {
+  it("uppercases and replaces dots with underscores", () => {
+    expect(peerUrlEnvName("web.myrepo")).toBe("PORTLESS_URL_WEB_MYREPO");
+  });
+
+  it("handles a single-label name", () => {
+    expect(peerUrlEnvName("api")).toBe("PORTLESS_URL_API");
+  });
+
+  it("replaces hyphens too, so the result is a usable shell variable", () => {
+    expect(peerUrlEnvName("web.json-render")).toBe("PORTLESS_URL_WEB_JSON_RENDER");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// buildPeerUrlEnv
+// ---------------------------------------------------------------------------
+
+describe("buildPeerUrlEnv", () => {
+  it("maps every app to its own variable", () => {
+    expect(
+      buildPeerUrlEnv([
+        { baseName: "web.myrepo", url: "https://web.myrepo.localhost" },
+        { baseName: "api.myrepo", url: "https://api.myrepo.localhost" },
+      ])
+    ).toEqual({
+      PORTLESS_URL_WEB_MYREPO: "https://web.myrepo.localhost",
+      PORTLESS_URL_API_MYREPO: "https://api.myrepo.localhost",
+    });
+  });
+
+  it("names variables from the base name while values carry the worktree prefix", () => {
+    expect(
+      buildPeerUrlEnv([{ baseName: "api.myrepo", url: "https://feature-x.api.myrepo.localhost" }])
+    ).toEqual({ PORTLESS_URL_API_MYREPO: "https://feature-x.api.myrepo.localhost" });
+  });
+
+  it("keeps the first of two names that collapse to one variable, and reports it", () => {
+    const warnings: string[] = [];
+    const env = buildPeerUrlEnv(
+      [
+        { baseName: "web.api", url: "https://web.api.localhost" },
+        { baseName: "web-api", url: "https://web-api.localhost" },
+      ],
+      (msg) => warnings.push(msg)
+    );
+
+    expect(env).toEqual({ PORTLESS_URL_WEB_API: "https://web.api.localhost" });
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("PORTLESS_URL_WEB_API");
+    expect(warnings[0]).toContain("web-api");
+  });
+
+  it("does not report a repeated identical name", () => {
+    const warnings: string[] = [];
+    buildPeerUrlEnv(
+      [
+        { baseName: "api", url: "https://api.localhost" },
+        { baseName: "api", url: "https://api.localhost" },
+      ],
+      (msg) => warnings.push(msg)
+    );
+
+    expect(warnings).toEqual([]);
+  });
+
+  it("skips a name that sanitizes to nothing", () => {
+    expect(buildPeerUrlEnv([{ baseName: "...", url: "https://x.localhost" }])).toEqual({});
+  });
+
+  it("returns an empty map for no apps", () => {
+    expect(buildPeerUrlEnv([])).toEqual({});
   });
 });
