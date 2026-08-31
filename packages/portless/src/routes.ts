@@ -208,8 +208,26 @@ export class RouteStore {
     }
   }
 
+  /**
+   * Write the routes file atomically: write to a temp file in the same
+   * directory, then rename over the target. A rename is a single filesystem
+   * operation, so a process killed at any point either leaves the previous
+   * routes.json intact or the new one fully written; there is no window where
+   * a reader can observe a truncated/corrupted file.
+   */
   private saveRoutes(routes: RouteMapping[]): void {
-    fs.writeFileSync(this.routesPath, JSON.stringify(routes, null, 2), { mode: FILE_MODE });
+    const tmpPath = path.join(this.dir, `routes.json.tmp-${process.pid}`);
+    try {
+      fs.writeFileSync(tmpPath, JSON.stringify(routes, null, 2), { mode: FILE_MODE });
+      fs.renameSync(tmpPath, this.routesPath);
+    } catch (err) {
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {
+        // Best-effort cleanup; non-fatal
+      }
+      throw err;
+    }
     fixOwnership(this.routesPath);
   }
 

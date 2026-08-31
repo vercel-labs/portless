@@ -265,6 +265,8 @@ flowchart TD
 
 Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
 
+Each running app registers a route in `~/.portless/routes.json` and removes it on exit. If a client is killed with an uncatchable signal (e.g. an IDE's stop/debug action terminating a child process tree), that exit-time cleanup never runs and the route is left behind. The proxy already ignores routes whose process has died when serving traffic, and `portless prune` removes them from disk on demand. The proxy also sweeps `routes.json` for dead routes on its own every 300 seconds by default; tune it with `--routes-cleanup-interval <seconds>` (`0` disables the sweep).
+
 ## HTTP/2 + HTTPS
 
 HTTPS with HTTP/2 is enabled by default. Browsers limit HTTP/1.1 to 6 connections per host, which bottlenecks dev servers that serve many unbundled files (Vite, Nuxt, etc.). HTTP/2 multiplexes all requests over a single connection.
@@ -402,6 +404,7 @@ portless proxy start --lan       # Start in LAN mode (mDNS .local for devices)
 portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
+portless proxy start --routes-cleanup-interval 60  # Sweep dead routes every 60s (default 300, 0 disables)
 portless proxy stop              # Stop the proxy
 
 # OS startup service
@@ -425,6 +428,7 @@ portless service uninstall       # Remove the startup service
 --foreground                     Run proxy in foreground instead of daemon
 --tld <tld>                      Use a custom TLD instead of .localhost; repeat for more
 --wildcard                       Allow unregistered subdomains to fall back to parent route
+--routes-cleanup-interval <sec>  Prune dead routes every <sec> seconds (default 300, 0 disables)
 --state-dir <path>               Use a custom state directory with service install
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
@@ -446,6 +450,7 @@ PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN
 PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode
 PORTLESS_TLD=<tld>[,<tld>]       Use one or more TLDs (e.g. localhost,test)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
+PORTLESS_ROUTES_CLEANUP_INTERVAL=<sec>  Prune dead routes every <sec> seconds (same as --routes-cleanup-interval)
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
