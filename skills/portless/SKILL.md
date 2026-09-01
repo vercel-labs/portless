@@ -147,6 +147,14 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+Set `PORTLESS_WORKTREE_FLAT=1` to join the worktree and app labels with hyphens.
+This keeps the hostname inside one label for a single-level wildcard certificate:
+
+```bash
+PORTLESS_WORKTREE_FLAT=1 portless run next dev
+# -> https://fix-ui-myapp.localhost
+```
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -181,21 +189,22 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable              | Description                                                                    |
-| --------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                            |
-| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`        | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`      | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_STATE_DIR`  | Override the state directory                                                   |
-| `PORTLESS=0`          | Bypass the proxy, run the command directly                                     |
+| Variable                 | Description                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------ |
+| `PORTLESS_PORT`          | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
+| `PORTLESS_APP_PORT`      | Use a fixed port for the app (skip auto-assignment)                            |
+| `PORTLESS_HTTPS`         | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
+| `PORTLESS_LAN`           | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
+| `PORTLESS_LAN_IP`        | Pin a specific LAN IP for LAN mode                                             |
+| `PORTLESS_TLD`           | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
+| `PORTLESS_WILDCARD`      | Set to `1` to allow unregistered subdomains to fall back to parent             |
+| `PORTLESS_SYNC_HOSTS`    | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
+| `PORTLESS_WORKTREE_FLAT` | Set to `1` to join worktree and app names into one DNS label                   |
+| `PORTLESS_TAILSCALE`     | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
+| `PORTLESS_FUNNEL`        | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
+| `PORTLESS_NGROK`         | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
+| `PORTLESS_STATE_DIR`     | Override the state directory                                                   |
+| `PORTLESS=0`             | Bypass the proxy, run the command directly                                     |
 
 ### HTTP/2 + HTTPS
 

@@ -202,6 +202,14 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
+Set `PORTLESS_WORKTREE_FLAT=1` when the hostname must fit a single-level wildcard
+certificate. It joins the worktree and app labels with hyphens:
+
+```bash
+PORTLESS_WORKTREE_FLAT=1 portless run next dev
+# -> https://fix-ui-myapp.localhost
+```
+
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
 ## Custom TLD
@@ -447,6 +455,7 @@ PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode
 PORTLESS_TLD=<tld>[,<tld>]       Use one or more TLDs (e.g. localhost,test)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
+PORTLESS_WORKTREE_FLAT=1         Join worktree and app names into one DNS label
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)
