@@ -129,6 +129,7 @@ import {
 } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
 import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
+import { handleCompose } from "./docker.js";
 
 const chalk = colors;
 
@@ -1840,6 +1841,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
   ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("portless compose up -d")}           Docker Compose with auto port handling
 
 ${colors.bold("Examples:")}
   portless                            # Run dev script through proxy
@@ -4282,6 +4284,7 @@ async function main() {
     "hosts",
     "proxy",
     "service",
+    "compose",
   ]);
 
   const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
@@ -4514,6 +4517,10 @@ async function main() {
     }
     if (args[0] === "service") {
       await handleService(args, { entryScript: getEntryScript() });
+      return;
+    }
+    if (args[0] === "compose") {
+      await handleCompose(args);
       return;
     }
   }
