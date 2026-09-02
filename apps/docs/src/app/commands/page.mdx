@@ -87,13 +87,13 @@ portless myapp --ngrok next dev
 portless get <name>
 ```
 
-Print the URL for a service. Useful for wiring services together in scripts or env vars:
+Print the URL for an active route. The command exits with an error when no matching route is registered. Useful for wiring services together in scripts or env vars:
 
 ```bash
 BACKEND_URL=$(portless get backend)
 ```
 
-Applies worktree prefix detection by default. Use `--no-worktree` to skip it.
+Inside a git worktree, the current worktree's route takes priority. If it is not registered and exactly one route from another worktree matches, that route is returned. Multiple matches require the full registered name from `portless list`. Use `--no-worktree` to skip the current-worktree preference.
 
 ## Alias (static routes)
 

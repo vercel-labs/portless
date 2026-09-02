@@ -1565,6 +1565,28 @@ describe("CLI", () => {
     });
 
     const getEnv = () => ({ PORTLESS_STATE_DIR: tmpDir });
+    const writeRoutes = (...routes: Array<string | { hostname: string; baseHostname: string }>) => {
+      fs.writeFileSync(
+        path.join(tmpDir, "routes.json"),
+        JSON.stringify(
+          routes.map((route, index) => ({
+            hostname: typeof route === "string" ? route : route.hostname,
+            port: 4100 + index,
+            pid: process.pid,
+            ...(typeof route === "string" ? {} : { baseHostname: route.baseHostname }),
+          }))
+        )
+      );
+    };
+    const makeCallerWorktree = (branch: string) => {
+      const callerDir = path.join(tmpDir, `caller-${branch}`);
+      const gitDir = path.join(tmpDir, "fake-bare.git", "worktrees", branch);
+      fs.mkdirSync(callerDir);
+      fs.mkdirSync(gitDir, { recursive: true });
+      fs.writeFileSync(path.join(gitDir, "HEAD"), `ref: refs/heads/${branch}\n`);
+      fs.writeFileSync(path.join(callerDir, ".git"), `gitdir: ${gitDir}\n`);
+      return callerDir;
+    };
 
     it("prints help with --help", () => {
       const { status, stdout } = run(["get", "--help"]);
@@ -1586,15 +1608,75 @@ describe("CLI", () => {
     });
 
     it("prints URL for a given service name", () => {
+      writeRoutes("backend.localhost");
       const { status, stdout } = run(["get", "backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
     it("prints URL for a dotted service name", () => {
+      writeRoutes("api.backend.localhost");
       const { status, stdout } = run(["get", "api.backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/api\.backend\.localhost(:\d+)?$/);
+    });
+
+    it("finds a uniquely registered route from another worktree on the first call", () => {
+      writeRoutes({
+        hostname: "registered-branch.api-1522.localhost",
+        baseHostname: "api-1522.localhost",
+      });
+
+      const { status, stdout } = run(["get", "api-1522"], {
+        cwd: makeCallerWorktree("caller-branch"),
+        env: getEnv(),
+      });
+
+      expect(status).toBe(0);
+      expect(new URL(stdout.trim()).hostname).toBe("registered-branch.api-1522.localhost");
+    });
+
+    it("prefers the current worktree's registered route when multiple routes match", () => {
+      writeRoutes("caller-branch.backend.localhost", "other-branch.backend.localhost");
+
+      const { status, stdout } = run(["get", "backend"], {
+        cwd: makeCallerWorktree("caller-branch"),
+        env: getEnv(),
+      });
+
+      expect(status).toBe(0);
+      expect(new URL(stdout.trim()).hostname).toBe("caller-branch.backend.localhost");
+    });
+
+    it("fails instead of composing a URL for an unregistered name", () => {
+      const { status, stdout, stderr } = run(["get", "backend"], { env: getEnv() });
+      expect(status).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain('No active route matches "backend"');
+    });
+
+    it("fails when the requested name matches multiple worktree routes", () => {
+      writeRoutes(
+        { hostname: "feature-a.backend.localhost", baseHostname: "backend.localhost" },
+        { hostname: "feature-b.backend.localhost", baseHostname: "backend.localhost" }
+      );
+      const { status, stdout, stderr } = run(["get", "backend"], { env: getEnv() });
+      expect(status).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain('Multiple active routes match "backend"');
+      expect(stderr).toContain("feature-a.backend.localhost");
+      expect(stderr).toContain("feature-b.backend.localhost");
+    });
+
+    it("does not mistake a dotted service name for a worktree route", () => {
+      writeRoutes({
+        hostname: "api.backend.localhost",
+        baseHostname: "api.backend.localhost",
+      });
+      const { status, stdout, stderr } = run(["get", "backend"], { env: getEnv() });
+      expect(status).toBe(1);
+      expect(stdout).toBe("");
+      expect(stderr).toContain('No active route matches "backend"');
     });
 
     it("rejects unknown flags", () => {
@@ -1604,6 +1686,7 @@ describe("CLI", () => {
     });
 
     it("accepts --no-worktree flag", () => {
+      writeRoutes("backend.localhost");
       const { status, stdout } = run(["get", "--no-worktree", "backend"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);

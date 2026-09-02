@@ -169,6 +169,11 @@ describe("RouteStore", () => {
       });
     });
 
+    it("persists the base hostname used before a worktree prefix", () => {
+      store.addRoute("feature-a.myapp.localhost", 4001, process.pid, false, "myapp.localhost");
+      expect(store.loadRoutes()[0].baseHostname).toBe("myapp.localhost");
+    });
+
     it("replaces existing route with same hostname", () => {
       store.addRoute("myapp.localhost", 4001, process.pid);
       store.addRoute("myapp.localhost", 4002, process.pid);

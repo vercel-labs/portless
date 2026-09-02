@@ -23,6 +23,8 @@ export const DIR_MODE = 0o755;
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
+  /** Route hostname before a git worktree prefix was applied. */
+  baseHostname?: string;
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
@@ -45,7 +47,9 @@ function isValidRoute(value: unknown): value is RouteMapping {
     value !== null &&
     typeof (value as RouteMapping).hostname === "string" &&
     typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
+    typeof (value as RouteMapping).pid === "number" &&
+    ((value as RouteMapping).baseHostname === undefined ||
+      typeof (value as RouteMapping).baseHostname === "string")
   );
 }
 
@@ -219,7 +223,13 @@ export class RouteStore {
    * replaced. Returns the PID of the killed process (if any) so the caller can
    * log it.
    */
-  addRoute(hostname: string, port: number, pid: number, force = false): number | undefined {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    baseHostname?: string
+  ): number | undefined {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -241,7 +251,7 @@ export class RouteStore {
         }
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);
-      const entry: RouteMapping = { hostname, port, pid };
+      const entry: RouteMapping = { hostname, port, pid, ...(baseHostname && { baseHostname }) };
       filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {

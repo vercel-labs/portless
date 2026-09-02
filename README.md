@@ -184,6 +184,16 @@ portless docs.myapp next dev
 
 By default, only explicitly registered subdomains are routed (strict mode). Use `--wildcard` when starting the proxy to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app without extra registration).
 
+## Get a service URL
+
+`portless get <name>` prints the URL of an active route. It exits with an error instead of returning a URL that is not registered.
+
+```bash
+BACKEND_URL=$(portless get backend)
+```
+
+Inside a git worktree, a route registered by the current worktree takes priority. If none exists and exactly one route from another worktree matches the name, that route is returned. Multiple matches are ambiguous and require the full registered name shown by `portless list`. Use `--no-worktree` to skip the current-worktree preference.
+
 ## Git Worktrees
 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
@@ -381,6 +391,7 @@ portless                        # Run dev script through proxy
 portless                        # From monorepo root: run all workspace packages
 portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
+portless get <name>              # Print the URL of an active route
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
 portless alias --remove <name>   # Remove a static route

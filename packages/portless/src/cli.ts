@@ -502,13 +502,14 @@ function addRoutes(
   hostnames: readonly string[],
   port: number,
   pid: number,
-  force = false
+  force = false,
+  baseHostnames?: readonly string[]
 ): number[] {
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
-    for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force);
+    for (const [index, hostname] of hostnames.entries()) {
+      const killedPid = store.addRoute(hostname, port, pid, force, baseHostnames?.[index]);
       registered.push(hostname);
       if (killedPid !== undefined) {
         killedPids.push(killedPid);
@@ -1329,8 +1330,8 @@ async function runApp(
   } else {
     console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
+  const baseName = autoInfo?.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
   if (autoInfo) {
-    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
     console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
@@ -1347,7 +1348,14 @@ async function runApp(
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
   try {
-    killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    killedPids = addRoutes(
+      store,
+      hostnames,
+      port,
+      process.pid,
+      force,
+      buildHostnames(baseName, tlds)
+    );
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
     if (err instanceof RouteConflictError) {
@@ -2278,14 +2286,15 @@ ${colors.bold("portless get")} - Print the URL for a service.
 ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}
 
-Constructs the URL using the same hostname and worktree logic as
-"portless run", then prints it to stdout. Useful for wiring services
-together:
+Finds an active route by name, then prints its URL to stdout. In a git
+worktree, a route registered by the current worktree takes priority. When
+there is one matching route from another worktree, that route is returned.
+Useful for wiring services together:
 
   BACKEND_URL=$(portless get backend)
 
 ${colors.bold("Options:")}
-  --no-worktree          Skip worktree prefix detection
+  --no-worktree          Skip current-worktree route preference
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2322,11 +2331,41 @@ ${colors.bold("Examples:")}
 
   const name = positional[0];
   const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const { dir, port, tls, tlds } = await discoverState();
+  const requestedHostname = buildHostnames(name, tlds)[0]!;
+  const store = new RouteStore(dir, {
+    onWarning: (msg) => console.warn(colors.yellow(msg)),
+  });
+  const routes = store.loadRoutes();
 
-  const { port, tls, tlds } = await discoverState();
-  const hostname = buildHostnames(effectiveName, tlds)[0]!;
-  const url = formatUrl(hostname, port, tls);
+  let route = worktree
+    ? routes.find(
+        (candidate) => candidate.hostname === buildHostnames(`${worktree.prefix}.${name}`, tlds)[0]
+      )
+    : undefined;
+  route ??= routes.find((candidate) => candidate.hostname === requestedHostname);
+
+  if (!route) {
+    const matchingRoutes = routes.filter(
+      (candidate) => candidate.baseHostname === requestedHostname
+    );
+    if (matchingRoutes.length === 1) {
+      route = matchingRoutes[0];
+    } else if (matchingRoutes.length > 1) {
+      console.error(colors.red(`Error: Multiple active routes match "${name}":`));
+      for (const candidate of matchingRoutes) {
+        console.error(colors.cyan(`  ${candidate.hostname}`));
+      }
+      console.error(colors.blue("Use the full registered name shown above."));
+      process.exit(1);
+    } else {
+      console.error(colors.red(`Error: No active route matches "${name}".`));
+      console.error(colors.blue("List active routes with: portless list"));
+      process.exit(1);
+    }
+  }
+
+  const url = formatUrl(route.hostname, port, tls);
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
@@ -3584,6 +3623,8 @@ interface MultiAppEntry {
   pkg: WorkspacePackage;
   /** Portless hostname (e.g. "web.json-render") */
   name: string;
+  /** Portless hostname before a git worktree prefix is applied. */
+  baseName: string;
   /** Human-readable package label for display (e.g. "web") */
   label: string;
   commandArgs: string[];
@@ -3669,7 +3710,7 @@ async function spawnProxiedApp(
     const url = urls[0]!;
     displayUrl = url;
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    addRoutes(store, hostnames, appPort, process.pid, false, buildHostnames(app.baseName, tlds));
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 
     env = {
@@ -3842,9 +3883,10 @@ async function handleDefaultMulti(
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
-    name = applyWorktreePrefix(name, worktree);
+    const baseName = name;
+    name = applyWorktreePrefix(baseName, worktree);
 
-    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+    apps.push({ pkg, name, baseName, label, commandArgs, appPort: appOverride.appPort, proxied });
   }
 
   if (apps.length === 0) {
@@ -3938,7 +3980,7 @@ async function runWithTurbo(
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    addRoutes(store, hostnames, appPort, process.pid, false, buildHostnames(app.baseName, tlds));
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 

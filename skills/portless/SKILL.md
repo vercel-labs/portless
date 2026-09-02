@@ -147,6 +147,10 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+### Get a service URL
+
+`portless get <name>` prints the URL of an active route and fails when no route is registered. In a git worktree, it prefers the current worktree's route. If that route does not exist and exactly one route from another worktree matches, it returns that route. Multiple matches require the full registered name from `portless list`. Use `--no-worktree` to skip the current-worktree preference.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -291,8 +295,8 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
-| `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
-| `portless get <name> --no-worktree`               | Print URL without worktree prefix                              |
+| `portless get <name>`                             | Print URL for a matching active route                          |
+| `portless get <name> --no-worktree`               | Skip current-worktree route preference                         |
 | `portless list`                                   | Show active routes                                             |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
