@@ -1681,6 +1681,7 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
+  --no-worktree          Skip worktree prefix detection
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -1961,6 +1962,7 @@ ${colors.bold("Options:")}
   --ngrok                       Share the app publicly via ngrok
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
+  --no-worktree                 Skip worktree prefix detection
   --                            Stop flag parsing; everything after is passed to the child
 
 ${colors.bold("Environment variables:")}
@@ -2270,7 +2272,7 @@ async function handleList(): Promise<void> {
   listRoutes(store, port, tls);
 }
 
-async function handleGet(args: string[]): Promise<void> {
+async function handleGet(args: string[], skipWorktree = false): Promise<void> {
   if (args[1] === "--help" || args[1] === "-h") {
     console.log(`
 ${colors.bold("portless get")} - Print the URL for a service.
@@ -2296,7 +2298,6 @@ ${colors.bold("Examples:")}
     process.exit(0);
   }
 
-  let skipWorktree = false;
   const positional: string[] = [];
 
   for (let i = 1; i < args.length; i++) {
@@ -3487,7 +3488,8 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
  */
 async function handleDefaultMode(
   globalScript?: string,
-  extraArgs: string[] = []
+  extraArgs: string[] = [],
+  skipWorktree = false
 ): Promise<boolean> {
   const cwd = process.cwd();
 
@@ -3509,7 +3511,7 @@ async function handleDefaultMode(
     }
     const hasMatchingPackages = packages.some((p) => p.scripts[wsScriptName]);
     if (hasMatchingPackages) {
-      await handleDefaultMulti(cwd, globalScript, extraArgs);
+      await handleDefaultMulti(cwd, globalScript, extraArgs, skipWorktree);
       return true;
     }
   }
@@ -3517,7 +3519,7 @@ async function handleDefaultMode(
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
   if (hasScript(scriptName, cwd)) {
-    await handleDefaultSingle(cwd, scriptName, appConfig);
+    await handleDefaultSingle(cwd, scriptName, appConfig, skipWorktree);
     return true;
   }
 
@@ -3530,7 +3532,8 @@ async function handleDefaultMode(
 async function handleDefaultSingle(
   cwd: string,
   scriptName: string,
-  appConfig: AppConfig | null
+  appConfig: AppConfig | null,
+  skipWorktree = false
 ): Promise<void> {
   const resolved = resolveScriptCommand(scriptName, cwd);
   if (!resolved) {
@@ -3553,7 +3556,7 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = detectWorktreePrefix(cwd);
+  const worktree = skipWorktree ? null : detectWorktreePrefix(cwd);
   const effectiveName = applyWorktreePrefix(baseName, worktree);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
@@ -3734,7 +3737,8 @@ function spawnTaskApp(
 async function handleDefaultMulti(
   wsRoot: string,
   globalScript?: string,
-  extraArgs: string[] = []
+  extraArgs: string[] = [],
+  skipWorktree = false
 ): Promise<void> {
   let loaded: ReturnType<typeof loadConfig>;
   try {
@@ -3788,7 +3792,7 @@ async function handleDefaultMulti(
   // In a git worktree, prefix every app's hostname with the branch name so
   // parallel worktrees of the same monorepo don't collide on <name>.localhost.
   // Mirrors handleDefaultSingle; single-app mode already does this.
-  const worktree = detectWorktreePrefix(wsRoot);
+  const worktree = skipWorktree ? null : detectWorktreePrefix(wsRoot);
 
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
@@ -4116,7 +4120,11 @@ async function runWithDirectSpawn(
   }
 }
 
-async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
+async function handleRunMode(
+  args: string[],
+  globalScript?: string,
+  skipWorktree = false
+): Promise<void> {
   const parsed = parseRunArgs(args);
 
   const appConfig = loadAppConfig();
@@ -4165,7 +4173,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = detectWorktreePrefix();
+  const worktree = skipWorktree ? null : detectWorktreePrefix();
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
@@ -4265,7 +4273,13 @@ async function main() {
     process.exit(1);
   }
 
-  const globalBooleanFlags = new Set(["--lan", "--tailscale", "--funnel", "--ngrok"]);
+  const globalBooleanFlags = new Set([
+    "--lan",
+    "--tailscale",
+    "--funnel",
+    "--ngrok",
+    "--no-worktree",
+  ]);
   const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
   const childlessCommands = new Set([
     "--help",
@@ -4384,6 +4398,7 @@ async function main() {
   if (stripGlobalFlag("--ngrok", false)) {
     process.env.PORTLESS_NGROK = "1";
   }
+  const skipWorktree = stripGlobalFlag("--no-worktree", false) === true;
 
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);
@@ -4467,7 +4482,7 @@ async function main() {
     }
     if (args.length === 0 || args[0] === "--") {
       const extraArgs = args[0] === "--" ? args.slice(1) : [];
-      const handled = await handleDefaultMode(globalScript, extraArgs);
+      const handled = await handleDefaultMode(globalScript, extraArgs, skipWorktree);
       if (handled) return;
       printHelp();
       return;
@@ -4497,7 +4512,7 @@ async function main() {
       return;
     }
     if (args[0] === "get") {
-      await handleGet(args);
+      await handleGet(args, skipWorktree);
       return;
     }
     if (args[0] === "alias") {
@@ -4520,7 +4535,7 @@ async function main() {
 
   // Run app (either `portless run <cmd>` or `portless <name> <cmd>`)
   if (isRunCommand) {
-    await handleRunMode(args, globalScript);
+    await handleRunMode(args, globalScript, skipWorktree);
   } else {
     await handleNamedMode(args);
   }

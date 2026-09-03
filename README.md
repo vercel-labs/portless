@@ -202,6 +202,13 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
+Use `--no-worktree` to skip worktree prefix detection:
+
+```bash
+portless run --no-worktree --name api.fix-ui.example pnpm dev
+# -> https://api.fix-ui.example.localhost
+```
+
 Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
 
 ## Custom TLD
