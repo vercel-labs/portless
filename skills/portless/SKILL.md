@@ -143,6 +143,10 @@ portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
 portless run next dev   # -> https://fix-ui.myapp.localhost
+
+# Skip worktree prefix detection
+portless run --no-worktree --name api.fix-ui.example pnpm dev
+# -> https://api.fix-ui.example.localhost
 ```
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
@@ -290,6 +294,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
+| `portless run --no-worktree --name <name> <cmd>`  | Skip worktree prefix detection                                 |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
 | `portless get <name> --no-worktree`               | Print URL without worktree prefix                              |
