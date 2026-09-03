@@ -1466,7 +1466,16 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
       "--root",
     ],
   },
-  astro: { strictPort: false, serverSubcommands: ["dev", "preview"], defaultIsServer: false },
+  astro: {
+    strictPort: false,
+    serverSubcommands: ["dev", "preview"],
+    defaultIsServer: false,
+    // Global flags that take a value. Astro documents them before the
+    // subcommand (`astro --root apps/web dev`). Without this list,
+    // frameworkPositionals treats a leading flag as unknown grammar and
+    // skips --port/--host injection.
+    valueFlags: ["--root", "--config", "-c", "--site", "--base", "--port", "--host", "--open", "--mode"],
+  },
   ng: { strictPort: false, serverSubcommands: ["serve", "dev", "s"], defaultIsServer: false },
   "react-native": { strictPort: false, serverSubcommands: ["start"], defaultIsServer: false },
   expo: { strictPort: false, serverSubcommands: ["start", "serve"], defaultIsServer: true },
