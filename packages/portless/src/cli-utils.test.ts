@@ -549,6 +549,23 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
+  it("injects for astro when global flags come before the subcommand", () => {
+    // Documented as `astro --root <dir> dev`. Without valueFlags this was
+    // declined and the app kept its own port.
+    const args = ["astro", "--root", "apps/web", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "astro",
+      "--root",
+      "apps/web",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
   it("injects for ng without --strictPort", () => {
     const args = ["ng", "serve"];
     injectFrameworkFlags(args, 4567);
