@@ -237,6 +237,27 @@ describe("tailscale", () => {
       expect(ports).toEqual(new Set([22, 443]));
     });
 
+    it("includes ports held by foreground serve or funnel sessions", () => {
+      const runner = createRunner({
+        "serve status --json": {
+          status: 0,
+          stdout: JSON.stringify({
+            TCP: { "8443": { HTTPS: true } },
+            Web: { "devbox.example.ts.net:8443": { Handlers: {} } },
+            Foreground: {
+              df16b397a48601e8: {
+                TCP: { "443": { HTTPS: true } },
+                Web: { "devbox.example.ts.net:443": { Handlers: {} } },
+                AllowFunnel: { "devbox.example.ts.net:443": true },
+              },
+            },
+          }),
+        },
+      });
+      const ports = getUsedServePorts(runner);
+      expect(ports).toEqual(new Set([443, 8443]));
+    });
+
     it("returns empty set on command failure", () => {
       const runner = createRunner({
         "serve status --json": { status: 1, stderr: "error" },
