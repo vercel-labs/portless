@@ -431,14 +431,31 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
 
   if (ctx.platform === "win32") {
     env.USERPROFILE = ctx.user.home;
-    env.PATH = ctx.pathEnv;
   } else {
     env.HOME = ctx.user.home;
     if (ctx.user.uid) env.SUDO_UID = ctx.user.uid;
     if (ctx.user.gid) env.SUDO_GID = ctx.user.gid;
   }
 
+  // Bake in a PATH that starts with the Node directory that ran the install,
+  // so the service resolves `node` from PATH at start instead of depending on
+  // the pinned absolute binary still existing (#393).
+  env.PATH = servicePathEnv(ctx);
+
   return env;
+}
+
+/// Prepends the install-time Node directory to the captured PATH so the
+/// service can resolve `node` even when the service manager sanitizes PATH
+/// (for example sudo `secure_path` on Linux) (#393).
+function servicePathEnv(ctx: ServiceContext): string {
+  const separator = ctx.platform === "win32" ? ";" : ":";
+  const nodeDir = (ctx.platform === "win32" ? path.win32 : path.posix).dirname(ctx.nodePath);
+  const entries = ctx.pathEnv.split(separator).filter((entry) => entry.length > 0);
+  if (!entries.includes(nodeDir)) {
+    entries.unshift(nodeDir);
+  }
+  return entries.join(separator);
 }
 
 function defaultStateDir(platform: SupportedPlatform, userHome: string): string {
@@ -498,7 +515,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 ${envLines}
-Environment=PATH=${systemdEscape(ctx.pathEnv)}
 ExecStart=${execStart.map(systemdEscape).join(" ")}
 Restart=on-failure
 RestartSec=2
@@ -515,7 +531,9 @@ function buildWindowsScript(ctx: ServiceContext, command: string[]): string {
   const setEnv = Object.entries(env)
     .map(([key, value]) => `set "${key}=${value.replace(/"/g, "").replace(/%/g, "%%")}"`)
     .join("\r\n");
-  const proxyCommand = [windowsQuote(ctx.nodePath), ...command.map(windowsQuote)].join(" ");
+  // Resolve node from the PATH set above instead of pinning the absolute
+  // binary, so the task keeps working if that Node install is removed (#393).
+  const proxyCommand = ["node", ...command.map(windowsQuote)].join(" ");
   return `@echo off\r\n${setEnv}\r\n${proxyCommand}\r\n`;
 }
 
@@ -613,7 +631,9 @@ export function buildServiceSpec(options: {
   const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
 
   if (ctx.platform === "darwin") {
-    const programArguments = [ctx.nodePath, ...proxyCommand];
+    // Resolve node from PATH at start (launchd gets PATH from the plist env)
+    // so the service keeps working if the pinned binary is removed (#393).
+    const programArguments = ["/usr/bin/env", "node", ...proxyCommand];
     return {
       platform: "darwin",
       label: SERVICE_LABEL,
@@ -626,7 +646,9 @@ export function buildServiceSpec(options: {
   }
 
   if (ctx.platform === "linux") {
-    const execStart = [ctx.nodePath, ...proxyCommand];
+    // Resolve node from PATH at start (systemd gets PATH from the unit env)
+    // so the service keeps working if the pinned binary is removed (#393).
+    const execStart = ["/usr/bin/env", "node", ...proxyCommand];
     return {
       platform: "linux",
       serviceName: SYSTEMD_SERVICE,
@@ -1225,6 +1247,10 @@ ${colors.bold("Notes:")}
   environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.
   Windows installs a Task Scheduler startup task that runs as SYSTEM.
+  The service resolves node from the PATH captured at install time (with the
+  Node directory that ran the install placed first), so it is not pinned to
+  the exact binary that existed during install. If you switch Node versions
+  with a version manager, re-run "portless service install" to refresh it.
 `);
 }
 
