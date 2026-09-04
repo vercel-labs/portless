@@ -303,6 +303,8 @@ The service uses portless defaults unless install options or `PORTLESS_*` enviro
 
 The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLDs, LAN mode, wildcard mode, and state directory. macOS and Linux install a root-owned service so port 443 can bind at boot. Windows installs a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
+The service resolves `node` from the PATH captured at install time (with the Node directory that ran the install placed first), so it is not pinned to the exact binary that existed during install. If you switch Node versions with a version manager such as nvm, re-run `portless service install` to refresh the service definition.
+
 ## LAN mode
 
 ```bash
