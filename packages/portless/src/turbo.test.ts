@@ -32,12 +32,12 @@ describe("hasTurboConfig", () => {
     cleanupDir(tmpDir);
   });
 
-  it("returns true when turbo.json exists", () => {
-    fs.writeFileSync(path.join(tmpDir, "turbo.json"), "{}");
+  it.each(["turbo.json", "turbo.jsonc"])("returns true when %s exists", (filename) => {
+    fs.writeFileSync(path.join(tmpDir, filename), "{}");
     expect(hasTurboConfig(tmpDir)).toBe(true);
   });
 
-  it("returns false when turbo.json is missing", () => {
+  it("returns false when no turbo config exists", () => {
     expect(hasTurboConfig(tmpDir)).toBe(false);
   });
 });

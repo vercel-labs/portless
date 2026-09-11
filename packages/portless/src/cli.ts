@@ -1864,6 +1864,7 @@ ${colors.bold("Configuration (portless.json):")}
   Override name:   { "name": "myapp" }
   Override script: { "name": "myapp", "script": "start" }
   Monorepo:        { "apps": { "apps/web": { "name": "myapp" } } }
+  Turborepo:       Detects turbo.json and turbo.jsonc automatically
 
 ${colors.bold("In package.json:")}
   {

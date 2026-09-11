@@ -135,7 +135,7 @@ For turborepo projects, use `portless` as the `dev` script and the real command 
 }
 ```
 
-`pnpm dev` at the root runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy. No `turbo.json` changes are needed.
+`pnpm dev` at the root runs turbo, which runs `portless` in each package. Portless detects both `turbo.json` and `turbo.jsonc`, then detects the package manager and runs `pnpm run dev:app` through the proxy. No Turborepo config changes are needed.
 
 People without portless installed can run `pnpm run dev:app` directly.
 
