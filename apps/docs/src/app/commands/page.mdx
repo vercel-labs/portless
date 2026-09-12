@@ -273,6 +273,8 @@ portless hosts clean    # remove portless entries from /etc/hosts
 
 Auto-sync is on by default. Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
+Portless leaves the hosts file unchanged if it cannot read it before syncing or cleaning.
+
 ## Bypass portless
 
 ```bash

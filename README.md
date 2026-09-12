@@ -486,6 +486,8 @@ portless hosts clean   # Clean up later
 
 Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLDs, LAN `.local`). Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
+Portless leaves the hosts file unchanged if it cannot read it before syncing or cleaning.
+
 ## Troubleshooting
 
 Run `portless doctor` to inspect local health without changing state. It checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.

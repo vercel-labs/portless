@@ -1997,6 +1997,8 @@ ${colors.bold("Safari / DNS:")}
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
+  Portless leaves the hosts file unchanged if it cannot read it before syncing
+  or cleaning.
 
 ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
@@ -2415,6 +2417,9 @@ ${colors.bold("Auto-sync:")}
   The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
   PORTLESS_SYNC_HOSTS=0. If a route hostname will not resolve, the command that
   registered it warns instead of failing silently.
+
+  Portless leaves the hosts file unchanged if it cannot read it before syncing
+  or cleaning.
 `);
     process.exit(0);
   }
