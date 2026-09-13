@@ -1999,6 +1999,8 @@ ${colors.bold("Safari / DNS:")}
     ${colors.cyan("portless hosts clean")}
   Portless leaves the hosts file unchanged if it cannot read it before syncing
   or cleaning.
+  With no active routes, hosts sync removes stale entries and still reports
+  failure if the hosts file cannot be read.
 
 ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
@@ -2420,6 +2422,8 @@ ${colors.bold("Auto-sync:")}
 
   Portless leaves the hosts file unchanged if it cannot read it before syncing
   or cleaning.
+  With no active routes, hosts sync removes stale entries and still reports
+  failure if the hosts file cannot be read.
 `);
     process.exit(0);
   }
@@ -2478,20 +2482,16 @@ ${colors.bold("Usage: portless hosts <command>")}
   });
 
   const routes = store.loadRoutes();
-  if (routes.length === 0) {
-    // Zero routes is a desired state, not a no-op: bailing here would leave a
-    // block whose routes are gone, in the command the warning tells users to run.
-    if (getManagedHostnames().length === 0) {
-      console.log(colors.yellow("No active routes to sync."));
-      return;
-    }
-    if (syncHostsFile([])) {
-      console.log(colors.green(`Removed stale portless entries from ${HOSTS_DISPLAY}.`));
-      return;
-    }
-  }
   const hostnames = routes.map((r) => r.hostname);
+  // Sync even an empty route set: hostname discovery cannot distinguish an
+  // unreadable hosts file from one with no managed entries.
   if (syncHostsFile(hostnames)) {
+    if (hostnames.length === 0) {
+      console.log(
+        colors.green(`No active routes. No portless entries remain in ${HOSTS_DISPLAY}.`)
+      );
+      return;
+    }
     console.log(colors.green(`Synced ${hostnames.length} hostname(s) to ${HOSTS_DISPLAY}:`));
     for (const h of hostnames) {
       console.log(colors.cyan(`  127.0.0.1 ${h}`));
