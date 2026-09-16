@@ -1,5 +1,6 @@
 import { convertToModelMessages, stepCountIs, streamText } from "ai";
 import type { ModelMessage, UIMessage } from "ai";
+import { createOpenAI } from "@ai-sdk/openai";
 import { createBashTool } from "bash-tool";
 import { headers } from "next/headers";
 import { loadAllDocsSources } from "@/lib/docs-source";
@@ -7,7 +8,24 @@ import { minuteRateLimit, dailyRateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
 
-const DEFAULT_MODEL = "anthropic/claude-haiku-4.5";
+const DOCS_CHAT_MODEL = process.env.DOCS_CHAT_MODEL || "anthropic/claude-haiku-4.5";
+
+function createModel() {
+  // MiniMax models use the OpenAI-compatible API
+  if (DOCS_CHAT_MODEL.startsWith("minimax/")) {
+    const minimax = createOpenAI({
+      apiKey: process.env.MINIMAX_API_KEY,
+      baseURL: process.env.MINIMAX_BASE_URL || "https://api.minimax.io/v1",
+    });
+    return minimax(DOCS_CHAT_MODEL.slice("minimax/".length));
+  }
+
+  // For other providers (anthropic, openai, etc.), use AI SDK model string
+  return DOCS_CHAT_MODEL;
+}
+
+const model = createModel();
+const isAnthropic = DOCS_CHAT_MODEL.startsWith("anthropic/");
 
 const SYSTEM_PROMPT = `You are a helpful documentation assistant for portless, a CLI tool that replaces port numbers with stable, named .localhost URLs.
 
@@ -85,14 +103,18 @@ export async function POST(req: Request) {
   } = await createBashTool({ files: docsFiles });
 
   const result = streamText({
-    model: DEFAULT_MODEL,
+    model,
     system: SYSTEM_PROMPT,
     messages: await convertToModelMessages(messages),
     stopWhen: stepCountIs(5),
     tools: { bash, readFile: readFileTool },
-    prepareStep: ({ messages: stepMessages }) => ({
-      messages: addCacheControl(stepMessages),
-    }),
+    ...(isAnthropic
+      ? {
+          prepareStep: ({ messages: stepMessages }) => ({
+            messages: addCacheControl(stepMessages),
+          }),
+        }
+      : {}),
   });
 
   return result.toUIMessageStreamResponse();
