@@ -19,6 +19,7 @@ import {
   formatUrl,
   isErrnoException,
   isProcessAlive as isPidAlive,
+  normalizePathPrefix,
   parseHostname,
   parseHostnames,
 } from "./utils.js";
@@ -481,8 +482,13 @@ function buildHostnames(name: string, tlds: readonly string[]): string[] {
   return parseHostnames(name, normalizeTlds(tlds));
 }
 
-function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
-  return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls));
+function formatUrls(
+  hostnames: readonly string[],
+  proxyPort: number,
+  tls: boolean,
+  pathPrefix?: string
+): string[] {
+  return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls, pathPrefix));
 }
 
 function formatViteAllowedHosts(tlds: readonly string[]): string {
@@ -502,13 +508,14 @@ function addRoutes(
   hostnames: readonly string[],
   port: number,
   pid: number,
-  force = false
+  force = false,
+  pathPrefix?: string
 ): number[] {
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
     for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force);
+      const killedPid = store.addRoute(hostname, port, pid, force, pathPrefix);
       registered.push(hostname);
       if (killedPid !== undefined) {
         killedPids.push(killedPid);
@@ -517,7 +524,7 @@ function addRoutes(
   } catch (err) {
     for (const hostname of registered) {
       try {
-        store.removeRoute(hostname, pid);
+        store.removeRoute(hostname, pid, pathPrefix);
       } catch {
         // Non-fatal rollback cleanup.
       }
@@ -527,10 +534,15 @@ function addRoutes(
   return [...new Set(killedPids)];
 }
 
-function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?: number): void {
+function removeRoutes(
+  store: RouteStore,
+  hostnames: readonly string[],
+  ownerPid?: number,
+  pathPrefix?: string
+): void {
   for (const hostname of hostnames) {
     try {
-      store.removeRoute(hostname, ownerPid);
+      store.removeRoute(hostname, ownerPid, pathPrefix);
     } catch {
       // Non-fatal cleanup.
     }
@@ -601,10 +613,25 @@ function startProxyServer(
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
+  // Path routes can share a hostname on different ports, so hostname-keyed
+  // consumers (hosts file, mDNS) must dedupe. The mDNS change-detection key
+  // maps each hostname to its sorted route ports; a same-hostname set of path
+  // routes yields one stable key instead of thrashing publish/unpublish.
+  const uniqueHostnames = () => [...new Set(cachedRoutes.map((r) => r.hostname))];
+  const routePortKeys = (routes: { hostname: string; port: number }[]) => {
+    const ports = new Map<string, number[]>();
+    for (const r of routes) {
+      const list = ports.get(r.hostname) ?? [];
+      list.push(r.port);
+      ports.set(r.hostname, list);
+    }
+    return new Map([...ports].map(([h, list]) => [h, list.sort((a, b) => a - b).join(",")]));
+  };
+
   const publishCachedRoutes = () => {
     if (!activeLanIp) return;
-    for (const route of cachedRoutes) {
-      publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+    for (const hostname of uniqueHostnames()) {
+      publish(hostname, proxyPort, activeLanIp, onMdnsError);
     }
   };
 
@@ -654,27 +681,28 @@ function startProxyServer(
     } catch {
       hostnames = cachedRoutes.map((route) => route.hostname);
     }
-    syncHostsAndLatch(hostnames);
+    // Path-based routes share a hostname; the hosts block wants each once.
+    syncHostsAndLatch([...new Set(hostnames)]);
     return "acted";
   };
 
   const reloadRoutes = () => {
     try {
-      const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
+      const previousRoutes = routePortKeys(cachedRoutes);
       cachedRoutes = store.loadRoutes();
       if (autoSyncHosts) {
-        syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
+        syncHostsAndLatch(uniqueHostnames());
       }
       // Sync mDNS records with current routes
       if (activeLanIp) {
-        const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
-        for (const route of cachedRoutes) {
-          const previousPort = previousRoutes.get(route.hostname);
-          if (previousPort === undefined) {
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-          } else if (previousPort !== route.port) {
-            unpublish(route.hostname);
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+        const currentRoutes = routePortKeys(cachedRoutes);
+        for (const [hostname, portsKey] of currentRoutes) {
+          const previousKey = previousRoutes.get(hostname);
+          if (previousKey === undefined) {
+            publish(hostname, proxyPort, activeLanIp, onMdnsError);
+          } else if (previousKey !== portsKey) {
+            unpublish(hostname);
+            publish(hostname, proxyPort, activeLanIp, onMdnsError);
           }
         }
         for (const hostname of previousRoutes.keys()) {
@@ -700,7 +728,7 @@ function startProxyServer(
   }
 
   if (autoSyncHosts) {
-    syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
+    syncHostsAndLatch(uniqueHostnames());
   }
 
   // Publish mDNS for routes that already exist at startup
@@ -1030,6 +1058,11 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   }
 }
 
+/** Display label for a route: hostname plus its path prefix when present. */
+function formatRouteLabel(route: { hostname: string; pathPrefix?: string }): string {
+  return `${route.hostname}${route.pathPrefix ?? ""}`;
+}
+
 function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   const routes = store.loadRoutes();
 
@@ -1041,17 +1074,20 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
 
   console.log(colors.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
-    const url = formatUrl(route.hostname, proxyPort, tls);
+    const url = formatUrl(route.hostname, proxyPort, tls, route.pathPrefix);
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
     console.log(
       `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}`
     );
     if (route.tailscaleUrl) {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
-      console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
+      const tsUrl = `${route.tailscaleUrl}${route.pathPrefix ?? ""}`;
+      console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(tsUrl)}`);
     }
     if (route.ngrokUrl) {
-      console.log(`    ${colors.gray("ngrok:")} ${colors.green(route.ngrokUrl)}`);
+      console.log(
+        `    ${colors.gray("ngrok:")} ${colors.green(`${route.ngrokUrl}${route.pathPrefix ?? ""}`)}`
+      );
     }
   }
   console.log();
@@ -1219,6 +1255,7 @@ async function runApp(
   force: boolean,
   autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
+  pathPrefix?: string,
   lanMode = false,
   lanIp?: string | null
 ) {
@@ -1324,10 +1361,11 @@ async function runApp(
     );
   }
 
+  const displayHostnames = pathPrefix ? hostnames.map((h) => `${h}${pathPrefix}`) : hostnames;
   if (lanIp) {
-    console.log(chalk.gray(`-- ${hostnames.join(", ")} (LAN: ${lanIp})`));
+    console.log(chalk.gray(`-- ${displayHostnames.join(", ")} (LAN: ${lanIp})`));
   } else {
-    console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
+    console.log(chalk.gray(`-- ${displayHostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
     const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
@@ -1335,6 +1373,9 @@ async function runApp(
     if (autoInfo.prefix) {
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
+  }
+  if (pathPrefix) {
+    console.log(chalk.gray(`-- Path "${pathPrefix}"`));
   }
 
   const port = desiredPort ?? (await findFreePort());
@@ -1347,7 +1388,7 @@ async function runApp(
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
   try {
-    killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    killedPids = addRoutes(store, hostnames, port, process.pid, force, pathPrefix);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
     if (err instanceof RouteConflictError) {
@@ -1360,8 +1401,8 @@ async function runApp(
     console.log(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
   }
 
-  const finalUrl = formatUrl(hostname, proxyPort, tls);
-  const allUrls = formatUrls(hostnames, proxyPort, tls);
+  const finalUrl = formatUrl(hostname, proxyPort, tls, pathPrefix);
+  const allUrls = formatUrls(hostnames, proxyPort, tls, pathPrefix);
   console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
   for (const extraUrl of allUrls.slice(1)) {
     console.log(chalk.cyan(`  also -> ${extraUrl}`));
@@ -1402,10 +1443,14 @@ async function runApp(
       )
     );
     try {
-      store.updateRoute(hostname, {
-        ngrokUrl: null,
-        ngrokPid: null,
-      });
+      store.updateRoute(
+        hostname,
+        {
+          ngrokUrl: null,
+          ngrokPid: null,
+        },
+        pathPrefix
+      );
     } catch {
       // Best-effort cleanup; non-fatal
     }
@@ -1436,7 +1481,9 @@ async function runApp(
     // a successful register or exits the process on final failure.
     tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
     const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
-    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+    // The tunnel dials the app port directly and the path is never stripped,
+    // so the app's routes live under the prefix on the tunnel too.
+    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}${pathPrefix ?? ""}`));
     if (wantsFunnel) {
       console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
     } else {
@@ -1444,11 +1491,15 @@ async function runApp(
     }
 
     try {
-      store.updateRoute(hostname, {
-        tailscaleUrl: tailscaleUrl,
-        tailscaleHttpsPort,
-        tailscaleFunnel: wantsFunnel || undefined,
-      });
+      store.updateRoute(
+        hostname,
+        {
+          tailscaleUrl: tailscaleUrl,
+          tailscaleHttpsPort,
+          tailscaleFunnel: wantsFunnel || undefined,
+        },
+        pathPrefix
+      );
     } catch {
       // Non-fatal: the local hostname keeps routing without it, but the
       // proxy needs tailscaleUrl to route requests arriving with the
@@ -1464,14 +1515,18 @@ async function runApp(
         onExit: handleNgrokExit,
       });
       ngrokUrl = ngrokProcess.url;
-      console.log(chalk.green(`  ngrok -> ${ngrokUrl}`));
+      console.log(chalk.green(`  ngrok -> ${ngrokUrl}${pathPrefix ?? ""}`));
       console.log(chalk.gray("  (accessible from the public internet via ngrok)\n"));
 
       try {
-        store.updateRoute(hostname, {
-          ngrokUrl,
-          ngrokPid: ngrokProcess.pid,
-        });
+        store.updateRoute(
+          hostname,
+          {
+            ngrokUrl,
+            ngrokPid: ngrokProcess.pid,
+          },
+          pathPrefix
+        );
       } catch {
         // Non-fatal: route display metadata only
       } finally {
@@ -1499,7 +1554,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        removeRoutes(store, hostnames, process.pid);
+        removeRoutes(store, hostnames, process.pid, pathPrefix);
       } catch {
         // Best-effort cleanup; non-fatal
       }
@@ -1581,7 +1636,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        removeRoutes(store, hostnames, process.pid);
+        removeRoutes(store, hostnames, process.pid, pathPrefix);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -1599,6 +1654,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** URL path prefix for path-based routing (e.g. "/api"). */
+  pathPrefix?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -1632,6 +1689,29 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+/** Normalize a user-supplied path prefix, printing a friendly error on invalid input. */
+function parsePathPrefixOrExit(value: string): string | undefined {
+  try {
+    return normalizePathPrefix(value);
+  } catch (err) {
+    console.error(colors.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
+}
+
+function pathPrefixFromEnv(): string | undefined {
+  const envVal = process.env.PORTLESS_PATH;
+  if (!envVal) return undefined;
+  try {
+    return normalizePathPrefix(envVal);
+  } catch (err) {
+    console.error(
+      colors.red(`Error: Invalid PORTLESS_PATH="${envVal}". ${(err as Error).message}`)
+    );
+    process.exit(1);
+  }
+}
+
 function applySharingFlag(flag: string): boolean {
   if (flag === "--tailscale") {
     process.env.PORTLESS_TAILSCALE = "1";
@@ -1660,6 +1740,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let pathPrefix: string | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -1683,6 +1764,7 @@ ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --path <prefix>        URL path prefix for path-based routing (e.g. /api)
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
@@ -1719,13 +1801,21 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(colors.red("Error: --path requires a path value."));
+        console.error(colors.cyan("  portless run --path /api <command...>"));
+        process.exit(1);
+      }
+      pathPrefix = parsePathPrefixOrExit(args[i]);
     } else if (applySharingFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --help"
+          "Known flags: --name, --force, --app-port, --path, --tailscale, --funnel, --ngrok, --help"
         )
       );
       process.exit(1);
@@ -1734,8 +1824,9 @@ ${colors.bold("Examples:")}
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  if (!pathPrefix) pathPrefix = pathPrefixFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, pathPrefix, commandArgs: args.slice(i) };
 }
 
 /**
@@ -1748,6 +1839,7 @@ ${colors.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
+  let pathPrefix: string | undefined;
   let i = 0;
 
   // Consume leading flags before name
@@ -1760,12 +1852,20 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(colors.red("Error: --path requires a path value."));
+        console.error(colors.cyan("  portless <name> --path /api <command...>"));
+        process.exit(1);
+      }
+      pathPrefix = parsePathPrefixOrExit(args[i]);
     } else if (applySharingFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --ngrok")
+        colors.blue("Known flags: --force, --app-port, --path, --tailscale, --funnel, --ngrok")
       );
       process.exit(1);
     }
@@ -1786,12 +1886,20 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else if (args[i] === "--app-port") {
       i++;
       appPort = parseAppPort(args[i]);
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(colors.red("Error: --path requires a path value."));
+        console.error(colors.cyan("  portless <name> --path /api <command...>"));
+        process.exit(1);
+      }
+      pathPrefix = parsePathPrefixOrExit(args[i]);
     } else if (applySharingFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --ngrok")
+        colors.blue("Known flags: --force, --app-port, --path, --tailscale, --funnel, --ngrok")
       );
       process.exit(1);
     }
@@ -1799,8 +1907,9 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   }
 
   if (!appPort) appPort = appPortFromEnv();
+  if (!pathPrefix) pathPrefix = pathPrefixFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, pathPrefix, commandArgs: args.slice(i) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1829,6 +1938,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
   ${colors.cyan("portless proxy stop")}              Stop the proxy
+  ${colors.cyan("portless <name> --path /prefix <cmd>")} Route by URL path prefix
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
@@ -1856,6 +1966,8 @@ ${colors.bold("Examples:")}
   portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
+  portless myapp --path /api pnpm start         # -> https://myapp.localhost/api
+  portless myapp --path /docs next dev          # -> https://myapp.localhost/docs
 
 ${colors.bold("Configuration (portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
@@ -1866,6 +1978,14 @@ ${colors.bold("Configuration (portless.json):")}
   Monorepo:        { "apps": { "apps/web": { "name": "myapp" } } }
   Turborepo:       Workspace roots use Turbo when turbo.json or turbo.jsonc is readable
                    Set { "turbo": false } to use direct spawning
+
+${colors.bold("Path-based routing:")}
+  Route multiple apps under one hostname by URL path:
+    portless myapp vite dev                      # serves /
+    portless myapp --path /api pnpm start        # serves /api/*
+    portless myapp --path /docs next dev         # serves /docs/*
+  The proxy uses longest-prefix matching to dispatch requests.
+  In portless.json: { "apps": { "apps/api": { "name": "myapp", "path": "/api" } } }
 
 ${colors.bold("In package.json:")}
   {
@@ -1978,6 +2098,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
   PORTLESS_STATE_DIR=<path>     Override the state directory
+  PORTLESS_PATH=<path>          Path prefix for path-based routing (e.g. /api)
   PORTLESS=0                    Run command directly without proxy
 
 ${colors.bold("Child process environment:")}
@@ -2240,7 +2361,9 @@ ${colors.bold("Options:")}
   for (const route of stale) {
     const pids = findPidsOnPort(route.port);
     if (pids.length === 0) {
-      console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
+      console.log(
+        `  ${formatRouteLabel(route)} :${route.port} - route removed (port already free)`
+      );
       continue;
     }
     const signal = forceKill ? "SIGKILL" : "SIGTERM";
@@ -2248,9 +2371,9 @@ ${colors.bold("Options:")}
       try {
         process.kill(pid, signal);
         killed++;
-        console.log(`  ${route.hostname} :${route.port} - killed PID ${pid} (${signal})`);
+        console.log(`  ${formatRouteLabel(route)} :${route.port} - killed PID ${pid} (${signal})`);
       } catch {
-        console.log(`  ${route.hostname} :${route.port} - PID ${pid} already exited`);
+        console.log(`  ${formatRouteLabel(route)} :${route.port} - PID ${pid} already exited`);
       }
     }
   }
@@ -2288,6 +2411,7 @@ together:
 
 ${colors.bold("Options:")}
   --no-worktree          Skip worktree prefix detection
+  --path <prefix>        Include a path prefix in the URL
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2299,14 +2423,22 @@ ${colors.bold("Examples:")}
   }
 
   let skipWorktree = false;
+  let pathPrefix: string | undefined;
   const positional: string[] = [];
 
   for (let i = 1; i < args.length; i++) {
     if (args[i] === "--no-worktree") {
       skipWorktree = true;
+    } else if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(colors.red("Error: --path requires a path value."));
+        process.exit(1);
+      }
+      pathPrefix = parsePathPrefixOrExit(args[i]);
     } else if (args[i].startsWith("-")) {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --no-worktree, --help"));
+      console.error(colors.blue("Known flags: --no-worktree, --path, --help"));
       process.exit(1);
     } else {
       positional.push(args[i]);
@@ -2328,7 +2460,7 @@ ${colors.bold("Examples:")}
 
   const { port, tls, tlds } = await discoverState();
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
-  const url = formatUrl(hostname, port, tls);
+  const url = formatUrl(hostname, port, tls, pathPrefix);
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
@@ -2363,15 +2495,30 @@ ${colors.bold("Examples:")}
       console.error(colors.cyan("  portless alias --remove <name>"));
       process.exit(1);
     }
+    let removePathPrefix: string | undefined;
+    for (let i = 3; i < args.length; i++) {
+      if (args[i] === "--path") {
+        i++;
+        if (!args[i] || args[i].startsWith("-")) {
+          console.error(colors.red("Error: --path requires a path value."));
+          process.exit(1);
+        }
+        removePathPrefix = parsePathPrefixOrExit(args[i]);
+      }
+    }
     const hostnames = buildHostnames(aliasName, tlds);
     const routes = store.loadRoutes();
-    const existing = routes.find((r) => hostnames.includes(r.hostname) && r.pid === 0);
+    const existing = routes.find(
+      (r) => hostnames.includes(r.hostname) && r.pid === 0 && r.pathPrefix === removePathPrefix
+    );
     if (!existing) {
-      console.error(colors.red(`Error: No alias found for "${hostnames.join(", ")}".`));
+      console.error(
+        colors.red(`Error: No alias found for "${hostnames.join(", ")}${removePathPrefix || ""}".`)
+      );
       process.exit(1);
     }
-    removeRoutes(store, hostnames);
-    console.log(colors.green(`Removed alias: ${hostnames.join(", ")}`));
+    removeRoutes(store, hostnames, undefined, removePathPrefix);
+    console.log(colors.green(`Removed alias: ${hostnames.join(", ")}${removePathPrefix || ""}`));
     return;
   }
 
@@ -2394,9 +2541,24 @@ ${colors.bold("Examples:")}
     process.exit(1);
   }
 
+  let pathPrefix: string | undefined;
+  for (let i = 3; i < args.length; i++) {
+    if (args[i] === "--path") {
+      i++;
+      if (!args[i] || args[i].startsWith("-")) {
+        console.error(colors.red("Error: --path requires a path value."));
+        process.exit(1);
+      }
+      pathPrefix = parsePathPrefixOrExit(args[i]);
+    }
+  }
   const force = args.includes("--force");
-  addRoutes(store, hostnames, port, 0, force);
-  console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
+  addRoutes(store, hostnames, port, 0, force, pathPrefix);
+  console.log(
+    colors.green(
+      `Alias registered: ${hostnames.map((h) => `${h}${pathPrefix || ""}`).join(", ")} -> 127.0.0.1:${port}`
+    )
+  );
   // Awaited: this command exits, and a warning printed after exit reaches nobody.
   await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 }
@@ -2487,7 +2649,7 @@ ${colors.bold("Usage: portless hosts <command>")}
       return;
     }
   }
-  const hostnames = routes.map((r) => r.hostname);
+  const hostnames = [...new Set(routes.map((r) => r.hostname))];
   if (syncHostsFile(hostnames)) {
     console.log(colors.green(`Synced ${hostnames.length} hostname(s) to ${HOSTS_DISPLAY}:`));
     for (const h of hostnames) {
@@ -2824,7 +2986,7 @@ ${colors.bold("Options:")}
   }
 
   for (const route of staleRoutes.slice(0, 5)) {
-    add("warn", `Stale route ${route.hostname} is owned by exited PID ${route.pid}.`);
+    add("warn", `Stale route ${formatRouteLabel(route)} is owned by exited PID ${route.pid}.`);
   }
   if (staleRoutes.length > 5) {
     add("warn", `${staleRoutes.length - 5} additional stale routes hidden.`);
@@ -2844,7 +3006,7 @@ ${colors.bold("Options:")}
     if (invalidPort) {
       add(
         "warn",
-        `Route ${route.hostname} has invalid port ${route.port}.`,
+        `Route ${formatRouteLabel(route)} has invalid port ${route.port}.`,
         route.pid === 0 ? "Remove or recreate the alias." : "Run: portless prune"
       );
       continue;
@@ -2852,7 +3014,7 @@ ${colors.bold("Options:")}
     if (listening) continue;
     add(
       "warn",
-      `Route ${route.hostname} points to port ${route.port}, but nothing is listening there.`,
+      `Route ${formatRouteLabel(route)} points to port ${route.port}, but nothing is listening there.`,
       route.pid === 0 ? "Remove the alias or start that service." : "The app may still be starting."
     );
   }
@@ -2871,11 +3033,13 @@ ${colors.bold("Options:")}
     }
   } else if (liveRoutes.length > 0) {
     const managedHosts = new Set(getManagedHostnames());
+    // Path routes can share a hostname; resolution is per-hostname, so dedupe.
+    const uniqueLiveHostnames = [...new Set(liveRoutes.map((route) => route.hostname))];
     const resolutionChecks = await Promise.all(
-      liveRoutes.map(async (route) => ({
-        hostname: route.hostname,
-        resolves: await checkHostResolution(route.hostname),
-        managed: managedHosts.has(route.hostname),
+      uniqueLiveHostnames.map(async (hostname) => ({
+        hostname,
+        resolves: await checkHostResolution(hostname),
+        managed: managedHosts.has(hostname),
       }))
     );
     const unresolved = resolutionChecks.filter((result) => !result.resolves);
@@ -3558,6 +3722,10 @@ async function handleDefaultSingle(
   const worktree = detectWorktreePrefix(cwd);
   const effectiveName = applyWorktreePrefix(baseName, worktree);
 
+  // PORTLESS_PATH wins over the config "path", mirroring appPort precedence.
+  const pathPrefix =
+    pathPrefixFromEnv() ?? (appConfig?.path ? parsePathPrefixOrExit(appConfig.path) : undefined);
+
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
@@ -3573,6 +3741,7 @@ async function handleDefaultSingle(
     false,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
+    pathPrefix,
     lanMode,
     lanIp
   );
@@ -3590,6 +3759,8 @@ interface MultiAppEntry {
   label: string;
   commandArgs: string[];
   appPort?: number;
+  /** URL path prefix for path-based routing (e.g. "/api"). */
+  pathPrefix?: string;
   proxied: boolean;
 }
 
@@ -3645,7 +3816,7 @@ async function spawnProxiedApp(
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
-  route: { store: RouteStore; hostnames: string[] } | null;
+  route: { store: RouteStore; hostnames: string[]; pathPrefix?: string } | null;
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
 
@@ -3667,11 +3838,11 @@ async function spawnProxiedApp(
 
     const appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app.name, tlds);
-    const urls = formatUrls(hostnames, proxyPort, tls);
+    const urls = formatUrls(hostnames, proxyPort, tls, app.pathPrefix);
     const url = urls[0]!;
     displayUrl = url;
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    addRoutes(store, hostnames, appPort, process.pid, false, app.pathPrefix);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 
     env = {
@@ -3703,11 +3874,12 @@ async function spawnProxiedApp(
       console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
     }
     if (capturedStore && capturedHostnames.length > 0) {
-      removeRoutes(capturedStore, capturedHostnames, process.pid);
+      removeRoutes(capturedStore, capturedHostnames, process.pid, app.pathPrefix);
     }
   });
 
-  const route = store && hostnames.length > 0 ? { store, hostnames } : null;
+  const route =
+    store && hostnames.length > 0 ? { store, hostnames, pathPrefix: app.pathPrefix } : null;
   return { child, displayUrl, route };
 }
 
@@ -3846,7 +4018,12 @@ async function handleDefaultMulti(
 
     name = applyWorktreePrefix(name, worktree);
 
-    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+    // Per-app path prefixes let several apps share one hostname (e.g. web at
+    // "/" and api at "/api"); PORTLESS_PATH is ignored here because a single
+    // global prefix is ambiguous across apps.
+    const pathPrefix = appOverride.path ? parsePathPrefixOrExit(appOverride.path) : undefined;
+
+    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, pathPrefix, proxied });
   }
 
   if (apps.length === 0) {
@@ -3924,7 +4101,7 @@ async function runWithTurbo(
   });
 
   const manifest: Record<string, ManifestEntry> = {};
-  const routes: { hostnames: string[] }[] = [];
+  const routes: { hostnames: string[]; pathPrefix?: string }[] = [];
   const appUrls: { label: string; url: string }[] = [];
 
   for (const app of proxiedApps) {
@@ -3936,13 +4113,13 @@ async function runWithTurbo(
 
     const appPort = app.appPort ?? (await findFreePort());
     const hostnames = buildHostnames(app.name, tlds);
-    const urls = formatUrls(hostnames, proxyPort, tls);
+    const urls = formatUrls(hostnames, proxyPort, tls, app.pathPrefix);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    addRoutes(store, hostnames, appPort, process.pid, false, app.pathPrefix);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
-    routes.push({ hostnames });
+    routes.push({ hostnames, pathPrefix: app.pathPrefix });
 
     const entry: ManifestEntry = {
       PORT: String(appPort),
@@ -4005,8 +4182,8 @@ async function runWithTurbo(
       }
     }, SIGKILL_TIMEOUT_MS).unref();
 
-    for (const { hostnames } of routes) {
-      removeRoutes(store, hostnames, process.pid);
+    for (const { hostnames, pathPrefix } of routes) {
+      removeRoutes(store, hostnames, process.pid, pathPrefix);
     }
     removeManifest();
   };
@@ -4037,7 +4214,7 @@ async function runWithDirectSpawn(
   const children: ReturnType<typeof spawn>[] = [];
   const exitCodes = new Map<string, number | null>();
   const appUrls: { label: string; url: string }[] = [];
-  const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
+  const routeEntries: { store: RouteStore; hostnames: string[]; pathPrefix?: string }[] = [];
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
@@ -4090,8 +4267,8 @@ async function runWithDirectSpawn(
       }
     }, SIGKILL_TIMEOUT_MS).unref();
 
-    for (const { store, hostnames } of routeEntries) {
-      removeRoutes(store, hostnames, process.pid);
+    for (const { store, hostnames, pathPrefix } of routeEntries) {
+      removeRoutes(store, hostnames, process.pid, pathPrefix);
     }
   };
 
@@ -4166,6 +4343,9 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   if (!parsed.appPort && appConfig?.appPort) {
     parsed.appPort = appConfig.appPort;
   }
+  if (!parsed.pathPrefix && appConfig?.path) {
+    parsed.pathPrefix = parsePathPrefixOrExit(appConfig.path);
+  }
 
   const worktree = detectWorktreePrefix();
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
@@ -4185,6 +4365,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.force,
     { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
+    parsed.pathPrefix,
     lanMode,
     lanIp
   );
@@ -4202,10 +4383,13 @@ async function handleNamedMode(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  if (!parsed.appPort) {
+  if (!parsed.appPort || !parsed.pathPrefix) {
     const appConfig = loadAppConfig();
-    if (appConfig?.appPort) {
+    if (!parsed.appPort && appConfig?.appPort) {
       parsed.appPort = appConfig.appPort;
+    }
+    if (!parsed.pathPrefix && appConfig?.path) {
+      parsed.pathPrefix = parsePathPrefixOrExit(appConfig.path);
     }
   }
 
@@ -4231,6 +4415,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     parsed.force,
     undefined,
     parsed.appPort,
+    parsed.pathPrefix,
     lanMode,
     lanIp
   );

@@ -81,6 +81,18 @@ portless docs.myapp next dev
 # -> https://docs.myapp.localhost
 ```
 
+## Path-based routing
+
+Route multiple apps under one hostname by URL path:
+
+```bash
+portless myapp vite dev                  # serves /
+portless myapp --path /api pnpm start    # serves /api/*
+portless myapp --path /docs next dev     # serves /docs/*
+```
+
+The proxy uses longest-prefix matching. The full request path is forwarded to the backend unchanged — `--path /api` does not strip `/api` before proxying, so your app must serve its routes under that prefix (or you can set its base path accordingly). Useful for local API gateways, microfrontends, monorepos, or any setup where services share a domain. Also available via `PORTLESS_PATH=/api`.
+
 ## Git Worktrees
 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
