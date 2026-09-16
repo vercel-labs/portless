@@ -183,21 +183,22 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable              | Description                                                                    |
-| --------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`       | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`   | Use a fixed port for the app (skip auto-assignment)                            |
-| `PORTLESS_HTTPS`      | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`        | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`     | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`        | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`   | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_SYNC_HOSTS` | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`  | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`     | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`      | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_STATE_DIR`  | Override the state directory                                                   |
-| `PORTLESS=0`          | Bypass the proxy, run the command directly                                     |
+| Variable                  | Description                                                                     |
+| ------------------------- | ------------------------------------------------------------------------------- |
+| `PORTLESS_PORT`           | Override the default proxy port (default: 443 with HTTPS, 80 without)           |
+| `PORTLESS_APP_PORT`       | Use a fixed port for the app (skip auto-assignment)                             |
+| `PORTLESS_HTTPS`          | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                 |
+| `PORTLESS_LAN`            | Set to `1` to always enable LAN mode (auto-detects LAN IP)                      |
+| `PORTLESS_LAN_IP`         | Pin a specific LAN IP for LAN mode                                              |
+| `PORTLESS_TLD`            | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com)  |
+| `PORTLESS_WILDCARD`       | Set to `1` to allow unregistered subdomains to fall back to parent              |
+| `PORTLESS_SYNC_HOSTS`     | Set to `0` to disable auto-sync of /etc/hosts (on by default)                   |
+| `PORTLESS_TAILSCALE`      | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)      |
+| `PORTLESS_TAILSCALE_HTTP` | Set to `1` to share on the tailnet over plain HTTP (same as `--tailscale-http`) |
+| `PORTLESS_FUNNEL`         | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)     |
+| `PORTLESS_NGROK`          | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                 |
+| `PORTLESS_STATE_DIR`      | Override the state directory                                                    |
+| `PORTLESS=0`              | Bypass the proxy, run the command directly                                      |
 
 ### HTTP/2 + HTTPS
 
@@ -250,9 +251,19 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public internet)
 ```
 
-Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+On a tailnet that cannot enable MagicDNS, use `--tailscale-http`:
 
-Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
+```bash
+portless myapp --tailscale-http next dev
+# -> https://myapp.localhost           (local)
+# -> http://100.101.102.103             (tailnet)
+```
+
+It forwards the tailnet port straight to the app, addressed by the node's tailnet IP, so no certificate is needed. Tailnet traffic is WireGuard-encrypted either way. HTTP apps get port 80 first, then 8080, 8081, etc. It cannot be combined with `--funnel`, and the app does not receive the `Tailscale-User-*` and `X-Forwarded-*` headers that an HTTPS serve adds.
+
+MagicDNS and Tailscale HTTPS certificates must both be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If a setting is missing, portless exits before starting the child process.
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected.
 
 ### ngrok sharing
 
@@ -323,6 +334,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)              |
+| `portless <name> --tailscale-http <cmd>`          | Share on the tailnet over plain HTTP (no MagicDNS needed)      |
 | `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                    |
 | `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                               |
 | `portless <name> --force <cmd>`                   | Kill the existing process and take over its route              |
@@ -466,6 +478,8 @@ tailscale up         # Connect to your tailnet
 ```
 
 Requires the Tailscale CLI to be installed (https://tailscale.com/download) and on PATH.
+
+If portless reports that MagicDNS is disabled, the tailnet cannot issue an HTTPS certificate for the node. Use `--tailscale-http` instead. The same setting is behind an `ERR_SSL_PROTOCOL_ERROR` on a tailnet URL printed by an older portless version.
 
 ### ngrok not working
 
