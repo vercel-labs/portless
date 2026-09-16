@@ -1840,7 +1840,7 @@ describe("CLI", () => {
     );
   });
 
-  describe("portless.json config", () => {
+  describe("portless config", () => {
     let tmpDir: string;
 
     beforeEach(() => {
@@ -2089,6 +2089,23 @@ describe("CLI", () => {
       expect(stdout).toContain("config-dev");
     });
 
+    it("portless run (no command) with .config/portless.json resolves dev script", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo config-dir-dev" } })
+      );
+      fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, ".config", "portless.json"),
+        JSON.stringify({ name: "myapp" })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("config-dir-dev");
+    });
+
     it("portless run (no command) without portless.json resolves dev script", () => {
       fs.writeFileSync(
         path.join(tmpDir, "package.json"),
@@ -2135,6 +2152,28 @@ describe("CLI", () => {
         env: { PORTLESS: "0" },
       });
       expect(stdout).toContain("from-start");
+    });
+
+    it("portless run prefers root portless.json over .config/portless.json", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "echo from-dev", start: "echo from-start" },
+        })
+      );
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ script: "start" }));
+      fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, ".config", "portless.json"),
+        JSON.stringify({ script: "dev" })
+      );
+      const { stdout } = run(["run"], {
+        cwd: tmpDir,
+        env: { PORTLESS: "0" },
+      });
+      expect(stdout).toContain("from-start");
+      expect(stdout).not.toContain("from-dev");
     });
 
     it("--script flag overrides config script field", () => {
@@ -2193,6 +2232,21 @@ describe("CLI", () => {
       );
       fs.writeFileSync(
         path.join(tmpDir, "portless.json"),
+        JSON.stringify({ appPort: "not-a-number" })
+      );
+      const { status, stderr } = run(["run"], { cwd: tmpDir });
+      expect(status).toBe(1);
+      expect(stderr).toContain("appPort");
+    });
+
+    it(".config/portless.json validation rejects invalid appPort", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({ name: "test-app", scripts: { dev: "echo hello" } })
+      );
+      fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+      fs.writeFileSync(
+        path.join(tmpDir, ".config", "portless.json"),
         JSON.stringify({ appPort: "not-a-number" })
       );
       const { status, stderr } = run(["run"], { cwd: tmpDir });
