@@ -1773,6 +1773,179 @@ describe("CLI", () => {
     });
   });
 
+  describe("routes.json live reload across repeated atomic rewrites", () => {
+    let tmpDir: string;
+    let testPort: number;
+
+    const proxyEnv = () => ({
+      PORTLESS_PORT: String(testPort),
+      PORTLESS_HTTPS: "0",
+      PORTLESS_STATE_DIR: tmpDir,
+    });
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-live-reload-"));
+      testPort = await getFreePort();
+    });
+
+    afterEach(() => {
+      run(["proxy", "stop"], { env: proxyEnv() });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    // Mirrors RouteStore.saveRoutes(): write a temp file, then rename it over
+    // routes.json. Each call swaps in a fresh inode at that path.
+    function atomicWriteRoutes(routes: unknown[]): void {
+      const routesPath = path.join(tmpDir, "routes.json");
+      const tmpPath = path.join(tmpDir, `routes.json.tmp-${process.pid}-${routes.length}`);
+      fs.writeFileSync(tmpPath, JSON.stringify(routes));
+      fs.renameSync(tmpPath, routesPath);
+    }
+
+    function listen(server: http.Server): Promise<number> {
+      return new Promise((resolve) => {
+        server.listen(0, "127.0.0.1", () => {
+          resolve((server.address() as { port: number }).port);
+        });
+      });
+    }
+
+    function requestThroughProxy(hostname: string): Promise<number> {
+      return new Promise((resolve, reject) => {
+        const req = http.request(
+          { hostname: "127.0.0.1", port: testPort, headers: { host: hostname }, timeout: 1000 },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode!);
+          }
+        );
+        req.on("error", reject);
+        req.on("timeout", () => {
+          req.destroy();
+          reject(new Error("request timed out"));
+        });
+        req.end();
+      });
+    }
+
+    async function waitForRouteStatus(hostname: string, expectedStatus: number): Promise<void> {
+      for (let i = 0; i < 50; i++) {
+        try {
+          if ((await requestThroughProxy(hostname)) === expectedStatus) return;
+        } catch {
+          // Backend or proxy not ready yet; retry.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      throw new Error(`Timed out waiting for ${hostname} to return ${expectedStatus}`);
+    }
+
+    it("picks up a route registered after routes.json was already atomically rewritten once", async () => {
+      // Regression test: fs.watch on routes.json's own path is bound to that
+      // inode. saveRoutes()'s rename-based write swaps the inode, so a watch
+      // on the file itself observes only the first such rewrite and silently
+      // stops firing after that — a second app's route would never become
+      // reachable. The proxy must watch the containing directory instead.
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+
+      const backendA = http.createServer((_req, res) => res.end("A"));
+      const backendB = http.createServer((_req, res) => res.end("B"));
+      try {
+        const portA = await listen(backendA);
+        const portB = await listen(backendB);
+
+        // First atomic write: one route. This is the rewrite that a
+        // file-path watch would still catch.
+        atomicWriteRoutes([{ hostname: "a.localhost", port: portA, pid: process.pid }]);
+        await waitForRouteStatus("a.localhost", 200);
+
+        // Second atomic write: a new route added alongside the first. Without
+        // the directory-watch fix, the proxy never learns about b.localhost.
+        atomicWriteRoutes([
+          { hostname: "a.localhost", port: portA, pid: process.pid },
+          { hostname: "b.localhost", port: portB, pid: process.pid },
+        ]);
+        await waitForRouteStatus("b.localhost", 200);
+
+        expect(await requestThroughProxy("a.localhost")).toBe(200);
+      } finally {
+        await new Promise<void>((resolve) => backendA.close(() => resolve()));
+        await new Promise<void>((resolve) => backendB.close(() => resolve()));
+      }
+    }, 10_000);
+  });
+
+  describe("--routes-cleanup-interval flag", () => {
+    let tmpDir: string;
+    let testPort: number;
+
+    const proxyEnv = () => ({
+      PORTLESS_PORT: String(testPort),
+      PORTLESS_HTTPS: "0",
+      PORTLESS_STATE_DIR: tmpDir,
+    });
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cleanup-interval-"));
+      testPort = await getFreePort();
+    });
+
+    afterEach(() => {
+      run(["proxy", "stop"], { env: proxyEnv() });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("rejects a non-numeric value", () => {
+      const { status, stderr } = run(["proxy", "start", "--routes-cleanup-interval", "abc"], {
+        env: proxyEnv(),
+      });
+      expect(status).not.toBe(0);
+      expect(stderr).toContain("Invalid");
+    });
+
+    it("rejects a negative value", () => {
+      const { status, stderr } = run(["proxy", "start", "--routes-cleanup-interval", "-5"], {
+        env: proxyEnv(),
+      });
+      expect(status).not.toBe(0);
+      expect(stderr).toContain("Invalid");
+    });
+
+    it("accepts 0 to disable the sweep and still starts normally", () => {
+      const start = run(["proxy", "start", "--routes-cleanup-interval", "0"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain(`proxy started on port ${testPort}`);
+    });
+
+    it("prunes routes with dead PIDs on the background sweep, unlike a plain file-change reload", async () => {
+      const start = run(["proxy", "start", "--routes-cleanup-interval", "1"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+
+      // Written directly (not via RouteStore) after the daemon is already up,
+      // so this exercises only the periodic sweep, not startup initialization.
+      const routesPath = path.join(tmpDir, "routes.json");
+      const deadPid = 999999;
+      fs.writeFileSync(
+        routesPath,
+        JSON.stringify([
+          { hostname: "dead.localhost", port: 4001, pid: deadPid },
+          { hostname: "alive.localhost", port: 4002, pid: process.pid },
+        ])
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+
+      const raw = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
+      expect(raw).toHaveLength(1);
+      expect(raw[0].hostname).toBe("alive.localhost");
+    }, 10_000);
+  });
+
   describe("HTTPS proxy with broken security binary (#228)", () => {
     let fakeBinDir: string;
     let tmpDir: string;

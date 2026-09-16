@@ -155,6 +155,28 @@ describe("RouteStore", () => {
       s.addRoute("test.localhost", 4001, process.pid);
       expect(fs.existsSync(s.getRoutesPath())).toBe(true);
     });
+
+    it("leaves no temp file behind after a normal write", () => {
+      store.addRoute("test.localhost", 4123, process.pid);
+      const entries = fs.readdirSync(tmpDir);
+      expect(entries.filter((f) => f.includes(".tmp-"))).toHaveLength(0);
+    });
+
+    it("leaves the previous target and any temp file untouched when the rename fails", () => {
+      // Force the rename step to fail with a real OS-level error (renaming a
+      // file onto an existing directory is illegal) rather than mocking fs,
+      // so this exercises the actual failure path saveRoutes must handle.
+      store.ensureDir();
+      fs.mkdirSync(store.getRoutesPath());
+
+      expect(() => store.addRoute("new.localhost", 4002, process.pid)).toThrow();
+
+      // The directory standing in for the previous target is untouched...
+      expect(fs.statSync(store.getRoutesPath()).isDirectory()).toBe(true);
+      // ...and the failed attempt's temp file was cleaned up, not left behind.
+      const entries = fs.readdirSync(tmpDir);
+      expect(entries.filter((f) => f.includes(".tmp-"))).toHaveLength(0);
+    });
   });
 
   describe("addRoute", () => {
