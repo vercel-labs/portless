@@ -1838,7 +1838,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
-  ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
+  ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Examples:")}
@@ -1995,7 +1995,10 @@ ${colors.bold("Safari / DNS:")}
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
   custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If a route
   hostname will not resolve, the command that registered it warns instead of
-  failing silently. To sync manually:
+  failing silently. Manual sync reconciles the managed entries with current routes,
+  removes stale entries when there are no routes, and requires a successful read
+  before writing. Every write is verified; a failed verification uses the normal
+  hosts sync failure path. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
@@ -2407,16 +2410,21 @@ async function handleHosts(args: string[]): Promise<void> {
 ${colors.bold("portless hosts")} - Manage ${HOSTS_DISPLAY} entries for .localhost subdomains.
 
 Safari relies on the system DNS resolver, which may not handle .localhost
-subdomains. This command adds entries to ${HOSTS_DISPLAY} as a workaround.
+subdomains. This command reconciles portless-managed entries in ${HOSTS_DISPLAY}.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${colors.cyan("portless hosts sync")}    Reconcile current routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Auto-sync:")}
   The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
   PORTLESS_SYNC_HOSTS=0. If a route hostname will not resolve, the command that
   registered it warns instead of failing silently.
+
+${colors.bold("Safety:")}
+  Sync removes stale entries when there are no routes. It requires a successful
+  hosts-file read before writing and verifies every write. Read or verification
+  failures use the normal elevated privileges or error path.
 `);
     process.exit(0);
   }
@@ -2455,7 +2463,7 @@ ${colors.bold("Auto-sync:")}
     console.log(`
 ${colors.bold("Usage: portless hosts <command>")}
 
-  ${colors.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${colors.cyan("portless hosts sync")}    Reconcile current routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 `);
     process.exit(0);
@@ -2464,7 +2472,7 @@ ${colors.bold("Usage: portless hosts <command>")}
   if (args[1] !== "sync") {
     console.error(colors.red(`Error: Unknown hosts subcommand "${args[1]}".`));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan(`  portless hosts sync    # Add routes to ${HOSTS_DISPLAY}`));
+    console.error(colors.cyan(`  portless hosts sync    # Reconcile routes with ${HOSTS_DISPLAY}`));
     console.error(colors.cyan("  portless hosts clean   # Remove portless entries"));
     process.exit(1);
   }
@@ -2475,20 +2483,12 @@ ${colors.bold("Usage: portless hosts <command>")}
   });
 
   const routes = store.loadRoutes();
-  if (routes.length === 0) {
-    // Zero routes is a desired state, not a no-op: bailing here would leave a
-    // block whose routes are gone, in the command the warning tells users to run.
-    if (getManagedHostnames().length === 0) {
-      console.log(colors.yellow("No active routes to sync."));
-      return;
-    }
-    if (syncHostsFile([])) {
-      console.log(colors.green(`Removed stale portless entries from ${HOSTS_DISPLAY}.`));
-      return;
-    }
-  }
   const hostnames = routes.map((r) => r.hostname);
   if (syncHostsFile(hostnames)) {
+    if (hostnames.length === 0) {
+      console.log(colors.green(`No stale portless entries remain in ${HOSTS_DISPLAY}.`));
+      return;
+    }
     console.log(colors.green(`Synced ${hostnames.length} hostname(s) to ${HOSTS_DISPLAY}:`));
     for (const h of hostnames) {
       console.log(colors.cyan(`  127.0.0.1 ${h}`));

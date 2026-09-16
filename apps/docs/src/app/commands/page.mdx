@@ -267,11 +267,13 @@ Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-u
 ## Hosts
 
 ```bash
-portless hosts sync     # add current routes to /etc/hosts
+portless hosts sync     # reconcile current routes with /etc/hosts
 portless hosts clean    # remove portless entries from /etc/hosts
 ```
 
 Auto-sync is on by default. Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
+
+Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
 
 ## Bypass portless
 

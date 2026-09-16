@@ -319,7 +319,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless alias <name> <port>`                    | Register a static route (e.g. for Docker containers)           |
 | `portless alias <name> <port> --force`            | Overwrite an existing route                                    |
 | `portless alias --remove <name>`                  | Remove a static route                                          |
-| `portless hosts sync`                             | Add routes to /etc/hosts (fixes Safari)                        |
+| `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)              |
@@ -413,11 +413,13 @@ Safari relies on the system DNS resolver for `.localhost` subdomains, which may 
 Fix:
 
 ```bash
-portless hosts sync    # Adds current routes to /etc/hosts
+portless hosts sync    # Reconcile current routes with /etc/hosts
 portless hosts clean   # Remove entries later
 ```
 
 Auto-syncs `/etc/hosts` for route hostnames by default. Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
+
+Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
 
 ### Browser shows certificate warning with --https
 

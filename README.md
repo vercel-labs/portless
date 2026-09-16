@@ -398,7 +398,7 @@ portless doctor                  # Check proxy, routes, DNS, and CA trust
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
 portless prune                   # Kill orphaned dev servers from crashed sessions
-portless hosts sync              # Add routes to /etc/hosts (fixes Safari)
+portless hosts sync              # Reconcile routes with /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
 
 # Disable portless (run command directly)
@@ -489,11 +489,13 @@ macOS/Linux may prompt for `sudo`. Custom certificate paths passed with `--cert`
 If Safari can't find your `.localhost` URL:
 
 ```bash
-portless hosts sync    # Add current routes to /etc/hosts
+portless hosts sync    # Reconcile current routes with /etc/hosts
 portless hosts clean   # Clean up later
 ```
 
 Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLDs, LAN `.local`). Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
+
+Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
 
 ## Troubleshooting
 
