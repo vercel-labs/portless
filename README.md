@@ -288,6 +288,10 @@ portless trust
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store. On WSL, it updates both the Linux trust store and the Windows current-user Root store so Windows browsers trust portless HTTPS certificates.
 
+On Linux, portless also trusts the CA in the invoking user's existing Chrome/Chromium NSS database: `~/.pki/nssdb` if present, otherwise `~/.local/share/pki/nssdb` (Chromium M146+). This requires NSS `certutil`: install `libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora/RHEL, `nss` on Arch, or `mozilla-nss-tools` on openSUSE, then run `portless trust` and restart the browser. No NSS database is created if neither path exists; if you install Chrome later, open it once and rerun `portless trust`. `portless clean` also removes the CA from the active NSS database.
+
+If NSS registration fails (including when `certutil` is missing), successful system trust registration is preserved and `portless trust` exits successfully with a browser-trust warning. Chrome may still reject the certificate; install the NSS tools and rerun `portless trust`. `portless doctor` continues to report incomplete trust. NSS removal failures still leave `portless clean` incomplete and preserve the CA certificate and key for retry.
+
 ## Start at OS startup
 
 Install the proxy as an OS startup service so clean HTTPS URLs are available after reboot without starting the proxy from a terminal:

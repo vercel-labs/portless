@@ -4,7 +4,7 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { fixOwnership } from "./utils.js";
+import { fixOwnership, resolveUserHome } from "./utils.js";
 import {
   isWSL,
   isWindowsCATrusted,
@@ -456,8 +456,8 @@ export function isCATrusted(stateDir: string): boolean {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) return false;
 
-  // Fast path: if we previously trusted this exact CA, skip the OS check.
-  const marker = readTrustMarker(stateDir);
+  // Linux browser trust is per-user and may change independently of this marker.
+  const marker = process.platform === "linux" ? null : readTrustMarker(stateDir);
   if (marker) {
     const fp = caFingerprint(stateDir);
     const expected = fp && isWSL() ? `wsl:${fp}` : fp;
@@ -468,6 +468,7 @@ export function isCATrusted(stateDir: string): boolean {
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
     if (!isCATrustedLinux(stateDir)) return false;
+    if (!isCATrustedNSS(caCertPath)) return false;
     if (!isWSL()) return true;
     try {
       return isWindowsCATrusted(caCertPath, wslWindowsCAStoreOptions());
@@ -619,6 +620,89 @@ function isCATrustedLinux(
     return ours === installed;
   } catch {
     return false;
+  }
+}
+
+/** Chromium prefers the legacy DB when present, otherwise the M146+ location. */
+function linuxNSSDatabase(): string | undefined {
+  const home = resolveUserHome();
+  const legacy = path.join(home, ".pki", "nssdb");
+  if (fs.existsSync(legacy)) return legacy;
+  const current = path.join(home, ".local", "share", "pki", "nssdb");
+  return fs.existsSync(current) ? current : undefined;
+}
+
+function nssCertutil(database: string, args: string[], input?: string): string {
+  const commandArgs = ["-d", `sql:${database}`, ...args];
+  const sudoUser = process.getuid?.() === 0 ? process.env.SUDO_USER : undefined;
+  try {
+    // Drop privileges, not just HOME, so NSS never creates root-owned user files.
+    // Pass the public CA via stdin because the state directory may be root-only.
+    return execFileSync(
+      sudoUser && sudoUser !== "root" ? "sudo" : "certutil",
+      sudoUser && sudoUser !== "root"
+        ? ["-u", sudoUser, "--", "certutil", ...commandArgs]
+        : commandArgs,
+      { encoding: "utf-8", stdio: "pipe", timeout: 15_000, input }
+    );
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Chrome/Chromium NSS trust failed (${database}): ${message}\n` +
+        "Ensure NSS certutil is installed (Debian/Ubuntu: sudo apt install libnss3-tools; " +
+        "Fedora/RHEL: sudo dnf install nss-tools; Arch: sudo pacman -S nss; " +
+        "openSUSE: sudo zypper install mozilla-nss-tools), then retry."
+    );
+  }
+}
+
+function nssNickname(caCertPath: string): string {
+  const cert = new crypto.X509Certificate(fs.readFileSync(caCertPath));
+  // NSS interprets colons in nicknames as token separators.
+  return `${CA_COMMON_NAME} ${cert.fingerprint256.replace(/:/g, "")}`;
+}
+
+function nssTrustFlags(database: string, nickname: string): string | undefined {
+  const listing = nssCertutil(database, ["-L"]);
+  for (const line of listing.split("\n")) {
+    const match = line.trim().match(/^(.*?)\s+([^\s,]*,[^\s,]*,[^\s,]*)$/);
+    if (match?.[1] === nickname) return match[2];
+  }
+  return undefined;
+}
+
+function isCATrustedNSS(caCertPath: string): boolean {
+  const database = linuxNSSDatabase();
+  if (!database) return true;
+  try {
+    const nickname = nssNickname(caCertPath);
+    const flags = nssTrustFlags(database, nickname);
+    if (!flags?.split(",")[0].includes("C")) return false;
+    const installed = nssCertutil(database, ["-L", "-n", nickname, "-a"]);
+    return (
+      new crypto.X509Certificate(installed).fingerprint256 ===
+      new crypto.X509Certificate(fs.readFileSync(caCertPath)).fingerprint256
+    );
+  } catch {
+    return false;
+  }
+}
+
+function updateCATrustNSS(caCertPath: string, remove = false): void {
+  const database = linuxNSSDatabase();
+  if (!database) return;
+  const nickname = nssNickname(caCertPath);
+  if (remove) {
+    // Listing distinguishes an absent certificate from an inaccessible database.
+    if (nssTrustFlags(database, nickname) !== undefined) {
+      nssCertutil(database, ["-D", "-n", nickname]);
+    }
+  } else {
+    nssCertutil(
+      database,
+      ["-A", "-n", nickname, "-t", "C,,"],
+      fs.readFileSync(caCertPath, "utf-8")
+    );
   }
 }
 
@@ -891,12 +975,16 @@ export function createSNICallback(
  *
  * On macOS, adds to the login keychain (no sudo required; the OS shows a
  * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
- * CA directory and runs the appropriate update command (requires sudo). WSL
- * also adds the CA to the Windows current-user Root store.
+ * CA directory and runs the appropriate update command (requires sudo), then
+ * updates the user's existing Chromium NSS DB. WSL also adds the CA to the
+ * Windows current-user Root store.
  *
  * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
+ *
+ * `trusted` reports OS trust installation. A warning means Linux browser NSS
+ * trust is incomplete; isCATrusted still checks both stores.
  */
-export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
+export function trustCA(stateDir: string): { trusted: boolean; error?: string; warning?: string } {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) {
     return {
@@ -940,9 +1028,18 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      let warning: string | undefined;
+      try {
+        updateCATrustNSS(caCertPath);
+      } catch (err) {
+        warning =
+          "Chrome/Chromium may still show certificate warnings.\n" +
+          (err instanceof Error ? err.message : String(err));
+      }
       if (isWSL()) {
         trustWindowsCA(caCertPath, wslWindowsCAStoreOptions());
       }
+      if (warning) return { trusted: true, warning };
       writeTrustMarker(stateDir);
       return { trusted: true };
     } else if (process.platform === "win32") {
@@ -995,6 +1092,12 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
       result = untrustCAMacOS(caCertPath);
     } else if (process.platform === "linux") {
       result = runningInWSL ? untrustCAWSL(stateDir, caCertPath) : untrustCALinux(stateDir);
+      try {
+        updateCATrustNSS(caCertPath, true);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        result = { removed: false, error: [result.error, message].filter(Boolean).join("; ") };
+      }
     } else if (process.platform === "win32") {
       result = untrustWindowsCA(caCertPath);
     } else {

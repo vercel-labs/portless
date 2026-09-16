@@ -988,6 +988,7 @@ function prepareTrust(stateDir: string): void {
   const trustResult = trustCA(stateDir);
   if (trustResult.trusted) {
     console.log(colors.green("CA added to the system trust store."));
+    if (trustResult.warning) console.warn(colors.yellow(trustResult.warning));
     return;
   }
 

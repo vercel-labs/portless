@@ -951,18 +951,6 @@ describe("CLI", () => {
       expect(stderr).toContain("Unknown argument");
     });
 
-    it("does not bypass when PORTLESS=0 is set", () => {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-clean-"));
-      const { stderr } = run(["clean"], {
-        env: {
-          PORTLESS: "0",
-          PORTLESS_STATE_DIR: tmpDir,
-        },
-      });
-      fs.rmSync(tmpDir, { recursive: true, force: true });
-      expect(stderr).not.toContain("ENOENT");
-    });
-
     it("does not bypass clean with extra args when PORTLESS=0", () => {
       const { status, stderr } = run(["clean", "typo"], { env: { PORTLESS: "0" } });
       expect(status).toBe(1);

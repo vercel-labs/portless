@@ -4,6 +4,10 @@ HTTP/2 + TLS is enabled by default for faster dev server page loads. Browsers li
 
 First run generates a local CA and server certs, then adds the CA to your system trust store. After that, no prompts, no browser warnings.
 
+On Linux, `portless trust` also updates the invoking user's existing Chrome/Chromium NSS database, even under sudo. It uses `~/.pki/nssdb` if present, otherwise `~/.local/share/pki/nssdb` (Chromium M146+). Install NSS `certutil` first (`sudo apt install libnss3-tools` on Debian/Ubuntu), then run `portless trust` and restart the browser. If neither database exists, open Chrome once before rerunning `portless trust`. `portless clean` removes the CA from the active NSS database too.
+
+If NSS registration fails or `certutil` is missing, `portless trust` preserves successful system trust registration and exits successfully with a warning. Chrome may still reject the certificate; install the NSS tools and rerun `portless trust`. `portless doctor` reports incomplete trust until NSS verification succeeds. If NSS removal fails during `portless clean`, the CA certificate and key are retained for retry.
+
 On WSL, portless updates both the Linux trust store and the Windows current-user Root store. Windows browsers can then verify portless HTTPS certificates served from WSL.
 
 ## Custom certificates
