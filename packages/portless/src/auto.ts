@@ -169,6 +169,66 @@ export function applyWorktreePrefix(baseName: string, worktree: WorktreePrefix |
   return worktree ? `${worktree.prefix}.${baseName}` : baseName;
 }
 
+/** Prefix of the generated peer URL environment variables. */
+export const PEER_URL_ENV_PREFIX = "PORTLESS_URL_";
+
+/**
+ * Environment variable name carrying one app's URL in a multi-app run. Derived
+ * from the app's base name, before any worktree prefix, so the variable name
+ * stays the same in every worktree while its value follows the prefix. That is
+ * what lets a service reference a peer from committed config: the value moves,
+ * the name does not.
+ */
+export function peerUrlEnvName(baseName: string): string {
+  return PEER_URL_ENV_PREFIX + baseName.toUpperCase().replace(/[^A-Z0-9]/g, "_");
+}
+
+/**
+ * A name made only of punctuation would yield a variable of bare underscores,
+ * which tells a reader nothing and cannot be guessed from the app name.
+ */
+function hasUsableEnvName(baseName: string): boolean {
+  return /[a-z0-9]/i.test(baseName);
+}
+
+/**
+ * Build the peer URL environment every app in a multi-app run receives, so one
+ * service can reach another without a hardcoded hostname that a worktree prefix
+ * would invalidate. Each app appears once, the reader's own entry included, so
+ * the map does not vary by reader.
+ *
+ * Two apps whose names differ only in punctuation (`web.api` and `web-api`)
+ * collapse to one variable name. The first wins and the second is reported,
+ * rather than silently overwriting a peer URL with the wrong host.
+ */
+export function buildPeerUrlEnv(
+  peers: { baseName: string; url: string }[],
+  onWarning?: (message: string) => void
+): Record<string, string> {
+  const env: Record<string, string> = {};
+  const claimedBy = new Map<string, string>();
+
+  for (const { baseName, url } of peers) {
+    if (!hasUsableEnvName(baseName)) continue;
+    const varName = peerUrlEnvName(baseName);
+
+    const owner = claimedBy.get(varName);
+    if (owner !== undefined) {
+      if (owner !== baseName) {
+        onWarning?.(
+          `Peer URL variable ${varName} is already taken by "${owner}", so "${baseName}" gets none. Rename one of them to give both a peer URL.`
+        );
+      }
+      continue;
+    }
+
+    claimedBy.set(varName, baseName);
+    env[varName] = url;
+  }
+
+  return env;
+}
+
 /** Branch names that represent the default/primary checkout — no prefix needed. */
 const DEFAULT_BRANCHES = new Set(["main", "master"]);
 

@@ -58,6 +58,11 @@ export interface ManifestEntry {
   PORTLESS_URL: string;
   __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS?: string;
   NODE_EXTRA_CA_CERTS?: string;
+  /**
+   * `PORTLESS_URL_<BASE_NAME>` for every app in the run, the entry's own app
+   * included. See buildPeerUrlEnv in auto.ts.
+   */
+  [peerUrl: `PORTLESS_URL_${string}`]: string | undefined;
 }
 
 /**
