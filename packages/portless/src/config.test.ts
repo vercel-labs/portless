@@ -134,6 +134,17 @@ describe("loadConfig", () => {
     expect(result!.config.proxy).toBe(false);
   });
 
+  it("loads config with worktree hostname template", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ worktree: { hostnameTemplate: "test.{worktree}-local.myapp" } })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result!.config.worktree).toEqual({
+      hostnameTemplate: "test.{worktree}-local.myapp",
+    });
+  });
+
   it("loads config with apps map", () => {
     const config = {
       apps: {
@@ -157,12 +168,22 @@ describe("loadConfig", () => {
   it("loads config from package.json portless key", () => {
     fs.writeFileSync(
       path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: { name: "myapp", script: "dev" } })
+      JSON.stringify({
+        name: "test",
+        portless: {
+          name: "myapp",
+          script: "dev",
+          worktree: { hostnameTemplate: "test.{worktree}-local.myapp" },
+        },
+      })
     );
     const result = loadConfig(tmpDir);
     expect(result).not.toBeNull();
     expect(result!.config.name).toBe("myapp");
     expect(result!.config.script).toBe("dev");
+    expect(result!.config.worktree).toEqual({
+      hostnameTemplate: "test.{worktree}-local.myapp",
+    });
     expect(result!.configDir).toBe(tmpDir);
   });
 
@@ -267,6 +288,14 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("throws when worktree hostnameTemplate omits worktree placeholder", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ worktree: { hostnameTemplate: "test.local.myapp" } })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
   it("accepts turbo as a boolean", () => {
     fs.writeFileSync(
       path.join(tmpDir, "portless.json"),
@@ -308,7 +337,13 @@ describe("resolveAppConfig", () => {
   it("returns top-level fields when no apps key", () => {
     const config = { name: "myapp", script: "dev" };
     const result = resolveAppConfig(config, "/repo", "/repo");
-    expect(result).toEqual({ name: "myapp", script: "dev", appPort: undefined, proxy: undefined });
+    expect(result).toEqual({
+      name: "myapp",
+      script: "dev",
+      appPort: undefined,
+      proxy: undefined,
+      worktree: undefined,
+    });
   });
 
   it("returns proxy field from top-level config", () => {

@@ -60,6 +60,12 @@ The name is inferred from `package.json` if not set in config. The script defaul
       </td>
     </tr>
     <tr>
+      <td>`worktree`</td>
+      <td>object</td>
+      <td></td>
+      <td>Git worktree hostname options.</td>
+    </tr>
+    <tr>
       <td>`apps`</td>
       <td>object</td>
       <td></td>
@@ -74,6 +80,16 @@ The name is inferred from `package.json` if not set in config. The script defaul
   </tbody>
 </table>
 
+Use `worktree.hostnameTemplate` to place the worktree label somewhere other than the first subdomain:
+
+```json
+{
+  "worktree": {
+    "hostnameTemplate": "test.{worktree}-local.myapp"
+  }
+}
+```
+
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
 
 ### package.json "portless" key
@@ -87,7 +103,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
 
 ```json
 {
