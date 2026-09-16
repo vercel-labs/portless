@@ -1609,6 +1609,24 @@ describe("CLI", () => {
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("skips the detected worktree prefix with --no-worktree", () => {
+      const gitdir = path.join(tmpDir, "fake-bare.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-a\n");
+      fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
+
+      const prefixed = run(["get", "backend"], { cwd: tmpDir, env: getEnv() });
+      const unprefixed = run(["get", "--no-worktree", "backend"], {
+        cwd: tmpDir,
+        env: getEnv(),
+      });
+
+      expect(prefixed.status).toBe(0);
+      expect(prefixed.stdout.trim()).toMatch(/^https?:\/\/feature-a\.backend\.localhost(:\d+)?$/);
+      expect(unprefixed.status).toBe(0);
+      expect(unprefixed.stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);
@@ -1617,6 +1635,14 @@ describe("CLI", () => {
   });
 
   describe("--name flag", () => {
+    it("accepts --no-worktree before --name", () => {
+      const { status, stdout } = run(["--no-worktree", "--name", "run", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
     it("treats reserved word as app name with PORTLESS=0", () => {
       const { status, stdout } = run(["--name", "run", "echo", "ok"], {
         env: { PORTLESS: "0" },
@@ -1651,7 +1677,61 @@ describe("CLI", () => {
       const { status, stdout } = run(["run", "--help"]);
       expect(status).toBe(0);
       expect(stdout).toContain("--name");
+      expect(stdout).toContain("--no-worktree");
     });
+
+    it.each([
+      ["an explicit name", ["--name", "api.feature-a.example"], "api.feature-a.example", false],
+      ["an inferred name", [], "api-feature-a-example", false],
+      ["a bare inferred name", [], "api-feature-a-example", true],
+    ])(
+      "skips the worktree prefix with --no-worktree and %s",
+      async (_label, nameArgs, name, bare) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-no-worktree-"));
+        let proxyChild: ReturnType<typeof spawn> | undefined;
+
+        try {
+          const proxy = await startMockProxy(tmpDir);
+          proxyChild = proxy.child;
+          fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+          fs.writeFileSync(
+            path.join(tmpDir, "package.json"),
+            JSON.stringify({
+              name: "api.feature-a.example",
+              scripts: { dev: "node capture-url.cjs" },
+            })
+          );
+
+          const gitdir = path.join(tmpDir, "fake-bare.git", "worktrees", "wt");
+          fs.mkdirSync(gitdir, { recursive: true });
+          fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-a\n");
+          fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
+
+          const capturePath = path.join(tmpDir, "url.txt");
+          const scriptPath = path.join(tmpDir, "capture-url.cjs");
+          fs.writeFileSync(
+            scriptPath,
+            `require("node:fs").writeFileSync(${JSON.stringify(capturePath)}, process.env.PORTLESS_URL);\n`
+          );
+
+          const args = bare
+            ? ["--no-worktree"]
+            : ["run", "--no-worktree", ...nameArgs, "node", scriptPath];
+          const { status } = run(args, {
+            cwd: tmpDir,
+            env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" },
+          });
+
+          expect(status).toBe(0);
+          expect(fs.readFileSync(capturePath, "utf-8")).toBe(
+            `http://${name}.localhost:${proxy.port}`
+          );
+        } finally {
+          if (proxyChild) await stopChild(proxyChild);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
 
     it("strips --name and passes command through (PORTLESS=0)", () => {
       const { status, stdout } = run(["run", "--name", "custom", "echo", "ok"], {
@@ -2314,9 +2394,12 @@ describe("CLI", () => {
     // a separate limitation of the multi-app spawn path, not the worktree-prefix
     // logic under test here, which is platform-agnostic and covered
     // cross-platform by the detectWorktreePrefix unit tests. Runs on macOS/Linux.
-    it.skipIf(process.platform === "win32")(
-      "prefixes every app hostname with the worktree branch",
-      async () => {
+    it.skipIf(process.platform === "win32").each([
+      ["prefixes every app hostname with the worktree branch", [], "feature-x."],
+      ["skips the worktree prefix with --no-worktree", ["--no-worktree"], ""],
+    ])(
+      "%s",
+      async (_label, args, prefix) => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-wt-"));
         const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-state-"));
         const proxyPort = await getFreePort();
@@ -2381,7 +2464,7 @@ describe("CLI", () => {
           childEnv.NO_COLOR = "1";
 
           let output = "";
-          cli = spawn(process.execPath, [CLI_PATH], {
+          cli = spawn(process.execPath, [CLI_PATH, ...args], {
             cwd: root,
             env: childEnv,
             stdio: ["ignore", "pipe", "pipe"],
@@ -2403,10 +2486,8 @@ describe("CLI", () => {
               `capture incomplete (web=${JSON.stringify(webUrl)}, api=${JSON.stringify(apiUrl)}). CLI output:\n${output}`
             );
           }
-          // Routed URL must carry the worktree prefix, in the full multi-app
-          // form <branch>.<pkg>.<project>.<tld>.
-          expect(webUrl).toContain("feature-x.web.myrepo.localhost");
-          expect(apiUrl).toContain("feature-x.api.myrepo.localhost");
+          expect(webUrl).toContain(`${prefix}web.myrepo.localhost`);
+          expect(apiUrl).toContain(`${prefix}api.myrepo.localhost`);
         } finally {
           if (cli) await stopChild(cli);
           run(["proxy", "stop"], {

@@ -101,6 +101,13 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
+Use `--no-worktree` to skip worktree prefix detection:
+
+```bash
+portless run --no-worktree --name api.fix-ui.example pnpm dev
+# -> https://api.fix-ui.example.localhost
+```
+
 ## Custom TLD
 
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:
