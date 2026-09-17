@@ -38,6 +38,8 @@ jobs:
 
       - run: pnpm test
 
+      - run: pnpm --filter @portless/docs test:routes
+
       - run: pnpm test:e2e
 
   ci-windows:

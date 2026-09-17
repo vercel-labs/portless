@@ -33,9 +33,8 @@ export function normalizeDocsHref(pathname: string): string {
 }
 
 function sourcePath(href: string): string {
-  const docsRoot = join(process.cwd(), "src", "app");
-  if (href === "/") return join(docsRoot, "page.mdx");
-  return join(docsRoot, ...href.slice(1).split("/"), "page.mdx");
+  const docsRoot = join(process.cwd(), "content", "docs");
+  return join(docsRoot, `${href === "/" ? "index" : href.slice(1)}.mdx`);
 }
 
 export async function loadDocsSource(href: string): Promise<DocsSource | null> {
@@ -51,7 +50,9 @@ export async function loadDocsSource(href: string): Promise<DocsSource | null> {
       markdownHref: normalized === "/" ? "/index.md" : `${normalized}.md`,
       canonicalUrl: canonicalUrlFor(normalized),
       description: siteDescription,
-      markdown: mdxToCleanMarkdown(raw),
+      markdown: mdxToCleanMarkdown(
+        `# ${page.name}\n${raw.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "")}`
+      ),
     }));
     sourcePromises.set(normalized, pending);
     pending.catch(() => {

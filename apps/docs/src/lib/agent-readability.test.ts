@@ -47,7 +47,7 @@ describe("public Markdown", () => {
       params: Promise.resolve({ slug: ["missing"] }),
     });
 
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(404);
     expect(response.headers.get("content-type")).toBe("text/markdown; charset=utf-8");
     expect(response.headers.get("vary")).toContain("Accept");
     expect(response.headers.get("link")).toBe('<https://portless.sh/missing>; rel="canonical"');
