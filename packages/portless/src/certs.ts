@@ -236,6 +236,7 @@ function openssl(args: string[], options?: { input?: string }): string {
       timeout: OPENSSL_TIMEOUT_MS,
       input: options?.input,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
       ...(extraEnv && Object.keys(extraEnv).length > 0
         ? { env: { ...process.env, ...extraEnv } }
         : {}),
@@ -259,6 +260,7 @@ async function opensslAsync(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
+      windowsHide: true,
       ...(extraEnv && Object.keys(extraEnv).length > 0
         ? { env: { ...process.env, ...extraEnv } }
         : {}),
