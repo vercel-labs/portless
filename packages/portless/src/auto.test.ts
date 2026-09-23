@@ -217,6 +217,48 @@ describe("detectWorktreePrefix", () => {
     fs.writeFileSync(path.join(dir, ".git"), `gitdir: ${gitdir}\n`);
   }
 
+  describe("PORTLESS_PREFIX", () => {
+    const saved = process.env.PORTLESS_PREFIX;
+
+    afterEach(() => {
+      if (saved === undefined) delete process.env.PORTLESS_PREFIX;
+      else process.env.PORTLESS_PREFIX = saved;
+    });
+
+    it("overrides the branch name", () => {
+      setupWorktree(tmpDir, "worktree-auth");
+      process.env.PORTLESS_PREFIX = "auth";
+      expect(detectWorktreePrefix(tmpDir)).toEqual({
+        prefix: "auth",
+        source: "PORTLESS_PREFIX",
+      });
+    });
+
+    it("sanitizes the value it is given", () => {
+      setupWorktree(tmpDir, "worktree-auth");
+      process.env.PORTLESS_PREFIX = "Feature/Auth Flow";
+      expect(detectWorktreePrefix(tmpDir)).toEqual({
+        prefix: "feature-auth-flow",
+        source: "PORTLESS_PREFIX",
+      });
+    });
+
+    it("means no prefix when empty", () => {
+      setupWorktree(tmpDir, "worktree-auth");
+      process.env.PORTLESS_PREFIX = "";
+      expect(detectWorktreePrefix(tmpDir)).toBeNull();
+    });
+
+    it("applies outside a worktree too", () => {
+      fs.mkdirSync(path.join(tmpDir, ".git"));
+      process.env.PORTLESS_PREFIX = "staging";
+      expect(detectWorktreePrefix(tmpDir)).toEqual({
+        prefix: "staging",
+        source: "PORTLESS_PREFIX",
+      });
+    });
+  });
+
   it("returns null for a main checkout (.git directory)", () => {
     fs.mkdirSync(path.join(tmpDir, ".git"));
     const result = detectWorktreePrefix(tmpDir);
