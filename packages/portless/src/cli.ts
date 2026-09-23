@@ -537,6 +537,17 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
+async function isRouteStillServing(port: number, hostname: string): Promise<number[]> {
+  const pids = findPidsOnPort(port);
+  if (pids.length === 0 || !(await isPortListening(port))) return [];
+  console.warn(
+    colors.yellow(
+      `Warning: command exited while ${hostname} is still listening on port ${port}. Keeping the route so portless prune can clean the orphaned server.`
+    )
+  );
+  return pids;
+}
+
 /** Warn on this terminal if a route it registered will not resolve. Issue #364. */
 function reportHostsSyncHere(
   hostnames: string[],
@@ -1554,6 +1565,7 @@ async function runApp(
     )
   );
 
+  let preserveRoute = false;
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
@@ -1580,10 +1592,21 @@ async function runApp(
       } catch {
         // Best-effort cleanup; non-fatal
       }
-      try {
+      if (!preserveRoute) {
         removeRoutes(store, hostnames, process.pid);
-      } catch {
-        // Lock acquisition may fail during cleanup; non-fatal
+      }
+    },
+    onExit: async () => {
+      const listenerPids = await isRouteStillServing(port, hostname);
+      if (listenerPids.length > 0) {
+        try {
+          store.updateRoute(hostname, { orphanPids: listenerPids });
+          preserveRoute = true;
+        } catch {
+          preserveRoute = false;
+        }
+      } else {
+        preserveRoute = false;
       }
     },
   });
@@ -2194,6 +2217,8 @@ When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
 may survive and continue holding their ports. This command finds those orphans
 by checking routes whose owning CLI process is dead but whose port is still in
 use, then terminates them and cleans up the stale route entries.
+If a wrapped command exits while its assigned port is still serving, portless
+keeps that route for the same cleanup path and prints a warning.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2238,9 +2263,16 @@ ${colors.bold("Options:")}
 
   let killed = 0;
   for (const route of stale) {
-    const pids = findPidsOnPort(route.port);
+    const listeningPids = findPidsOnPort(route.port);
+    const pids = route.orphanPids
+      ? listeningPids.filter((pid) => route.orphanPids!.includes(pid))
+      : listeningPids;
     if (pids.length === 0) {
-      console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
+      const reason =
+        route.orphanPids && listeningPids.length > 0
+          ? "listener identity changed"
+          : "port already free";
+      console.log(`  ${route.hostname} :${route.port} - route removed (${reason})`);
       continue;
     }
     const signal = forceKill ? "SIGKILL" : "SIGTERM";
@@ -3646,6 +3678,7 @@ async function spawnProxiedApp(
   child: ReturnType<typeof spawn>;
   displayUrl: string;
   route: { store: RouteStore; hostnames: string[] } | null;
+  routeCleanup: Promise<void>;
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
 
@@ -3655,6 +3688,7 @@ async function spawnProxiedApp(
   let env: Record<string, string | undefined>;
   let store: RouteStore | null = null;
   let hostnames: string[] = [];
+  let assignedPort: number | undefined;
   let displayUrl: string;
 
   if (usesPortless) {
@@ -3666,6 +3700,7 @@ async function spawnProxiedApp(
     });
 
     const appPort = app.appPort ?? (await findFreePort());
+    assignedPort = appPort;
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -3695,20 +3730,31 @@ async function spawnProxiedApp(
 
   const capturedStore = store;
   const capturedHostnames = hostnames;
-  child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
-    if (code !== 0 && code !== null) {
-      console.error(colors.red(`[${app.name}] exited with code ${code}`));
-    } else if (signal) {
-      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
-    }
-    if (capturedStore && capturedHostnames.length > 0) {
-      removeRoutes(capturedStore, capturedHostnames, process.pid);
-    }
+  const routeCleanup = new Promise<void>((resolve) => {
+    child.on("exit", async (code, signal) => {
+      exitCodes.set(app.name, code);
+      if (code !== 0 && code !== null) {
+        console.error(colors.red(`[${app.name}] exited with code ${code}`));
+      } else if (signal) {
+        console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+      }
+      try {
+        if (capturedStore && capturedHostnames.length > 0 && assignedPort !== undefined) {
+          const listenerPids = await isRouteStillServing(assignedPort, capturedHostnames[0]);
+          if (listenerPids.length === 0) {
+            removeRoutes(capturedStore, capturedHostnames, process.pid);
+          } else {
+            capturedStore.updateRoute(capturedHostnames[0], { orphanPids: listenerPids });
+          }
+        }
+      } finally {
+        resolve();
+      }
+    });
   });
 
   const route = store && hostnames.length > 0 ? { store, hostnames } : null;
-  return { child, displayUrl, route };
+  return { child, displayUrl, route, routeCleanup };
 }
 
 function spawnTaskApp(
@@ -4038,11 +4084,12 @@ async function runWithDirectSpawn(
   const exitCodes = new Map<string, number | null>();
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
+  const routeCleanups: Promise<void>[] = [];
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
   for (const app of proxiedApps) {
-    const { child, displayUrl, route } = await spawnProxiedApp(
+    const { child, displayUrl, route, routeCleanup } = await spawnProxiedApp(
       app,
       stateDir,
       proxyPort,
@@ -4052,6 +4099,7 @@ async function runWithDirectSpawn(
       exitCodes
     );
     children.push(child);
+    routeCleanups.push(routeCleanup);
     if (route) routeEntries.push(route);
     appUrls.push({ label: app.label, url: displayUrl });
   }
@@ -4106,6 +4154,7 @@ async function runWithDirectSpawn(
         })
     )
   );
+  await Promise.all(routeCleanups);
 
   const failed = [...exitCodes.entries()].filter(([, code]) => code !== 0 && code !== null);
   if (failed.length > 0) {
