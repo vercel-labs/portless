@@ -1483,6 +1483,37 @@ const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
     valueFlags: ["-c", "--call", "-p", "--package", "-w", "--workspace", "--allow-scripts"],
   },
   bunx: { subcommands: [] },
+  // `bun <bin>` runs a binary directly (like bunx); `bun run <bin>` also runs
+  // a binary or package.json script. Both patterns need framework detection.
+  // The flags listed are the ones bun consumes a following token for when they
+  // appear before the script or binary name; flags with an optional value
+  // (`--inspect`) are deliberately left out, since skipping their next token
+  // would swallow the command itself.
+  bun: {
+    subcommands: ["run"],
+    valueFlags: [
+      "--conditions",
+      "--config",
+      "--cwd",
+      "--define",
+      "--env-file",
+      "--extension-order",
+      "--jsx-factory",
+      "--jsx-fragment",
+      "--jsx-import-source",
+      "--jsx-runtime",
+      "--loader",
+      "--main-fields",
+      "--public-dir",
+      "--shell",
+      "--tsconfig-override",
+      "-c",
+      "-d",
+      "-F",
+      "--filter",
+      "-l",
+    ],
+  },
   pnpx: { subcommands: [], valueFlags: ["-p", "--package"] },
   yarn: { subcommands: ["dlx", "exec"] },
   pnpm: { subcommands: ["dlx", "exec"] },
