@@ -1858,6 +1858,13 @@ ${colors.bold("Examples:")}
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
 
+${colors.bold("Programmatic API:")}
+  For Node config files (Playwright, Vite proxy, next.config.js, ...), resolve
+  service URLs without spawning the CLI:
+    import { getUrl } from "portless";
+    const cms = await getUrl("cms");   // -> https://cms.localhost
+    // ServiceUrl coerces to its URL string in template literals and new URL()
+
 ${colors.bold("Configuration (portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
   from package.json. Use portless.json to override defaults.

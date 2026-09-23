@@ -233,6 +233,8 @@ describe("CLI", () => {
       expect(stdout).toContain("PORTLESS_NGROK");
       expect(stdout).toContain("PORTLESS_NGROK_URL");
       expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("Programmatic API:");
+      expect(stdout).toContain("getUrl");
     });
 
     it("prints help and exits 0 with -h", () => {
