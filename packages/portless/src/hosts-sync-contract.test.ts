@@ -24,8 +24,8 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const SURFACES = [
   "README.md",
   "skills/portless/SKILL.md",
-  "apps/docs/src/app/page.mdx",
-  "apps/docs/src/app/commands/page.mdx",
+  "apps/docs/content/docs/index.mdx",
+  "apps/docs/content/docs/commands.mdx",
   "packages/portless/src/cli.ts",
 ];
 

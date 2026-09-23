@@ -8,6 +8,7 @@ coverage/
 .astro/
 .nuxt/
 .next/
+apps/docs/.source/
 .react-router/
 .svelte-kit/
 .angular/
