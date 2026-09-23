@@ -1,6 +1,6 @@
-import { discoverState } from "./cli-utils.js";
+import { discoverState, DEFAULT_TLD } from "./cli-utils.js";
 import { detectWorktreePrefix } from "./auto.js";
-import { parseHostname, formatUrl } from "./utils.js";
+import { parseHostnames, formatUrl } from "./utils.js";
 
 /**
  * Service URL information returned by {@link getUrl}.
@@ -49,7 +49,7 @@ export interface GetUrlOptions {
  * Resolve the URL for a portless-managed service by name.
  *
  * Equivalent to the `portless get <name>` CLI command. Reads the active
- * proxy's port, TLS mode, and TLD from persisted state, applies the same
+ * proxy's port, TLS mode, and TLDs from persisted state, applies the same
  * hostname and worktree logic as `portless run`, and returns the resulting
  * URL plus the components used to build it.
  *
@@ -57,7 +57,9 @@ export interface GetUrlOptions {
  * a URL string is expected. Access fields like `.port` or `.tls` when the
  * components matter.
  *
- * Returned URLs stay stable across reboots and TLS/TLD config changes.
+ * Returned URLs are stable across reboots, derived from the proxy's
+ * persisted configuration. An explicit TLS or TLD configuration change
+ * changes the returned URL.
  * In linked git worktrees the branch name is prepended as a subdomain
  * (e.g. `https://feature-x.cms.localhost`), so apps running in the same
  * worktree automatically address the matching peer service. Pass
@@ -91,9 +93,10 @@ export async function getUrl(name: string, options?: GetUrlOptions): Promise<Ser
   const worktree = skipWorktree ? null : detectWorktreePrefix(options?.cwd);
   const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
 
-  const { port, tls, tld } = await discoverState();
-  const hostname = parseHostname(effectiveName, tld);
+  const { port, tls, tlds } = await discoverState();
+  const hostname = parseHostnames(effectiveName, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
+  const tld = tlds[0] ?? DEFAULT_TLD;
 
   const result = { url, hostname, port, tls, tld } as ServiceUrl;
   Object.defineProperty(result, "toString", {

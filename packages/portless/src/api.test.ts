@@ -84,6 +84,27 @@ describe("getUrl", () => {
     expect(result.tld).toBe("test");
   });
 
+  it("uses the primary TLD when multiple TLDs are configured", async () => {
+    writeStateMarkers(stateDir, { port: 443, tls: true });
+    fs.writeFileSync(path.join(stateDir, "proxy.tlds"), "localhost\ntest\n");
+
+    const result = await getUrl("myapp", { worktree: false });
+
+    expect(result.url).toBe("https://myapp.localhost");
+    expect(result.tld).toBe("localhost");
+  });
+
+  it("strips a configured TLD suffix from the service name", async () => {
+    writeStateMarkers(stateDir, { port: 443, tls: true });
+    fs.writeFileSync(path.join(stateDir, "proxy.tlds"), "localhost\ntest\n");
+
+    // Matches `portless get myapp.test`: the suffix is stripped and the
+    // primary TLD is used, rather than producing myapp.test.localhost.
+    const result = await getUrl("myapp.test", { worktree: false });
+
+    expect(result.url).toBe("https://myapp.localhost");
+  });
+
   it("preserves dotted service names as subdomain chains", async () => {
     writeStateMarkers(stateDir, { port: 443, tls: true });
 
