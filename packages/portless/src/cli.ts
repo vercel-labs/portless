@@ -2017,13 +2017,24 @@ function printVersion(): void {
 }
 
 async function handleTrust(): Promise<void> {
-  const { dir } = await discoverState();
+  const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
     console.log(colors.gray("Generated local CA certificate."));
+    // A running proxy keeps the previous CA and the TLS contexts it already
+    // built in memory, so it presents the old chain until it restarts.
+    if (await isProxyRunning(port, tls)) {
+      const portFlag = port !== getDefaultPort(tls) ? ` -p ${port}` : "";
+      console.log(
+        colors.yellow("The running proxy still serves certificates from the previous CA.")
+      );
+      console.log(
+        colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
+      );
+    }
   }
   const result = trustCA(dir);
   if (result.trusted) {
