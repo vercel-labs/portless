@@ -6,6 +6,7 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFileSync } from "node:child_process";
 import {
+  buildHostSans,
   createSNICallback,
   ensureCerts,
   isCATrusted,
@@ -27,6 +28,33 @@ function getCertSignatureAlgo(certPath: string): string {
   const match = text.match(/Signature Algorithm:\s*(\S+)/i);
   return match ? match[1].toLowerCase() : "";
 }
+
+describe("buildHostSans", () => {
+  it("adds a sibling wildcard when the parent domain is not a bare TLD", () => {
+    expect(buildHostSans("chat.myapp.localhost")).toEqual([
+      "DNS:chat.myapp.localhost",
+      "DNS:*.myapp.localhost",
+    ]);
+  });
+
+  it("omits the wildcard for a two-label hostname so it stays off the public suffix", () => {
+    // "*.localhost" sits at the public suffix boundary. Chrome ignores the
+    // unusable entry, but Apple platforms reject the entire certificate,
+    // which breaks native apps talking to a portless URL.
+    expect(buildHostSans("myapp.localhost")).toEqual(["DNS:myapp.localhost"]);
+  });
+
+  it("omits the wildcard for a bare single-label hostname", () => {
+    expect(buildHostSans("localhost")).toEqual(["DNS:localhost"]);
+  });
+
+  it("adds the wildcard for custom multi-segment TLDs", () => {
+    expect(buildHostSans("myapp.dev.example.com")).toEqual([
+      "DNS:myapp.dev.example.com",
+      "DNS:*.dev.example.com",
+    ]);
+  });
+});
 
 describe("sanitizeHostForFilename", () => {
   // Longest suffix the cert cache appends to the sanitized base.
