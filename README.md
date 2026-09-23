@@ -363,11 +363,25 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public)
 ```
 
-Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+### Tailnets without MagicDNS
+
+HTTPS sharing needs a certificate for the node's MagicDNS name, so it needs MagicDNS. Some tailnets cannot enable it — it resolves subnet routers to their private IPs, which breaks split-horizon DNS. Use `--tailscale-http` there:
+
+```bash
+portless myapp --tailscale-http next dev
+# -> https://myapp.localhost           (local)
+# -> http://100.101.102.103             (tailnet)
+```
+
+This forwards the tailnet port straight to the app, addressed by the node's tailnet IP, so no certificate is involved. All tailnet traffic is WireGuard-encrypted, so the plaintext hop exists only inside the tunnel. The only cost is a less pretty URL. HTTP apps get port 80 first, then 8080, 8081, etc.
+
+`--tailscale-http` cannot be combined with `--funnel`: Funnel terminates TLS for the public internet and has no plain-HTTP mode. Because the forward is raw TCP, the app does not receive the `Tailscale-User-*` and `X-Forwarded-*` headers that an HTTPS serve adds.
+
+MagicDNS and Tailscale HTTPS certificates must both be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If a setting is missing, portless exits before starting the child process and points you at `--tailscale-http` when MagicDNS is the reason.
 
 Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up automatically when the app exits.
 
-Requires the Tailscale CLI to be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled.
+Requires the Tailscale CLI to be installed and connected (`tailscale up`). `--tailscale` and `--funnel` also require MagicDNS and Tailscale HTTPS certificates; `--tailscale-http` requires neither.
 
 ## ngrok sharing
 
@@ -438,6 +452,7 @@ portless service uninstall       # Remove the startup service
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
 --tailscale                      Share the app on your Tailscale network (tailnet)
+--tailscale-http                 Share on the tailnet over plain HTTP (no MagicDNS needed)
 --funnel                         Share the app publicly via Tailscale Funnel
 --ngrok                          Share the app publicly via ngrok
 --force                          Kill the existing process and take over its route
@@ -457,6 +472,7 @@ PORTLESS_TLD=<tld>[,<tld>]       Use one or more TLDs (e.g. localhost,test)
 PORTLESS_WILDCARD=1              Allow unregistered subdomains to fall back to parent route
 PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
+PORTLESS_TAILSCALE_HTTP=1        Share on the tailnet over plain HTTP (same as --tailscale-http)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)
 PORTLESS_STATE_DIR=<path>        Override the state directory

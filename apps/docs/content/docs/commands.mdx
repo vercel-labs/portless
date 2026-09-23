@@ -67,6 +67,10 @@ portless docs.myapp next dev
       <td>Share the app on your Tailscale network.</td>
     </tr>
     <tr>
+      <td>`--tailscale-http`</td>
+      <td>Share on the tailnet over plain HTTP, addressed by the node's tailnet IP. For tailnets that cannot enable MagicDNS. Cannot be combined with `--funnel`.</td>
+    </tr>
+    <tr>
       <td>`--funnel`</td>
       <td>Share the app publicly via Tailscale Funnel.</td>
     </tr>
@@ -79,6 +83,7 @@ portless docs.myapp next dev
 
 ```bash
 portless myapp --tailscale next dev
+portless myapp --tailscale-http next dev
 portless myapp --funnel next dev
 portless myapp --ngrok next dev
 ```

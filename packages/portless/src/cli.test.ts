@@ -2258,6 +2258,58 @@ describe("CLI", () => {
     });
   });
 
+  describe("--tailscale-http flag", () => {
+    it("shows --tailscale-http in help output", () => {
+      const { status, stdout } = run(["--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--tailscale-http");
+      expect(stdout).toContain("PORTLESS_TAILSCALE_HTTP");
+    });
+
+    it("shows --tailscale-http in run subcommand help", () => {
+      const { status, stdout } = run(["run", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("--tailscale-http");
+    });
+
+    it("accepts --tailscale-http before the app name", () => {
+      const { status, stderr } = run(["--tailscale-http", "myapp", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale-http after the app name", () => {
+      const { status, stderr } = run(["myapp", "--tailscale-http", "echo", "hello"], {
+        env: { PATH: "/tmp/portless-no-ts-path" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale");
+    });
+
+    it("accepts --tailscale-http in run subcommand", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-http-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
+        const { status, stderr } = run(["run", "--tailscale-http", "echo", "hello"], {
+          cwd: tmpDir,
+          env: { PATH: "/tmp/portless-no-ts-path" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain("Tailscale");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects --funnel combined with --tailscale-http", () => {
+      const { status, stderr } = run(["--funnel", "--tailscale-http", "myapp", "echo", "hello"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("--funnel cannot be combined with --tailscale-http");
+    });
+  });
+
   describe("--ngrok flag", () => {
     it("shows --ngrok in help output", () => {
       const { status, stdout } = run(["--help"]);
