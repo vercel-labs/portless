@@ -109,8 +109,11 @@ describe("buildServiceSpec", () => {
     expect(spec.platform).toBe("darwin");
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
     expect(spec.plistPath).toBe("/Library/LaunchDaemons/sh.portless.proxy.plist");
+    // node is resolved from PATH at start instead of pinning the absolute
+    // binary, so removing that Node install does not break boot (#393).
     expect(spec.programArguments).toEqual([
-      "/usr/local/bin/node",
+      "/usr/bin/env",
+      "node",
       "/usr/local/lib/node_modules/portless/dist/cli.js",
       "proxy",
       "start",
@@ -126,6 +129,10 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<string>/Users/alice/.portless</string>");
     expect(spec.plist).toContain("<key>SUDO_UID</key>");
     expect(spec.plist).toContain("<string>501</string>");
+    // launchd daemons start with a minimal PATH; the install-time Node
+    // directory is baked in so `/usr/bin/env node` resolves.
+    expect(spec.plist).toContain("<key>PATH</key>");
+    expect(spec.plist).toContain("<string>/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>");
   });
 
   it("builds a Linux systemd unit for the HTTPS proxy", () => {
@@ -141,8 +148,11 @@ describe("buildServiceSpec", () => {
     expect(spec.platform).toBe("linux");
     if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
     expect(spec.unitPath).toBe("/etc/systemd/system/portless.service");
+    // node is resolved from PATH at start instead of pinning the absolute
+    // binary, so removing that Node install does not break boot (#393).
     expect(spec.execStart).toEqual([
-      "/usr/bin/node",
+      "/usr/bin/env",
+      "node",
       "/usr/lib/node_modules/portless/dist/cli.js",
       "proxy",
       "start",
@@ -156,9 +166,27 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
     expect(spec.unit).toContain(
-      'ExecStart="/usr/bin/node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
+      'ExecStart="/usr/bin/env" "node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
     expect(spec.unit).toContain("WantedBy=multi-user.target");
+  });
+
+  it("bakes the install-time Node directory into the Linux service PATH", () => {
+    // sudo often sanitizes PATH (secure_path), dropping version-manager
+    // directories; the captured Node directory must be baked in so
+    // `/usr/bin/env node` resolves even for nvm-style installs (#393).
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/home/alice/.nvm/versions/node/v24.1.0/bin/node",
+      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      userHome: "/home/alice",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.unit).toContain(
+      'Environment=PATH="/home/alice/.nvm/versions/node/v24.1.0/bin:/usr/local/bin:/usr/bin:/bin"'
+    );
   });
 
   it("builds a Windows startup task for the HTTPS proxy", () => {
@@ -191,7 +219,12 @@ describe("buildServiceSpec", () => {
       "<Arguments>/d /s /c &quot;&quot;C:\\ProgramData\\portless\\service\\portless-service.cmd&quot;&quot;</Arguments>"
     );
     expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\Alice\\.portless");
-    expect(spec.script).toContain('"C:\\Program Files\\nodejs\\node.exe"');
+    // node is resolved from the PATH baked into the script instead of pinning
+    // the absolute binary (#393).
+    expect(spec.script).not.toContain('"C:\\Program Files\\nodejs\\node.exe"');
+    expect(spec.script).toContain(
+      'node "C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\portless\\dist\\cli.js"'
+    );
     expect(spec.script).toContain("proxy");
     expect(spec.script).toContain("--port");
     expect(spec.script).toContain("443");
@@ -209,8 +242,10 @@ describe("buildServiceSpec", () => {
     });
 
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
+    // The Node directory that ran the install is prepended so `node` resolves
+    // even under a PATH that does not include it (#393).
     expect(spec.script).toContain(
-      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%%Done"'
+      'set "PATH=C:\\nodejs;C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%%Done"'
     );
   });
 
