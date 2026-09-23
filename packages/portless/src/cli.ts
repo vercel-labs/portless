@@ -22,6 +22,7 @@ import {
   parseHostname,
   parseHostnames,
 } from "./utils.js";
+import { getUrl } from "./api.js";
 import {
   checkHostResolution,
   getManagedHostnames,
@@ -1857,6 +1858,13 @@ ${colors.bold("Examples:")}
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
 
+${colors.bold("Programmatic API:")}
+  For Node config files (Playwright, Vite proxy, next.config.js, ...), resolve
+  service URLs without spawning the CLI:
+    import { getUrl } from "portless";
+    const cms = await getUrl("cms");   // -> https://cms.localhost
+    // ServiceUrl coerces to its URL string in template literals and new URL()
+
 ${colors.bold("Configuration (portless.json):")}
   Optional. Portless works out of the box by running the "dev" script
   from package.json. Use portless.json to override defaults.
@@ -2323,12 +2331,7 @@ ${colors.bold("Examples:")}
   }
 
   const name = positional[0];
-  const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
-
-  const { port, tls, tlds } = await discoverState();
-  const hostname = buildHostnames(effectiveName, tlds)[0]!;
-  const url = formatUrl(hostname, port, tls);
+  const { url } = await getUrl(name, { worktree: !skipWorktree });
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(url + "\n");
 }
