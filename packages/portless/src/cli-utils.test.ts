@@ -1729,6 +1729,36 @@ describe("buildProxyStartConfig", () => {
       args: ["--https", "--tld", "localhost", "--tld", "test"],
     });
   });
+
+  it("forwards the resolved routes-cleanup interval, including 0 to disable it", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: false,
+        tld: "localhost",
+        routesCleanupIntervalSeconds: 60,
+      }).args
+    ).toEqual(["--no-tls", "--routes-cleanup-interval", "60"]);
+
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: false,
+        tld: "localhost",
+        routesCleanupIntervalSeconds: 0,
+      }).args
+    ).toEqual(["--no-tls", "--routes-cleanup-interval", "0"]);
+  });
+
+  it("omits the flag when the interval is not specified", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: false,
+        lanMode: false,
+        tld: "localhost",
+      }).args
+    ).toEqual(["--no-tls"]);
+  });
 });
 
 describe("readLanMarker / writeLanMarker", () => {
