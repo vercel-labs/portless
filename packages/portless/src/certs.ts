@@ -226,6 +226,27 @@ function isCertSignatureStrong(certPath: string): boolean {
 }
 
 /**
+ * Check whether a certificate carries basicConstraints exactly once.
+ *
+ * RFC 5280 requires that an extension appear at most once. Earlier portless
+ * versions generated the CA with "req -x509 -addext basicConstraints=...",
+ * which on OpenSSL 1.1.1 appends to the x509_extensions section from
+ * openssl.cnf rather than replacing it. Debian and Ubuntu point that section
+ * at v3_ca, which already carries basicConstraints, so the CA ended up with
+ * two copies. OpenSSL 3 then rejects such a CA with "X509 V3
+ * routines::invalid certificate", which breaks curl and Node.js even though
+ * NSS and browsers accept it. Detect those CAs so they get regenerated.
+ */
+function hasUniqueBasicConstraints(certPath: string): boolean {
+  try {
+    const text = openssl(["x509", "-in", certPath, "-noout", "-text"]);
+    return (text.match(/X509v3 Basic Constraints/g) ?? []).length <= 1;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Run openssl and return stdout. Throws on non-zero exit.
  */
 function openssl(args: string[], options?: { input?: string }): string {
@@ -281,29 +302,58 @@ async function opensslAsync(args: string[]): Promise<string> {
 function generateCA(stateDir: string): { certPath: string; keyPath: string } {
   const keyPath = path.join(stateDir, CA_KEY_FILE);
   const certPath = path.join(stateDir, CA_CERT_FILE);
+  const csrPath = path.join(stateDir, "ca.csr");
+  const extPath = path.join(stateDir, "ca-ext.cnf");
 
   // Generate EC private key
   openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
 
-  // Generate self-signed CA certificate
+  // Write extension config for the CA.
+  //
+  // Do not use "req -x509 -addext" here. On OpenSSL 1.1.1, -addext appends to
+  // the x509_extensions section configured in openssl.cnf instead of replacing
+  // it. Debian and Ubuntu set that section to v3_ca, which already carries
+  // basicConstraints, so the CA came out with the extension twice. RFC 5280
+  // forbids duplicate extensions, and OpenSSL 3 rejects such a CA with
+  // "X509 V3 routines::invalid certificate", so curl and Node.js fail to
+  // verify the chain while NSS and browsers still accept it. Signing a CSR
+  // with an explicit -extfile produces exactly one copy of each extension on
+  // every OpenSSL and LibreSSL version.
+  fs.writeFileSync(
+    extPath,
+    [
+      "basicConstraints=critical,CA:TRUE",
+      "keyUsage=critical,keyCertSign,cRLSign",
+      "subjectKeyIdentifier=hash",
+    ].join("\n") + "\n"
+  );
+
+  // Generate CSR, then self-sign it into the CA certificate
+  openssl(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${CA_COMMON_NAME}`]);
   openssl([
-    "req",
-    "-new",
-    "-x509",
+    "x509",
+    "-req",
     "-sha256",
-    "-key",
+    "-in",
+    csrPath,
+    "-signkey",
     keyPath,
     "-out",
     certPath,
     "-days",
     CA_VALIDITY_DAYS.toString(),
-    "-subj",
-    `/CN=${CA_COMMON_NAME}`,
-    "-addext",
-    "basicConstraints=critical,CA:TRUE",
-    "-addext",
-    "keyUsage=critical,keyCertSign,cRLSign",
+    "-extfile",
+    extPath,
   ]);
+
+  // Clean up temporary files
+  for (const tmp of [csrPath, extPath]) {
+    try {
+      fs.unlinkSync(tmp);
+    } catch {
+      // Non-fatal
+    }
+  }
 
   fs.chmodSync(keyPath, 0o600);
   fs.chmodSync(certPath, 0o644);
@@ -423,7 +473,8 @@ export function ensureCerts(stateDir: string): {
     !fileExists(caCertPath) ||
     !fileExists(caKeyPath) ||
     !isCertValid(caCertPath) ||
-    !isCertSignatureStrong(caCertPath);
+    !isCertSignatureStrong(caCertPath) ||
+    !hasUniqueBasicConstraints(caCertPath);
 
   if (caMissing) {
     generateCA(stateDir);
