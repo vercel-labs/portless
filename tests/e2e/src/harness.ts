@@ -11,7 +11,7 @@ const E2E_NODE_MODULES = path.resolve(__dirname, "../node_modules");
 const VENV_DIR = path.resolve(__dirname, "../.venv");
 
 // Each e2e test uses a unique proxy port to allow sequential runs without
-// collisions. Current allocation: 19001-19011. Pick the next unused port
+// collisions. Current allocation: 19001-19014. Pick the next unused port
 // when adding a new test.
 
 const isWindows = process.platform === "win32";
@@ -89,6 +89,30 @@ export interface StartAppOptions {
   env?: Record<string, string>;
 }
 
+export interface TailscaleShim {
+  directory: string;
+  logPath: string;
+  cleanup: () => void;
+}
+
+export function createTailscaleShim(): TailscaleShim {
+  if (isWindows) {
+    throw new Error("The Tailscale test shim requires a POSIX executable");
+  }
+
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-tailscale-"));
+  const scriptPath = path.resolve(__dirname, "../../fixtures/tailscale-shim.cjs");
+  const shimPath = path.join(directory, "tailscale");
+  fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${scriptPath}" "$@"\n`);
+  fs.chmodSync(shimPath, 0o755);
+
+  return {
+    directory,
+    logPath: path.join(directory, "calls.log"),
+    cleanup: () => fs.rmSync(directory, { recursive: true, force: true }),
+  };
+}
+
 /** Resolve the absolute path to a fixture directory. */
 export function fixtureDir(name: string): string {
   return path.resolve(__dirname, "../fixtures", name);
@@ -108,7 +132,7 @@ function resolveBin(command: string, cwd: string): string {
   return command;
 }
 
-function makeRequest(url: string, host: string): Promise<number> {
+export function requestWithHost(url: string, host: string): Promise<number> {
   return new Promise((resolve, reject) => {
     const req = http.request(url, { headers: { Host: host } }, (res) => {
       res.resume();
@@ -129,7 +153,7 @@ async function waitForApp(proxyPort: number, hostname: string, timeoutMs: number
   const url = `http://127.0.0.1:${proxyPort}/`;
   while (Date.now() - start < timeoutMs) {
     try {
-      const status = await makeRequest(url, hostname);
+      const status = await requestWithHost(url, hostname);
       if (status >= 200 && status < 400) return;
     } catch {
       // not ready yet

@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
+const TAILSCALE_SHIM_SCRIPT = path.resolve(__dirname, "../../../tests/fixtures/tailscale-shim.cjs");
 const TEST_CA_PEM = `-----BEGIN CERTIFICATE-----
 MIIDFzCCAf+gAwIBAgIUEVh0YNawusstUaCfwLYo2qUO7D8wDQYJKoZIhvcNAQEL
 BQAwGzEZMBcGA1UEAwwQcG9ydGxlc3MtdGVzdC1jYTAeFw0yNjA1MjAyMTIzNDBa
@@ -85,6 +86,16 @@ function writeExpoShim(dir: string): void {
 
   const shimPath = path.join(dir, "expo");
   fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
+  fs.chmodSync(shimPath, 0o755);
+}
+
+function writeTailscaleShim(dir: string): void {
+  if (process.platform === "win32") {
+    throw new Error("The Tailscale test shim requires a POSIX executable");
+  }
+
+  const shimPath = path.join(dir, "tailscale");
+  fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${TAILSCALE_SHIM_SCRIPT}" "$@"\n`);
   fs.chmodSync(shimPath, 0o755);
 }
 
@@ -2202,6 +2213,73 @@ describe("CLI", () => {
   });
 
   describe("--tailscale flag", () => {
+    async function captureTailscaleRun(mode: "serve" | "funnel"): Promise<{
+      status: number | null;
+      capture: {
+        viteAllowedHosts?: string;
+        tailscaleUrl?: string;
+      };
+      calls: string[][];
+    }> {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-test-"));
+      const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-ts-shim-"));
+      const capturePath = path.join(stateDir, "capture.json");
+      const logPath = path.join(stateDir, "tailscale.log");
+      const scriptPath = path.join(stateDir, "capture.cjs");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      fs.writeFileSync(
+        scriptPath,
+        [
+          'const fs = require("node:fs");',
+          `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+          "  viteAllowedHosts: process.env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS,",
+          "  tailscaleUrl: process.env.PORTLESS_TAILSCALE_URL,",
+          "}));",
+        ].join("\n") + "\n"
+      );
+
+      try {
+        writeTailscaleShim(shimDir);
+        const proxy = await startMockProxy(stateDir);
+        proxyChild = proxy.child;
+        fs.writeFileSync(path.join(stateDir, "proxy.port"), proxy.port.toString());
+
+        const sharingEnv =
+          mode === "funnel" ? { PORTLESS_FUNNEL: "1" } : { PORTLESS_TAILSCALE: "1" };
+        const { status } = run(["run", "--name", "myapp", "node", scriptPath], {
+          env: {
+            PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_HTTPS: "0",
+            PORTLESS_STATE_DIR: stateDir,
+            PORTLESS_TEST_TAILSCALE_LOG: logPath,
+            ...sharingEnv,
+          },
+        });
+
+        const capture = fs.existsSync(capturePath)
+          ? (JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+              viteAllowedHosts?: string;
+              tailscaleUrl?: string;
+            })
+          : {};
+        const calls = fs.existsSync(logPath)
+          ? fs
+              .readFileSync(logPath, "utf-8")
+              .trim()
+              .split("\n")
+              .filter(Boolean)
+              .map((line) => JSON.parse(line) as string[])
+          : [];
+
+        return { status, capture, calls };
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+        fs.rmSync(stateDir, { recursive: true, force: true });
+        fs.rmSync(shimDir, { recursive: true, force: true });
+      }
+    }
+
     it("shows --tailscale in help output", () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
@@ -2209,6 +2287,46 @@ describe("CLI", () => {
       expect(stdout).toContain("--funnel");
       expect(stdout).toContain("PORTLESS_TAILSCALE");
     });
+
+    it.skipIf(process.platform === "win32")(
+      "adds the exact Tailscale host to the Vite environment",
+      async () => {
+        const { status, capture, calls } = await captureTailscaleRun("serve");
+
+        expect(status).toBe(0);
+        expect(capture.viteAllowedHosts).toBe("devbox.example.ts.net");
+        expect(capture.tailscaleUrl).toBe("https://devbox.example.ts.net:8443");
+        expect(
+          calls.some(
+            (args) =>
+              args[0] === "serve" &&
+              args.includes("--https=8443") &&
+              args.at(-1)?.startsWith("http://127.0.0.1:") === true
+          )
+        ).toBe(true);
+        expect(calls.some((args) => args[0] === "serve" && args.at(-1) === "off")).toBe(true);
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "uses the same Vite host for Funnel registrations",
+      async () => {
+        const { status, capture, calls } = await captureTailscaleRun("funnel");
+
+        expect(status).toBe(0);
+        expect(capture.viteAllowedHosts).toBe("devbox.example.ts.net");
+        expect(capture.tailscaleUrl).toBe("https://devbox.example.ts.net:8443");
+        expect(
+          calls.some(
+            (args) =>
+              args[0] === "funnel" &&
+              args.includes("--https=8443") &&
+              args.at(-1)?.startsWith("http://127.0.0.1:") === true
+          )
+        ).toBe(true);
+        expect(calls.some((args) => args[0] === "funnel" && args.at(-1) === "off")).toBe(true);
+      }
+    );
 
     it("fails with actionable message when tailscale is not installed", () => {
       const { status, stderr } = run(["--tailscale", "myapp", "echo", "hello"], {

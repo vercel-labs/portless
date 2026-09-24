@@ -480,6 +480,25 @@ export function parseTldList(value: string, source = "TLD"): string[] {
   return tlds;
 }
 
+/**
+ * Build the host value consumed by Vite's allowed-host environment hook.
+ * Vite versions before 8.1 treat this value as one host, so an active
+ * Tailscale URL takes precedence over the configured local TLDs. Vite permits
+ * localhost and its subdomains intrinsically.
+ */
+export function formatViteAllowedHosts(tlds: readonly string[], tailscaleUrl?: string): string {
+  if (tailscaleUrl) {
+    try {
+      const hostname = new URL(tailscaleUrl).hostname;
+      if (hostname) return hostname;
+    } catch {
+      // Fall back to the local TLD list when the optional URL is invalid.
+    }
+  }
+
+  return tlds.map((configuredTld) => `.${configuredTld}`).join(",");
+}
+
 /** Name of the file that stores the proxy's active TLD. */
 const TLD_FILE = "proxy.tld";
 const TLDS_FILE = "proxy.tlds";

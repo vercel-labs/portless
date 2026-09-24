@@ -254,6 +254,8 @@ Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` 
 
 Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
 
+Single-app Vite runs receive the exact generated Tailscale hostname automatically. The Tailscale hostname takes Vite's single additional host slot; `localhost` remains allowed, but custom TLDs are not added while Tailscale sharing is active.
+
 ### ngrok sharing
 
 Expose a dev server to the public internet with ngrok using `--ngrok`:

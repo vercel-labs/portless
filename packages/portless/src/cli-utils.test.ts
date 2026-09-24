@@ -16,6 +16,7 @@ import {
   USER_STATE_DIR,
   discoverState,
   findFreePort,
+  formatViteAllowedHosts,
   getDefaultPort,
   getDefaultTld,
   getDefaultTlds,
@@ -1652,6 +1653,22 @@ describe("parseTldList", () => {
 
   it("accepts a mix of single- and multi-segment TLDs", () => {
     expect(parseTldList("localhost,dev.example.com")).toEqual(["localhost", "dev.example.com"]);
+  });
+});
+
+describe("formatViteAllowedHosts", () => {
+  it("returns the configured local TLDs without a Tailscale URL", () => {
+    expect(formatViteAllowedHosts(["localhost", "test"])).toBe(".localhost,.test");
+  });
+
+  it("uses the exact Tailscale hostname without its URL or port", () => {
+    expect(
+      formatViteAllowedHosts(["localhost", "test"], "https://devbox.example.ts.net:8443")
+    ).toBe("devbox.example.ts.net");
+  });
+
+  it("falls back to local TLDs for an invalid Tailscale URL", () => {
+    expect(formatViteAllowedHosts(["localhost", "test"], "not a URL")).toBe(".localhost,.test");
   });
 });
 
