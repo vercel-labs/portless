@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
-import { fixOwnership, isErrnoException } from "./utils.js";
+import { fixOwnership, isErrnoException, isProcessAlive } from "./utils.js";
 
 /** How long (ms) before a lock directory is considered stale and forcibly removed. */
 const STALE_LOCK_THRESHOLD_MS = 10_000;
@@ -156,15 +156,6 @@ export class RouteStore {
   // Route I/O
   // ---------------------------------------------------------------------------
 
-  private isProcessAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
   /**
    * Load routes from disk, filtering out stale entries whose owning process
    * is no longer alive. Stale-route cleanup is only persisted when the caller
@@ -190,7 +181,7 @@ export class RouteStore {
       }
       const routes: RouteMapping[] = parsed.filter(isValidRoute);
       // Filter out stale routes whose owning process is no longer alive
-      const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
+      const alive = routes.filter((r) => r.pid === 0 || isProcessAlive(r.pid));
       if (persistCleanup && alive.length !== routes.length) {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.
@@ -228,7 +219,7 @@ export class RouteStore {
     try {
       const routes = this.loadRoutes(true);
       const existing = routes.find((r) => r.hostname === hostname);
-      if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
+      if (existing && existing.pid !== pid && isProcessAlive(existing.pid)) {
         if (!force) {
           throw new RouteConflictError(hostname, existing.pid);
         }
@@ -294,7 +285,7 @@ export class RouteStore {
       const alive: RouteMapping[] = [];
       const stale: RouteMapping[] = [];
       for (const r of all) {
-        if (r.pid === 0 || this.isProcessAlive(r.pid)) {
+        if (r.pid === 0 || isProcessAlive(r.pid)) {
           alive.push(r);
         } else {
           stale.push(r);
