@@ -1,8 +1,13 @@
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import console from "node:console";
 import { createServer } from "node:net";
+import process from "node:process";
+import { clearTimeout, setTimeout } from "node:timers";
 import { setTimeout as sleep } from "node:timers/promises";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, URL } from "node:url";
 
+const { AbortSignal, fetch } = globalThis;
 const cwd = fileURLToPath(new URL("../", import.meta.url));
 const socket = createServer();
 await new Promise((resolve, reject) => {
@@ -85,12 +90,66 @@ try {
         ready = true;
         break;
       }
-    } catch {}
+    } catch {
+      ready = false;
+    }
     await sleep(100);
   }
   if (!ready && !stopping)
     throw new Error("Docs server did not become ready. Run the docs build first.");
   if (!stopping) {
+    const script = await fetch(`${url}/api/mcp?webmcp-script`, {
+      signal: AbortSignal.timeout(30000),
+    });
+    assert.equal(script.status, 200);
+    assert.match(script.headers.get("content-type"), /^(application|text)\/javascript\b/);
+    assert.ok((await script.text()).length > 0);
+
+    const rpc = async (method, params) => {
+      const response = await fetch(`${url}/api/mcp`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+        signal: AbortSignal.timeout(30000),
+      });
+      assert.equal(response.status, 200);
+      const text = await response.text();
+      const body = JSON.parse(
+        response.headers.get("content-type")?.includes("text/event-stream")
+          ? text
+              .split(/\r?\n/)
+              .find((line) => line.startsWith("data:"))
+              ?.slice(5)
+          : text
+      );
+      assert.equal(body.jsonrpc, "2.0");
+      assert.equal(body.id, 1);
+      assert.equal(body.error, undefined);
+      return body.result;
+    };
+    const { tools } = await rpc("tools/list", {});
+    assert.deepEqual(
+      tools.map((tool) => tool.name),
+      ["search_docs"]
+    );
+    const result = await rpc("tools/call", {
+      name: "search_docs",
+      arguments: { query: "EADDRINUSE", locale: "en" },
+    });
+    assert.ok(!result.isError);
+    const results = result.content
+      .filter((content) => content.type === "text")
+      .flatMap((content) => JSON.parse(content.text));
+    assert.ok(
+      results.some(
+        (item) => item.url === "/why#port-conflicts" && item.content.includes("EADDRINUSE")
+      )
+    );
+    console.log("MCP route checks: 3 passed (bridge script, tools/list, tools/call)");
+
     tests = launch(["--test", "tests/docs-routes.test.mjs"], {
       ...process.env,
       DOCS_TEST_URL: url,
