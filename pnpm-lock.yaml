@@ -51,8 +51,8 @@ importers:
         specifier: 0.5.1
         version: 0.5.1(@sveltejs/kit@2.53.0(@opentelemetry/api@1.9.0)(@sveltejs/vite-plugin-svelte@6.2.4(svelte@5.53.2)(vite@7.3.1(@types/node@24.12.4)(jiti@2.6.1)(lightningcss@1.31.1)(sass@1.97.1)(terser@5.46.0)(yaml@2.8.2)))(svelte@5.53.2)(typescript@5.9.3)(vite@7.3.1(@types/node@24.12.4)(jiti@2.6.1)(lightningcss@1.31.1)(sass@1.97.1)(terser@5.46.0)(yaml@2.8.2)))(h3@1.15.5)(next@16.3.4(patch_hash=a620718f9d934500c4f0364aa9312b2539559e0ac911cdc37c97b92e1e9b4550)(@opentelemetry/api@1.9.0)(@types/node@24.12.4)(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(sass@1.97.1))
       '@vercel/geistdocs':
-        specifier: 2.6.0
-        version: 2.6.0(68a96ff5743b7d97b286bb8b10486660)
+        specifier: 2.7.5
+        version: 2.7.5(68a96ff5743b7d97b286bb8b10486660)
       ai:
         specifier: ^6.0.94
         version: 6.0.94(zod@4.6.5)
@@ -5305,8 +5305,8 @@ packages:
     resolution: {integrity: sha512-g9XerViJ/paZujufXYcu5XYI2vU2rtB4sgdpjUHde5RnOkdmpu0ngH46LCFGHoPXO/C+qDPSczIHIRN+8Q2YKQ==}
     engines: {node: '>= 18'}
 
-  '@vercel/geistdocs@2.6.0':
-    resolution: {integrity: sha512-RiZZNjyvQviQXGoms6X/wBWMjpCL26gLAYOQacikpbQZbu2PJbxWksrqIatKGZP+1OKwCHl288IM48lLbncV9g==}
+  '@vercel/geistdocs@2.7.5':
+    resolution: {integrity: sha512-SjEOusPjrviI0fO3NPWCmL/Kw/63Yh3Hyb3ysxyZg0+cLrlRoMxq2YqeQ1deI85xZhva5i3vSR22r+rw+FSw1w==}
     hasBin: true
     peerDependencies:
       next: ^16.3.3
@@ -15884,7 +15884,7 @@ snapshots:
     dependencies:
       execa: 5.1.1
 
-  '@vercel/geistdocs@2.6.0(68a96ff5743b7d97b286bb8b10486660)':
+  '@vercel/geistdocs@2.7.5(68a96ff5743b7d97b286bb8b10486660)':
     dependencies:
       '@ai-sdk/react': 3.0.286(react@19.2.5)(zod@4.6.5)
       '@clack/prompts': 0.11.0
