@@ -542,16 +542,19 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
  * Keep routes served when the command self-daemonized: its launcher exited
  * but a listener is still on the assigned port. The routes move to that
  * listener's pid, so the proxy keeps serving them and they drop on their own
- * once it exits. Issue #411.
+ * once it exits. A listener that already held the port before the command
+ * started is not the command's daemon, so its routes are left to cleanup.
+ * Issue #411.
  */
 async function transferRoutesToDaemon(
   store: RouteStore,
   hostnames: readonly string[],
   port: number,
-  processGroupId: number | undefined
+  processGroupId: number | undefined,
+  preexistingPid: number | null
 ): Promise<void> {
   const listenerPid = await findSelfDaemonizedListener(port, processGroupId, EXIT_TIMEOUT_MS);
-  if (listenerPid === null) return;
+  if (listenerPid === null || listenerPid === preexistingPid) return;
   let transferred = false;
   for (const hostname of hostnames) {
     try {
@@ -566,6 +569,11 @@ async function transferRoutesToDaemon(
       `Command exited but PID ${listenerPid} is still serving port ${port}. Keeping ${hostnames[0]} routed to it. Stop it with: kill ${listenerPid}`
     )
   );
+}
+
+/** PID already listening on a port before a command is spawned, if any. */
+async function findPreexistingListener(port: number): Promise<number | null> {
+  return (await isPortListening(port)) ? findPidOnPort(port) : null;
 }
 
 /** Warn on this terminal if a route it registered will not resolve. Issue #364. */
@@ -1585,6 +1593,7 @@ async function runApp(
     )
   );
 
+  const preexistingListener = await findPreexistingListener(port);
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
@@ -1600,7 +1609,8 @@ async function runApp(
       ...(ngrokUrl ? { PORTLESS_NGROK_URL: ngrokUrl } : {}),
       ...caEnv,
     },
-    onExit: (childPid) => transferRoutesToDaemon(store, hostnames, port, childPid),
+    onExit: (childPid) =>
+      transferRoutesToDaemon(store, hostnames, port, childPid, preexistingListener),
     onCleanup: () => {
       stoppingNgrok = true;
       stopNgrokProcess(ngrokProcess?.child);
@@ -3724,6 +3734,7 @@ async function spawnProxiedApp(
     }
   }
 
+  const preexistingListener = appPort === undefined ? null : await findPreexistingListener(appPort);
   const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
   pipeOutput(child, chalk.cyan(`[${app.name}]`));
 
@@ -3744,7 +3755,13 @@ async function spawnProxiedApp(
       }
       const transfer = signal
         ? Promise.resolve()
-        : transferRoutesToDaemon(capturedStore, capturedHostnames, capturedPort, child.pid);
+        : transferRoutesToDaemon(
+            capturedStore,
+            capturedHostnames,
+            capturedPort,
+            child.pid,
+            preexistingListener
+          );
       transfer
         .catch(() => {
           // Best-effort; the routes are removed below.

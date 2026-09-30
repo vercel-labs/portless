@@ -158,4 +158,22 @@ describe.skipIf(process.platform === "win32")("self-daemonizing command lifecycl
     expect(await waitForExit(cliChild)).toBe(0);
     expect(readRoutes()).toHaveLength(0);
   });
+
+  it("does not hand the route to a server that held the port before the command ran", async () => {
+    const env = startProxy();
+    const foreign = http.createServer((_, response) => response.end("foreign"));
+    await new Promise<void>((resolve) => foreign.listen(0, "127.0.0.1", resolve));
+    const foreignPort = (foreign.address() as { port: number }).port;
+    try {
+      cliChild = spawn(
+        process.execPath,
+        [CLI_PATH, "occupied", "--app-port", String(foreignPort), "sh", "-c", "exit 1"],
+        { env, stdio: ["ignore", "pipe", "pipe"] }
+      );
+      expect(await waitForExit(cliChild)).toBe(1);
+      expect(readRoutes()).toHaveLength(0);
+    } finally {
+      await new Promise((resolve) => foreign.close(resolve));
+    }
+  });
 });
