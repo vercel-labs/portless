@@ -256,6 +256,38 @@ function killWindowsTree(pid: number): void {
  * (which survive the parent's exit) and checks creation times so a reused pid
  * is never killed.
  */
+/**
+ * Pids from `[pid, parentPid, createdAtMs]` rows that belong to the tree rooted
+ * at `root`. A pid is only ours if its creation time fits the lineage: the root
+ * was created before the watcher started, and every descendant after its
+ * parent. A process holding the root pid that was created later is a reuse; it
+ * and anything created after it are left alone. Runs inside the watcher script,
+ * so it must stay self-contained.
+ */
+export function ownedProcessIds(
+  rows: ReadonlyArray<readonly [number, number, number]>,
+  root: number,
+  watcherStartedAt: number
+): number[] {
+  const rootRow = rows.find(([pid]) => pid === root);
+  const impostorAt = rootRow && rootRow[2] > watcherStartedAt ? rootRow[2] : Infinity;
+  const created = new Map<number, number>();
+  if (rootRow && impostorAt === Infinity) created.set(root, rootRow[2]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [pid, ppid, at] of rows) {
+      if (created.has(pid) || pid === root) continue;
+      const parentAt = created.get(ppid);
+      const ok = ppid === root ? at < impostorAt : parentAt !== undefined && at >= parentAt;
+      if (ok) {
+        created.set(pid, at);
+        grew = true;
+      }
+    }
+  }
+  return [...created.keys()];
+}
+
 function watchParentOnWindows(
   childPid: number,
   spawnedAt: number
@@ -265,27 +297,12 @@ function watchParentOnWindows(
     const [parent, root, since] = process.argv.slice(1).map(Number);
     const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
     const watcherStartedAt = Date.now();
+    const ownedProcessIds = ${ownedProcessIds.toString()};
     const descendants = () => {
       const ps = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }";
-      const out = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true }).stdout || "";
+      const out = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true, timeout: ${PID_LOOKUP_TIMEOUT_MS} }).stdout || "";
       const rows = out.trim().split(/\\r?\\n/).map((l) => l.trim().split(" ").map(Number)).filter((r) => r.length === 3 && r[2] >= since);
-      // A pid is only ours if its creation time fits the lineage: the root was
-      // created before this watcher started, and every descendant after its
-      // parent. A process holding the root pid that was created later is a
-      // reuse; it and anything created after it are left alone.
-      const rootRow = rows.find(([pid]) => pid === root);
-      const impostorAt = rootRow && rootRow[2] > watcherStartedAt ? rootRow[2] : Infinity;
-      const created = new Map();
-      if (rootRow && impostorAt === Infinity) created.set(root, rootRow[2]);
-      for (let grew = true; grew; ) {
-        grew = false;
-        for (const [pid, ppid, at] of rows) {
-          if (created.has(pid) || pid === root) continue;
-          const ok = ppid === root ? at < impostorAt : created.has(ppid) && at >= created.get(ppid);
-          if (ok) { created.set(pid, at); grew = true; }
-        }
-      }
-      return [...created.keys()];
+      return ownedProcessIds(rows, root, watcherStartedAt);
     };
     const timer = setInterval(() => {
       if (alive(parent)) {
@@ -293,7 +310,7 @@ function watchParentOnWindows(
         return;
       }
       clearInterval(timer);
-      for (const pid of descendants()) spawnSync("taskkill", ["/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+      for (const pid of descendants()) spawnSync("taskkill", ["/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true, timeout: ${PID_LOOKUP_TIMEOUT_MS} });
       process.exit(0);
     }, 500);
   `;
@@ -310,6 +327,17 @@ function watchParentOnWindows(
     // Best effort; normal shutdown still kills the tree.
     return undefined;
   }
+}
+
+/**
+ * On Windows, kill `child`'s tree if portless is force-killed before cleanup
+ * runs. `spawnedAt` is taken just before spawning `child`. No-op elsewhere.
+ * The watcher is only needed if we die without cleanup; it stops on a normal
+ * exit.
+ */
+export function guardWindowsOrphans(child: ReturnType<typeof spawn>, spawnedAt: number): void {
+  const watcher = isWindows && child.pid ? watchParentOnWindows(child.pid, spawnedAt) : undefined;
+  if (watcher) process.once("exit", () => watcher.kill());
 }
 
 /**
@@ -1371,9 +1399,7 @@ export function spawnCommand(
         detached: true,
       });
 
-  // The watcher is only needed if we die without cleanup; stop it on a normal exit.
-  const watcher = isWindows && child.pid ? watchParentOnWindows(child.pid, spawnedAt) : undefined;
-  if (watcher) process.once("exit", () => watcher.kill());
+  guardWindowsOrphans(child, spawnedAt);
 
   let exiting = false;
   let shutdownSignal: NodeJS.Signals | undefined;

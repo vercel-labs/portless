@@ -59,6 +59,7 @@ import {
   discoverState,
   findFreePort,
   findPidOnPort,
+  guardWindowsOrphans,
   findPidsOnPort,
   getDefaultPort,
   getDefaultTlds,
@@ -3598,12 +3599,15 @@ function spawnChildProcess(
   env: Record<string, string | undefined>,
   cwd: string
 ): ReturnType<typeof spawn> {
-  return spawn(commandArgs[0], commandArgs.slice(1), {
+  const spawnedAt = Date.now();
+  const child = spawn(commandArgs[0], commandArgs.slice(1), {
     stdio: ["ignore", "pipe", "pipe"],
     env,
     cwd,
     ...(isWindows ? {} : { detached: true }),
   });
+  guardWindowsOrphans(child, spawnedAt);
+  return child;
 }
 
 function prefixStream(
@@ -3981,6 +3985,7 @@ async function runWithTurbo(
         ? ["bunx", "turbo", "run", scriptName, ...extraArgs]
         : [pm, "exec", "turbo", "run", scriptName, ...extraArgs];
 
+  const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
     stdio: "inherit",
     cwd: wsRoot,
@@ -3990,6 +3995,7 @@ async function runWithTurbo(
     },
     ...(isWindows ? {} : { detached: true }),
   });
+  guardWindowsOrphans(turboChild, turboSpawnedAt);
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
