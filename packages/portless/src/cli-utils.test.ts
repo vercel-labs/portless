@@ -44,6 +44,7 @@ import {
   writeTldFile,
   writeTldsFile,
   writeTlsMarker,
+  ownedProcessIds,
 } from "./cli-utils.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
@@ -2188,5 +2189,47 @@ describe("syncHostsWithWarning", () => {
     );
     expect(warns).toBe(0);
     expect(latched).toBe(false);
+  });
+});
+
+describe("ownedProcessIds", () => {
+  const started = 1_000;
+
+  it("collects the root and its descendants in creation order", () => {
+    const rows = [
+      [10, 1, 900],
+      [11, 10, 950],
+      [12, 11, 1_200],
+      [20, 1, 960],
+    ] as const;
+    expect(ownedProcessIds(rows, 10, started).sort()).toEqual([10, 11, 12]);
+  });
+
+  it("leaves a reused root pid and anything it spawned alone", () => {
+    const rows = [
+      [10, 1, 1_500],
+      [11, 10, 950],
+      [12, 10, 1_600],
+    ] as const;
+    expect(ownedProcessIds(rows, 10, started)).toEqual([11]);
+  });
+
+  it("still finds orphaned children once the root exited", () => {
+    const rows = [
+      [11, 10, 950],
+      [12, 11, 1_100],
+    ] as const;
+    expect(ownedProcessIds(rows, 10, started).sort()).toEqual([11, 12]);
+  });
+
+  it("works when evaluated standalone, as the watcher script embeds it", () => {
+    const standalone = new Function(
+      `return (${ownedProcessIds.toString()});`
+    )() as typeof ownedProcessIds;
+    const rows = [
+      [10, 1, 900],
+      [11, 10, 950],
+    ] as const;
+    expect(standalone(rows, 10, started).sort()).toEqual([10, 11]);
   });
 });
