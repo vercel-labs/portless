@@ -33,6 +33,10 @@ jobs:
 
       - uses: pnpm/action-setup@v4
 
+      # pnpm and npm are .cmd shims on Windows and workspace mode spawns them
+      # without a shell (ENOENT on main too), so the workspace fixture uses bun.
+      - uses: oven-sh/setup-bun@v2
+
       - name: Build portless (${{ matrix.build }})
         shell: pwsh
         run: |
@@ -56,16 +60,15 @@ jobs:
           $ws = "$env:RUNNER_TEMP\ws"
           New-Item -ItemType Directory -Force "$ws\apps\web" | Out-Null
           $dev = "$pwd\.github\repro-437\dev.cjs" -replace '\\', '/'
-          Set-Content "$ws\pnpm-workspace.yaml" "packages:`n  - apps/*"
-          Set-Content "$ws\package.json" ('{"name":"ws","private":true,"packageManager":"pnpm@' + (pnpm --version) + '"}')
+          Set-Content "$ws\package.json" ('{"name":"ws","private":true,"workspaces":["apps/*"],"packageManager":"bun@' + (bun --version) + '"}')
           Set-Content "$ws\apps\web\package.json" ('{"name":"web","private":true,"scripts":{"dev":"node ' + $dev + '"}}')
           if ("${{ matrix.shape }}" -eq "turbo") {
             Set-Content "$ws\turbo.json" '{"$schema":"https://turbo.build/schema.json","globalPassThroughEnv":["REPRO_OUT","DEV_EXIT_AFTER_MS"],"tasks":{"dev":{"cache":false,"persistent":true}}}'
             Set-Content "$ws\portless.json" '{"apps":{"apps/web":{"name":"demo","appPort":4370}}}'
-            Push-Location $ws; pnpm add -D -w turbo@2; Pop-Location
+            Push-Location $ws; bun add -d turbo@2; Pop-Location
           } else {
             Set-Content "$ws\portless.json" '{"turbo":false,"apps":{"apps/web":{"name":"demo","appPort":4370}}}'
-            Push-Location $ws; pnpm install; Pop-Location
+            Push-Location $ws; bun install; Pop-Location
           }
           "REPRO_WS=$ws" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
 
