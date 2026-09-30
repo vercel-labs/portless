@@ -1,0 +1,121 @@
+name: Verify 437 turbo and multi-app
+
+on:
+  push:
+    branches: [railly/issue-437-windows-verify]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.build }} / ${{ matrix.shape }} / ${{ matrix.mode }}
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      PORTLESS_PORT: "1355"
+      PORTLESS_HTTPS: "0"
+    strategy:
+      fail-fast: false
+      matrix:
+        build: [pr-head, fix]
+        shape: [single, turbo, multi]
+        mode: [forcekill]
+        include:
+          - { build: fix, shape: turbo, mode: graceful }
+          - { build: fix, shape: multi, mode: graceful }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+
+      - uses: pnpm/action-setup@v4
+
+      - name: Build portless (${{ matrix.build }})
+        shell: pwsh
+        run: |
+          if ("${{ matrix.build }}" -eq "pr-head") {
+            git fetch --depth 1 origin 83f6f2441bbf39d2279e84311ffeaafa2ae7b60b
+            git worktree add "$env:RUNNER_TEMP\src" FETCH_HEAD
+            Push-Location "$env:RUNNER_TEMP\src"
+          } else {
+            Push-Location $pwd
+          }
+          git log -1 --format="build=%h %s"
+          pnpm install --frozen-lockfile
+          pnpm --filter portless build
+          "CLI=$pwd\packages\portless\dist\cli.js" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Pop-Location
+
+      - name: Prepare workspace fixture
+        if: matrix.shape != 'single'
+        shell: pwsh
+        run: |
+          $ws = "$env:RUNNER_TEMP\ws"
+          New-Item -ItemType Directory -Force "$ws\apps\web" | Out-Null
+          $dev = "$pwd\.github\repro-437\dev.cjs" -replace '\\', '/'
+          Set-Content "$ws\pnpm-workspace.yaml" "packages:`n  - apps/*"
+          Set-Content "$ws\package.json" ('{"name":"ws","private":true,"packageManager":"pnpm@' + (pnpm --version) + '"}')
+          Set-Content "$ws\apps\web\package.json" ('{"name":"web","private":true,"scripts":{"dev":"node ' + $dev + '"}}')
+          if ("${{ matrix.shape }}" -eq "turbo") {
+            Set-Content "$ws\turbo.json" '{"$schema":"https://turbo.build/schema.json","globalPassThroughEnv":["REPRO_OUT","DEV_EXIT_AFTER_MS"],"tasks":{"dev":{"cache":false,"persistent":true}}}'
+            Set-Content "$ws\portless.json" '{"apps":{"apps/web":{"name":"demo","appPort":4370}}}'
+            Push-Location $ws; pnpm add -D -w turbo@2; Pop-Location
+          } else {
+            Set-Content "$ws\portless.json" '{"turbo":false,"apps":{"apps/web":{"name":"demo","appPort":4370}}}'
+            Push-Location $ws; pnpm install; Pop-Location
+          }
+          "REPRO_WS=$ws" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Install cuse
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri https://github.com/crafter-agents/cuse/releases/download/v0.2.1/cuse-windows-x64.exe -OutFile "$env:RUNNER_TEMP\cuse.exe"
+          & "$env:RUNNER_TEMP\cuse.exe" os
+
+      - name: Start proxy
+        shell: pwsh
+        run: node $env:CLI proxy start --no-tls -p 1355
+
+      - name: Run portless inside a real console
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\r437"; New-Item -ItemType Directory -Force $out | Out-Null
+          $script = "$pwd\.github\repro-437\console.ps1"
+          $cmd = "`$Host.UI.RawUI.WindowTitle = 'P437'; `$env:REPRO_WS = '$env:REPRO_WS'; & '$script' -Cli '$env:CLI' -Out '$out' -Mode '${{ matrix.mode }}' -AppPort 4370 -Shape '${{ matrix.shape }}'"
+          Start-Process powershell -ArgumentList '-NoExit', '-NoProfile', '-Command', $cmd
+          for ($i = 0; $i -lt 360; $i++) {
+            if ((Test-Path "$out\result.txt") -and (Select-String -Quiet -Path "$out\result.txt" -Pattern '^(ready|error)=')) { break }
+            Start-Sleep -Milliseconds 250
+          }
+          Get-Content "$out\result.txt"
+
+      - name: Type a command into the shell with cuse
+        shell: pwsh
+        run: |
+          $cuse = "$env:RUNNER_TEMP\cuse.exe"; $out = "$env:RUNNER_TEMP\r437"
+          & $cuse focus P437
+          Start-Sleep -Milliseconds 500
+          & $cuse type "echo ok > $out\shell.txt"
+          & $cuse key Return
+          Start-Sleep -Seconds 3
+          & $cuse capture "$out\console.png"
+          "shell_ran=$(Test-Path "$out\shell.txt")" | Out-File -Append -Encoding ascii "$out\result.txt"
+
+      - name: Report
+        if: always()
+        shell: pwsh
+        run: |
+          $out = "$env:RUNNER_TEMP\r437"
+          "### ${{ matrix.build }} / ${{ matrix.shape }} / ${{ matrix.mode }}" | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+          Get-Content "$out\result.txt", "$out\dev.log", "$out\portless.out", "$out\portless.err" -ErrorAction SilentlyContinue | Tee-Object -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append $env:GITHUB_STEP_SUMMARY
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: verify-437-${{ matrix.build }}-${{ matrix.shape }}-${{ matrix.mode }}
+          path: ${{ runner.temp }}/r437
