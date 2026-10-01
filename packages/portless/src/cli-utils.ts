@@ -196,11 +196,7 @@ function signalTrackedProcesses(
 ): void {
   if (isWindows) {
     for (const { pid } of tracked.values()) {
-      try {
-        process.kill(pid, signal);
-      } catch {
-        // Already dead
-      }
+      killWindowsTree(pid);
     }
     return;
   }
@@ -236,10 +232,119 @@ export function listenOnProxyInterface(
 }
 
 /**
+ * Kill a process and all of its descendants on Windows. Windows has no process
+ * groups, and child.kill() only terminates the cmd.exe wrapper, which leaves
+ * the dev server running and attached to the console.
+ */
+function killWindowsTree(pid: number): void {
+  try {
+    execFileSync("taskkill", ["/T", "/F", "/PID", String(pid)], {
+      stdio: "ignore",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+      windowsHide: true,
+    });
+  } catch {
+    // Already dead
+  }
+}
+
+/**
+ * Kill the command's descendants if this process dies without running its own
+ * cleanup, such as when it is terminated with `taskkill /F`. Windows does not
+ * end children with their parent, and the cmd.exe wrapper can exit alongside
+ * us, so a detached watcher walks ParentProcessId links from the wrapper pid
+ * (which survive the parent's exit) and checks creation times so a reused pid
+ * is never killed.
+ */
+/**
+ * Pids from `[pid, parentPid, createdAtMs]` rows that belong to the tree rooted
+ * at `root`. A pid is only ours if its creation time fits the lineage: the root
+ * was created before the watcher started, and every descendant after its
+ * parent. A process holding the root pid that was created later is a reuse; it
+ * and anything created after it are left alone. Runs inside the watcher script,
+ * so it must stay self-contained.
+ */
+export function ownedProcessIds(
+  rows: ReadonlyArray<readonly [number, number, number]>,
+  root: number,
+  watcherStartedAt: number
+): number[] {
+  const rootRow = rows.find(([pid]) => pid === root);
+  const impostorAt = rootRow && rootRow[2] > watcherStartedAt ? rootRow[2] : Infinity;
+  const created = new Map<number, number>();
+  if (rootRow && impostorAt === Infinity) created.set(root, rootRow[2]);
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const [pid, ppid, at] of rows) {
+      if (created.has(pid) || pid === root) continue;
+      const parentAt = created.get(ppid);
+      const ok = ppid === root ? at < impostorAt : parentAt !== undefined && at >= parentAt;
+      if (ok) {
+        created.set(pid, at);
+        grew = true;
+      }
+    }
+  }
+  return [...created.keys()];
+}
+
+function watchParentOnWindows(
+  childPid: number,
+  spawnedAt: number
+): ReturnType<typeof spawn> | undefined {
+  const script = `
+    const { spawnSync } = require("child_process");
+    const [parent, root, since] = process.argv.slice(1).map(Number);
+    const alive = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+    const watcherStartedAt = Date.now();
+    const ownedProcessIds = ${ownedProcessIds.toString()};
+    const descendants = () => {
+      const ps = "Get-CimInstance Win32_Process | ForEach-Object { '{0} {1} {2}' -f $_.ProcessId, $_.ParentProcessId, ([DateTimeOffset]$_.CreationDate).ToUnixTimeMilliseconds() }";
+      const out = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", ps], { encoding: "utf8", windowsHide: true, timeout: ${PID_LOOKUP_TIMEOUT_MS} }).stdout || "";
+      const rows = out.trim().split(/\\r?\\n/).map((l) => l.trim().split(" ").map(Number)).filter((r) => r.length === 3 && r[2] >= since);
+      return ownedProcessIds(rows, root, watcherStartedAt);
+    };
+    const timer = setInterval(() => {
+      if (alive(parent)) {
+        if (!alive(root)) process.exit(0);
+        return;
+      }
+      clearInterval(timer);
+      for (const pid of descendants()) spawnSync("taskkill", ["/F", "/PID", String(pid)], { stdio: "ignore", windowsHide: true, timeout: ${PID_LOOKUP_TIMEOUT_MS} });
+      process.exit(0);
+    }, 500);
+  `;
+  try {
+    // Run outside the user's cwd so the watcher never holds that directory open.
+    const watcher = spawn(
+      process.execPath,
+      ["-e", script, String(process.pid), String(childPid), String(spawnedAt)],
+      { cwd: path.dirname(process.execPath), detached: true, stdio: "ignore", windowsHide: true }
+    );
+    watcher.unref();
+    return watcher;
+  } catch {
+    // Best effort; normal shutdown still kills the tree.
+    return undefined;
+  }
+}
+
+/**
+ * On Windows, kill `child`'s tree if portless is force-killed before cleanup
+ * runs. `spawnedAt` is taken just before spawning `child`. No-op elsewhere.
+ * The watcher is only needed if we die without cleanup; it stops on a normal
+ * exit.
+ */
+export function guardWindowsOrphans(child: ReturnType<typeof spawn>, spawnedAt: number): void {
+  const watcher = isWindows && child.pid ? watchParentOnWindows(child.pid, spawnedAt) : undefined;
+  if (watcher) process.once("exit", () => watcher.kill());
+}
+
+/**
  * Kill a child process and its entire process tree. On Unix, when the child
  * was spawned with `detached: true`, it leads its own process group and
- * process.kill(-pid) reaches every descendant. Falls back to killing just
- * the child on Windows or when the group kill fails.
+ * process.kill(-pid) reaches every descendant. On Windows, taskkill /T walks
+ * the tree. Falls back to killing just the child when neither is possible.
  */
 export function killTree(
   child: ReturnType<typeof spawn>,
@@ -249,13 +354,15 @@ export function killTree(
     child.kill(signal);
     return;
   }
-  if (!isWindows) {
-    try {
-      process.kill(-child.pid, signal);
-      return;
-    } catch {
-      // Process group may already be gone; fall through
-    }
+  if (isWindows) {
+    killWindowsTree(child.pid);
+    return;
+  }
+  try {
+    process.kill(-child.pid, signal);
+    return;
+  } catch {
+    // Process group may already be gone; fall through
   }
   try {
     child.kill(signal);
@@ -1276,6 +1383,8 @@ export function spawnCommand(
     }
   }
 
+  const spawnedAt = Date.now();
+
   // On Unix, spawn detached so the child gets its own process group. This
   // lets us kill the entire tree (shell + grandchild dev server) with a
   // single process.kill(-pid, signal) instead of only the immediate child.
@@ -1289,6 +1398,8 @@ export function spawnCommand(
         env,
         detached: true,
       });
+
+  guardWindowsOrphans(child, spawnedAt);
 
   let exiting = false;
   let shutdownSignal: NodeJS.Signals | undefined;
