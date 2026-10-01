@@ -672,6 +672,27 @@ export function sanitizeHostForFilename(hostname: string): string {
 const MAX_CN_LENGTH = 64;
 
 /**
+ * SAN entries for a per-hostname certificate: the exact hostname, plus a
+ * wildcard covering sibling subdomains at the same level.
+ *
+ * The sibling wildcard is only added when the parent domain has at least two
+ * labels. For a two-label hostname such as "myapp.localhost" the parent is the
+ * bare TLD "localhost", so the wildcard would be "*.localhost", which sits at
+ * the public suffix boundary. TLS implementations are not permitted to honour
+ * wildcards there (RFC 2606 section 2, CA/Browser Forum BR 3.2.2.6), and Apple
+ * platforms reject the whole certificate because of that entry rather than
+ * ignoring it. See the fix in #18, which this completes.
+ */
+export function buildHostSans(hostname: string): string[] {
+  const sans = [`DNS:${hostname}`];
+  const parts = hostname.split(".");
+  if (parts.length >= 3) {
+    sans.push(`DNS:*.${parts.slice(1).join(".")}`);
+  }
+  return sans;
+}
+
+/**
  * Generate a certificate for a specific hostname, signed by the local CA.
  * Certs are cached on disk in the host-certs subdirectory.
  *
@@ -706,14 +727,7 @@ async function generateHostCertAsync(
   // Generate CSR
   await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
 
-  // Build SAN list: include the exact hostname plus a wildcard at the same level
-  // e.g., for "chat.json-render2.localhost" -> also add "*.json-render2.localhost"
-  const sans = [`DNS:${hostname}`];
-  const parts = hostname.split(".");
-  if (parts.length >= 2) {
-    // Add a wildcard for sibling subdomains at the same level
-    sans.push(`DNS:*.${parts.slice(1).join(".")}`);
-  }
+  const sans = buildHostSans(hostname);
 
   await fs.promises.writeFile(
     extPath,
