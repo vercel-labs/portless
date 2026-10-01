@@ -36,6 +36,14 @@ const HOP_BY_HOP_HEADERS = new Set([
 ]);
 
 /**
+ * Client hop-by-hop headers dropped before forwarding a plain request.
+ * Forwarding `Connection: keep-alive` leaves the backend socket open after
+ * the response with no error listener, so a backend restart crashes the
+ * proxy. `transfer-encoding` stays: it frames the streamed request body.
+ */
+const REQUEST_HOP_BY_HOP_HEADERS = ["connection", "keep-alive", "proxy-connection", "upgrade"];
+
+/**
  * Get the effective host value from a request.
  * HTTP/2 uses the :authority pseudo-header; HTTP/1.1 uses Host.
  */
@@ -343,6 +351,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       if (key.startsWith(":")) {
         delete proxyReqHeaders[key];
       }
+    }
+    for (const h of REQUEST_HOP_BY_HOP_HEADERS) {
+      delete proxyReqHeaders[h];
     }
     // HTTP/2 carries the hostname only in :authority (stripped above); restore
     // it as Host so Host-dependent backends (multi-tenant vhosts, framework
