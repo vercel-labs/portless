@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -184,6 +184,32 @@ describe("RouteStore", () => {
       expect(routes).toHaveLength(2);
       const hostnames = routes.map((r) => r.hostname).sort();
       expect(hostnames).toEqual(["app1.localhost", "app2.localhost"]);
+    });
+
+    it("preserves a route owned by a process that cannot be signaled", () => {
+      const peerPid = 424242;
+      store.addRoute("peer.localhost", 4001, peerPid);
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+        if (pid === peerPid) {
+          const error = new Error("permission denied") as NodeJS.ErrnoException;
+          error.code = "EPERM";
+          throw error;
+        }
+        return true;
+      });
+
+      try {
+        store.addRoute("local.localhost", 4002, process.pid);
+        const routes = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8")) as Array<{
+          hostname: string;
+        }>;
+        expect(routes.map((route) => route.hostname).sort()).toEqual([
+          "local.localhost",
+          "peer.localhost",
+        ]);
+      } finally {
+        kill.mockRestore();
+      }
     });
   });
 
