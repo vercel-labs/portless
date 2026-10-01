@@ -23,6 +23,8 @@ export const DIR_MODE = 0o755;
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
+  /** Listener PIDs captured when a wrapped command exits but its route remains serving. */
+  orphanPids?: number[];
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
@@ -31,6 +33,7 @@ export interface RouteMapping extends RouteInfo {
 }
 
 type RouteMetadataPatch = {
+  orphanPids?: number[] | null;
   tailscaleUrl?: string | null;
   tailscaleHttpsPort?: number | null;
   tailscaleFunnel?: boolean | null;
@@ -325,6 +328,10 @@ export class RouteStore {
       if ("tailscaleUrl" in fields) {
         if (fields.tailscaleUrl === null) delete route.tailscaleUrl;
         else if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
+      }
+      if ("orphanPids" in fields) {
+        if (fields.orphanPids === null) delete route.orphanPids;
+        else if (fields.orphanPids !== undefined) route.orphanPids = [...fields.orphanPids];
       }
       if ("tailscaleHttpsPort" in fields) {
         if (fields.tailscaleHttpsPort === null) delete route.tailscaleHttpsPort;

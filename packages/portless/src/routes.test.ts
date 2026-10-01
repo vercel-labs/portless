@@ -500,4 +500,19 @@ describe("RouteStore", () => {
       expect(routes[0].ngrokPid).toBeUndefined();
     });
   });
+
+  describe("orphan metadata", () => {
+    it("persists listener PIDs for preserved routes", () => {
+      store.addRoute("orphan.localhost", 4123, process.pid);
+      store.updateRoute("orphan.localhost", { orphanPids: [1234, 5678] });
+
+      expect(store.loadRoutes()[0].orphanPids).toEqual([1234, 5678]);
+    });
+
+    it("loads routes without orphan metadata", () => {
+      store.addRoute("legacy.localhost", 4000, process.pid);
+
+      expect(store.loadRoutes()[0].orphanPids).toBeUndefined();
+    });
+  });
 });
