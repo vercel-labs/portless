@@ -210,12 +210,14 @@ describe("createProxyServer", () => {
           connection: "keep-alive",
           "keep-alive": "timeout=5",
           "proxy-connection": "keep-alive",
+          upgrade: "h2c",
         },
       });
       expect(res.status).toBe(200);
       expect(received.connection).toBe("close");
       expect(received["keep-alive"]).toBeUndefined();
       expect(received["proxy-connection"]).toBeUndefined();
+      expect(received.upgrade).toBeUndefined();
     });
 
     it("survives a backend resetting a kept-alive connection (issue #434)", async () => {
