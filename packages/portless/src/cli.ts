@@ -1955,7 +1955,7 @@ ${colors.bold("Options:")}
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
-  --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
@@ -1972,7 +1972,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
+  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)

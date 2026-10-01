@@ -186,6 +186,33 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("hello from ipv6 backend");
     });
 
+    it("routes a wildcard subdomain to the most specific parent in any order (issue #380)", async () => {
+      const backends = await Promise.all(
+        ["parent", "child"].map(async (name) => {
+          const backend = trackServer(http.createServer((_req, res) => res.end(name)));
+          await listen(backend);
+          const addr = backend.address();
+          if (!addr || typeof addr === "string") throw new Error("no addr");
+          return addr.port;
+        })
+      );
+      const parent = { hostname: "acme.localhost", port: backends[0] };
+      const child = { hostname: "api.acme.localhost", port: backends[1] };
+
+      for (const routes of [
+        [parent, child],
+        [child, parent],
+      ]) {
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, strict: false })
+        );
+        await listen(server);
+        expect((await request(server, { host: "admin.api.acme.localhost" })).body).toBe("child");
+        expect((await request(server, { host: "tenant.acme.localhost" })).body).toBe("parent");
+        expect((await request(server, { host: "api.acme.localhost" })).body).toBe("child");
+      }
+    });
+
     it("routes wildcard subdomain to matching parent route when strict is false", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
