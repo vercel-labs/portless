@@ -230,6 +230,68 @@ describe("ensureCerts", () => {
     expect(getCertSignatureAlgo(second.certPath)).toContain("sha256");
   });
 
+  it("generates a CA that carries basicConstraints exactly once", () => {
+    const result = ensureCerts(tmpDir);
+    const text = execFileSync("openssl", ["x509", "-in", result.caPath, "-noout", "-text"], {
+      encoding: "utf-8",
+    });
+
+    expect((text.match(/X509v3 Basic Constraints/g) ?? []).length).toBe(1);
+  });
+
+  it("generates a CA that OpenSSL accepts when verifying the server cert", () => {
+    const result = ensureCerts(tmpDir);
+
+    // A CA carrying duplicate extensions violates RFC 5280. OpenSSL 3 refuses
+    // to build a chain through it, which is what breaks curl and Node.js.
+    const output = execFileSync("openssl", ["verify", "-CAfile", result.caPath, result.certPath], {
+      encoding: "utf-8",
+    });
+
+    expect(output).toContain("OK");
+  });
+
+  it("regenerates a CA that carries basicConstraints twice", () => {
+    // Built by portless versions that used "req -x509 -addext" on OpenSSL
+    // 1.1.1. Embedded as a fixture because OpenSSL 3 collapses the duplicate
+    // and so cannot reproduce it at runtime. Expires in 2126, so only the
+    // duplicate extension triggers regeneration here.
+    const duplicateCA = [
+      "-----BEGIN CERTIFICATE-----",
+      "MIIBbzCCARagAwIBAgIUW1e9aQ1IazId4nZ2NFa3n9/x0tswCgYIKoZIzj0EAwIw",
+      "HDEaMBgGA1UEAwwRcG9ydGxlc3MgTG9jYWwgQ0EwIBcNMjYwODE4MjA1NDAzWhgP",
+      "MjEyNjA3MjUyMDU0MDNaMBwxGjAYBgNVBAMMEXBvcnRsZXNzIExvY2FsIENBMFkw",
+      "EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEUyFvqnRhhAABzXTmWgpBHmiWn2jyPshG",
+      "gmA4dNP5kfINATS8K1JtWLxYf/saqHPFxOesHYjr9oD0cBp6V4qxv6M0MDIwDwYD",
+      "VR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwDwYDVR0TAQH/BAUwAwEB/zAK",
+      "BggqhkjOPQQDAgNHADBEAiAwxhr+G5JDO7qNqiX3bm/nFE41AXnSB0y34puz5c4J",
+      "zQIgTl7ah1MEHSd3HXXKPqzzR7U/152NzDvplbDfXNfRDTc=",
+      "-----END CERTIFICATE-----",
+    ].join("\n");
+    const duplicateCAKey = [
+      "-----BEGIN EC PRIVATE KEY-----",
+      "MHcCAQEEICnG5CETQb8As6nwQZ+YfkpTGydFLIgr8nETZ5ZHr5bQoAoGCCqGSM49",
+      "AwEHoUQDQgAEUyFvqnRhhAABzXTmWgpBHmiWn2jyPshGgmA4dNP5kfINATS8K1Jt",
+      "WLxYf/saqHPFxOesHYjr9oD0cBp6V4qxvw==",
+      "-----END EC PRIVATE KEY-----",
+    ].join("\n");
+
+    const caCertPath = path.join(tmpDir, "ca.pem");
+    const caKeyPath = path.join(tmpDir, "ca-key.pem");
+    fs.writeFileSync(caCertPath, duplicateCA + "\n");
+    fs.writeFileSync(caKeyPath, duplicateCAKey + "\n");
+
+    const result = ensureCerts(tmpDir);
+
+    expect(result.caGenerated).toBe(true);
+    expect(fs.readFileSync(caCertPath, "utf-8")).not.toContain("MIIBbzCCARagAwIBAgIUW1e9aQ1Iaz");
+
+    const text = execFileSync("openssl", ["x509", "-in", caCertPath, "-noout", "-text"], {
+      encoding: "utf-8",
+    });
+    expect((text.match(/X509v3 Basic Constraints/g) ?? []).length).toBe(1);
+  });
+
   it.skipIf(process.platform === "win32")("sets restrictive permissions on key files", () => {
     const result = ensureCerts(tmpDir);
 
