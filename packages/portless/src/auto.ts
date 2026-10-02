@@ -160,13 +160,18 @@ export interface WorktreePrefix {
 }
 
 /**
- * Prepend a worktree prefix to a base hostname, or return the base name
- * unchanged when not in a worktree. Both single-app and multi-app modes
- * use this so a bare `portless` in a git worktree produces the same
- * `<prefix>.<name>` hostnames in either layout.
+ * Apply a worktree prefix to a base hostname, or return the base name
+ * unchanged when not in a worktree. With PORTLESS_WORKTREE_FLAT=1, all
+ * labels are joined into one DNS label for single-level wildcard certificates.
  */
-export function applyWorktreePrefix(baseName: string, worktree: WorktreePrefix | null): string {
-  return worktree ? `${worktree.prefix}.${baseName}` : baseName;
+export function applyWorktreePrefix(
+  baseName: string,
+  worktree: WorktreePrefix | null,
+  flat: boolean = process.env.PORTLESS_WORKTREE_FLAT === "1"
+): string {
+  if (!worktree) return baseName;
+  if (!flat) return `${worktree.prefix}.${baseName}`;
+  return truncateLabel(`${worktree.prefix}-${baseName.replace(/\./g, "-")}`);
 }
 
 /** Branch names that represent the default/primary checkout — no prefix needed. */
