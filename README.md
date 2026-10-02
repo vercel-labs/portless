@@ -351,6 +351,8 @@ portless myapp --tailscale next dev
 
 Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no framework `basePath` configuration is needed. The first app gets port 443, subsequent apps get 8443, 8444, etc.
 
+Single-app Vite runs receive the exact generated Tailscale hostname automatically. The Tailscale hostname takes Vite's single additional host slot; `localhost` remains allowed, but custom TLDs are not added while Tailscale sharing is active.
+
 ```bash
 portless myapp --tailscale next dev     # -> https://devbox.ts.net
 portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
