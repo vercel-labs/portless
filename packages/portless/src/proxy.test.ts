@@ -186,6 +186,149 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("hello from ipv6 backend");
     });
 
+    it("routes a wildcard subdomain to the most specific parent in any order (issue #380)", async () => {
+      const backends = await Promise.all(
+        ["parent", "child"].map(async (name) => {
+          const backend = trackServer(http.createServer((_req, res) => res.end(name)));
+          await listen(backend);
+          const addr = backend.address();
+          if (!addr || typeof addr === "string") throw new Error("no addr");
+          return addr.port;
+        })
+      );
+      const parent = { hostname: "acme.localhost", port: backends[0] };
+      const child = { hostname: "api.acme.localhost", port: backends[1] };
+
+      for (const routes of [
+        [parent, child],
+        [child, parent],
+      ]) {
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, strict: false })
+        );
+        await listen(server);
+        expect((await request(server, { host: "admin.api.acme.localhost" })).body).toBe("child");
+        expect((await request(server, { host: "tenant.acme.localhost" })).body).toBe("parent");
+        expect((await request(server, { host: "api.acme.localhost" })).body).toBe("child");
+      }
+    });
+
+    it("does not forward client hop-by-hop headers to the backend (issue #434)", async () => {
+      let received: http.IncomingHttpHeaders = {};
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          received = req.headers;
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "myapp.localhost",
+        headers: {
+          connection: "keep-alive",
+          "keep-alive": "timeout=5",
+          "proxy-connection": "keep-alive",
+          upgrade: "h2c",
+        },
+      });
+      expect(res.status).toBe(200);
+      expect(received.connection).toBe("close");
+      expect(received["keep-alive"]).toBeUndefined();
+      expect(received["proxy-connection"]).toBeUndefined();
+      expect(received.upgrade).toBeUndefined();
+    });
+
+    it("survives a backend resetting a kept-alive connection (issue #434)", async () => {
+      const sockets = new Set<net.Socket>();
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.end("ok");
+        })
+      );
+      backend.on("connection", (socket) => {
+        sockets.add(socket);
+        socket.on("close", () => sockets.delete(socket));
+      });
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const uncaught: Error[] = [];
+      const onUncaught = (err: Error) => uncaught.push(err);
+      process.prependListener("uncaughtException", onUncaught);
+      try {
+        const first = await request(server, {
+          host: "myapp.localhost",
+          headers: { connection: "keep-alive" },
+        });
+        expect(first.status).toBe(200);
+        for (const socket of sockets) socket.resetAndDestroy();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        const second = await request(server, { host: "myapp.localhost" });
+        expect(second.status).toBe(200);
+        expect(uncaught).toEqual([]);
+      } finally {
+        process.removeListener("uncaughtException", onUncaught);
+      }
+    });
+
+    it("forwards a chunked DELETE body intact", async () => {
+      let body = "";
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          req.on("data", (chunk) => (body += chunk));
+          req.on("end", () => res.end("ok"));
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = http.request(
+          {
+            hostname: "127.0.0.1",
+            port: addr.port,
+            method: "DELETE",
+            headers: { host: "myapp.localhost", "transfer-encoding": "chunked" },
+          },
+          (res) => {
+            res.resume();
+            res.on("end", () => resolve(res.statusCode!));
+          }
+        );
+        req.on("error", reject);
+        req.write("part-one,");
+        req.end("part-two");
+      });
+      expect(status).toBe(200);
+      expect(body).toBe("part-one,part-two");
+    });
+
     it("routes wildcard subdomain to matching parent route when strict is false", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {

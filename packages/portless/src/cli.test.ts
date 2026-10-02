@@ -2125,12 +2125,8 @@ describe("CLI", () => {
         );
 
         // Place the shim inside tmpDir/node_modules/.bin rather than relying
-        // on PATH order alone. spawnCommand's augmentedPath prepends the
-        // running node binary's own directory to PATH *ahead of* any PATH we
-        // pass in here, so a real `bun` installed beside Node (e.g. both
-        // via Homebrew) would shadow a shim placed in an arbitrary PATH
-        // directory no matter where it sits in that string. node_modules/.bin
-        // is collected first, before the node binary's directory, so a shim
+        // on PATH order alone: spawnCommand's augmentedPath collects
+        // node_modules/.bin first, ahead of the PATH we pass in, so a shim
         // there always wins regardless of what else is installed on the
         // machine. This mirrors how npm/pnpm/yarn/bun themselves resolve
         // locally-installed binaries.

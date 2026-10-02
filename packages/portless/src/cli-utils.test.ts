@@ -5,6 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  augmentedPath,
   buildProxyStartConfig,
   BLOCKED_PORTS,
   DEFAULT_TLD,
@@ -116,6 +117,35 @@ describe("proxy listener interface", () => {
     } finally {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
+  });
+});
+
+describe("augmentedPath (issue #241)", () => {
+  const nodeDir = path.dirname(process.execPath);
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-path-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("keeps the caller's PATH ahead of the running node's directory", () => {
+    const userBin = path.join(tmpDir, "version-manager", "bin");
+    const entries = augmentedPath({ PATH: userBin }, tmpDir).split(path.delimiter);
+    expect(entries.indexOf(userBin)).toBeGreaterThanOrEqual(0);
+    expect(entries.indexOf(userBin)).toBeLessThan(entries.lastIndexOf(nodeDir));
+  });
+
+  it("keeps project node_modules/.bin first and node's directory as a fallback", () => {
+    const localBin = path.join(tmpDir, "node_modules", ".bin");
+    fs.mkdirSync(localBin, { recursive: true });
+    const entries = augmentedPath({ PATH: "" }, tmpDir).split(path.delimiter);
+    expect(entries[0]).toBe(localBin);
+    expect(entries.at(-1)).toBe(nodeDir);
+    expect(entries).not.toContain("");
   });
 });
 

@@ -191,7 +191,7 @@ portless docs.myapp next dev
 # -> https://docs.myapp.localhost
 ```
 
-By default, only explicitly registered subdomains are routed (strict mode). Use `--wildcard` when starting the proxy to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app without extra registration).
+By default, only explicitly registered subdomains are routed (strict mode). Use `--wildcard` when starting the proxy to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app without extra registration). When several registered routes are parents of the host, the most specific one wins (`admin.api.myapp.localhost` routes to `api.myapp`, not `myapp`).
 
 ## Git Worktrees
 
