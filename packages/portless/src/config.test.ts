@@ -99,7 +99,7 @@ describe("loadConfig", () => {
     cleanupDir(tmpDir);
   });
 
-  it("returns null when no portless.json exists", () => {
+  it("returns null when no config source exists", () => {
     expect(loadConfig(tmpDir)).toBeNull();
   });
 
@@ -108,7 +108,21 @@ describe("loadConfig", () => {
     const result = loadConfig(tmpDir);
     expect(result).not.toBeNull();
     expect(result!.config.name).toBe("myapp");
-    expect(result!.configDir).toBe(tmpDir);
+    expect(result!.configBaseDir).toBe(tmpDir);
+    expect(result!.sourcePath).toBe(path.join(tmpDir, "portless.json"));
+  });
+
+  it("loads .config/portless.json when root portless.json is absent", () => {
+    fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, ".config", "portless.json"),
+      JSON.stringify({ name: "myapp" })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result).not.toBeNull();
+    expect(result!.config.name).toBe("myapp");
+    expect(result!.configBaseDir).toBe(tmpDir);
+    expect(result!.sourcePath).toBe(path.join(tmpDir, ".config", "portless.json"));
   });
 
   it("does not walk up from a subdirectory", () => {
@@ -163,7 +177,8 @@ describe("loadConfig", () => {
     expect(result).not.toBeNull();
     expect(result!.config.name).toBe("myapp");
     expect(result!.config.script).toBe("dev");
-    expect(result!.configDir).toBe(tmpDir);
+    expect(result!.configBaseDir).toBe(tmpDir);
+    expect(result!.sourcePath).toBe(path.join(tmpDir, "package.json"));
   });
 
   it("loads string shorthand from package.json portless key", () => {
@@ -192,6 +207,33 @@ describe("loadConfig", () => {
     );
     const result = loadConfig(tmpDir);
     expect(result!.config.name).toBe("from-file");
+  });
+
+  it("prefers root portless.json over .config/portless.json", () => {
+    fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "from-root" }));
+    fs.writeFileSync(
+      path.join(tmpDir, ".config", "portless.json"),
+      JSON.stringify({ name: "from-config-dir" })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result!.config.name).toBe("from-root");
+    expect(result!.sourcePath).toBe(path.join(tmpDir, "portless.json"));
+  });
+
+  it("prefers .config/portless.json over package.json portless key", () => {
+    fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, ".config", "portless.json"),
+      JSON.stringify({ name: "from-config-dir" })
+    );
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ name: "test", portless: { name: "from-pkg" } })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result!.config.name).toBe("from-config-dir");
+    expect(result!.sourcePath).toBe(path.join(tmpDir, ".config", "portless.json"));
   });
 
   it("ignores package.json without portless key", () => {
@@ -226,6 +268,12 @@ describe("loadConfig validation", () => {
 
   it("throws on invalid JSON", () => {
     fs.writeFileSync(path.join(tmpDir, "portless.json"), "not json");
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
+  it("throws on invalid JSON in .config/portless.json", () => {
+    fs.mkdirSync(path.join(tmpDir, ".config"), { recursive: true });
+    fs.writeFileSync(path.join(tmpDir, ".config", "portless.json"), "not json");
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
@@ -377,6 +425,16 @@ describe("resolveAppConfig", () => {
     };
     // path.relative on Windows returns backslashes
     const result = resolveAppConfig(config, "/repo", "/repo/apps/web");
+    expect(result).toEqual({ name: "web" });
+  });
+
+  it("matches apps relative to the project root even when config lives in .config", () => {
+    const config = {
+      apps: {
+        "packages/web": { name: "web" },
+      },
+    };
+    const result = resolveAppConfig(config, "/repo", "/repo/packages/web");
     expect(result).toEqual({ name: "web" });
   });
 });
