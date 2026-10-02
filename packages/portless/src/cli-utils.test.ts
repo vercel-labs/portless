@@ -120,6 +120,24 @@ describe("proxy listener interface", () => {
 });
 
 describe("findFreePort", () => {
+  it.for(["127.0.0.1", "::1", "0.0.0.0", "::"])(
+    "skips a port held on %s (issue #288)",
+    async (host, { skip }) => {
+      const server = net.createServer();
+      const port = await new Promise<number | null>((resolve) => {
+        // Only a missing address family fails here: port 0 is always available.
+        server.once("error", () => resolve(null));
+        server.listen(0, host, () => resolve((server.address() as net.AddressInfo).port));
+      });
+      if (port === null) return skip();
+      try {
+        await expect(findFreePort(port, port)).rejects.toThrow("No free port found");
+      } finally {
+        await new Promise((resolve) => server.close(resolve));
+      }
+    }
+  );
+
   it("returns a port in the default range", async () => {
     const port = await findFreePort();
     expect(port).toBeGreaterThanOrEqual(4000);
