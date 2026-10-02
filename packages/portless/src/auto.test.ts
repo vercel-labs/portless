@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -10,6 +10,21 @@ import {
   detectWorktreePrefix,
   applyWorktreePrefix,
 } from "./auto.js";
+
+// Count git CLI invocations so the fast-path test can assert the default
+// worktree detection never spawns git. The wrapper forwards to the real
+// implementation, so the git-CLI suite below still exercises real git.
+const gitSpawnCount = vi.hoisted(() => ({ value: 0 }));
+vi.mock("node:child_process", async (importOriginal) => {
+  const module = await importOriginal<typeof import("node:child_process")>();
+  return {
+    ...module,
+    execFileSync: ((...args: Parameters<typeof module.execFileSync>) => {
+      gitSpawnCount.value += 1;
+      return module.execFileSync(...args);
+    }) as typeof module.execFileSync,
+  };
+});
 
 // ---------------------------------------------------------------------------
 // sanitizeForHostname
@@ -227,6 +242,16 @@ describe("detectWorktreePrefix", () => {
     setupWorktree(tmpDir, "feature-auth");
     const result = detectWorktreePrefix(tmpDir);
     expect(result).toEqual({ prefix: "feature-auth", source: "git branch" });
+  });
+
+  it("resolves a linked worktree from the .git file without spawning git", () => {
+    setupWorktree(tmpDir, "feature-no-spawn");
+    gitSpawnCount.value = 0;
+
+    const result = detectWorktreePrefix(tmpDir);
+
+    expect(result).toEqual({ prefix: "feature-no-spawn", source: "git branch" });
+    expect(gitSpawnCount.value).toBe(0);
   });
 
   it("returns null when branch is main", () => {
