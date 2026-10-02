@@ -1321,6 +1321,7 @@ export function spawnCommand(
     if (graceTimer) clearTimeout(graceTimer);
     if (forceTimer) clearTimeout(forceTimer);
     if (shutdownPoll) clearInterval(shutdownPoll);
+    process.removeListener("SIGHUP", onSigHup);
     process.removeListener("SIGINT", onSigInt);
     process.removeListener("SIGTERM", onSigTerm);
     options?.onCleanup?.();
@@ -1361,9 +1362,11 @@ export function spawnCommand(
     shutdownPoll = setInterval(finishShutdownIfComplete, COMMAND_SHUTDOWN_POLL_MS);
   };
 
+  const onSigHup = () => handleSignal("SIGHUP");
   const onSigInt = () => handleSignal("SIGINT");
   const onSigTerm = () => handleSignal("SIGTERM");
 
+  process.on("SIGHUP", onSigHup);
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
 
