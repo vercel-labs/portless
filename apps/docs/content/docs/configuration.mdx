@@ -22,7 +22,7 @@ portless        # runs "dev" script, https://myapp.localhost
 
 In each project directory, portless checks `portless.json`, `.config/portless.json`, and the `package.json` `"portless"` key in that order. Only a missing standalone file advances to the next source; an invalid or unreadable file fails. Paths in `apps` are relative to the project directory, including when the config is in `.config`.
 
-The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`. Only `worktree` options and the [proxy settings](#proxy-settings) inherit from the workspace root into package directories; `name`, `script`, `appPort`, and `proxy` remain cwd-only.
+The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`. Only `worktree` options and the [proxy settings](#fields) inherit from the workspace root into package directories; `name`, `script`, `appPort`, and `proxy` remain cwd-only.
 
 ### Fields
 
