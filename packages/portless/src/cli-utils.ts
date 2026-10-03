@@ -9,7 +9,8 @@ import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
-import { resolveScript, resolveScriptRaw } from "./config.js";
+import { APP_PORT_STRATEGIES, resolveScript, resolveScriptRaw } from "./config.js";
+import type { AppConfig, AppPortStrategy } from "./config.js";
 import { createLoopbackConnection, resolveUserHome } from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
@@ -845,9 +846,84 @@ export async function discoverState(): Promise<{
  */
 const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
 
+/** How a port is picked and from where, resolved from config and environment. */
+export interface AppPortAllocation {
+  strategy: AppPortStrategy;
+  range: [number, number];
+}
+
+export const DEFAULT_APP_PORT_RANGE: readonly [number, number] = [MIN_APP_PORT, MAX_APP_PORT];
+
+/** Parse `PORTLESS_APP_PORT_STRATEGY`. */
+export function parseAppPortStrategy(
+  value: string,
+  source = "PORTLESS_APP_PORT_STRATEGY"
+): AppPortStrategy {
+  const normalized = value.trim().toLowerCase();
+  if ((APP_PORT_STRATEGIES as readonly string[]).includes(normalized)) {
+    return normalized as AppPortStrategy;
+  }
+  throw new Error(
+    `Invalid ${source}="${value}". Must be one of: ${APP_PORT_STRATEGIES.join(", ")}.`
+  );
+}
+
+/** Parse `PORTLESS_APP_PORT_RANGE`, written as `min-max` (e.g. `4200-4999`). */
+export function parseAppPortRange(
+  value: string,
+  source = "PORTLESS_APP_PORT_RANGE"
+): [number, number] {
+  const match = value.trim().match(/^(\d+)-(\d+)$/);
+  const min = match ? Number(match[1]) : NaN;
+  const max = match ? Number(match[2]) : NaN;
+  const isPort = (port: number) => Number.isInteger(port) && port >= 1 && port <= 65535;
+  if (!match || !isPort(min) || !isPort(max) || min > max) {
+    throw new Error(
+      `Invalid ${source}="${value}". Must be min-max with ports between 1 and 65535, e.g. 4200-4999.`
+    );
+  }
+  return [min, max];
+}
+
+/**
+ * Resolve how to pick an app port: the environment beats the config, which
+ * beats the defaults. `appPort` itself is handled by the callers, since a
+ * fixed port needs no picking.
+ */
+export function resolveAppPortAllocation(
+  config: Pick<AppConfig, "appPortStrategy" | "appPortRange"> | null | undefined,
+  env: NodeJS.ProcessEnv = process.env
+): AppPortAllocation {
+  const envStrategy = env.PORTLESS_APP_PORT_STRATEGY;
+  const envRange = env.PORTLESS_APP_PORT_RANGE;
+  return {
+    strategy: envStrategy
+      ? parseAppPortStrategy(envStrategy)
+      : (config?.appPortStrategy ?? "random"),
+    range: envRange
+      ? parseAppPortRange(envRange)
+      : (config?.appPortRange ?? [DEFAULT_APP_PORT_RANGE[0], DEFAULT_APP_PORT_RANGE[1]]),
+  };
+}
+
+/** FNV-1a over the key, so `stable` picks the same offset on every machine. */
+function hashKey(key: string): number {
+  let hash = 0x811c9dc5;
+  for (const char of key) {
+    hash ^= char.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
+
 /**
  * Find a free port in the given range (default 4000-4999).
- * Tries random ports first for speed, then falls back to sequential scan.
+ *
+ * `random` tries random ports first for speed, then falls back to a scan.
+ * `sequential` scans from the bottom, so the first app gets the bottom port.
+ * `stable` starts at an offset derived from `key` (the app's hostname) and
+ * scans forward with wraparound, so one checkout keeps its port across
+ * restarts while different checkouts spread across the range.
  *
  * Note: There is an inherent TOCTOU race between verifying a port is free
  * and the child process actually binding to it. The random-first strategy
@@ -855,11 +931,17 @@ const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
  */
 export async function findFreePort(
   minPort = MIN_APP_PORT,
-  maxPort = MAX_APP_PORT
+  maxPort = MAX_APP_PORT,
+  options: { strategy?: AppPortStrategy; key?: string; exclude?: ReadonlySet<number> } = {}
 ): Promise<number> {
   if (minPort > maxPort) {
     throw new Error(`minPort (${minPort}) must be <= maxPort (${maxPort})`);
   }
+  // `exclude` holds ports other routes already own. Their apps may not have
+  // bound yet, and a bottom-first strategy would otherwise hand the same
+  // port to two apps started at the same time.
+  const { strategy = "random", key = "", exclude = new Set<number>() } = options;
+  const skip = (port: number) => BLOCKED_PORTS.has(port) || exclude.has(port);
 
   const isFreeOn = (port: number, host: string): Promise<boolean> => {
     return new Promise((resolve) => {
@@ -882,17 +964,23 @@ export async function findFreePort(
     return true;
   };
 
-  // Try random ports first
-  for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
-    const port = minPort + Math.floor(Math.random() * (maxPort - minPort + 1));
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
-      return port;
+  const size = maxPort - minPort + 1;
+
+  if (strategy === "random") {
+    for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
+      const port = minPort + Math.floor(Math.random() * size);
+      if (!skip(port) && (await tryPort(port))) {
+        return port;
+      }
     }
   }
 
-  // Fall back to sequential
-  for (let port = minPort; port <= maxPort; port++) {
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
+  // Scan the whole range once. Sequential and the random fallback start at
+  // the bottom; stable starts at the key's offset and wraps around.
+  const start = strategy === "stable" ? hashKey(key) % size : 0;
+  for (let i = 0; i < size; i++) {
+    const port = minPort + ((start + i) % size);
+    if (!skip(port) && (await tryPort(port))) {
       return port;
     }
   }

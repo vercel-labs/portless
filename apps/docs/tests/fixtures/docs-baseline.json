@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "be2a9250db17fb53b3134ddc6a6fac7c7db4b1df46eb6abbf0dd4f5476bb5c68",
-      "markdownBodySha256": "be2a9250db17fb53b3134ddc6a6fac7c7db4b1df46eb6abbf0dd4f5476bb5c68",
+      "mdxSha256": "fd43c9af3989f4d5d9ebf06da2cea0210baf5e81c6eca577892dcff09fbe2fbb",
+      "markdownBodySha256": "fd43c9af3989f4d5d9ebf06da2cea0210baf5e81c6eca577892dcff09fbe2fbb",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",
@@ -109,8 +109,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "2c2d026e9a3a6099dad1e60c59e8d53f103b84bdedf173a266e6bc2f8f88aba4",
-      "markdownBodySha256": "2c2d026e9a3a6099dad1e60c59e8d53f103b84bdedf173a266e6bc2f8f88aba4",
+      "mdxSha256": "1ff97413d4329d4f3087b468e8e55722704a4b582970e034c8c8669d4c82689c",
+      "markdownBodySha256": "1ff97413d4329d4f3087b468e8e55722704a4b582970e034c8c8669d4c82689c",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",
