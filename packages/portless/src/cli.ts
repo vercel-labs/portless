@@ -116,6 +116,7 @@ import {
   isUnprivilegedEnvEnabled,
   readUnprivilegedMarker,
   writeUnprivilegedMarker,
+  resolveAppPortAllocation,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -178,6 +179,7 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
+import type { AppPortAllocation } from "./cli-utils.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import { EnvPublication, buildNodeOptions, hasTurboConfig } from "./turbo.js";
@@ -1824,7 +1826,8 @@ async function runApp(
   autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  allocation: AppPortAllocation = resolveAppPortAllocation(null)
 ) {
   let store = initialStore;
   initialStore.recoverCorruptRoutesFile();
@@ -1940,11 +1943,23 @@ async function runApp(
     }
   }
 
-  const port = desiredPort ?? (await findFreePort());
+  const port =
+    desiredPort ??
+    (await findFreePort(allocation.range[0], allocation.range[1], {
+      strategy: allocation.strategy,
+      key: hostname,
+      exclude: registeredPorts(store),
+    }));
   if (desiredPort) {
     console.error(colors.green(`  Using port ${port} (fixed)`));
-  } else {
+  } else if (allocation.strategy === "random") {
     console.error(colors.green(`  Using port ${port}`));
+  } else {
+    console.error(
+      colors.green(
+        `  Using port ${port} (${allocation.strategy} in ${allocation.range[0]}-${allocation.range[1]})`
+      )
+    );
   }
 
   await stopOrphanedProcessGroups(store);
@@ -4693,7 +4708,8 @@ async function handleDefaultSingle(
     { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
@@ -4709,7 +4725,26 @@ interface MultiAppEntry {
   label: string;
   commandArgs: string[];
   appPort?: number;
+  allocation: AppPortAllocation;
   proxied: boolean;
+}
+
+/** Ports that registered routes already own, so a new pick never doubles up on one. */
+function registeredPorts(store: RouteStore): Set<number> {
+  try {
+    return new Set(store.loadRoutes().map((route) => route.port));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Pick a port for a multi-app entry with its own strategy, keyed by its hostname. */
+function pickAppPort(app: MultiAppEntry, store: RouteStore): Promise<number> {
+  return findFreePort(app.allocation.range[0], app.allocation.range[1], {
+    strategy: app.allocation.strategy,
+    key: app.name,
+    exclude: registeredPorts(store),
+  });
 }
 
 function spawnChildProcess(
@@ -4790,7 +4825,7 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    appPort = app.appPort ?? (await findFreePort());
+    appPort = app.appPort ?? (await pickAppPort(app, store));
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -5043,6 +5078,7 @@ async function handleDefaultMulti(
       label,
       commandArgs,
       appPort: envAppPort ?? appOverride.appPort,
+      allocation: resolveAppPortAllocation(appOverride),
       proxied,
     });
   }
@@ -5174,7 +5210,7 @@ async function runWithTurbo(
       continue;
     }
 
-    const appPort = app.appPort ?? (await findFreePort());
+    const appPort = app.appPort ?? (await pickAppPort(app, store));
     const hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -5446,7 +5482,8 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
@@ -5474,11 +5511,9 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     throw new UsageError("No command provided.", NAMED_USAGE);
   }
 
-  if (!parsed.appPort) {
-    const appConfig = loadAppConfig();
-    if (appConfig?.appPort) {
-      parsed.appPort = appConfig.appPort;
-    }
+  const appConfig = loadAppConfig();
+  if (!parsed.appPort && appConfig?.appPort) {
+    parsed.appPort = appConfig.appPort;
   }
 
   // Truncate individual labels that exceed the DNS limit, same as handleRunMode.
@@ -5504,7 +5539,8 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     undefined,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
