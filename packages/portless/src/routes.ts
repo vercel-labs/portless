@@ -23,6 +23,8 @@ export const DIR_MODE = 0o755;
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
+  /** Process group of the command portless spawned for this route. */
+  childPgid?: number;
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
@@ -31,6 +33,7 @@ export interface RouteMapping extends RouteInfo {
 }
 
 type RouteMetadataPatch = {
+  childPgid?: number | null;
   tailscaleUrl?: string | null;
   tailscaleHttpsPort?: number | null;
   tailscaleFunnel?: boolean | null;
@@ -322,6 +325,10 @@ export class RouteStore {
       const routes = this.loadRoutes(true);
       const route = routes.find((r) => r.hostname === hostname);
       if (!route) return;
+      if ("childPgid" in fields) {
+        if (fields.childPgid === null) delete route.childPgid;
+        else if (fields.childPgid !== undefined) route.childPgid = fields.childPgid;
+      }
       if ("tailscaleUrl" in fields) {
         if (fields.tailscaleUrl === null) delete route.tailscaleUrl;
         else if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
