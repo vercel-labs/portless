@@ -215,11 +215,52 @@ function signalTrackedProcesses(
   }
 }
 
-/** Return explicit IPv4 and IPv6 listener targets for the effective proxy mode. */
-export function getProxyBindTargets(lanMode: boolean): ProxyBindTarget[] {
-  return lanMode
+/**
+ * Return explicit IPv4 and IPv6 listener targets for the effective proxy mode.
+ * LAN mode binds the unspecified addresses so other devices can reach the
+ * proxy. Unprivileged mode binds them too, because macOS lets a non-root
+ * process take a port below 1024 only on the wildcard address; the proxy
+ * then refuses every peer that is not loopback itself.
+ */
+export function getProxyBindTargets(lanMode: boolean, unprivileged = false): ProxyBindTarget[] {
+  return lanMode || unprivileged
     ? [{ host: IPV4_LAN_PROXY_HOST }, { host: IPV6_LAN_PROXY_HOST, ipv6Only: true }]
     : [{ host: IPV4_LOOPBACK_PROXY_HOST }, { host: IPV6_LOOPBACK_PROXY_HOST, ipv6Only: true }];
+}
+
+/**
+ * Whether this process can bind `port` without root on `platform`. macOS
+ * allows any port on the wildcard address since Mojave. Linux moves the
+ * boundary with `net.ipv4.ip_unprivileged_port_start`. Windows has none.
+ */
+export function canBindWithoutRoot(
+  port: number,
+  platform: NodeJS.Platform = process.platform,
+  readUnprivilegedPortStart: () => string = () =>
+    fs.readFileSync("/proc/sys/net/ipv4/ip_unprivileged_port_start", "utf-8")
+): { ok: true } | { ok: false; reason: string } {
+  if (port >= PRIVILEGED_PORT_THRESHOLD || platform === "darwin" || platform === "win32") {
+    return { ok: true };
+  }
+  if (platform !== "linux") {
+    return {
+      ok: false,
+      reason: `Binding port ${port} without root is not supported on ${platform}.`,
+    };
+  }
+  let start: number;
+  try {
+    start = parseInt(readUnprivilegedPortStart().trim(), 10);
+  } catch {
+    return { ok: false, reason: "Could not read net.ipv4.ip_unprivileged_port_start." };
+  }
+  if (!Number.isNaN(start) && port >= start) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: `Port ${port} is below net.ipv4.ip_unprivileged_port_start (${Number.isNaN(start) ? "unreadable" : start}).`,
+  };
 }
 
 /**
@@ -331,6 +372,32 @@ export function readTlsMarker(dir: string): boolean {
 /** Write or remove the TLS marker in the state directory. */
 export function writeTlsMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, TLS_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
+/** Name of the marker file that remembers unprivileged mode across proxy restarts. */
+const UNPRIVILEGED_MARKER_FILE = "proxy.unprivileged";
+
+/** Read the unprivileged-mode marker from a state directory. */
+export function readUnprivilegedMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, UNPRIVILEGED_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+/** Write or remove the unprivileged-mode marker in the state directory. */
+export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, UNPRIVILEGED_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
   } else {
@@ -612,6 +679,15 @@ export function isLanEnvEnabled(): boolean {
 }
 
 /**
+ * Return whether unprivileged mode is requested via the PORTLESS_UNPRIVILEGED
+ * env var: bind the wildcard address, accept loopback peers only, never sudo.
+ */
+export function isUnprivilegedEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_UNPRIVILEGED;
+  return val === "1" || val === "true";
+}
+
+/**
  * Read the last-known proxy configuration from the state directory on disk.
  * Unlike {@link discoverState}, this does not check whether the proxy is
  * actually running. It simply reads whatever state files exist so a
@@ -625,6 +701,7 @@ export function readPersistedProxyState(): {
   tld: string;
   tlds: string[];
   lanMode: boolean;
+  unprivileged: boolean;
 } | null {
   const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
   const port = readPortFromDir(dir);
@@ -633,7 +710,8 @@ export function readPersistedProxyState(): {
     const tlds = readTldsFromDir(dir);
     const tld = tlds[0] ?? DEFAULT_TLD;
     const lanIp = readLanMarker(dir);
-    return { port, tls, tld, tlds, lanMode: lanIp !== null };
+    const unprivileged = readUnprivilegedMarker(dir);
+    return { port, tls, tld, tlds, lanMode: lanIp !== null, unprivileged };
   }
 
   return null;
@@ -649,6 +727,7 @@ export function buildProxyStartConfig(options: {
   tld: string;
   tlds?: readonly string[];
   useWildcard?: boolean;
+  unprivileged?: boolean;
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
@@ -694,6 +773,10 @@ export function buildProxyStartConfig(options: {
 
   if (options.useWildcard) {
     args.push("--wildcard");
+  }
+
+  if (options.unprivileged) {
+    args.push("--unprivileged");
   }
 
   if (options.skipTrust) {
