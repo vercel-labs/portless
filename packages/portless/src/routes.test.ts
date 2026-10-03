@@ -5,7 +5,8 @@ import * as net from "node:net";
 import * as os from "node:os";
 import { spawn } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { RouteStore, RouteConflictError, RoutesFileError } from "./routes.js";
+import { RouteStore, RouteConflictError, RoutesFileError, portCandidates } from "./routes.js";
+import type { AppPortStrategy } from "./config.js";
 import { ensureStateDir } from "./utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -455,6 +456,121 @@ describe("RouteStore", () => {
       expect(routes).toHaveLength(2);
       const hostnames = routes.map((r) => r.hostname).sort();
       expect(hostnames).toEqual(["app1.localhost", "app2.localhost"]);
+    });
+  });
+
+  describe("register with a port pick", () => {
+    async function hold(port: number): Promise<net.Server | null> {
+      const server = net.createServer();
+      const bound = await new Promise<boolean>((resolve) => {
+        server.once("error", () => resolve(false));
+        server.listen(port, "127.0.0.1", () => resolve(true));
+      });
+      return bound ? server : null;
+    }
+    const release = (server: net.Server | null) =>
+      new Promise<void>((resolve) => (server ? server.close(() => resolve()) : resolve()));
+    const pick = (strategy: AppPortStrategy, range: [number, number], key = "k") => ({
+      strategy,
+      range,
+      key,
+    });
+
+    it("sequential returns the bottom of the range when it is free", async (ctx) => {
+      const probe = await hold(9990);
+      if (!probe) return ctx.skip();
+      await release(probe);
+      const { port } = await store.register({
+        hostnames: ["a.localhost"],
+        pid: process.pid,
+        pick: pick("sequential", [9990, 9995]),
+      });
+      expect(port).toBe(9990);
+    });
+
+    it("sequential moves to the next port when the bottom is held", async (ctx) => {
+      const holder = await hold(9990);
+      if (!holder) return ctx.skip();
+      try {
+        const { port } = await store.register({
+          hostnames: ["a.localhost"],
+          pid: process.pid,
+          pick: pick("sequential", [9990, 9995]),
+        });
+        expect(port).toBe(9991);
+      } finally {
+        await release(holder);
+      }
+    });
+
+    it("sequential skips a port another route owns before its app has bound it", async () => {
+      const first = await store.register({
+        hostnames: ["a.localhost"],
+        pid: process.pid,
+        pick: pick("sequential", [9990, 9995]),
+      });
+      const second = await store.register({
+        hostnames: ["b.localhost"],
+        pid: process.pid,
+        pick: pick("sequential", [9990, 9995]),
+      });
+      expect(second.port).not.toBe(first.port);
+      expect(second.port).toBeGreaterThan(first.port);
+    });
+
+    it("skips browser-blocked ports in every strategy", async () => {
+      for (const strategy of ["sequential", "stable", "random"] as const) {
+        const { port } = await store.register({
+          hostnames: [`${strategy}.localhost`],
+          pid: process.pid,
+          pick: pick(strategy, [6000, 6001]),
+        });
+        expect(port).toBe(6001);
+        store.remove([`${strategy}.localhost`]);
+      }
+    });
+
+    it("names the configured range when it is full", async () => {
+      await expect(
+        store.register({
+          hostnames: ["a.localhost"],
+          pid: process.pid,
+          pick: pick("sequential", [4045, 4045]),
+        })
+      ).rejects.toThrow("No free port found in range 4045-4045");
+    });
+  });
+
+  describe("portCandidates", () => {
+    const first = (key: string, range: [number, number] = [9000, 9999]) =>
+      portCandidates({ strategy: "stable", range, key }).next().value;
+
+    it("stable starts at the same port for the same key", () => {
+      expect(first("login.myapp.localhost")).toBe(first("login.myapp.localhost"));
+    });
+
+    it("stable spreads different keys across the range", () => {
+      const ports = new Set(
+        ["a.myapp.localhost", "b.myapp.localhost", "c.myapp.localhost"].map((key) => first(key))
+      );
+      expect(ports.size).toBe(3);
+    });
+
+    it("stable wraps around and covers the whole range once", () => {
+      const ports = [...portCandidates({ strategy: "stable", range: [9990, 9994], key: "wrap" })];
+      expect([...ports].sort()).toEqual([9990, 9991, 9992, 9993, 9994]);
+    });
+
+    it("sequential walks the range from the bottom", () => {
+      expect([...portCandidates({ strategy: "sequential", range: [9990, 9992], key: "" })]).toEqual(
+        [9990, 9991, 9992]
+      );
+    });
+
+    it("random stays inside the range and ends with a full scan", () => {
+      const ports = [...portCandidates({ strategy: "random", range: [9990, 9992], key: "" })];
+      expect(ports.every((port) => port >= 9990 && port <= 9992)).toBe(true);
+      expect(ports.slice(-3)).toEqual([9990, 9991, 9992]);
     });
   });
 

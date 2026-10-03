@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import colors from "./colors.js";
 import { PID_FILE, PORT_FILE, START_FILE } from "./proxy-state.js";
+import type { AppPortStrategy } from "./config.js";
 import type { RouteInfo } from "./types.js";
 import {
   explainUnsafeStateDir,
@@ -30,6 +31,46 @@ export const FILE_MODE = 0o644;
 const MIN_APP_PORT = 4000;
 const MAX_APP_PORT = 4999;
 const RANDOM_PORT_ATTEMPTS = 50;
+
+/** The range app ports are picked from when the config does not set one. */
+export const DEFAULT_APP_PORT_RANGE: readonly [number, number] = [MIN_APP_PORT, MAX_APP_PORT];
+
+/** How `RouteStore.register` orders the ports it tries when none is fixed. */
+export interface PortPick {
+  strategy: AppPortStrategy;
+  range: readonly [number, number];
+  /** The app's hostname, so `stable` lands on the same port every run. */
+  key: string;
+}
+
+/**
+ * Ports to try, in order. `random` tries random ports first for speed and
+ * then scans from the bottom. `sequential` scans from the bottom, so the
+ * first app gets the bottom port. `stable` starts at an offset derived from
+ * `key` and wraps around, so one checkout keeps its port across restarts
+ * while different checkouts spread across the range.
+ */
+export function* portCandidates(pick: PortPick): Generator<number> {
+  const [min, max] = pick.range;
+  const size = max - min + 1;
+  if (pick.strategy === "random") {
+    for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
+      yield min + Math.floor(Math.random() * size);
+    }
+  }
+  const start = pick.strategy === "stable" ? hashKey(pick.key) % size : 0;
+  for (let i = 0; i < size; i++) yield min + ((start + i) % size);
+}
+
+/** FNV-1a over the key, so `stable` picks the same offset on every machine. */
+function hashKey(key: string): number {
+  let hash = 0x811c9dc5;
+  for (const char of key) {
+    hash ^= char.codePointAt(0)!;
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return hash;
+}
 
 const BLOCKED_PORTS: ReadonlySet<number> = new Set([
   0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
@@ -527,6 +568,8 @@ export class RouteStore {
     hostnames: readonly string[];
     pid: number;
     port?: number;
+    /** Order to try ports in when `port` is not fixed. Defaults to random over 4000-4999. */
+    pick?: PortPick;
     force?: boolean;
     upstream?: RouteInfo["upstream"];
   }): Promise<{ port: number; killedPids: number[] }> {
@@ -601,16 +644,13 @@ export class RouteStore {
       );
 
     if (input.port !== undefined) return registerPort(input.port)!;
-    for (let i = 0; i < RANDOM_PORT_ATTEMPTS + MAX_APP_PORT - MIN_APP_PORT + 1; i++) {
-      const port =
-        i < RANDOM_PORT_ATTEMPTS
-          ? MIN_APP_PORT + Math.floor(Math.random() * (MAX_APP_PORT - MIN_APP_PORT + 1))
-          : MIN_APP_PORT + i - RANDOM_PORT_ATTEMPTS;
+    const pick = input.pick ?? { strategy: "random", range: DEFAULT_APP_PORT_RANGE, key: "" };
+    for (const port of portCandidates(pick)) {
       if (BLOCKED_PORTS.has(port) || !(await isPortFree(port))) continue;
       const result = registerPort(port);
       if (result) return result;
     }
-    throw new Error(`No free port found in range ${MIN_APP_PORT}-${MAX_APP_PORT}`);
+    throw new Error(`No free port found in range ${pick.range[0]}-${pick.range[1]}`);
   }
 
   /** Return routes whose owners are dead without removing them from storage. */
