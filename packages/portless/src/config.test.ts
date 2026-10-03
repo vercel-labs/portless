@@ -131,10 +131,12 @@ describe("loadConfig", () => {
       config: { name: "root" },
       configDir: tmpDir,
       source: "portless.json",
+      location: path.join(tmpDir, "portless.json"),
     });
     fs.unlinkSync(path.join(tmpDir, "portless.json"));
     const nested = loadConfig(tmpDir)!;
     expect(nested.source).toBe(".config/portless.json");
+    expect(nested.location).toBe(path.join(configDir, "portless.json"));
     expect(nested.configDir).toBe(tmpDir);
     expect(
       resolveAppConfig(nested.config, nested.configDir, path.join(tmpDir, "apps/web"))
@@ -146,6 +148,7 @@ describe("loadConfig", () => {
       config: { name: "pkg" },
       configDir: tmpDir,
       source: "package.json",
+      location: `${path.join(tmpDir, "package.json")} "portless"`,
     });
   });
 
@@ -156,6 +159,7 @@ describe("loadConfig", () => {
       config: { name: "pkg" },
       configDir: tmpDir,
       source: "package.json",
+      location: `${path.join(tmpDir, "package.json")} "portless"`,
     });
   });
 
@@ -443,6 +447,62 @@ describe("loadConfig validation", () => {
   it("throws when turbo is not a boolean", () => {
     fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ turbo: "yes" }));
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
+  it("accepts every proxy setting with its JSON type", () => {
+    const config = {
+      https: false,
+      port: 8080,
+      tld: ["localhost", "test"],
+      wildcard: true,
+      syncHosts: false,
+      unprivileged: true,
+    };
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify(config));
+    const result = loadConfig(tmpDir);
+    expect(result?.config).toEqual(config);
+    expect(result?.location).toBe(path.join(tmpDir, "portless.json"));
+  });
+
+  it("accepts a single string tld", () => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ tld: "test" }));
+    expect(loadConfig(tmpDir)?.config.tld).toBe("test");
+  });
+
+  it.each([
+    ["https", "0"],
+    ["wildcard", 1],
+    ["syncHosts", "false"],
+    ["unprivileged", null],
+  ])("throws when %s is not a boolean", (key, value) => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ [key]: value }));
+    expect(() => loadConfig(tmpDir)).toThrow(new RegExp(`"${key}".*must be a boolean`));
+  });
+
+  it.each([0, 70000, 80.5, "80"])("throws when port is %s", (port) => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ port }));
+    expect(() => loadConfig(tmpDir)).toThrow(/"port".*between 1 and 65535/);
+  });
+
+  it.each([[], [""], 7, ["localhost", 3]])("throws when tld is %j", (tld) => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ tld }));
+    expect(() => loadConfig(tmpDir)).toThrow(/"tld".*non-empty string/);
+  });
+
+  it("rejects unprivileged together with hosts sync before anything runs", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ unprivileged: true, syncHosts: true })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/"syncHosts": true cannot be combined/);
+  });
+
+  it("names the package.json key as the location", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ name: "x", portless: { https: false } })
+    );
+    expect(loadConfig(tmpDir)?.location).toBe(`${path.join(tmpDir, "package.json")} "portless"`);
   });
 
   it("warns on unknown top-level keys", () => {

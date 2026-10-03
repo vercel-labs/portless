@@ -98,6 +98,8 @@ An optional `portless.json` sets the name and script. In a monorepo, one file at
 }
 ```
 
+The same file can pin how the proxy runs for everyone who checks the project out, such as `{ "https": false, "wildcard": true }`, and a flag or an exported `PORTLESS_*` variable still overrides it.
+
 In each project directory, portless reads `portless.json`, then `.config/portless.json`, then the `package.json` `"portless"` key, using the first available config. `apps` paths remain relative to the project directory even when the config is in `.config`. Fields, precedence, Turborepo setup, and environment variables are in [Configuration](https://portless.sh/configuration).
 
 ## For AI agents
