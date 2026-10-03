@@ -304,6 +304,15 @@ async function waitForHttpHeader(
   throw new Error(`Timed out waiting for ${headerName} on ${hostname}:${port}`);
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   if (child.exitCode !== null) return;
   child.kill("SIGTERM");
@@ -2680,10 +2689,13 @@ describe("CLI", { timeout: 15_000 }, () => {
 
       it("auto-starts the proxy from the file when an app runs", async () => {
         writeConfig(tmpDir, { https: false, port: testPort, wildcard: true });
+        // The app records its URL and pid. The test ends the app itself and
+        // waits for it to be gone: on Windows a live process whose cwd is the
+        // temp dir would make the afterEach cleanup fail with EPERM.
         const capFile = path.join(tmpDir, "url.txt");
         fs.writeFileSync(
           path.join(tmpDir, "app.cjs"),
-          `require("node:fs").writeFileSync(${JSON.stringify(capFile)}, process.env.PORTLESS_URL || "");\nsetInterval(() => {}, 1000);\n`
+          `require("node:fs").writeFileSync(${JSON.stringify(capFile)}, JSON.stringify({ url: process.env.PORTLESS_URL || "", pid: process.pid }));\nsetInterval(() => {}, 1000);\n`
         );
         const childEnv: Record<string, string | undefined> = { ...process.env, ...fileEnv() };
         for (const key of Object.keys(childEnv)) {
@@ -2703,17 +2715,33 @@ describe("CLI", { timeout: 15_000 }, () => {
         let output = "";
         cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
         cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+        let appPid: number | undefined;
         try {
           for (let i = 0; i < 60 && !fs.existsSync(capFile); i++) {
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
           if (!fs.existsSync(capFile)) throw new Error(`app never started. CLI output:\n${output}`);
 
-          expect(fs.readFileSync(capFile, "utf-8")).toBe(`http://fromfile.localhost:${testPort}`);
+          const captured = JSON.parse(fs.readFileSync(capFile, "utf-8")) as {
+            url: string;
+            pid: number;
+          };
+          appPid = captured.pid;
+          expect(captured.url).toBe(`http://fromfile.localhost:${testPort}`);
           await waitForHttpHeader(testPort, "X-Portless", "1");
           expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain("(wildcard)");
         } finally {
           await stopChild(cli);
+          if (appPid !== undefined) {
+            try {
+              process.kill(appPid, "SIGKILL");
+            } catch {
+              // Already gone.
+            }
+            for (let i = 0; i < 50 && isAlive(appPid); i++) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
         }
       }, 60_000);
     });
