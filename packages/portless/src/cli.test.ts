@@ -2662,6 +2662,60 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.writeFileSync(path.join(tmpDir, "portless.json"), "{ not json");
         expect(run(["--help"], { env: fileEnv(), cwd: tmpDir }).status).toBe(0);
       });
+
+      it("fails only the commands that start the proxy on a conflicting file", () => {
+        writeConfig(tmpDir, { unprivileged: true, syncHosts: true, port: testPort });
+        const get = run(["get", "--no-worktree", "web"], { env: fileEnv(), cwd: tmpDir });
+        expect(get.status).toBe(0);
+        expect(get.stdout).toContain("web.localhost");
+
+        const auto = run(["run", "--name", "web", "node", "-e", "0"], {
+          env: fileEnv(),
+          cwd: tmpDir,
+        });
+        expect(auto.status).toBe(1);
+        expect(auto.stderr).toContain('"syncHosts": true cannot be combined');
+        expect(fs.existsSync(path.join(tmpDir, "proxy.port"))).toBe(false);
+      });
+
+      it("auto-starts the proxy from the file when an app runs", async () => {
+        writeConfig(tmpDir, { https: false, port: testPort, wildcard: true });
+        const capFile = path.join(tmpDir, "url.txt");
+        fs.writeFileSync(
+          path.join(tmpDir, "app.cjs"),
+          `require("node:fs").writeFileSync(${JSON.stringify(capFile)}, process.env.PORTLESS_URL || "");\nsetInterval(() => {}, 1000);\n`
+        );
+        const childEnv: Record<string, string | undefined> = { ...process.env, ...fileEnv() };
+        for (const key of Object.keys(childEnv)) {
+          if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+        }
+        childEnv.NO_COLOR = "1";
+
+        const cli = spawn(
+          process.execPath,
+          [CLI_PATH, "run", "--name", "fromfile", "node", "app.cjs"],
+          {
+            cwd: tmpDir,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          }
+        );
+        let output = "";
+        cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+        cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+        try {
+          for (let i = 0; i < 60 && !fs.existsSync(capFile); i++) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          if (!fs.existsSync(capFile)) throw new Error(`app never started. CLI output:\n${output}`);
+
+          expect(fs.readFileSync(capFile, "utf-8")).toBe(`http://fromfile.localhost:${testPort}`);
+          await waitForHttpHeader(testPort, "X-Portless", "1");
+          expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain("(wildcard)");
+        } finally {
+          await stopChild(cli);
+        }
+      }, 60_000);
     });
 
     it("accepts connections on IPv6 loopback when available", async (ctx) => {
