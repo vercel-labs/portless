@@ -269,6 +269,20 @@ describe("zombie process prevention", () => {
     expect(survivors).toEqual([]);
   });
 
+  it("SIGHUP kills the dev server via process group", async () => {
+    if (isWindows) return;
+
+    // Closing the terminal sends SIGHUP to the foreground process group. The
+    // detached child is outside that group, so the CLI has to forward it.
+    const { appPort } = await startCliApp("zombie-sighup", state, "wrapper.js");
+
+    state.cliChild!.kill("SIGHUP");
+    const cliExited = await waitForChildToExit(state.cliChild!, 10_000);
+    const portClosed = await waitForPortToClose(appPort, 2000);
+
+    expect({ cliExited, portClosed }).toEqual({ cliExited: true, portClosed: true });
+  });
+
   it("SIGINT stops the command's dev server before exiting", async () => {
     if (isWindows) return;
 

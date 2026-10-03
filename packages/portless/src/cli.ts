@@ -4024,6 +4024,7 @@ async function runWithTurbo(
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
 
   const exitCode = await new Promise<number | null>((resolve) => {
     turboChild.on("exit", (code) => resolve(code));
@@ -4108,6 +4109,7 @@ async function runWithDirectSpawn(
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
 
   await Promise.all(
     children.map(
