@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { WorktreePrefixStyle } from "./auto.js";
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -15,9 +16,15 @@ export interface AppConfig {
   proxy?: boolean;
 }
 
+export interface WorktreeConfig {
+  /** How the git branch becomes the worktree prefix. Defaults to `last-segment`. */
+  prefix?: WorktreePrefixStyle;
+}
+
 export interface PortlessConfig extends AppConfig {
   apps?: Record<string, AppConfig>;
   turbo?: boolean;
+  worktree?: WorktreeConfig;
 }
 
 export interface LoadedConfig {
@@ -311,7 +318,12 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo"]);
+const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo", "worktree"]);
+const KNOWN_WORKTREE_KEYS = new Set(["prefix"]);
+const WORKTREE_PREFIX_STYLES: ReadonlySet<string> = new Set<WorktreePrefixStyle>([
+  "last-segment",
+  "branch",
+]);
 const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy"]);
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
@@ -356,6 +368,10 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
     if (typeof obj.turbo !== "boolean") {
       throw new ConfigValidationError(`"turbo" in ${configPath} must be a boolean.`);
     }
+  }
+
+  if (obj.worktree !== undefined) {
+    validateWorktreeConfig(obj.worktree, configPath);
   }
 
   if (obj.apps !== undefined) {
@@ -407,6 +423,21 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
   }
 
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
+}
+
+function validateWorktreeConfig(value: unknown, configPath: string): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ConfigValidationError(`"worktree" in ${configPath} must be an object.`);
+  }
+  const obj = value as Record<string, unknown>;
+  if (obj.prefix !== undefined) {
+    if (typeof obj.prefix !== "string" || !WORKTREE_PREFIX_STYLES.has(obj.prefix)) {
+      throw new ConfigValidationError(
+        `"worktree.prefix" in ${configPath} must be one of: ${[...WORKTREE_PREFIX_STYLES].map((s) => `"${s}"`).join(", ")}.`
+      );
+    }
+  }
+  warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, "worktree");
 }
 
 function warnUnknownKeys(

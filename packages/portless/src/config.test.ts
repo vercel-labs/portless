@@ -281,6 +281,43 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("accepts worktree.prefix as a known style", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ worktree: { prefix: "branch" } })
+    );
+    expect(loadConfig(tmpDir)?.config.worktree).toEqual({ prefix: "branch" });
+  });
+
+  it("accepts an empty worktree object", () => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ worktree: {} }));
+    expect(loadConfig(tmpDir)?.config.worktree).toEqual({});
+  });
+
+  it("throws when worktree is not an object", () => {
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ worktree: "branch" }));
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+  });
+
+  it("throws when worktree.prefix is not a known style", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ worktree: { prefix: "full" } })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/"worktree\.prefix".*"last-segment", "branch"/);
+  });
+
+  it("warns on unknown worktree keys", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ worktree: { prefix: "branch", typo: true } })
+    );
+    loadConfig(tmpDir);
+    expect(spy).toHaveBeenCalledWith(expect.stringContaining('"worktree.typo"'));
+    spy.mockRestore();
+  });
+
   it("warns on unknown top-level keys", () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fs.writeFileSync(
