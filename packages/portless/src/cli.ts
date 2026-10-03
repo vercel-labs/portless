@@ -118,6 +118,8 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig } from "./config.js";
+import { applyProjectProxySettings } from "./proxy-settings.js";
+import type { AppliedProxySettings } from "./proxy-settings.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -374,11 +376,20 @@ function printProxyConfigMismatch(
   for (const message of messages) {
     console.error(chalk.yellow(`- ${message}`));
   }
+  const fromProject = Object.keys(projectProxySettings?.applied ?? {});
+  if (projectProxySettings && fromProject.length > 0) {
+    console.error(
+      chalk.gray(`Requested by ${projectProxySettings.source}: ${fromProject.join(", ")}`)
+    );
+  }
   console.error(chalk.blue("Stop it first, then restart with the desired settings:"));
   console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy stop${portFlag}`));
   console.error(chalk.cyan(`  ${formatProxyStartCommand(proxyPort, desiredConfig)}`));
   process.exit(1);
 }
+
+/** The project's proxy settings this process applied at startup, if any. */
+let projectProxySettings: AppliedProxySettings | null = null;
 
 /**
  * Return the path to the portless entry script. Guards against the
@@ -4276,6 +4287,20 @@ async function main() {
     console.error(colors.cyan("  npm install -g portless"));
     console.error(colors.cyan("  npm install -D portless"));
     process.exit(1);
+  }
+
+  // A project's proxy settings become the defaults for the PORTLESS_* variables
+  // before any command reads them, so a repo can pin how its proxy runs.
+  if (!["--help", "-h", "--version", "-v"].includes(args[0] ?? "")) {
+    try {
+      projectProxySettings = applyProjectProxySettings(process.cwd());
+    } catch (err) {
+      if (err instanceof ConfigValidationError) {
+        console.error(colors.red(`Error: ${err.message}`));
+        process.exit(1);
+      }
+      throw err;
+    }
   }
 
   const globalBooleanFlags = new Set(["--lan", "--tailscale", "--funnel", "--ngrok"]);
