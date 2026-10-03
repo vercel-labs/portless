@@ -20,7 +20,7 @@ Use an optional `portless.json` to override defaults:
 portless        # runs "dev" script, https://myapp.localhost
 ```
 
-The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`. Only `worktree` options inherit from the workspace root into package directories; `name`, `script`, `appPort`, and `proxy` remain cwd-only.
+The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`. Only `worktree` options and the [proxy settings](#proxy-settings) inherit from the workspace root into package directories; `name`, `script`, `appPort`, and `proxy` remain cwd-only.
 
 ### Fields
 
@@ -82,10 +82,50 @@ The name is inferred from `package.json` if not set in config. The script defaul
       <td>`true`</td>
       <td>Set `false` to use direct spawning instead of turborepo in multi-app mode.</td>
     </tr>
+    <tr>
+      <td>`https`</td>
+      <td>boolean</td>
+      <td>`true`</td>
+      <td>`false` serves plain HTTP (same as `PORTLESS_HTTPS=0`).</td>
+    </tr>
+    <tr>
+      <td>`port`</td>
+      <td>number</td>
+      <td>`443` (HTTPS) / `80` (HTTP)</td>
+      <td>Proxy port (same as `PORTLESS_PORT`).</td>
+    </tr>
+    <tr>
+      <td>`tld`</td>
+      <td>string or string[]</td>
+      <td>`"localhost"`</td>
+      <td>One TLD or several (same as `PORTLESS_TLD`).</td>
+    </tr>
+    <tr>
+      <td>`wildcard`</td>
+      <td>boolean</td>
+      <td>`false`</td>
+      <td>
+        Route unregistered subdomains to the most specific parent (same as `PORTLESS_WILDCARD`).
+      </td>
+    </tr>
+    <tr>
+      <td>`syncHosts`</td>
+      <td>boolean</td>
+      <td>`true`</td>
+      <td>`false` turns automatic hosts-file sync off (same as `PORTLESS_SYNC_HOSTS=0`).</td>
+    </tr>
+    <tr>
+      <td>`unprivileged`</td>
+      <td>boolean</td>
+      <td>`false`</td>
+      <td>Take a port below 1024 without sudo (same as `PORTLESS_UNPRIVILEGED=1`).</td>
+    </tr>
   </tbody>
 </table>
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode, except `worktree`, which sets defaults for every app that `apps` entries override by key.
+
+The proxy settings `https`, `port`, `tld`, `wildcard`, `syncHosts`, and `unprivileged` pin how the proxy runs for everyone who checks the project out. Each is the camelCase form of the `PORTLESS_*` variable it stands for and is applied as that variable's default before any command reads it, so a flag or an exported variable still wins. The proxy is one per machine, so a package directory inside a workspace with no proxy settings of its own uses the workspace root's. `"unprivileged": true` with `"syncHosts": true` is rejected when the file is read, because writing the hosts file needs root. When the file disagrees with a proxy that is already running, the error names the file.
 
 ### Worktree hostnames
 
@@ -171,6 +211,8 @@ For `script`: CLI `--script` flag > `package.json` `"portless"` key > `portless.
 For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.json` `"portless"` key > `portless.json` app entry > auto-assigned.
 
 For the worktree label: CLI `--prefix` flag (`portless run`) > `PORTLESS_PREFIX` env var > branch of a linked worktree.
+
+For proxy settings (`https`, `port`, `tld`, `wildcard`, `syncHosts`, `unprivileged`): CLI flag > `PORTLESS_*` env var > `portless.json` or `package.json` `"portless"` key in the current directory, else the workspace root > last proxy run > default.
 
 ## Environment variables
 

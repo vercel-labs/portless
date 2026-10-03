@@ -148,6 +148,8 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
+import { applyProjectProxySettings } from "./proxy-settings.js";
+import type { AppliedProxySettings } from "./proxy-settings.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -448,9 +450,31 @@ function printProxyConfigMismatch(
   for (const message of messages) {
     console.error(chalk.yellow(`- ${message}`));
   }
+  const fromProject = Object.keys(projectProxySettings?.applied ?? {});
+  if (projectProxySettings && fromProject.length > 0) {
+    console.error(
+      chalk.gray(`Requested by ${projectProxySettings.source}: ${fromProject.join(", ")}`)
+    );
+  }
   console.error(chalk.blue("Stop it first, then restart with the desired settings:"));
   console.error(chalk.cyan(`  ${needsSudo ? "sudo " : ""}portless proxy stop${portFlag}`));
   console.error(chalk.cyan(`  ${formatProxyStartCommand(proxyPort, desiredConfig)}`));
+  process.exit(1);
+}
+
+/** The project's proxy settings this process applied at startup, if any. */
+let projectProxySettings: AppliedProxySettings | null = null;
+
+/**
+ * Why the project's config could not supply proxy settings. Only starting the
+ * proxy fails on it: a command that never starts one keeps working with a
+ * broken file, as it does when the file has no proxy settings at all.
+ */
+let projectProxySettingsError: ConfigValidationError | null = null;
+
+function exitOnProjectProxySettingsError(): void {
+  if (!projectProxySettingsError) return;
+  console.error(colors.red(`Error: ${projectProxySettingsError.message}`));
   process.exit(1);
 }
 
@@ -1287,6 +1311,7 @@ interface ProxyDesiredState {
 }
 
 function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
+  exitOnProjectProxySettingsError();
   const envTlds = getDefaultTlds();
   const envTld = primaryTld(envTlds);
   const explicit: ProxyConfigExplicitness = {
@@ -3489,6 +3514,7 @@ ${colors.bold("LAN mode (--lan):")}
       stateDir = currentState.dir;
     }
   }
+  exitOnProjectProxySettingsError();
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
     persistedUnprivileged: readUnprivilegedMarker(stateDir),
@@ -5208,6 +5234,15 @@ async function main() {
     console.error(colors.cyan("  npm install -g portless"));
     console.error(colors.cyan("  npm install -D portless"));
     process.exit(1);
+  }
+
+  // A project's proxy settings become the defaults for the PORTLESS_* variables
+  // before any command reads them, so a repo can pin how its proxy runs.
+  try {
+    projectProxySettings = applyProjectProxySettings(process.cwd());
+  } catch (err) {
+    if (!(err instanceof ConfigValidationError)) throw err;
+    projectProxySettingsError = err;
   }
 
   if (args[0] === "mcp") {

@@ -22,7 +22,27 @@ export interface AppConfig {
   worktree?: WorktreeConfig;
 }
 
-export interface PortlessConfig extends AppConfig {
+/**
+ * Proxy settings a project can pin. Each key is the camelCase form of the
+ * `PORTLESS_*` variable it stands in for, and is applied as that variable's
+ * default: an exported variable or a flag still wins.
+ */
+export interface ProxySettings {
+  /** `PORTLESS_HTTPS`: `false` serves plain HTTP (same as `--no-tls`). */
+  https?: boolean;
+  /** `PORTLESS_PORT`: the proxy port. */
+  port?: number;
+  /** `PORTLESS_TLD`: one TLD or several. */
+  tld?: string | string[];
+  /** `PORTLESS_WILDCARD`: route unregistered subdomains to the most specific parent. */
+  wildcard?: boolean;
+  /** `PORTLESS_SYNC_HOSTS`: `false` turns automatic hosts-file sync off. */
+  syncHosts?: boolean;
+  /** `PORTLESS_UNPRIVILEGED`: take a port below 1024 without sudo. */
+  unprivileged?: boolean;
+}
+
+export interface PortlessConfig extends AppConfig, ProxySettings {
   apps?: Record<string, AppConfig>;
   turbo?: boolean;
 }
@@ -31,6 +51,8 @@ export interface LoadedConfig {
   config: PortlessConfig;
   configDir: string;
   source: "portless.json" | "package.json";
+  /** Where the config came from, as shown in messages: the file, or the `package.json` key. */
+  location: string;
 }
 
 const CONFIG_FILENAME = "portless.json";
@@ -46,7 +68,7 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
     const raw = fs.readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw);
     validateConfig(parsed, configPath);
-    return { config: parsed, configDir: cwd, source: "portless.json" };
+    return { config: parsed, configDir: cwd, source: "portless.json", location: configPath };
   } catch (err) {
     if (isErrnoException(err) && err.code === "ENOENT") {
       return loadConfigFromPackageJson(cwd);
@@ -74,8 +96,9 @@ function loadConfigFromPackageJson(dir: string): LoadedConfig | null {
     if (pkg && typeof pkg === "object" && "portless" in pkg) {
       const config = normalizePortlessValue(pkg.portless);
       if (config === null) return null;
-      validateConfig(config, `${pkgPath} "portless"`);
-      return { config: config as PortlessConfig, configDir: dir, source: "package.json" };
+      const location = `${pkgPath} "portless"`;
+      validateConfig(config, location);
+      return { config: config as PortlessConfig, configDir: dir, source: "package.json", location };
     }
   } catch (err) {
     if (isErrnoException(err) && err.code === "ENOENT") return null;
@@ -335,7 +358,26 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo", "worktree"]);
+/** Keys of `ProxySettings`, in the order they are reported. */
+export const PROXY_SETTING_KEYS = [
+  "https",
+  "port",
+  "tld",
+  "wildcard",
+  "syncHosts",
+  "unprivileged",
+] as const satisfies readonly (keyof ProxySettings)[];
+
+const KNOWN_TOP_KEYS = new Set([
+  "name",
+  "script",
+  "appPort",
+  "proxy",
+  "apps",
+  "turbo",
+  "worktree",
+  ...PROXY_SETTING_KEYS,
+]);
 const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree"]);
 const KNOWN_WORKTREE_KEYS = new Set(["prefix", "hostnameTemplate"]);
 
@@ -384,6 +426,8 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
   }
 
   if (obj.worktree !== undefined) validateWorktreeConfig(obj.worktree, "worktree", configPath);
+
+  validateProxySettings(obj, configPath);
 
   if (obj.apps !== undefined) {
     if (typeof obj.apps !== "object" || obj.apps === null || Array.isArray(obj.apps)) {
@@ -474,6 +518,50 @@ function validateWorktreeConfig(value: unknown, prefix: string, configPath: stri
   }
 
   warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, prefix);
+}
+
+/**
+ * Type-check the proxy settings and reject the one combination that can
+ * never work: writing the hosts file needs root, which unprivileged mode
+ * never has. TLD grammar is checked where the value is applied, with the
+ * same validator the `--tld` flag uses.
+ */
+function validateProxySettings(obj: Record<string, unknown>, configPath: string): void {
+  for (const key of ["https", "wildcard", "syncHosts", "unprivileged"] as const) {
+    if (obj[key] !== undefined && typeof obj[key] !== "boolean") {
+      throw new ConfigValidationError(`"${key}" in ${configPath} must be a boolean.`);
+    }
+  }
+
+  if (obj.port !== undefined) {
+    if (
+      typeof obj.port !== "number" ||
+      !Number.isInteger(obj.port) ||
+      obj.port < 1 ||
+      obj.port > 65535
+    ) {
+      throw new ConfigValidationError(
+        `"port" in ${configPath} must be an integer between 1 and 65535.`
+      );
+    }
+  }
+
+  if (obj.tld !== undefined) {
+    const tlds = Array.isArray(obj.tld) ? obj.tld : [obj.tld];
+    const valid =
+      tlds.length > 0 && tlds.every((tld) => typeof tld === "string" && tld.trim().length > 0);
+    if (!valid) {
+      throw new ConfigValidationError(
+        `"tld" in ${configPath} must be a non-empty string or an array of them.`
+      );
+    }
+  }
+
+  if (obj.unprivileged === true && obj.syncHosts === true) {
+    throw new ConfigValidationError(
+      `"syncHosts": true cannot be combined with "unprivileged": true in ${configPath}: writing the hosts file needs root, which unprivileged mode never asks for.`
+    );
+  }
 }
 
 function warnUnknownKeys(
