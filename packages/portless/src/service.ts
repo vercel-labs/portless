@@ -77,6 +77,7 @@ export type ServiceInstallConfig = {
   tld: string;
   tlds: string[];
   useWildcard: boolean;
+  unprivileged: boolean;
   extraEnv: Record<string, string>;
 };
 
@@ -95,6 +96,7 @@ const DEFAULT_SERVICE_CONFIG: ServiceInstallConfig = {
   tld: DEFAULT_TLD,
   tlds: [DEFAULT_TLD],
   useWildcard: false,
+  unprivileged: false,
   extraEnv: {},
 };
 
@@ -278,6 +280,11 @@ function parseServiceInstallConfig(
     config.useWildcard = envWildcard;
   }
 
+  const envUnprivileged = parseBooleanEnv(env.PORTLESS_UNPRIVILEGED);
+  if (envUnprivileged !== null) {
+    config.unprivileged = envUnprivileged;
+  }
+
   if (env.PORTLESS_PORT) {
     config.proxyPort = parsePortValue(env.PORTLESS_PORT, "PORTLESS_PORT");
   } else {
@@ -319,6 +326,9 @@ function parseServiceInstallConfig(
       }
       case "--wildcard":
         config.useWildcard = true;
+        break;
+      case "--unprivileged":
+        config.unprivileged = true;
         break;
       case "--cert":
         config.customCertPath = getFlagValue(tokens, i, token);
@@ -401,6 +411,7 @@ function buildProxyCommand(entryScript: string, serviceConfig: ServiceInstallCon
     tld: serviceConfig.tld,
     tlds: serviceConfig.tlds,
     useWildcard: serviceConfig.useWildcard,
+    unprivileged: serviceConfig.unprivileged,
     foreground: true,
     includePort: true,
     proxyPort: serviceConfig.proxyPort,
@@ -416,6 +427,7 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
     PORTLESS_HTTPS: ctx.config.useHttps ? "1" : "0",
     PORTLESS_LAN: ctx.config.lanMode ? "1" : "0",
     PORTLESS_WILDCARD: ctx.config.useWildcard ? "1" : "0",
+    PORTLESS_UNPRIVILEGED: ctx.config.unprivileged ? "1" : "0",
     ...ctx.config.extraEnv,
   };
 
@@ -1191,6 +1203,7 @@ async function printServiceStatus(entryScript: string, runner: CommandRunner): P
     console.log(`  LAN IP: ${config.lanIp}`);
   }
   console.log(`  Wildcard: ${config.useWildcard ? "yes" : "no"}`);
+  console.log(`  Unprivileged: ${config.unprivileged ? "yes" : "no"}`);
   console.log(`  State directory: ${config.stateDir}`);
   if (status.details) {
     console.log(`  Service entry: ${status.details}`);
@@ -1216,6 +1229,7 @@ ${colors.bold("Install options:")}
   --ip <address>                   Pin a specific LAN IP
   --tld <tld>                      Use a custom TLD outside LAN mode, repeatable
   --wildcard                       Allow subdomain fallback
+  --unprivileged                   Bind the wildcard address, loopback peers only, no elevation
   --cert <path>                    Use a custom TLS certificate
   --key <path>                     Use a custom TLS private key
   --state-dir <path>               Use a custom service state directory

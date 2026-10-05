@@ -7,6 +7,7 @@ import * as path from "node:path";
 import {
   augmentedPath,
   buildProxyStartConfig,
+  canBindWithoutRoot,
   BLOCKED_PORTS,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
@@ -24,6 +25,7 @@ import {
   getProxyBindTargets,
   getRiskyTldReason,
   isHttpsEnvDisabled,
+  isUnprivilegedEnvEnabled,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
@@ -37,6 +39,7 @@ import {
   parseTldList,
   readLanMarker,
   readPersistedProxyState,
+  readUnprivilegedMarker,
   readTldFromDir,
   readTldsFromDir,
   resolveStateDir,
@@ -45,6 +48,7 @@ import {
   writeTldFile,
   writeTldsFile,
   writeTlsMarker,
+  writeUnprivilegedMarker,
 } from "./cli-utils.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
@@ -56,6 +60,13 @@ describe("proxy listener interface", () => {
 
   it("uses IPv4 and IPv6 unspecified addresses in LAN mode", () => {
     expect(getProxyBindTargets(true)).toEqual([
+      { host: "0.0.0.0" },
+      { host: "::", ipv6Only: true },
+    ]);
+  });
+
+  it("uses the unspecified addresses in unprivileged mode outside LAN mode", () => {
+    expect(getProxyBindTargets(false, true)).toEqual([
       { host: "0.0.0.0" },
       { host: "::", ipv6Only: true },
     ]);
@@ -1733,6 +1744,15 @@ describe("buildProxyStartConfig", () => {
     });
   });
 
+  it("emits --unprivileged only when requested", () => {
+    const base = { useHttps: false, lanMode: false, tld: "localhost" };
+    expect(buildProxyStartConfig({ ...base, unprivileged: true }).args).toEqual([
+      "--no-tls",
+      "--unprivileged",
+    ]);
+    expect(buildProxyStartConfig(base).args).toEqual(["--no-tls"]);
+  });
+
   it("passes auto-detected LAN IP through an internal flag", () => {
     expect(
       buildProxyStartConfig({
@@ -2054,6 +2074,7 @@ describe("readPersistedProxyState", () => {
       tld: "local",
       tlds: ["local"],
       lanMode: true,
+      unprivileged: false,
     });
   });
 
@@ -2236,5 +2257,100 @@ describe("syncHostsWithWarning", () => {
     );
     expect(warns).toBe(0);
     expect(latched).toBe(false);
+  });
+});
+
+describe("canBindWithoutRoot", () => {
+  const unreadable = () => {
+    throw new Error("ENOENT");
+  };
+
+  it("allows any port at or above the privileged threshold on every platform", () => {
+    expect(canBindWithoutRoot(PRIVILEGED_PORT_THRESHOLD, "freebsd", unreadable)).toEqual({
+      ok: true,
+    });
+    expect(canBindWithoutRoot(8080, "linux", unreadable)).toEqual({ ok: true });
+  });
+
+  it("allows a privileged port on macOS and Windows without consulting a sysctl", () => {
+    expect(canBindWithoutRoot(80, "darwin", unreadable)).toEqual({ ok: true });
+    expect(canBindWithoutRoot(443, "win32", unreadable)).toEqual({ ok: true });
+  });
+
+  it("follows net.ipv4.ip_unprivileged_port_start on Linux", () => {
+    expect(canBindWithoutRoot(80, "linux", () => "80\n")).toEqual({ ok: true });
+    expect(canBindWithoutRoot(443, "linux", () => "80\n")).toEqual({ ok: true });
+    expect(canBindWithoutRoot(79, "linux", () => "80\n")).toEqual({
+      ok: false,
+      reason: "Port 79 is below net.ipv4.ip_unprivileged_port_start (80).",
+    });
+    expect(canBindWithoutRoot(80, "linux", () => "1024\n")).toMatchObject({ ok: false });
+  });
+
+  it("reports an unreadable sysctl instead of guessing", () => {
+    expect(canBindWithoutRoot(80, "linux", unreadable)).toEqual({
+      ok: false,
+      reason: "Could not read net.ipv4.ip_unprivileged_port_start.",
+    });
+  });
+
+  it("refuses a privileged port on platforms it does not know", () => {
+    expect(canBindWithoutRoot(80, "freebsd", unreadable)).toMatchObject({ ok: false });
+  });
+});
+
+describe("isUnprivilegedEnvEnabled", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each(["1", "true"])("is on for PORTLESS_UNPRIVILEGED=%s", (value) => {
+    vi.stubEnv("PORTLESS_UNPRIVILEGED", value);
+    expect(isUnprivilegedEnvEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "yes", ""])("is off for PORTLESS_UNPRIVILEGED=%s", (value) => {
+    vi.stubEnv("PORTLESS_UNPRIVILEGED", value);
+    expect(isUnprivilegedEnvEnabled()).toBe(false);
+  });
+
+  it("is off when unset", () => {
+    vi.stubEnv("PORTLESS_UNPRIVILEGED", undefined);
+    expect(isUnprivilegedEnvEnabled()).toBe(false);
+  });
+});
+
+describe("readUnprivilegedMarker / writeUnprivilegedMarker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-unpriv-marker-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("is absent by default", () => {
+    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
+  });
+
+  it("round-trips through write and remove", () => {
+    writeUnprivilegedMarker(tmpDir, true);
+    expect(readUnprivilegedMarker(tmpDir)).toBe(true);
+    writeUnprivilegedMarker(tmpDir, false);
+    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
+  });
+
+  it("is part of the persisted proxy state", () => {
+    vi.stubEnv("PORTLESS_STATE_DIR", tmpDir);
+    try {
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "8080");
+      expect(readPersistedProxyState()?.unprivileged).toBe(false);
+      writeUnprivilegedMarker(tmpDir, true);
+      expect(readPersistedProxyState()?.unprivileged).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
