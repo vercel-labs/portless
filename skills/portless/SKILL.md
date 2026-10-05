@@ -133,7 +133,7 @@ portless api.myapp pnpm start    # https://api.myapp.localhost
 portless docs.myapp next dev     # https://docs.myapp.localhost
 ```
 
-By default, only explicitly registered subdomains are routed (strict mode). Start the proxy with `--wildcard` to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app). Exact matches always take priority over wildcards.
+By default, only explicitly registered subdomains are routed (strict mode). Start the proxy with `--wildcard` to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app). Exact matches always take priority over wildcards. When several registered routes are parents of the host, the most specific one wins (`admin.api.myapp.localhost` routes to `api.myapp`, not `myapp`).
 
 ### Git worktrees
 
@@ -300,7 +300,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
-| `portless prune`                                  | Kill orphaned dev servers from crashed sessions                |
+| `portless prune`                                  | Kill orphaned dev server groups; `run` also does it on start   |
 | `portless prune --force`                          | Kill orphans with SIGKILL instead of SIGTERM                   |
 | `portless proxy start`                            | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
 | `portless proxy start --no-tls`                   | Start without HTTPS (plain HTTP on port 80)                    |

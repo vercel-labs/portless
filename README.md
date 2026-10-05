@@ -193,7 +193,7 @@ portless docs.myapp next dev
 # -> https://docs.myapp.localhost
 ```
 
-By default, only explicitly registered subdomains are routed (strict mode). Use `--wildcard` when starting the proxy to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app without extra registration).
+By default, only explicitly registered subdomains are routed (strict mode). Use `--wildcard` when starting the proxy to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app without extra registration). When several registered routes are parents of the host, the most specific one wins (`admin.api.myapp.localhost` routes to `api.myapp`, not `myapp`).
 
 ## Git Worktrees
 
@@ -399,7 +399,7 @@ portless list                    # Show active routes
 portless doctor                  # Check proxy, routes, DNS, and CA trust
 portless trust                   # Add local CA to system trust store
 portless clean                   # Remove state, CA trust entry, and hosts block
-portless prune                   # Kill orphaned dev servers from crashed sessions
+portless prune                   # Kill orphaned dev servers from crashed sessions (run also does this on start)
 portless hosts sync              # Reconcile routes with /etc/hosts (fixes Safari)
 portless hosts clean             # Remove portless entries from /etc/hosts
 

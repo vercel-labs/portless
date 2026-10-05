@@ -97,6 +97,24 @@ function findPidsOnPort(port: number): number[] {
   }
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForPidToExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isAlive(pid)) return true;
+    await sleep(50);
+  }
+  return !isAlive(pid);
+}
+
 async function sleep(ms: number): Promise<void> {
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -162,9 +180,10 @@ async function cleanupTestState(state: TestState): Promise<void> {
 async function startCliApp(
   appName: string,
   state: TestState,
-  script = "server.js"
+  script = "server.js",
+  extraEnv: Record<string, string> = {}
 ): Promise<{ hostname: string; appPort: number }> {
-  state.stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-zombie-"));
+  state.stateDir ??= fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-zombie-"));
 
   const baseEnv = {
     ...process.env,
@@ -182,7 +201,7 @@ async function startCliApp(
 
   state.cliChild = spawn(process.execPath, [CLI_PATH, appName, "node", script], {
     cwd: FIXTURE_DIR,
-    env: { ...baseEnv, APP_NAME: appName },
+    env: { ...baseEnv, APP_NAME: appName, ...extraEnv },
     stdio: ["ignore", "pipe", "pipe"],
   });
 
@@ -269,6 +288,20 @@ describe("zombie process prevention", () => {
     expect(survivors).toEqual([]);
   });
 
+  it("SIGHUP kills the dev server via process group", async () => {
+    if (isWindows) return;
+
+    // Closing the terminal sends SIGHUP to the foreground process group. The
+    // detached child is outside that group, so the CLI has to forward it.
+    const { appPort } = await startCliApp("zombie-sighup", state, "wrapper.js");
+
+    state.cliChild!.kill("SIGHUP");
+    const cliExited = await waitForChildToExit(state.cliChild!, 10_000);
+    const portClosed = await waitForPortToClose(appPort, 2000);
+
+    expect({ cliExited, portClosed }).toEqual({ cliExited: true, portClosed: true });
+  });
+
   it("SIGINT stops the command's dev server before exiting", async () => {
     if (isWindows) return;
 
@@ -328,6 +361,66 @@ describe("zombie process prevention", () => {
     await sleep(1000);
     const pidsAfterPrune = findPidsOnPort(appPort);
     expect(pidsAfterPrune).toEqual([]);
+  });
+});
+
+describe("orphaned process groups", () => {
+  const state: TestState = {};
+  let sidecarPid: number | undefined;
+
+  afterEach(async () => {
+    if (sidecarPid && isAlive(sidecarPid)) process.kill(sidecarPid, "SIGKILL");
+    sidecarPid = undefined;
+    await cleanupTestState(state);
+    state.stateDir = undefined;
+    state.cliChild = undefined;
+    state.appPort = undefined;
+  });
+
+  async function startAndCrash(appName: string): Promise<number> {
+    const pidFile = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "portless-sidecar-")), "pid");
+    await startCliApp(appName, state, "sidecar-wrapper.js", { SIDECAR_PID_FILE: pidFile });
+    sidecarPid = parseInt(fs.readFileSync(pidFile, "utf-8"), 10);
+
+    state.cliChild!.kill("SIGKILL");
+    await waitForChildToExit(state.cliChild!, 5000);
+    await sleep(500);
+    expect(isAlive(sidecarPid)).toBe(true);
+    return sidecarPid;
+  }
+
+  it("prune kills the whole process group, not only the route port", async () => {
+    if (isWindows) return;
+
+    const pid = await startAndCrash("orphan-prune");
+
+    const pruneResult = spawnSync(process.execPath, [CLI_PATH, "prune"], {
+      env: {
+        ...process.env,
+        PORTLESS_PORT: PROXY_PORT.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_STATE_DIR: state.stateDir,
+        NO_COLOR: "1",
+      },
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    expect(pruneResult.stdout).toContain("killed process group");
+
+    expect(await waitForPidToExit(pid, 5000)).toBe(true);
+    expect(await waitForPortToClose(state.appPort!, 5000)).toBe(true);
+  });
+
+  it("run stops the orphaned process group of a crashed session", async () => {
+    if (isWindows) return;
+
+    const pid = await startAndCrash("orphan-restart");
+    const oldPort = state.appPort!;
+
+    await startCliApp("orphan-restart", state, "server.js");
+
+    expect(await waitForPidToExit(pid, 5000)).toBe(true);
+    expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
   });
 });
 

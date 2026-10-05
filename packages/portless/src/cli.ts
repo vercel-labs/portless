@@ -61,6 +61,8 @@ import {
   findPidOnPort,
   findPidsOnPort,
   findSelfDaemonizedListener,
+  killOrphanedProcessGroup,
+  getProcessStartTime,
   getDefaultPort,
   getDefaultTlds,
   getProxyBindTargets,
@@ -526,6 +528,25 @@ function addRoutes(
     throw err;
   }
   return [...new Set(killedPids)];
+}
+
+/**
+ * Stop dev servers left running by portless sessions that died without
+ * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
+ * the stored process group is the only remaining link to the orphaned tree.
+ */
+function stopOrphanedProcessGroups(store: RouteStore): void {
+  const seen = new Set<number>();
+  for (const route of store.loadRoutesRaw()) {
+    const pgid = route.childPgid;
+    if (!pgid || seen.has(pgid) || route.pid === 0 || isPidAlive(route.pid)) continue;
+    seen.add(pgid);
+    if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
+      console.log(
+        colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
+      );
+    }
+  }
 }
 
 function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?: number): void {
@@ -1383,6 +1404,8 @@ async function runApp(
     console.log(colors.green(`-- Using port ${port}`));
   }
 
+  stopOrphanedProcessGroups(store);
+
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
   try {
@@ -1611,6 +1634,16 @@ async function runApp(
     },
     onExit: (childPid) =>
       transferRoutesToDaemon(store, hostnames, port, childPid, preexistingListener),
+    onSpawn: (pid) => {
+      const childStartTime = getProcessStartTime(pid) ?? undefined;
+      for (const host of hostnames) {
+        try {
+          store.updateRoute(host, { childPgid: pid, childStartTime });
+        } catch {
+          // Without the pgid, prune falls back to the route port; non-fatal
+        }
+      }
+    },
     onCleanup: () => {
       stoppingNgrok = true;
       stopNgrokProcess(ngrokProcess?.child);
@@ -1997,7 +2030,7 @@ ${colors.bold("Options:")}
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
-  --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
@@ -2014,7 +2047,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
+  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
@@ -2062,13 +2095,24 @@ function printVersion(): void {
 }
 
 async function handleTrust(): Promise<void> {
-  const { dir } = await discoverState();
+  const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
     console.log(colors.gray("Generated local CA certificate."));
+    // A running proxy keeps the previous CA and the TLS contexts it already
+    // built in memory, so it presents the old chain until it restarts.
+    if (await isProxyRunning(port, tls)) {
+      const portFlag = port !== getDefaultPort(tls) ? ` -p ${port}` : "";
+      console.log(
+        colors.yellow("The running proxy still serves certificates from the previous CA.")
+      );
+      console.log(
+        colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
+      );
+    }
   }
   const result = trustCA(dir);
   if (result.trusted) {
@@ -2282,13 +2326,28 @@ ${colors.bold("Options:")}
   }
 
   let killed = 0;
+  const signal = forceKill ? "SIGKILL" : "SIGTERM";
+  const killedGroups = new Set<number>();
   for (const route of stale) {
+    const pgid = route.childPgid;
+    if (
+      pgid &&
+      !killedGroups.has(pgid) &&
+      killOrphanedProcessGroup(pgid, route.childStartTime, signal)
+    ) {
+      killedGroups.add(pgid);
+      killed++;
+      console.log(`  ${route.hostname} - killed process group ${pgid} (${signal})`);
+    }
+  }
+
+  for (const route of stale) {
+    if (route.childPgid && killedGroups.has(route.childPgid)) continue;
     const pids = findPidsOnPort(route.port);
     if (pids.length === 0) {
       console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
       continue;
     }
-    const signal = forceKill ? "SIGKILL" : "SIGTERM";
     for (const pid of pids) {
       try {
         process.kill(pid, signal);
@@ -4079,6 +4138,7 @@ async function runWithTurbo(
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
 
   const exitCode = await new Promise<number | null>((resolve) => {
     turboChild.on("exit", (code) => resolve(code));
@@ -4165,6 +4225,7 @@ async function runWithDirectSpawn(
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
 
   await Promise.all(
     children.map(

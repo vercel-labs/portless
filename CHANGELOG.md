@@ -1,8 +1,39 @@
 # Changelog
 
-## 0.15.6
+## 0.15.7
 
 <!-- release:start -->
+
+### New Features
+
+- **Turbo JSONC workspaces**: Workspaces that only have `turbo.jsonc` now use Turbo orchestration, the same as `turbo.json`. (#422)
+- **Unresolved hostname warning**: After registering a route, portless asks the proxy to sync the hosts file and warns when the hostname still does not resolve. (#374)
+- **WebMCP documentation site**: The docs moved to Geistdocs and expose their pages to agents through WebMCP. (#427)
+
+### Bug Fixes
+
+- **Hosts sync data loss**: Manual hosts sync refuses to write when the hosts file cannot be read, verifies what it wrote, and removes stale managed entries when no routes remain. (#424)
+- **Local CA certificate**: The generated CA no longer carries a duplicate Basic Constraints extension on OpenSSL 1.1.1 and LibreSSL, which macOS and OpenSSL 3 rejected and left `*.localhost` untrusted. (#443)
+- **Proxy crash on backend restart**: The proxy no longer forwards client hop-by-hop headers, which left backend sockets open and crashed the proxy with `ECONNRESET` when a backend restarted. (#445)
+- **Wildcard fallback order**: With `--wildcard`, an unregistered subdomain now routes to the most specific registered parent instead of the first one stored. (#446)
+- **Occupied app ports**: Free app ports are checked on `127.0.0.1`, `::1`, `0.0.0.0` and `::`, so portless no longer assigns a port another server already holds. (#447)
+- **Version manager node**: Child commands now use the node a version manager put first on `PATH`; portless's own node directory is only a fallback. (#448)
+
+### Contributors
+
+- @Railly
+- @ctate
+- @Knat-Dev
+- @EfeDurmaz16
+- @octo-patch
+- @bilinkis
+- @luizfm
+- @Geektrovert
+- @thazhemadam
+- @begininvoke
+<!-- release:end -->
+
+## 0.15.6
 
 ### New Features
 
@@ -19,7 +50,6 @@
 - @Railly
 - @EfeDurmaz16
 - @JohnPhamous
-<!-- release:end -->
 
 ## 0.15.5
 
