@@ -363,7 +363,7 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
 { "portless": { "name": "myapp", "script": "dev:app" } }
 ```
 
-Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.json app entry > defaults.
+For a single app, `portless.json` in the current directory takes precedence over the `package.json` `"portless"` key. In a workspace, a package's `"portless"` key takes precedence over the root `portless.json` app entry. CLI flags override both. The startup message identifies which configuration supplied the app name.
 
 ## Troubleshooting
 

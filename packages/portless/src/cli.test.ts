@@ -307,6 +307,54 @@ describe("CLI", () => {
     }
   });
 
+  describe.each(["portless.json", "package.json object", "package.json string"])(
+    "configured name source: %s",
+    (source) => {
+      it.each(["default", "run"])("reports the correct source in %s mode", async (mode) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-name-source-"));
+        let proxyChild: ReturnType<typeof spawn> | undefined;
+        try {
+          const portless = source === "package.json string" ? "gavel" : { name: "gavel" };
+          fs.writeFileSync(
+            path.join(tmpDir, "package.json"),
+            JSON.stringify({
+              name: "inferred-name",
+              scripts: { dev: "node -e \"console.log('child ready')\"" },
+              portless: source === "portless.json" ? { name: "package-name" } : portless,
+            })
+          );
+          if (source === "portless.json") {
+            fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "gavel" }));
+          }
+          const proxy = await startMockProxy(tmpDir);
+          proxyChild = proxy.child;
+          fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(proxy.port));
+          fs.writeFileSync(path.join(tmpDir, "proxy.pid"), String(proxy.child.pid));
+          const result = run(mode === "default" ? [] : ["run"], {
+            cwd: tmpDir,
+            env: {
+              PORTLESS: undefined,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_PORT: String(proxy.port),
+              PORTLESS_HTTPS: "0",
+              PORTLESS_SYNC_HOSTS: "0",
+            },
+          });
+          expect(result.status).toBe(0);
+          expect(result.stdout).toContain("child ready");
+          const expected = source === "portless.json" ? "portless.json" : 'package.json "portless"';
+          expect(result.stdout).toContain(`Name "gavel" (from ${expected})`);
+          if (source !== "portless.json") {
+            expect(result.stdout).not.toContain("(from portless.json)");
+          }
+        } finally {
+          if (proxyChild) await stopChild(proxyChild);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      });
+    }
+  );
+
   describe("--help", () => {
     it("prints help and exits 0 with --help", () => {
       const { status, stdout } = run(["--help"]);

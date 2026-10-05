@@ -117,7 +117,7 @@ import {
   loadPackagePortlessConfig,
   ConfigValidationError,
 } from "./config.js";
-import type { AppConfig } from "./config.js";
+import type { AppConfig, LoadedConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -1857,9 +1857,10 @@ ${colors.bold("Examples:")}
   portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
   portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
 
-${colors.bold("Configuration (portless.json):")}
+${colors.bold('Configuration (portless.json or package.json "portless"):')}
   Optional. Portless works out of the box by running the "dev" script
-  from package.json. Use portless.json to override defaults.
+  from package.json. Configure it in portless.json or the "portless" key
+  in package.json. In the same directory, portless.json takes precedence.
 
   Override name:   { "name": "myapp" }
   Override script: { "name": "myapp", "script": "start" }
@@ -3470,15 +3471,20 @@ ${colors.bold("LAN mode (--lan):")}
   }
 }
 
+type SourcedAppConfig = AppConfig & Pick<LoadedConfig, "source">;
+
 /**
- * Load the effective AppConfig for the current directory from portless.json.
+ * Load the effective AppConfig and its source for the current directory.
  * Handles both single-app (top-level fields) and monorepo (apps map) configs.
  */
-function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
+function loadAppConfig(cwd: string = process.cwd()): SourcedAppConfig | null {
   try {
     const loaded = loadConfig(cwd);
     if (!loaded) return null;
-    return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    return {
+      ...resolveAppConfig(loaded.config, loaded.configDir, cwd),
+      source: loaded.source,
+    };
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -3543,7 +3549,7 @@ async function handleDefaultMode(
 async function handleDefaultSingle(
   cwd: string,
   scriptName: string,
-  appConfig: AppConfig | null
+  appConfig: SourcedAppConfig | null
 ): Promise<void> {
   const resolved = resolveScriptCommand(scriptName, cwd);
   if (!resolved) {
@@ -3559,7 +3565,7 @@ async function handleDefaultSingle(
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName(cwd);
     baseName = inferred.name;
@@ -4167,7 +4173,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName();
     baseName = inferred.name;
