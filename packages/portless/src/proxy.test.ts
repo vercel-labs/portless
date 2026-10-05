@@ -782,6 +782,53 @@ describe("createProxyServer", () => {
       expect(errors.length).toBeGreaterThan(0);
       expect(errors[0]).toContain("dead.localhost");
     });
+
+    it("releases the client socket when a client resets after a 502 with an unread body (issue #462)", async () => {
+      const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: 59999 }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+        })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      // A body larger than the socket buffers, so most of it is still unread
+      // when the 502 goes out. Only a reset leaks the socket; a graceful close
+      // does not.
+      const bodySize = 1024 * 1024;
+      const client = net.createConnection(addr.port, "127.0.0.1");
+      await new Promise<void>((resolve, reject) => {
+        let data = "";
+        client.on("data", (chunk) => {
+          data += chunk;
+          if (data.includes("HTTP/1.1 502")) resolve();
+        });
+        client.on("error", reject);
+        client.write(
+          "POST / HTTP/1.1\r\n" +
+            "Host: dead.localhost\r\n" +
+            "Content-Type: application/octet-stream\r\n" +
+            `Content-Length: ${bodySize}\r\n\r\n`
+        );
+        client.write(Buffer.alloc(bodySize));
+      });
+      // Reset only after the rest of the body has had time to arrive. On macOS
+      // with the firewall's stealth mode on, a reset that races with data in
+      // flight can be dropped by the kernel, so the proxy never sees it.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      client.resetAndDestroy();
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      const open = await new Promise<number>((resolve, reject) => {
+        server.getConnections((err, count) => (err ? reject(err) : resolve(count)));
+      });
+      expect(open).toBe(0);
+    });
   });
 
   describe("X-Portless header", () => {
