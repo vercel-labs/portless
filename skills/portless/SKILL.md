@@ -421,6 +421,8 @@ Auto-syncs `/etc/hosts` for route hostnames by default. Set `PORTLESS_SYNC_HOSTS
 
 Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
 
+Sync and cleanup refuse malformed portless marker pairs without changing the hosts file. If a partial write left a missing marker, inspect and repair the managed block manually before retrying. Cleanup verifies the resulting file before reporting success.
+
 ### Browser shows certificate warning with --https
 
 The local CA may not be trusted yet. Run:

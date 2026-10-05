@@ -11,6 +11,19 @@ const LOOPBACK_ADDRESS = "127.0.0.1";
 const MARKER_START = "# portless-start";
 const MARKER_END = "# portless-end";
 
+/** An incomplete or repeated boundary cannot safely identify owned entries. */
+function hasMalformedManagedBlock(content: string): boolean {
+  const start = content.indexOf(MARKER_START);
+  const end = content.indexOf(MARKER_END);
+  if (start === -1 && end === -1) return false;
+  return (
+    start === -1 ||
+    end <= start ||
+    content.indexOf(MARKER_START, start + MARKER_START.length) !== -1 ||
+    content.indexOf(MARKER_END, end + MARKER_END.length) !== -1
+  );
+}
+
 /**
  * Read the current /etc/hosts file content.
  * Returns null if the file cannot be read, including when it does not exist.
@@ -44,6 +57,7 @@ export function extractManagedBlock(content: string): string[] {
  * the cleaned content with trailing newlines normalized.
  */
 export function removeBlock(content: string): string {
+  if (hasMalformedManagedBlock(content)) return content;
   const startIdx = content.indexOf(MARKER_START);
   const endIdx = content.indexOf(MARKER_END);
   if (startIdx === -1 || endIdx === -1) return content;
@@ -104,6 +118,7 @@ export function blockMatchesHostnames(content: string, hostnames: string[]): boo
 export function syncHostsFile(hostnames: string[]): boolean {
   const content = readHostsFile();
   if (content === null) return false;
+  if (hasMalformedManagedBlock(content)) return false;
   if (blockMatchesHostnames(content, hostnames)) return true;
   try {
     const cleaned = removeBlock(content);
@@ -128,10 +143,12 @@ export function syncHostsFile(hostnames: string[]): boolean {
 export function cleanHostsFile(): boolean {
   const content = readHostsFile();
   if (content === null) return false;
+  if (hasMalformedManagedBlock(content)) return false;
   try {
     if (!content.includes(MARKER_START)) return true;
-    fs.writeFileSync(HOSTS_PATH, removeBlock(content));
-    return true;
+    const cleaned = removeBlock(content);
+    fs.writeFileSync(HOSTS_PATH, cleaned);
+    return readHostsFile() === cleaned;
   } catch {
     return false;
   }

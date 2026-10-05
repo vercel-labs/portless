@@ -326,6 +326,45 @@ describe("hosts file mutation safety", () => {
   });
 
   it.each([
+    "# portless-start\n127.0.0.1 app.test\n",
+    "# portless-end\n",
+    "# portless-end\n# portless-start\n127.0.0.1 app.test\n",
+    "# portless-start\n# portless-start\n127.0.0.1 app.test\n# portless-end\n",
+    "# portless-start\n127.0.0.1 app.test\n# portless-end\n# portless-end\n",
+  ])("refuses to rewrite malformed managed blocks (%s)", (block) => {
+    const original = systemAndCustomEntries + block;
+    const hosts = useInMemoryHosts(original);
+    expect(cleanHostsFile()).toBe(false);
+    expect(syncHostsFile([])).toBe(false);
+    expect(syncHostsFile(["new.test"])).toBe(false);
+    expect(removeBlock(original)).toBe(original);
+    expect(hosts()).toBe(original);
+    expect(writeFileSync).not.toHaveBeenCalled();
+  });
+
+  it("verifies cleanup while preserving unrelated entries", () => {
+    const hosts = useInMemoryHosts(staleBlock);
+    expect(cleanHostsFile()).toBe(true);
+    expect(hosts()).not.toContain("portless-start");
+    expect(hosts()).not.toContain("stale.test");
+    expect(hosts()).toContain("127.0.0.1 localhost");
+    expect(hosts()).toContain("192.0.2.10 custom.test");
+    expect(readFileSync).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not report cleanup success when a write leaves the block unchanged", () => {
+    vi.mocked(readFileSync).mockReturnValue(staleBlock);
+    expect(cleanHostsFile()).toBe(false);
+  });
+
+  it("does not report cleanup success when verification cannot read the hosts file", () => {
+    vi.mocked(readFileSync)
+      .mockReturnValueOnce(staleBlock)
+      .mockImplementationOnce(throwReadError as typeof readFileSync);
+    expect(cleanHostsFile()).toBe(false);
+  });
+
+  it.each([
     ["populated", ["app.test"]],
     ["empty", []],
   ])("returns false when verification cannot read a %s sync", (_description, hostnames) => {

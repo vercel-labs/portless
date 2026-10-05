@@ -2189,11 +2189,12 @@ ${colors.bold("Options:")}
       process.exit(1);
     }
   } else {
-    console.warn(
+    console.error(
       colors.yellow(
         `Could not remove portless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
       )
     );
+    process.exit(1);
   }
 
   console.log(colors.green("Clean finished."));
@@ -2436,6 +2437,9 @@ ${colors.bold("Safety:")}
   Sync removes stale entries when there are no routes. It requires a successful
   hosts-file read before writing and verifies every write. Read or verification
   failures use the normal elevated privileges or error path.
+  Sync and cleanup refuse malformed marker pairs without writing. Inspect and
+  repair an incomplete managed block manually before retrying. Cleanup verifies
+  the resulting file before reporting success.
 `);
     process.exit(0);
   }

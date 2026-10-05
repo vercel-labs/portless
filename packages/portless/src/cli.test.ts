@@ -1134,6 +1134,23 @@ describe("CLI", () => {
         expect(stderr).toContain("Failed to update");
         expect(capture.writes).toEqual([]);
       });
+
+      it.each(["hosts", "full"])(
+        "fails %s cleanup without deleting an incomplete block",
+        (mode) => {
+          const original = "127.0.0.1 localhost\n# portless-start\n127.0.0.1 stale.test\n";
+          const { status, stdout, stderr, capture } = runWithHostsFileMock(
+            mode === "hosts" ? ["hosts", "clean"] : ["clean"],
+            { content: original, stateDir: tmpDir, uid: 0 }
+          );
+          expect(status).toBe(1);
+          expect(stdout).not.toContain("Clean finished");
+          expect(stdout).not.toMatch(/Removed portless entries/);
+          expect(stderr).toMatch(/(Failed to update|Could not remove portless entries)/);
+          expect(capture.writes).toEqual([]);
+          expect(capture.content).toBe(original);
+        }
+      );
     });
   });
 

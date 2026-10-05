@@ -497,6 +497,8 @@ Auto-syncs `/etc/hosts` for route hostnames by default (`.localhost`, custom TLD
 
 Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
 
+Sync and cleanup refuse malformed portless marker pairs without changing the hosts file. If a partial write left a missing marker, inspect and repair the managed block manually before retrying. Cleanup verifies the resulting file before reporting success.
+
 ## Troubleshooting
 
 Run `portless doctor` to inspect local health without changing state. It checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
