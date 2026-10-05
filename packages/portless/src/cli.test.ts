@@ -229,7 +229,7 @@ async function getFreePort(): Promise<number> {
 
 async function startMockProxy(
   dir: string,
-  options: { acknowledgeHostsSync?: boolean; port?: number } = {}
+  options: { acknowledgeHostsSync?: boolean; port?: number; requestLog?: string } = {}
 ): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
   const port = options.port ?? (await getFreePort());
   const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
@@ -237,7 +237,11 @@ async function startMockProxy(
     scriptPath,
     [
       'const http = require("node:http");',
+      options.requestLog ? 'const fs = require("node:fs");' : "",
       "const server = http.createServer((req, res) => {",
+      options.requestLog
+        ? `fs.appendFileSync(${JSON.stringify(options.requestLog)}, "request\\n");`
+        : "",
       '  res.setHeader("X-Portless", "1");',
       options.acknowledgeHostsSync !== false
         ? '  if (req.method === "POST" && req.url === "/.portless/hosts-sync") { res.writeHead(204); res.end(); return; }'
@@ -305,6 +309,63 @@ describe("CLI", () => {
     if (!fs.existsSync(CLI_PATH)) {
       throw new Error(`Built CLI not found at ${CLI_PATH}. Run 'pnpm build' before running tests.`);
     }
+  });
+
+  describe("single-app proxy opt-out", () => {
+    it.each([
+      { source: "portless.json", mode: "default" },
+      { source: "portless.json", mode: "run" },
+      { source: "package.json", mode: "default" },
+      { source: "package.json", mode: "run" },
+    ])("runs the child directly with $source in $mode mode", async ({ source, mode }) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-optout-"));
+      const requestLog = path.join(tmpDir, "proxy-requests.txt");
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({
+            name: "task-app",
+            portless: source === "package.json" ? { proxy: false } : undefined,
+            scripts: {
+              dev: "node -e \"console.log('task completed');console.log(JSON.stringify({port:process.env.PORT ?? null,url:process.env.PORTLESS_URL ?? null}))\"",
+            },
+          })
+        );
+        if (source === "portless.json") {
+          fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ proxy: false }));
+        }
+        const proxy = await startMockProxy(tmpDir, { requestLog });
+        proxyChild = proxy.child;
+        const proxyPid = String(proxy.child.pid);
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(proxy.port));
+        fs.writeFileSync(path.join(tmpDir, "proxy.pid"), proxyPid);
+        fs.writeFileSync(requestLog, "");
+
+        const result = run(mode === "default" ? [] : ["run"], {
+          cwd: tmpDir,
+          env: {
+            PORTLESS: undefined,
+            PORT: undefined,
+            HOST: undefined,
+            PORTLESS_URL: undefined,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: String(proxy.port),
+            PORTLESS_HTTPS: "0",
+            PORTLESS_SYNC_HOSTS: "0",
+          },
+        });
+        expect(result.status).toBe(0);
+        expect(result.stdout).toContain("task completed");
+        expect(result.stdout).toContain('{"port":null,"url":null}');
+        expect(fs.readFileSync(requestLog, "utf-8")).toBe("");
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+        expect(fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8")).toBe(proxyPid);
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("--help", () => {

@@ -347,6 +347,8 @@ Optional config file. Portless looks for it in the current directory.
 | `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
 | `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
+Set `proxy` to `false` to run a single app's default or `run` command directly, without starting the proxy, registering a route, or injecting `PORT` and `PORTLESS_URL`. Existing environment variables are preserved.
+
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
 
 ### package.json "portless" key

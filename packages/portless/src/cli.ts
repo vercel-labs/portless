@@ -1863,6 +1863,7 @@ ${colors.bold("Configuration (portless.json):")}
 
   Override name:   { "name": "myapp" }
   Override script: { "name": "myapp", "script": "start" }
+  Skip proxy:      { "proxy": false } runs default/run commands directly
   Monorepo:        { "apps": { "apps/web": { "name": "myapp" } } }
   Turborepo:       Workspace roots use Turbo when turbo.json or turbo.jsonc is readable
                    Set { "turbo": false } to use direct spawning
@@ -3538,7 +3539,7 @@ async function handleDefaultMode(
 }
 
 /**
- * Single-app mode: run one package through the proxy.
+ * Single-app mode: run one package according to its proxy setting.
  */
 async function handleDefaultSingle(
   cwd: string,
@@ -3549,6 +3550,11 @@ async function handleDefaultSingle(
   if (!resolved) {
     console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
     process.exit(1);
+  }
+
+  if (appConfig?.proxy === false) {
+    spawnCommand(resolved);
+    return;
   }
 
   let baseName: string;
@@ -4149,6 +4155,11 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     console.error(colors.blue("Example:"));
     console.error(colors.cyan("  portless run next dev"));
     process.exit(1);
+  }
+
+  if (appConfig?.proxy === false) {
+    spawnCommand(parsed.commandArgs);
+    return;
   }
 
   let baseName: string;

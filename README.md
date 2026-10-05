@@ -100,6 +100,8 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 | `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
 | `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
 
+Set `proxy` to `false` to run a single app's default or `run` command directly, without starting the proxy, registering a route, or injecting `PORT` and `PORTLESS_URL`. Existing environment variables are preserved.
+
 ### package.json "portless" key
 
 Instead of a separate `portless.json`, you can add a `"portless"` key to your `package.json`. A string value is shorthand for setting the name:
