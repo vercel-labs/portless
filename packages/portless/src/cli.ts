@@ -61,6 +61,8 @@ import {
   findPidOnPort,
   guardWindowsOrphans,
   findPidsOnPort,
+  killOrphanedProcessGroup,
+  getProcessStartTime,
   getDefaultPort,
   getDefaultTlds,
   getProxyBindTargets,
@@ -526,6 +528,25 @@ function addRoutes(
     throw err;
   }
   return [...new Set(killedPids)];
+}
+
+/**
+ * Stop dev servers left running by portless sessions that died without
+ * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
+ * the stored process group is the only remaining link to the orphaned tree.
+ */
+function stopOrphanedProcessGroups(store: RouteStore): void {
+  const seen = new Set<number>();
+  for (const route of store.loadRoutesRaw()) {
+    const pgid = route.childPgid;
+    if (!pgid || seen.has(pgid) || route.pid === 0 || isPidAlive(route.pid)) continue;
+    seen.add(pgid);
+    if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
+      console.log(
+        colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
+      );
+    }
+  }
 }
 
 function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?: number): void {
@@ -1345,6 +1366,8 @@ async function runApp(
     console.log(colors.green(`-- Using port ${port}`));
   }
 
+  stopOrphanedProcessGroups(store);
+
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
   try {
@@ -1569,6 +1592,16 @@ async function runApp(
       ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
       ...(ngrokUrl ? { PORTLESS_NGROK_URL: ngrokUrl } : {}),
       ...caEnv,
+    },
+    onSpawn: (pid) => {
+      const childStartTime = getProcessStartTime(pid) ?? undefined;
+      for (const host of hostnames) {
+        try {
+          store.updateRoute(host, { childPgid: pid, childStartTime });
+        } catch {
+          // Without the pgid, prune falls back to the route port; non-fatal
+        }
+      }
     },
     onCleanup: () => {
       stoppingNgrok = true;
@@ -1839,7 +1872,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
-  ${colors.cyan("portless hosts sync")}              Add routes to ${HOSTS_DISPLAY} (fixes Safari)
+  ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Examples:")}
@@ -1956,7 +1989,7 @@ ${colors.bold("Options:")}
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
-  --wildcard                    Allow unregistered subdomains to fall back to parent route
+  --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
@@ -1973,7 +2006,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to parent route
+  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
@@ -1996,7 +2029,10 @@ ${colors.bold("Safari / DNS:")}
   Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
   custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If a route
   hostname will not resolve, the command that registered it warns instead of
-  failing silently. To sync manually:
+  failing silently. Manual sync reconciles the managed entries with current routes,
+  removes stale entries when there are no routes, and requires a successful read
+  before writing. Every write is verified; a failed verification uses the normal
+  hosts sync failure path. To sync manually:
     ${colors.cyan("portless hosts sync")}
   Clean up later with:
     ${colors.cyan("portless hosts clean")}
@@ -2018,13 +2054,24 @@ function printVersion(): void {
 }
 
 async function handleTrust(): Promise<void> {
-  const { dir } = await discoverState();
+  const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
     console.log(colors.gray("Generated local CA certificate."));
+    // A running proxy keeps the previous CA and the TLS contexts it already
+    // built in memory, so it presents the old chain until it restarts.
+    if (await isProxyRunning(port, tls)) {
+      const portFlag = port !== getDefaultPort(tls) ? ` -p ${port}` : "";
+      console.log(
+        colors.yellow("The running proxy still serves certificates from the previous CA.")
+      );
+      console.log(
+        colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
+      );
+    }
   }
   const result = trustCA(dir);
   if (result.trusted) {
@@ -2238,13 +2285,28 @@ ${colors.bold("Options:")}
   }
 
   let killed = 0;
+  const signal = forceKill ? "SIGKILL" : "SIGTERM";
+  const killedGroups = new Set<number>();
   for (const route of stale) {
+    const pgid = route.childPgid;
+    if (
+      pgid &&
+      !killedGroups.has(pgid) &&
+      killOrphanedProcessGroup(pgid, route.childStartTime, signal)
+    ) {
+      killedGroups.add(pgid);
+      killed++;
+      console.log(`  ${route.hostname} - killed process group ${pgid} (${signal})`);
+    }
+  }
+
+  for (const route of stale) {
+    if (route.childPgid && killedGroups.has(route.childPgid)) continue;
     const pids = findPidsOnPort(route.port);
     if (pids.length === 0) {
       console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
       continue;
     }
-    const signal = forceKill ? "SIGKILL" : "SIGTERM";
     for (const pid of pids) {
       try {
         process.kill(pid, signal);
@@ -2408,16 +2470,21 @@ async function handleHosts(args: string[]): Promise<void> {
 ${colors.bold("portless hosts")} - Manage ${HOSTS_DISPLAY} entries for .localhost subdomains.
 
 Safari relies on the system DNS resolver, which may not handle .localhost
-subdomains. This command adds entries to ${HOSTS_DISPLAY} as a workaround.
+subdomains. This command reconciles portless-managed entries in ${HOSTS_DISPLAY}.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${colors.cyan("portless hosts sync")}    Reconcile current routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Auto-sync:")}
   The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
   PORTLESS_SYNC_HOSTS=0. If a route hostname will not resolve, the command that
   registered it warns instead of failing silently.
+
+${colors.bold("Safety:")}
+  Sync removes stale entries when there are no routes. It requires a successful
+  hosts-file read before writing and verifies every write. Read or verification
+  failures use the normal elevated privileges or error path.
 `);
     process.exit(0);
   }
@@ -2456,7 +2523,7 @@ ${colors.bold("Auto-sync:")}
     console.log(`
 ${colors.bold("Usage: portless hosts <command>")}
 
-  ${colors.cyan("portless hosts sync")}    Add current routes to ${HOSTS_DISPLAY}
+  ${colors.cyan("portless hosts sync")}    Reconcile current routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 `);
     process.exit(0);
@@ -2465,7 +2532,7 @@ ${colors.bold("Usage: portless hosts <command>")}
   if (args[1] !== "sync") {
     console.error(colors.red(`Error: Unknown hosts subcommand "${args[1]}".`));
     console.error(colors.blue("Usage:"));
-    console.error(colors.cyan(`  portless hosts sync    # Add routes to ${HOSTS_DISPLAY}`));
+    console.error(colors.cyan(`  portless hosts sync    # Reconcile routes with ${HOSTS_DISPLAY}`));
     console.error(colors.cyan("  portless hosts clean   # Remove portless entries"));
     process.exit(1);
   }
@@ -2476,20 +2543,12 @@ ${colors.bold("Usage: portless hosts <command>")}
   });
 
   const routes = store.loadRoutes();
-  if (routes.length === 0) {
-    // Zero routes is a desired state, not a no-op: bailing here would leave a
-    // block whose routes are gone, in the command the warning tells users to run.
-    if (getManagedHostnames().length === 0) {
-      console.log(colors.yellow("No active routes to sync."));
-      return;
-    }
-    if (syncHostsFile([])) {
-      console.log(colors.green(`Removed stale portless entries from ${HOSTS_DISPLAY}.`));
-      return;
-    }
-  }
   const hostnames = routes.map((r) => r.hostname);
   if (syncHostsFile(hostnames)) {
+    if (hostnames.length === 0) {
+      console.log(colors.green(`No stale portless entries remain in ${HOSTS_DISPLAY}.`));
+      return;
+    }
     console.log(colors.green(`Synced ${hostnames.length} hostname(s) to ${HOSTS_DISPLAY}:`));
     for (const h of hostnames) {
       console.log(colors.cyan(`  127.0.0.1 ${h}`));
@@ -4016,6 +4075,7 @@ async function runWithTurbo(
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
 
   const exitCode = await new Promise<number | null>((resolve) => {
     turboChild.on("exit", (code) => resolve(code));
@@ -4100,6 +4160,7 @@ async function runWithDirectSpawn(
 
   process.on("SIGINT", cleanup);
   process.on("SIGTERM", cleanup);
+  process.on("SIGHUP", cleanup);
 
   await Promise.all(
     children.map(

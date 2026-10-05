@@ -13,13 +13,13 @@ const MARKER_END = "# portless-end";
 
 /**
  * Read the current /etc/hosts file content.
- * Returns empty string if the file cannot be read.
+ * Returns null if the file cannot be read, including when it does not exist.
  */
-function readHostsFile(): string {
+function readHostsFile(): string | null {
   try {
     return fs.readFileSync(HOSTS_PATH, "utf-8");
   } catch {
-    return "";
+    return null;
   }
 }
 
@@ -103,6 +103,7 @@ export function blockMatchesHostnames(content: string, hostnames: string[]): boo
  */
 export function syncHostsFile(hostnames: string[]): boolean {
   const content = readHostsFile();
+  if (content === null) return false;
   if (blockMatchesHostnames(content, hostnames)) return true;
   try {
     const cleaned = removeBlock(content);
@@ -116,7 +117,8 @@ export function syncHostsFile(hostnames: string[]): boolean {
     return false;
   }
   // Re-read rather than assume the write landed.
-  return blockMatchesHostnames(readHostsFile(), hostnames);
+  const verification = readHostsFile();
+  return verification !== null && blockMatchesHostnames(verification, hostnames);
 }
 
 /**
@@ -124,8 +126,9 @@ export function syncHostsFile(hostnames: string[]): boolean {
  * Returns true on success, false on failure.
  */
 export function cleanHostsFile(): boolean {
+  const content = readHostsFile();
+  if (content === null) return false;
   try {
-    const content = readHostsFile();
     if (!content.includes(MARKER_START)) return true;
     fs.writeFileSync(HOSTS_PATH, removeBlock(content));
     return true;
@@ -136,9 +139,12 @@ export function cleanHostsFile(): boolean {
 
 /**
  * Return the current portless-managed hostnames from /etc/hosts.
+ * A read failure returns an empty array for best-effort callers; it does not
+ * prove that the hosts file is empty or was read successfully.
  */
 export function getManagedHostnames(): string[] {
   const content = readHostsFile();
+  if (content === null) return [];
   return extractManagedBlock(content).flatMap((line) => {
     const [, ...aliases] = line.split("#", 1)[0].trim().split(/\s+/);
     return aliases;

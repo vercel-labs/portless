@@ -946,6 +946,13 @@ export async function discoverState(): Promise<{
 // ---------------------------------------------------------------------------
 
 /**
+ * Addresses an app port must be free on. A bind on one address does not see a
+ * listener on another (on macOS a hostless bind succeeds while 127.0.0.1 or
+ * 0.0.0.0 holds the port), and the proxy dials apps on both loopbacks.
+ */
+const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
+
+/**
  * Find a free port in the given range (default 4000-4999).
  * Tries random ports first for speed, then falls back to sequential scan.
  *
@@ -961,14 +968,25 @@ export async function findFreePort(
     throw new Error(`minPort (${minPort}) must be <= maxPort (${maxPort})`);
   }
 
-  const tryPort = (port: number): Promise<boolean> => {
+  const isFreeOn = (port: number, host: string): Promise<boolean> => {
     return new Promise((resolve) => {
       const server = net.createServer();
-      server.listen(port, () => {
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        // A missing address family (IPv4-only or IPv6-only host) cannot hold the port.
+        resolve(err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT");
+      });
+      server.listen(port, host, () => {
         server.close(() => resolve(true));
       });
-      server.on("error", () => resolve(false));
     });
+  };
+
+  // Probe sequentially: a dual-stack `::` bind collides with a concurrent `0.0.0.0` one.
+  const tryPort = async (port: number): Promise<boolean> => {
+    for (const host of APP_PORT_PROBE_HOSTS) {
+      if (!(await isFreeOn(port, host))) return false;
+    }
+    return true;
   };
 
   // Try random ports first
@@ -1266,6 +1284,59 @@ export function findPidsOnPort(port: number): number[] {
 }
 
 /**
+ * Read a process's start time. Paired with the PID it identifies one process
+ * instance, so a recycled PID does not match. Linux reads the boot-relative
+ * tick count from /proc, which wall-clock adjustments cannot shift; other
+ * platforms use `ps` in a fixed locale and time zone. Returns null on Windows
+ * or when the process does not exist.
+ */
+export function getProcessStartTime(pid: number): string | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      // Fields after the parenthesized command name; starttime is field 22.
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+      return fields[19] || null;
+    }
+    const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C", TZ: "UTC" },
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    return output.trim().replace(/\s+/g, " ") || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Kill a process group left behind by a portless session that died without
+ * cleaning up. The group is only signaled while its leader is alive, still
+ * leads the group, and has the start time recorded at spawn, so a recycled PID
+ * is not targeted. Returns true when the signal was sent.
+ */
+export function killOrphanedProcessGroup(
+  pgid: number,
+  startTime: string | undefined,
+  signal: NodeJS.Signals = "SIGTERM"
+): boolean {
+  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
+  try {
+    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pgid)], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    if (Number(output.trim()) !== pgid) return false;
+    if (getProcessStartTime(pgid) !== startTime) return false;
+    process.kill(-pgid, signal);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Try to find the PID of a process listening on the given TCP port.
  * Uses lsof on macOS/Linux and netstat on Windows.
  * Returns null if the PID cannot be determined.
@@ -1337,7 +1408,8 @@ function collectBinPaths(cwd: string): string[] {
 }
 
 /**
- * Build a PATH string with `node_modules/.bin` directories prepended.
+ * Build a PATH string with `node_modules/.bin` directories prepended and the
+ * running node's directory appended as a fallback.
  */
 export function augmentedPath(env: NodeJS.ProcessEnv | undefined, cwd?: string): string {
   const source = env ?? process.env;
@@ -1345,11 +1417,11 @@ export function augmentedPath(env: NodeJS.ProcessEnv | undefined, cwd?: string):
   // process.env but case-sensitive in plain objects created via spread).
   const base = source.PATH ?? source.Path ?? "";
   const bins = collectBinPaths(cwd ?? process.cwd());
-  // Ensure node's own directory is in PATH so .cmd wrappers in node_modules/.bin
-  // can locate the node executable (fixes Windows "node not recognized" errors).
+  // node's own directory goes last, as a fallback for .cmd wrappers in
+  // node_modules/.bin on Windows ("node not recognized"). Ahead of the caller's
+  // PATH it would shadow the node a version manager (asdf, nvm, fnm, mise) chose.
   const nodeBin = path.dirname(process.execPath);
-  const allBins = [...bins, nodeBin];
-  return allBins.join(path.delimiter) + path.delimiter + base;
+  return [...bins, base, nodeBin].filter(Boolean).join(path.delimiter);
 }
 
 /**
@@ -1363,6 +1435,8 @@ export function spawnCommand(
   options?: {
     env?: NodeJS.ProcessEnv;
     onCleanup?: () => void;
+    /** Called with the child's PID, which is also its process group on Unix. */
+    onSpawn?: (pid: number) => void;
   }
 ): void {
   const env: Record<string, string | undefined> = {
@@ -1400,6 +1474,7 @@ export function spawnCommand(
       });
 
   guardWindowsOrphans(child, spawnedAt);
+  if (!isWindows && child.pid) options?.onSpawn?.(child.pid);
 
   let exiting = false;
   let shutdownSignal: NodeJS.Signals | undefined;
@@ -1415,6 +1490,7 @@ export function spawnCommand(
     if (shutdownPoll) clearInterval(shutdownPoll);
     process.removeListener("SIGINT", onSigInt);
     process.removeListener("SIGTERM", onSigTerm);
+    process.removeListener("SIGHUP", onSigHup);
     options?.onCleanup?.();
   };
 
@@ -1455,9 +1531,13 @@ export function spawnCommand(
 
   const onSigInt = () => handleSignal("SIGINT");
   const onSigTerm = () => handleSignal("SIGTERM");
+  // The child runs in its own process group, so it never sees the SIGHUP a
+  // closing terminal sends to the foreground group.
+  const onSigHup = () => handleSignal("SIGHUP");
 
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
+  process.on("SIGHUP", onSigHup);
 
   child.on("error", (err) => {
     if (exiting || shutdownSignal) return;
