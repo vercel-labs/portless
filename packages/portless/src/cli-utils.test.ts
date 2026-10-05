@@ -4,6 +4,7 @@ import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { execFileSync } from "node:child_process";
 import {
   augmentedPath,
   buildProxyStartConfig,
@@ -45,6 +46,8 @@ import {
   writeTldFile,
   writeTldsFile,
   writeTlsMarker,
+  getProcessStartTime,
+  killOrphanedProcessGroup,
 } from "./cli-utils.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
@@ -2236,5 +2239,70 @@ describe("syncHostsWithWarning", () => {
     );
     expect(warns).toBe(0);
     expect(latched).toBe(false);
+  });
+});
+
+describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => {
+  let orphanPid: number | undefined;
+
+  // A detached grandchild becomes its own group leader and is reparented to
+  // init once its parent exits: PGID == PID and PPID == 1, like an orphan.
+  function spawnUnrelatedOrphan(): number {
+    const script = `
+      const { spawn } = require("node:child_process");
+      const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      process.stdout.write(String(child.pid));
+    `;
+    return Number(execFileSync(process.execPath, ["-e", script], { encoding: "utf-8" }));
+  }
+
+  function isAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  async function waitForParentToBeInit(pid: number): Promise<void> {
+    for (let i = 0; i < 50; i++) {
+      const ppid = Number(
+        execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf-8" })
+      );
+      if (ppid === 1) return;
+      await new Promise((r) => setTimeout(r, 20));
+    }
+  }
+
+  afterEach(() => {
+    if (orphanPid && isAlive(orphanPid)) process.kill(orphanPid, "SIGKILL");
+    orphanPid = undefined;
+  });
+
+  it("does not signal an unrelated group leader whose start time was not recorded", async () => {
+    orphanPid = spawnUnrelatedOrphan();
+    await waitForParentToBeInit(orphanPid);
+
+    expect(killOrphanedProcessGroup(orphanPid, undefined)).toBe(false);
+    expect(killOrphanedProcessGroup(orphanPid, "Thu Jan  1 00:00:00 1970")).toBe(false);
+    expect(isAlive(orphanPid)).toBe(true);
+  });
+
+  it("signals the group when the leader start time matches the recorded one", async () => {
+    orphanPid = spawnUnrelatedOrphan();
+    await waitForParentToBeInit(orphanPid);
+    const startTime = getProcessStartTime(orphanPid);
+    expect(startTime).toBeTruthy();
+
+    expect(killOrphanedProcessGroup(orphanPid, startTime!, "SIGKILL")).toBe(true);
+    for (let i = 0; i < 50 && isAlive(orphanPid); i++) {
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    expect(isAlive(orphanPid)).toBe(false);
   });
 });

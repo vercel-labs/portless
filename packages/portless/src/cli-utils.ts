@@ -1177,16 +1177,38 @@ export function findPidsOnPort(port: number): number[] {
 }
 
 /**
+ * Read a process's start time as reported by `ps`. Paired with the PID it
+ * identifies one process instance, so a recycled PID does not match.
+ * Returns null on Windows or when the process does not exist.
+ */
+export function getProcessStartTime(pid: number): string | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+      encoding: "utf-8",
+      env: { ...process.env, LC_ALL: "C" },
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    const startTime = output.trim().replace(/\s+/g, " ");
+    return startTime || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Kill a process group left behind by a portless session that died without
  * cleaning up. The group is only signaled while its leader is alive, still
- * leads the group, and has been reparented to init, so a recycled PID is not
- * targeted. Returns true when the signal was sent.
+ * leads the group, has been reparented to init, and has the start time
+ * recorded at spawn, so a recycled PID is not targeted. Returns true when the
+ * signal was sent.
  */
 export function killOrphanedProcessGroup(
   pgid: number,
+  startTime: string | undefined,
   signal: NodeJS.Signals = "SIGTERM"
 ): boolean {
-  if (isWindows || !Number.isInteger(pgid) || pgid <= 1) return false;
+  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
   try {
     const output = execFileSync("ps", ["-o", "pgid=,ppid=", "-p", String(pgid)], {
       encoding: "utf-8",
@@ -1194,6 +1216,7 @@ export function killOrphanedProcessGroup(
     });
     const [leaderPgid, ppid] = output.trim().split(/\s+/).map(Number);
     if (leaderPgid !== pgid || ppid !== 1) return false;
+    if (getProcessStartTime(pgid) !== startTime) return false;
     process.kill(-pgid, signal);
     return true;
   } catch {

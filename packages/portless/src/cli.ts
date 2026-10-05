@@ -61,6 +61,7 @@ import {
   findPidOnPort,
   findPidsOnPort,
   killOrphanedProcessGroup,
+  getProcessStartTime,
   getDefaultPort,
   getDefaultTlds,
   getProxyBindTargets,
@@ -539,7 +540,7 @@ function stopOrphanedProcessGroups(store: RouteStore): void {
     const pgid = route.childPgid;
     if (!pgid || seen.has(pgid) || route.pid === 0 || isPidAlive(route.pid)) continue;
     seen.add(pgid);
-    if (killOrphanedProcessGroup(pgid)) {
+    if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
       console.log(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
@@ -1592,9 +1593,10 @@ async function runApp(
       ...caEnv,
     },
     onSpawn: (pid) => {
+      const childStartTime = getProcessStartTime(pid) ?? undefined;
       for (const host of hostnames) {
         try {
-          store.updateRoute(host, { childPgid: pid });
+          store.updateRoute(host, { childPgid: pid, childStartTime });
         } catch {
           // Without the pgid, prune falls back to the route port; non-fatal
         }
@@ -2286,7 +2288,11 @@ ${colors.bold("Options:")}
   const killedGroups = new Set<number>();
   for (const route of stale) {
     const pgid = route.childPgid;
-    if (pgid && !killedGroups.has(pgid) && killOrphanedProcessGroup(pgid, signal)) {
+    if (
+      pgid &&
+      !killedGroups.has(pgid) &&
+      killOrphanedProcessGroup(pgid, route.childStartTime, signal)
+    ) {
       killedGroups.add(pgid);
       killed++;
       console.log(`  ${route.hostname} - killed process group ${pgid} (${signal})`);
