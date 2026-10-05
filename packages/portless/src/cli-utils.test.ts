@@ -2245,8 +2245,8 @@ describe("syncHostsWithWarning", () => {
 describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => {
   let orphanPid: number | undefined;
 
-  // A detached grandchild becomes its own group leader and is reparented to
-  // init once its parent exits: PGID == PID and PPID == 1, like an orphan.
+  // A detached grandchild leads its own group and outlives its parent, like
+  // an orphaned dev server.
   function spawnUnrelatedOrphan(): number {
     const script = `
       const { spawn } = require("node:child_process");
@@ -2269,24 +2269,13 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
     }
   }
 
-  async function waitForParentToBeInit(pid: number): Promise<void> {
-    for (let i = 0; i < 50; i++) {
-      const ppid = Number(
-        execFileSync("ps", ["-o", "ppid=", "-p", String(pid)], { encoding: "utf-8" })
-      );
-      if (ppid === 1) return;
-      await new Promise((r) => setTimeout(r, 20));
-    }
-  }
-
   afterEach(() => {
     if (orphanPid && isAlive(orphanPid)) process.kill(orphanPid, "SIGKILL");
     orphanPid = undefined;
   });
 
-  it("does not signal an unrelated group leader whose start time was not recorded", async () => {
+  it("does not signal a group leader whose start time was not recorded or differs", () => {
     orphanPid = spawnUnrelatedOrphan();
-    await waitForParentToBeInit(orphanPid);
 
     expect(killOrphanedProcessGroup(orphanPid, undefined)).toBe(false);
     expect(killOrphanedProcessGroup(orphanPid, "Thu Jan  1 00:00:00 1970")).toBe(false);
@@ -2295,7 +2284,6 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
 
   it("signals the group when the leader start time matches the recorded one", async () => {
     orphanPid = spawnUnrelatedOrphan();
-    await waitForParentToBeInit(orphanPid);
     const startTime = getProcessStartTime(orphanPid);
     expect(startTime).toBeTruthy();
 
