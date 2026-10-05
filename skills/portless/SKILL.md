@@ -299,7 +299,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
-| `portless prune`                                  | Kill orphaned dev servers from crashed sessions                |
+| `portless prune`                                  | Kill orphaned dev server groups; `run` also does it on start   |
 | `portless prune --force`                          | Kill orphans with SIGKILL instead of SIGTERM                   |
 | `portless proxy start`                            | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
 | `portless proxy start --no-tls`                   | Start without HTTPS (plain HTTP on port 80)                    |
