@@ -62,6 +62,40 @@ function isEncrypted(req: http.IncomingMessage): boolean {
   return !!(req.socket as net.Socket & { encrypted?: boolean }).encrypted;
 }
 
+/** Use HTML only when the client explicitly accepts it at a positive quality. */
+function prefersHtml(accept: string | undefined): boolean {
+  let html = 0;
+  let json = 0;
+  for (const range of (accept ?? "").split(",")) {
+    const [mediaType, ...parameters] = range.trim().toLowerCase().split(";");
+    const qualityParameter = parameters.find((parameter) => parameter.trim().startsWith("q="));
+    const quality = qualityParameter === undefined ? 1 : Number(qualityParameter.trim().slice(2));
+    if (!Number.isFinite(quality) || quality <= 0 || quality > 1) continue;
+    if (mediaType === "text/html") html = Math.max(html, quality);
+    if (mediaType === "application/json") json = Math.max(json, quality);
+  }
+  return html > 0 && html >= json;
+}
+
+function sendProxyError(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  status: number,
+  error: string,
+  upstream: string,
+  message: string,
+  html: () => string
+): void {
+  res.setHeader("Vary", "Accept");
+  if (prefersHtml(req.headers.accept)) {
+    res.writeHead(status, { "Content-Type": "text/html" });
+    res.end(html());
+  } else {
+    res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ error, upstream, message }));
+  }
+}
+
 export const HOSTS_SYNC_PATH = "/.portless/hosts-sync";
 
 function isLoopbackPeer(address: string | undefined): boolean {
@@ -315,18 +349,24 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           `This usually means a backend is proxying back through portless without rewriting ` +
           `the Host header. If you use Vite/webpack proxy, set changeOrigin: true.`
       );
-      res.writeHead(508, { "Content-Type": "text/html" });
-      res.end(
-        renderPage(
-          508,
-          "Loop Detected",
-          `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
+      sendProxyError(
+        req,
+        res,
+        508,
+        "loop_detected",
+        host,
+        `This request has passed through portless ${hops} times.`,
+        () =>
+          renderPage(
+            508,
+            "Loop Detected",
+            `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
   "/api": {
     target: "${reqTls ? "https" : "http"}://&lt;backend&gt;${escapeHtml(primaryTldSuffix)}${reqTls ? "" : ":&lt;port&gt;"}",
     changeOrigin: true,
   },
 }</pre></div></div>`
-        )
+          )
       );
       return;
     }
@@ -347,8 +387,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         routes.length > 0
           ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
           : '<p class="empty">No apps running.</p>';
-      res.writeHead(404, { "Content-Type": "text/html" });
-      res.end(
+      sendProxyError(req, res, 404, "not_found", host, `No app registered for ${host}`, () =>
         renderPage(
           404,
           "Not Found",
@@ -419,8 +458,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           errWithCode.code === "ECONNREFUSED"
             ? "The target app is not responding. It may have crashed."
             : "The target app may not be running.";
-        res.writeHead(502, { "Content-Type": "text/html" });
-        res.end(
+        sendProxyError(req, res, 502, "bad_gateway", host, detail, () =>
           renderPage(
             502,
             "Bad Gateway",

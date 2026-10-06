@@ -21,6 +21,7 @@ type AnyServer = http.Server | ProxyServer;
 function request(
   server: AnyServer,
   options: {
+    accept?: string | null;
     hostname?: string;
     host?: string;
     path?: string;
@@ -39,7 +40,11 @@ function request(
         port: addr.port,
         path: options.path || "/",
         method: options.method || "GET",
-        headers: { host: options.host || "", ...options.headers },
+        headers: {
+          host: options.host || "",
+          ...(options.accept !== null ? { accept: options.accept ?? "text/html" } : {}),
+          ...options.headers,
+        },
       },
       (res) => {
         let body = "";
@@ -764,6 +769,79 @@ describe("createProxyServer", () => {
   });
 
   describe("error handling", () => {
+    it.each([
+      null,
+      "*/*",
+      "application/json",
+      "application/x-amz-json-1.1",
+      "text/html;q=0, */*",
+      "application/json, text/html;q=0.1",
+    ])("returns a compact JSON gateway error for Accept %s", async (accept) => {
+      const backend = trackServer(http.createServer());
+      await listen(backend);
+      const port = (backend.address() as net.AddressInfo).port;
+      await new Promise<void>((resolve) => backend.close(() => resolve()));
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "dead.localhost", port }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+      const res = await request(server, { host: "dead.localhost", accept });
+      expect(res.status).toBe(502);
+      expect(res.headers["content-type"]).toContain("application/json");
+      expect(res.headers.vary).toBe("Accept");
+      expect(JSON.parse(res.body)).toMatchObject({
+        error: "bad_gateway",
+        upstream: "dead.localhost",
+      });
+      expect(res.body.length).toBeLessThan(500);
+    });
+
+    it("returns JSON for an unknown route and a proxy loop", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      const missing = await request(server, {
+        host: "missing.localhost",
+        accept: "application/json",
+      });
+      expect(missing.status).toBe(404);
+      expect(JSON.parse(missing.body).error).toBe("not_found");
+      const loop = await request(server, {
+        host: "missing.localhost",
+        accept: "application/json",
+        headers: { "x-portless-hops": "10" },
+      });
+      expect(loop.status).toBe(508);
+      expect(JSON.parse(loop.body).error).toBe("loop_detected");
+    });
+
+    it("passes upstream API error responses through unchanged", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(503, { "Content-Type": "application/json", "X-Upstream": "preserved" });
+          res.end('{"error":"upstream_unavailable"}');
+        })
+      );
+      await listen(backend);
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [
+            { hostname: "api.localhost", port: (backend.address() as net.AddressInfo).port },
+          ],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+      const res = await request(server, { host: "api.localhost", accept: "application/json" });
+      expect(res.status).toBe(503);
+      expect(res.headers["x-upstream"]).toBe("preserved");
+      expect(res.body).toBe('{"error":"upstream_unavailable"}');
+    });
+
     it("returns 502 when backend is not running", async () => {
       const errors: string[] = [];
       const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: 59999 }];
@@ -843,6 +921,7 @@ describe("createProxyServer", () => {
             method: "GET",
             headers: {
               host: "app.localhost",
+              accept: "text/html",
               "x-portless-hops": "5",
             },
           },
@@ -1068,7 +1147,7 @@ describe("createProxyServer", () => {
             port: proxyAddr.port,
             path: "/api/tasks",
             method: "GET",
-            headers: { host: "frontend.localhost" },
+            headers: { host: "frontend.localhost", accept: "text/html" },
           },
           (res) => {
             let body = "";
@@ -1502,7 +1581,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
           port: addr.port,
           path: options.path || "/",
           method: options.method || "GET",
-          headers: { host: options.host || "" },
+          headers: { host: options.host || "", accept: "text/html" },
           rejectUnauthorized: false,
         },
         (res) => {

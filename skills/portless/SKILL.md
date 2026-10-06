@@ -487,3 +487,5 @@ Requires the ngrok CLI to be installed (https://ngrok.com/download) and on PATH.
 - `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions; on Windows, install via `winget install -e --id ShiningLight.OpenSSL.Dev` or use the copy bundled with Git for Windows)
 - `tailscale` CLI (optional, for `--tailscale` and `--funnel`)
 - `ngrok` CLI (optional, for `--ngrok`)
+
+Proxy-generated 404, 502, and 508 errors use JSON for API clients. Send `Accept: text/html` to get the browser error page. A higher preference for `application/json` selects JSON. Upstream responses keep their original status and body.

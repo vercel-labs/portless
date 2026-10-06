@@ -557,3 +557,5 @@ pnpm format           # Format all files with Prettier
 - macOS, Linux, or Windows
 - Tailscale CLI (optional, for `--tailscale` and `--funnel`)
 - ngrok CLI (optional, for `--ngrok`)
+
+Proxy-generated 404, 502, and 508 errors return a small JSON response for API clients. Clients that explicitly accept `text/html` receive the browser error page, unless they prefer `application/json`. Upstream responses keep their original status and body.

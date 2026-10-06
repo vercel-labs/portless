@@ -1932,6 +1932,11 @@ ${colors.bold("How it works:")}
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
+${colors.bold("Proxy errors:")}
+  API clients receive JSON for proxy-generated 404, 502, and 508 errors.
+  Explicit Accept: text/html selects the browser page unless JSON is preferred.
+  Upstream status codes and bodies pass through unchanged.
+
 ${colors.bold("HTTP/2 + HTTPS (default):")}
   HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
   WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441
