@@ -365,6 +365,27 @@ export class RouteStore {
   }
 
   /**
+   * Hand a route over to another process. Only applies while the route is
+   * still owned by `fromPid`, so a `--force` takeover is never overwritten.
+   */
+  transferRoute(hostname: string, fromPid: number, toPid: number): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const routes = this.loadRoutes(true);
+      const route = routes.find((r) => r.hostname === hostname && r.pid === fromPid);
+      if (!route) return false;
+      route.pid = toPid;
+      this.saveRoutes(routes);
+      return true;
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /**
    * Remove a route by hostname. When `ownerPid` is provided, the entry is
    * only removed while it is still owned by that pid. Exit cleanups must
    * pass their own pid: after a `--force` takeover the killed process would

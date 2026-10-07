@@ -1283,6 +1283,42 @@ export function findPidsOnPort(port: number): number[] {
   }
 }
 
+function isProcessGroupAlive(groupId: number): boolean {
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * Find the listener a command left on `port` after its launcher exited, for
+ * commands that self-daemonize (print an address and exit while the server
+ * keeps running). On Unix the wait lasts while processes from the launcher's
+ * process group are alive, up to `timeoutMs`; a plain foreground exit leaves
+ * the group empty and returns at once. Windows has no process group to watch,
+ * so it checks once.
+ */
+export async function findSelfDaemonizedListener(
+  port: number,
+  processGroupId: number | undefined,
+  timeoutMs: number
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await isPortListening(port)) {
+      const pid = findPidOnPort(port);
+      if (pid !== null) return pid;
+    }
+    if (isWindows || processGroupId === undefined || !isProcessGroupAlive(processGroupId)) {
+      return null;
+    }
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, COMMAND_SHUTDOWN_POLL_MS));
+  }
+}
+
 /**
  * Read a process's start time. Paired with the PID it identifies one process
  * instance, so a recycled PID does not match. Linux reads the boot-relative
@@ -1435,6 +1471,8 @@ export function spawnCommand(
   options?: {
     env?: NodeJS.ProcessEnv;
     onCleanup?: () => void;
+    /** Awaited after the command exits on its own, before cleanup runs. */
+    onExit?: (childPid: number | undefined) => Promise<void>;
     /** Called with the child's PID, which is also its process group on Unix. */
     onSpawn?: (pid: number) => void;
   }
@@ -1559,7 +1597,16 @@ export function spawnCommand(
       finish(128 + (SIGNAL_CODES[signal] || 15));
       return;
     }
-    finish(code ?? 1);
+    const onExit = options?.onExit;
+    if (!onExit) {
+      finish(code ?? 1);
+      return;
+    }
+    onExit(child.pid)
+      .catch(() => {
+        // Exit hooks are best-effort.
+      })
+      .finally(() => finish(code ?? 1));
   });
 }
 
