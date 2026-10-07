@@ -1488,6 +1488,7 @@ export function spawnCommand(
     if (graceTimer) clearTimeout(graceTimer);
     if (forceTimer) clearTimeout(forceTimer);
     if (shutdownPoll) clearInterval(shutdownPoll);
+    process.removeListener("SIGHUP", onSigHup);
     process.removeListener("SIGINT", onSigInt);
     process.removeListener("SIGTERM", onSigTerm);
     process.removeListener("SIGHUP", onSigHup);
@@ -1529,12 +1530,14 @@ export function spawnCommand(
     shutdownPoll = setInterval(finishShutdownIfComplete, COMMAND_SHUTDOWN_POLL_MS);
   };
 
+  const onSigHup = () => handleSignal("SIGHUP");
   const onSigInt = () => handleSignal("SIGINT");
   const onSigTerm = () => handleSignal("SIGTERM");
   // The child runs in its own process group, so it never sees the SIGHUP a
   // closing terminal sends to the foreground group.
   const onSigHup = () => handleSignal("SIGHUP");
 
+  process.on("SIGHUP", onSigHup);
   process.on("SIGINT", onSigInt);
   process.on("SIGTERM", onSigTerm);
   process.on("SIGHUP", onSigHup);
