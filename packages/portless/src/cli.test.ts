@@ -288,6 +288,15 @@ async function waitForHttpHeader(
   throw new Error(`Timed out waiting for ${headerName} on ${hostname}:${port}`);
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   if (child.exitCode !== null) return;
   child.kill("SIGTERM");
@@ -1926,6 +1935,146 @@ describe("CLI", () => {
       const stop = run(["proxy", "stop"], { env: proxyEnv() });
       expect(stop.status).toBe(0);
       expect(stop.stdout).toContain("Proxy stopped");
+    });
+
+    describe("proxy settings from portless.json", () => {
+      // Only the state dir: everything else must come from the file.
+      const fileEnv = () => ({
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: undefined,
+        PORTLESS_HTTPS: undefined,
+        PORTLESS_WILDCARD: undefined,
+      });
+      const writeConfig = (dir: string, config: Record<string, unknown>) =>
+        fs.writeFileSync(path.join(dir, "portless.json"), JSON.stringify(config));
+
+      it("starts the proxy from the file alone", async () => {
+        writeConfig(tmpDir, { https: false, port: testPort, wildcard: true });
+        const start = run(["proxy", "start"], { env: fileEnv(), cwd: tmpDir });
+        expect(start.status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+        const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+        expect(log).toContain(`HTTP proxy listening on 127.0.0.1:${testPort}`);
+        expect(log).toContain("(wildcard)");
+      });
+
+      it("lets an exported variable beat the file", async () => {
+        writeConfig(tmpDir, { https: false, port: testPort, wildcard: true });
+        const start = run(["proxy", "start"], {
+          env: { ...fileEnv(), PORTLESS_WILDCARD: "0" },
+          cwd: tmpDir,
+        });
+        expect(start.status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+        expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).not.toContain(
+          "(wildcard)"
+        );
+      });
+
+      it("lets a flag beat the file", async () => {
+        writeConfig(tmpDir, { https: false, port: testPort, wildcard: false });
+        const start = run(["proxy", "start", "--wildcard"], { env: fileEnv(), cwd: tmpDir });
+        expect(start.status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+        expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain("(wildcard)");
+      });
+
+      it("uses the workspace root's file from a package directory", async () => {
+        fs.writeFileSync(path.join(tmpDir, "pnpm-workspace.yaml"), 'packages:\n  - "apps/*"\n');
+        const pkg = path.join(tmpDir, "apps", "web");
+        fs.mkdirSync(pkg, { recursive: true });
+        fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name: "@demo/web" }));
+        writeConfig(tmpDir, { https: false, port: testPort });
+
+        const start = run(["proxy", "start"], { env: fileEnv(), cwd: pkg });
+        expect(start.status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+      });
+
+      it("names the file when it disagrees with the running proxy", async () => {
+        writeConfig(tmpDir, { https: false, port: testPort });
+        expect(run(["proxy", "start"], { env: fileEnv(), cwd: tmpDir }).status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+
+        writeConfig(tmpDir, { https: true, port: testPort });
+        const again = run(["proxy", "start"], { env: fileEnv(), cwd: tmpDir });
+        expect(again.status).toBe(1);
+        expect(again.stderr).toContain("requested HTTPS, but the running proxy is using HTTP");
+        // The child reports its real cwd, which on macOS resolves the temp dir symlink.
+        const file = path.join(fs.realpathSync(tmpDir), "portless.json");
+        expect(again.stderr).toContain(`Requested by ${file}: https, port`);
+      });
+
+      it("rejects a conflicting file before anything starts", () => {
+        writeConfig(tmpDir, { unprivileged: true, syncHosts: true, port: testPort });
+        const start = run(["proxy", "start"], { env: fileEnv(), cwd: tmpDir });
+        expect(start.status).toBe(1);
+        expect(start.stderr).toContain('"syncHosts": true cannot be combined');
+        expect(fs.existsSync(path.join(tmpDir, "proxy.port"))).toBe(false);
+      });
+
+      it("still prints help with an invalid file", () => {
+        fs.writeFileSync(path.join(tmpDir, "portless.json"), "{ not json");
+        expect(run(["--help"], { env: fileEnv(), cwd: tmpDir }).status).toBe(0);
+      });
+
+      it("auto-starts the proxy from the file when an app runs", async () => {
+        writeConfig(tmpDir, { https: false, port: testPort, wildcard: true });
+        // The app records its URL and pid. The test ends the app itself and
+        // waits for it to be gone: on Windows a live process whose cwd is the
+        // temp dir would make the afterEach cleanup fail with EPERM.
+        const capFile = path.join(tmpDir, "url.txt");
+        fs.writeFileSync(
+          path.join(tmpDir, "app.cjs"),
+          `require("node:fs").writeFileSync(${JSON.stringify(capFile)}, JSON.stringify({ url: process.env.PORTLESS_URL || "", pid: process.pid }));\nsetInterval(() => {}, 1000);\n`
+        );
+        const childEnv: Record<string, string | undefined> = { ...process.env, ...fileEnv() };
+        for (const key of Object.keys(childEnv)) {
+          if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+        }
+        childEnv.NO_COLOR = "1";
+
+        const cli = spawn(
+          process.execPath,
+          [CLI_PATH, "run", "--name", "fromfile", "node", "app.cjs"],
+          {
+            cwd: tmpDir,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          }
+        );
+        let output = "";
+        cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+        cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+        let appPid: number | undefined;
+        try {
+          for (let i = 0; i < 60 && !fs.existsSync(capFile); i++) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          if (!fs.existsSync(capFile)) throw new Error(`app never started. CLI output:\n${output}`);
+
+          const captured = JSON.parse(fs.readFileSync(capFile, "utf-8")) as {
+            url: string;
+            pid: number;
+          };
+          appPid = captured.pid;
+          expect(captured.url).toBe(`http://fromfile.localhost:${testPort}`);
+          await waitForHttpHeader(testPort, "X-Portless", "1");
+          expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain("(wildcard)");
+        } finally {
+          await stopChild(cli);
+          if (appPid !== undefined) {
+            try {
+              process.kill(appPid, "SIGKILL");
+            } catch {
+              // Already gone.
+            }
+            for (let i = 0; i < 50 && isAlive(appPid); i++) {
+              await new Promise((resolve) => setTimeout(resolve, 100));
+            }
+          }
+        }
+      }, 60_000);
     });
 
     it("accepts connections on IPv6 loopback when available", async (ctx) => {
