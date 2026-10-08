@@ -47,6 +47,7 @@ import {
   truncateLabel,
   sanitizeForHostname,
 } from "./auto.js";
+import type { WorktreePrefixOptions } from "./auto.js";
 import {
   buildProxyStartConfig,
   DEFAULT_TLD,
@@ -2386,7 +2387,7 @@ ${colors.bold("Examples:")}
   }
 
   const name = positional[0];
-  const worktree = skipWorktree ? null : detectWorktreePrefix();
+  const worktree = skipWorktree ? null : detectWorktreePrefix(process.cwd(), loadWorktreeOptions());
   const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
 
   const { port, tls, tlds } = await discoverState();
@@ -3520,14 +3521,12 @@ ${colors.bold("LAN mode (--lan):")}
 }
 
 /**
- * Load the effective AppConfig for the current directory from portless.json.
- * Handles both single-app (top-level fields) and monorepo (apps map) configs.
+ * Load portless.json (or the package.json "portless" key) from `cwd`,
+ * exiting with the validation message when the config is malformed.
  */
-function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
+function loadConfigOrExit(cwd: string): ReturnType<typeof loadConfig> {
   try {
-    const loaded = loadConfig(cwd);
-    if (!loaded) return null;
-    return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    return loadConfig(cwd);
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -3535,6 +3534,24 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
     }
     throw err;
   }
+}
+
+/**
+ * Load the effective AppConfig for the current directory from portless.json.
+ * Handles both single-app (top-level fields) and monorepo (apps map) configs.
+ */
+function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
+  const loaded = loadConfigOrExit(cwd);
+  if (!loaded) return null;
+  return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+}
+
+/**
+ * Worktree settings from the config in `cwd`, so `run`, `get` and the
+ * zero-arg modes derive the same prefix for the same checkout.
+ */
+function loadWorktreeOptions(cwd: string = process.cwd()): WorktreePrefixOptions {
+  return { prefix: loadConfigOrExit(cwd)?.config.worktree?.prefix };
 }
 
 /**
@@ -3615,7 +3632,7 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = detectWorktreePrefix(cwd);
+  const worktree = detectWorktreePrefix(cwd, loadWorktreeOptions(cwd));
   const effectiveName = applyWorktreePrefix(baseName, worktree);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
@@ -3798,16 +3815,7 @@ async function handleDefaultMulti(
   globalScript?: string,
   extraArgs: string[] = []
 ): Promise<void> {
-  let loaded: ReturnType<typeof loadConfig>;
-  try {
-    loaded = loadConfig(wsRoot);
-  } catch (err) {
-    if (err instanceof ConfigValidationError) {
-      console.error(colors.red(`Error: ${err.message}`));
-      process.exit(1);
-    }
-    throw err;
-  }
+  const loaded = loadConfigOrExit(wsRoot);
   const packages = discoverWorkspacePackages(wsRoot);
 
   if (packages.length === 0) {
@@ -3850,7 +3858,7 @@ async function handleDefaultMulti(
   // In a git worktree, prefix every app's hostname with the branch name so
   // parallel worktrees of the same monorepo don't collide on <name>.localhost.
   // Mirrors handleDefaultSingle; single-app mode already does this.
-  const worktree = detectWorktreePrefix(wsRoot);
+  const worktree = detectWorktreePrefix(wsRoot, { prefix: loaded?.config.worktree?.prefix });
 
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
@@ -4231,7 +4239,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = detectWorktreePrefix();
+  const worktree = detectWorktreePrefix(process.cwd(), loadWorktreeOptions());
   const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();

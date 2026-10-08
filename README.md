@@ -91,14 +91,15 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 
 ### Config fields
 
-| Field     | Type    | Default  | Description                                               |
-| --------- | ------- | -------- | --------------------------------------------------------- |
-| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
-| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
-| `appPort` | number  | auto     | Fixed port for the child process.                         |
-| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
-| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
-| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+| Field      | Type    | Default  | Description                                                                                       |
+| ---------- | ------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `name`     | string  | inferred | Base app name. Worktree prefix still applies.                                                     |
+| `script`   | string  | `"dev"`  | Name of a `package.json` script to run.                                                           |
+| `appPort`  | number  | auto     | Fixed port for the child process.                                                                 |
+| `proxy`    | boolean | auto     | Whether to route through the proxy. Auto-detected.                                                |
+| `apps`     | object  |          | Overrides for workspace packages, keyed by relative path.                                         |
+| `turbo`    | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.                                          |
+| `worktree` | object  |          | `{ "prefix": "branch" }` labels worktrees with the whole branch name instead of its last segment. |
 
 ### package.json "portless" key
 
@@ -203,7 +204,12 @@ portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
 portless run next dev   # -> https://fix-ui.myapp.localhost
+
+# Linked worktree on branch "feature/auth"
+portless run next dev   # -> https://auth.myapp.localhost
 ```
+
+By default the label is the last segment of the branch name, so branches that share a tail, such as `team-a/login` and `team-b/login`, would share a URL. Set `"worktree": { "prefix": "branch" }` in `portless.json` to use the whole branch name instead: `feature/auth` becomes `feature-auth.myapp.localhost`, with slashes and other characters that are not valid in a hostname replaced by hyphens.
 
 Use `--name` to override the inferred base name while keeping the worktree prefix:
 
