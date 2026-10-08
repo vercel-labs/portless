@@ -412,6 +412,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     );
 
     proxyReq.on("error", (err) => {
+      // Nothing reads the client body once the backend request has failed,
+      // and pipe() keeps Node from dumping it on its own. Drain it so the
+      // socket keeps being read; otherwise the connection stalls, and a
+      // client that resets it leaves the socket and its buffered body
+      // pinned until the keep-alive timeout.
+      req.unpipe(proxyReq);
+      req.resume();
       onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
       if (!res.headersSent) {
         const errWithCode = err as NodeJS.ErrnoException;
