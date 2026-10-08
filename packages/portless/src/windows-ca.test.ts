@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ensureCerts } from "./certs.js";
 import {
+  hasWSLWindowsCA,
   isWSL,
   isWindowsCATrusted,
   trustWindowsCA,
@@ -34,6 +35,33 @@ describe("isWSL", () => {
     expect(
       isWSL({ platform: "win32", env: { WSL_DISTRO_NAME: "Ubuntu" }, release: "microsoft" })
     ).toBe(false);
+  });
+});
+
+describe("hasWSLWindowsCA", () => {
+  const container = {
+    platform: "linux" as const,
+    env: {},
+    release: "6.6.87.2-microsoft-standard-WSL2",
+  };
+
+  it("uses Linux trust when a WSL container has no wslpath", () => {
+    const run = vi.fn(() => {
+      throw Object.assign(new Error("spawnSync wslpath ENOENT"), { code: "ENOENT" });
+    });
+    expect(isWSL(container)).toBe(true);
+    expect(hasWSLWindowsCA(container, run)).toBe(false);
+  });
+
+  it("keeps Windows trust when wslpath resolves certutil", () => {
+    const run = vi.fn(() => "/mnt/c/Windows/System32/certutil.exe\n");
+    expect(hasWSLWindowsCA(container, run)).toBe(true);
+  });
+
+  it("does not probe Windows tools on native Linux", () => {
+    const run = vi.fn();
+    expect(hasWSLWindowsCA({ ...container, release: "6.8.0-generic" }, run)).toBe(false);
+    expect(run).not.toHaveBeenCalled();
   });
 });
 
