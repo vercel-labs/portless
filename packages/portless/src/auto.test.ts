@@ -480,4 +480,20 @@ describe("applyWorktreePrefix", () => {
       "feature-x.api"
     );
   });
+
+  it("flattens every label for a single-level wildcard certificate", () => {
+    expect(
+      applyWorktreePrefix("web.json-render", { prefix: "feature-x", source: "git branch" }, true)
+    ).toBe("feature-x-web-json-render");
+  });
+
+  it("keeps a flat worktree name within one DNS label", () => {
+    const result = applyWorktreePrefix(
+      "very-long-application-name-that-would-overflow-a-dns-label",
+      { prefix: "very-long-feature-branch-name", source: "git branch" },
+      true
+    );
+    expect(result.length).toBeLessThanOrEqual(63);
+    expect(result).not.toContain(".");
+  });
 });
