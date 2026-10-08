@@ -159,7 +159,7 @@ export function parseHostname(input: string, tld = "localhost"): string {
   // Remove any protocol prefix
   let hostname = input
     .trim()
-    .replace(/^https?:\/\//, "")
+    .replace(/^https?:\/\//i, "")
     .split("/")[0]
     .toLowerCase();
 
