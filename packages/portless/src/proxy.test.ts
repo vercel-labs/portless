@@ -13,6 +13,8 @@ import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
 
+// Bun cannot hand plain HTTP sockets to its TLS server; port 80 redirects remain supported.
+const nodeIt = process.versions.bun ? it.skip : it;
 const TEST_PROXY_PORT = 1355;
 
 /** Helper type covering both http.Server and http2.Http2SecureServer */
@@ -2121,57 +2123,60 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     }
   });
 
-  it("proxies plain-HTTP WebSocket upgrades on the TLS port instead of dropping them", async () => {
-    const backend = trackServer(http.createServer());
-    backend.on("upgrade", (_req, socket) => {
-      socket.write(
-        "HTTP/1.1 101 Switching Protocols\r\n" +
-          "Upgrade: websocket\r\n" +
-          "Connection: Upgrade\r\n" +
-          "\r\n"
+  nodeIt(
+    "proxies plain-HTTP WebSocket upgrades on the TLS port instead of dropping them",
+    async () => {
+      const backend = trackServer(http.createServer());
+      backend.on("upgrade", (_req, socket) => {
+        socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "\r\n"
+        );
+        socket.end();
+      });
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          tls: { cert: tlsCert, key: tlsKey },
+        })
       );
-      socket.end();
-    });
-    await listen(backend);
-    const backendAddr = backend.address();
-    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+      await listen(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
 
-    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port }];
-    const server = trackServer(
-      createProxyServer({
-        getRoutes: () => routes,
-        proxyPort: TEST_PROXY_PORT,
-        tls: { cert: tlsCert, key: tlsKey },
-      })
-    );
-    await listen(server);
-    const addr = server.address();
-    if (!addr || typeof addr === "string") throw new Error("no addr");
-
-    const upgraded = await new Promise<boolean>((resolve) => {
-      const req = http.request({
-        hostname: "127.0.0.1",
-        port: addr.port,
-        path: "/",
-        headers: {
-          host: "ws.localhost",
-          connection: "Upgrade",
-          upgrade: "websocket",
-        },
+      const upgraded = await new Promise<boolean>((resolve) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/",
+          headers: {
+            host: "ws.localhost",
+            connection: "Upgrade",
+            upgrade: "websocket",
+          },
+        });
+        req.on("error", () => resolve(false));
+        req.on("upgrade", () => resolve(true));
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve(false);
+        });
+        req.end();
       });
-      req.on("error", () => resolve(false));
-      req.on("upgrade", () => resolve(true));
-      req.setTimeout(2000, () => {
-        req.destroy();
-        resolve(false);
-      });
-      req.end();
-    });
 
-    expect(upgraded).toBe(true);
-  });
+      expect(upgraded).toBe(true);
+    }
+  );
 
-  it("redirects plain HTTP to HTTPS on the TLS-enabled port", async () => {
+  nodeIt("redirects plain HTTP to HTTPS on the TLS-enabled port", async () => {
     const routes: RouteInfo[] = [];
     const server = trackServer(
       createProxyServer({
@@ -2187,7 +2192,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(res.headers.location).toBe("https://myapp.localhost/dashboard");
   });
 
-  it("includes port in redirect Location when proxy is not on 443", async () => {
+  nodeIt("includes port in redirect Location when proxy is not on 443", async () => {
     const routes: RouteInfo[] = [];
     const server = trackServer(
       createProxyServer({
@@ -2203,7 +2208,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(res.headers.location).toBe(`https://myapp.localhost:${TEST_PROXY_PORT}/`);
   });
 
-  it("includes X-Portless header in HTTP-to-HTTPS redirect", async () => {
+  nodeIt("includes X-Portless header in HTTP-to-HTTPS redirect", async () => {
     const server = trackServer(
       createProxyServer({
         getRoutes: () => [],
