@@ -237,7 +237,10 @@ function findRoute(
 }
 
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
-export type ProxyServer = http.Server | net.Server;
+export type ProxyServer = (http.Server | net.Server) & {
+  /** Prepare registered TLS names on runtimes that do not invoke SNICallback. */
+  refreshTlsContexts?: () => Promise<void>;
+};
 
 /**
  * Create an HTTP proxy server that routes requests based on the Host header.
@@ -789,6 +792,45 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         handleExtendedConnect(req as http2.Http2ServerRequest, resOrSocket);
       }
     );
+
+    if (process.versions.bun) {
+      // Bun ignores SNICallback and cannot apply addContext to sockets handed
+      // over with emit("connection"). Let the TLS server accept sockets itself.
+      // HTTP on port 80 still redirects; HTTP on the TLS port is Node-only.
+      const contexts = new Map<string, Promise<void>>();
+      const selectContext = tls.SNICallback;
+      return Object.assign(h2Server, {
+        async refreshTlsContexts(): Promise<void> {
+          if (!selectContext) return;
+          await Promise.all(
+            getRoutes().map(({ hostname }) => {
+              let pending = contexts.get(hostname);
+              if (!pending) {
+                pending = new Promise<void>((resolve, reject) => {
+                  selectContext(hostname, (error, context) => {
+                    if (error || !context) {
+                      reject(error ?? new Error("Missing TLS context for " + hostname));
+                      return;
+                    }
+                    try {
+                      h2Server.addContext(hostname, context);
+                      resolve();
+                    } catch (error) {
+                      reject(error);
+                    }
+                  });
+                }).catch((error) => {
+                  contexts.delete(hostname);
+                  throw error;
+                });
+                contexts.set(hostname, pending);
+              }
+              return pending;
+            })
+          );
+        },
+      });
+    }
 
     // Plain HTTP on a TLS-enabled port -> 302 redirect to HTTPS.
     // The redirect targets the same port because the wrapper net.Server

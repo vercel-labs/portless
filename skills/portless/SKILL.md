@@ -211,6 +211,10 @@ portless trust                                      # Add CA to trust store late
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store. On WSL, it updates both the Linux trust store and the Windows current-user Root store so Windows browsers trust portless HTTPS certificates.
 
+### Bun HTTPS compatibility
+
+When running the proxy under Bun, registered hostnames are prepared with exact TLS certificates before route publication. Bun currently negotiates HTTP/1.1 for these contexts; secure WebSocket upgrades still work. Use explicit registered names rather than unregistered wildcard subdomains. Plain HTTP redirects remain available on port 80, but plain HTTP on the HTTPS port itself is only supported under Node.
+
 ### LAN mode
 
 ```bash
