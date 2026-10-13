@@ -38,6 +38,12 @@ jobs:
 
       - run: pnpm test
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun packages/portless/scripts/test-bun-tls.ts
+
       - run: pnpm --filter @portless/docs test:routes
 
       - run: pnpm test:e2e
@@ -66,6 +72,12 @@ jobs:
       - run: pnpm build
 
       - run: pnpm test
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - run: bun packages/portless/scripts/test-bun-tls.ts
 
       - name: Install and verify the Windows service
         shell: pwsh

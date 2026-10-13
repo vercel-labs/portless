@@ -47,6 +47,10 @@ Portless stores per-user state in `~/.portless`. When the proxy runs under sudo,
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners like turborepo and CI scripts fail early with a clear message.
 
+### Bun HTTPS compatibility
+
+When running the proxy under Bun, registered hostnames are prepared with exact TLS certificates before route publication. Bun currently negotiates HTTP/1.1 for these contexts; secure WebSocket upgrades still work. Use explicit registered names rather than unregistered wildcard subdomains. Plain HTTP redirects remain available on port 80, but plain HTTP on the HTTPS port itself is only supported under Node.
+
 ## Configuration
 
 Bare `portless` works out of the box. It runs the `"dev"` script from `package.json` through the proxy, inferring the app name from the package name, git root, or directory:
