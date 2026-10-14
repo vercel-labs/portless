@@ -91,14 +91,30 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 
 ### Config fields
 
-| Field     | Type    | Default  | Description                                               |
-| --------- | ------- | -------- | --------------------------------------------------------- |
-| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
-| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
-| `appPort` | number  | auto     | Fixed port for the child process.                         |
-| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
-| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
-| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+| Field          | Type               | Default       | Description                                                                              |
+| -------------- | ------------------ | ------------- | ---------------------------------------------------------------------------------------- |
+| `name`         | string             | inferred      | Base app name. Worktree prefix still applies.                                            |
+| `script`       | string             | `"dev"`       | Name of a `package.json` script to run.                                                  |
+| `appPort`      | number             | auto          | Fixed port for the child process.                                                        |
+| `proxy`        | boolean            | auto          | Whether to route through the proxy. Auto-detected.                                       |
+| `apps`         | object             |               | Overrides for workspace packages, keyed by relative path.                                |
+| `turbo`        | boolean            | `true`        | Set `false` to use direct spawning instead of turborepo.                                 |
+| `https`        | boolean            | `true`        | `false` serves plain HTTP (same as `PORTLESS_HTTPS=0`).                                  |
+| `port`         | number             | auto          | Proxy port (same as `PORTLESS_PORT`).                                                    |
+| `tld`          | string or string[] | `"localhost"` | One TLD or several (same as `PORTLESS_TLD`).                                             |
+| `wildcard`     | boolean            | `false`       | Route unregistered subdomains to the most specific parent (same as `PORTLESS_WILDCARD`). |
+| `syncHosts`    | boolean            | `true`        | `false` turns automatic hosts-file sync off (same as `PORTLESS_SYNC_HOSTS=0`).           |
+| `unprivileged` | boolean            | `false`       | Take a port below 1024 without sudo (same as `PORTLESS_UNPRIVILEGED=1`).                 |
+
+### Proxy settings
+
+The last six keys pin how the proxy runs for everyone who checks the project out. Each is the camelCase form of the `PORTLESS_*` variable it stands for, and portless applies it as that variable's default before any command reads it. A flag or an exported variable still wins, and the file wins over whatever the last proxy run used.
+
+```json
+{ "https": false, "wildcard": true }
+```
+
+Commit that once and every checkout, including a coding agent's, starts the same proxy from `npm install`, with nothing exported on any machine. The proxy is one per machine, so inside a workspace a package directory with no proxy settings of its own uses the workspace root's. A combination that can never work, such as `"unprivileged": true` with `"syncHosts": true`, is rejected when the file is read, and when a file disagrees with a proxy that is already running the error names the file.
 
 ### package.json "portless" key
 
