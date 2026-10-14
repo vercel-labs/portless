@@ -188,29 +188,29 @@ function branchToPrefix(branch: string): string | null {
  * Detect if the current directory is inside a multi-worktree git repo and
  * return the current branch name as a prefix for hostname composition.
  *
- * Heuristic:
- *   1. `git worktree list` — if there are multiple worktrees, this repo
- *      uses worktrees and checkouts need distinguishing.
- *   2. `git rev-parse --abbrev-ref HEAD` — get the current branch name.
- *   3. If the branch is `main` or `master`, no prefix (primary checkout).
- *   4. Otherwise, the sanitized branch name is the prefix.
+ * Resolves from the `.git` layout on disk first, without spawning a process:
+ * a linked worktree has a `.git` file pointing at `.git/worktrees/<name>`,
+ * while the primary checkout has a `.git` directory. The branch is read from
+ * that worktree's own HEAD file. Branches named `main`/`master` and detached
+ * HEAD produce no prefix.
  *
- * Falls back to parsing `.git` file + HEAD when git CLI is unavailable.
+ * Falls back to the git CLI only for `.git` layouts the filesystem heuristic
+ * cannot classify.
  */
 export function detectWorktreePrefix(cwd: string = process.cwd()): WorktreePrefix | null {
-  // Primary: git CLI
-  const cliResult = detectWorktreeViaCli(cwd);
-  if (cliResult !== undefined) return cliResult;
+  // Fast path: pure filesystem detection, no git subprocess.
+  const filesystemResult = detectWorktreeViaFilesystem(cwd);
+  if (filesystemResult !== undefined) return filesystemResult;
 
-  // Fallback: parse .git file and HEAD when git binary is unavailable
-  return detectWorktreeViaFilesystem(cwd);
+  // Fallback: git CLI for .git layouts the filesystem heuristic cannot classify.
+  return detectWorktreeViaCli(cwd) ?? null;
 }
 
 /**
- * Use git CLI to detect worktree prefix. Returns:
+ * Fallback worktree detection using the git CLI. Returns:
  *   - `{ prefix, source }` if in a linked worktree on a non-default branch
  *   - `null` if not in a linked worktree, or on main/master
- *   - `undefined` if git CLI is unavailable (caller should try fallback)
+ *   - `undefined` if git CLI is unavailable (no further fallback remains)
  */
 function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
   try {
@@ -272,18 +272,24 @@ function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
 }
 
 /**
- * Fallback worktree detection when git CLI is unavailable. Walks up from
- * `startDir` looking for a `.git` file (worktrees have a file, not a
- * directory) and reads the branch name from the gitdir's HEAD file.
+ * Filesystem worktree detection. Walks up from `startDir` looking for a
+ * `.git` file (linked worktrees have a file, not a directory) and reads the
+ * branch name from the gitdir's HEAD file.
+ *
+ * Returns:
+ *   - `{ prefix, source }` in a linked worktree on a non-default branch
+ *   - `null` when the layout definitively has no worktree prefix
+ *   - `undefined` when the `.git` file points to an unrecognized location,
+ *     so the caller should consult the git CLI
  */
-function detectWorktreeViaFilesystem(startDir: string): WorktreePrefix | null {
+function detectWorktreeViaFilesystem(startDir: string): WorktreePrefix | null | undefined {
   let dir = startDir;
   for (;;) {
     const gitPath = path.join(dir, ".git");
     try {
       const stat = fs.statSync(gitPath);
       if (stat.isDirectory()) {
-        // Regular .git directory — not a worktree
+        // Regular .git directory — not a linked worktree
         return null;
       }
       if (stat.isFile()) {
@@ -292,9 +298,11 @@ function detectWorktreeViaFilesystem(startDir: string): WorktreePrefix | null {
         if (!match) return null;
 
         const gitdir = match[1];
-        // Only treat as a worktree if gitdir points into a /worktrees/ path.
-        // Submodules point to /modules/ instead.
-        if (!gitdir.match(/[/\\]worktrees[/\\][^/\\]+$/)) return null;
+        // Submodules point into /modules/ and are not linked worktrees.
+        if (gitdir.match(/[/\\]modules[/\\][^/\\]+$/)) return null;
+        // Any other gitdir that does not match the worktree layout is
+        // unclassifiable from the filesystem alone; let the git CLI decide.
+        if (!gitdir.match(/[/\\]worktrees[/\\][^/\\]+$/)) return undefined;
 
         // Read the branch name from the worktree's HEAD file
         const branch = readBranchFromHead(path.resolve(dir, gitdir));
