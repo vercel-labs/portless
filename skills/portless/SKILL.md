@@ -164,7 +164,7 @@ period.
 ## How It Works
 
 1. `portless proxy start` starts an HTTPS reverse proxy on port 443 as a background daemon. Auto-elevates with sudo on macOS/Linux; falls back to port 1355 if sudo is unavailable. Use `--no-tls` for plain HTTP on port 80. Configurable with `-p` / `--port` or the `PORTLESS_PORT` env var. The proxy also auto-starts when you run an app.
-2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
+2. `portless <name> <cmd>` assigns a free port (random in 4000-4999 by default; `appPortStrategy` can make it `stable` per hostname or `sequential` from the bottom of `appPortRange`) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `https://<name>.localhost`; the proxy forwards to the app's assigned port
 
 Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
@@ -338,14 +338,16 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 Optional config file. Portless looks for it in the current directory.
 
-| Field     | Type    | Default                    | Description                                              |
-| --------- | ------- | -------------------------- | -------------------------------------------------------- |
-| `name`    | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
-| `script`  | string  | `"dev"`                    | Name of a package.json script to run                     |
-| `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
-| `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
-| `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
+| Field             | Type             | Default                    | Description                                                                            |
+| ----------------- | ---------------- | -------------------------- | -------------------------------------------------------------------------------------- |
+| `name`            | string           | inferred from package.json | Base app name (worktree prefix still applies)                                          |
+| `script`          | string           | `"dev"`                    | Name of a package.json script to run                                                   |
+| `appPort`         | number           | auto-assigned              | Fixed port for the child process                                                       |
+| `appPortStrategy` | string           | `"random"`                 | `random`, `stable` (same hostname, same port) or `sequential` (lowest free port first) |
+| `appPortRange`    | [number, number] | `[4000, 4999]`             | Inclusive range the strategy picks from                                                |
+| `proxy`           | boolean          | auto-detected              | Whether to route through the proxy (`false` for tasks)                                 |
+| `apps`            | object           |                            | Overrides for workspace packages, keyed by relative path                               |
+| `turbo`           | boolean          | `true`                     | Set `false` to use direct spawning instead of turborepo                                |
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
 

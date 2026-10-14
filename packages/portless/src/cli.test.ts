@@ -288,6 +288,15 @@ async function waitForHttpHeader(
   throw new Error(`Timed out waiting for ${headerName} on ${hostname}:${port}`);
 }
 
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   if (child.exitCode !== null) return;
   child.kill("SIGTERM");
@@ -1926,6 +1935,134 @@ describe("CLI", () => {
       const stop = run(["proxy", "stop"], { env: proxyEnv() });
       expect(stop.status).toBe(0);
       expect(stop.stdout).toContain("Proxy stopped");
+    });
+
+    describe("app port strategy", () => {
+      // Each app records the PORT it was given and its pid, then idles. The
+      // test ends the apps itself and waits for them to be gone so the
+      // afterEach cleanup can remove the temp dir on Windows.
+      const children: ReturnType<typeof spawn>[] = [];
+      const appPids: number[] = [];
+
+      afterEach(async () => {
+        for (const child of children) await stopChild(child);
+        children.length = 0;
+        for (const pid of appPids) {
+          try {
+            process.kill(pid, "SIGKILL");
+          } catch {
+            // Already gone.
+          }
+          for (let i = 0; i < 50 && isAlive(pid); i++) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+        }
+        appPids.length = 0;
+      });
+
+      async function startApp(
+        name: string,
+        config: Record<string, unknown>,
+        env: Record<string, string | undefined> = {}
+      ): Promise<{ port: number; output: () => string }> {
+        fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify(config));
+        const capFile = path.join(tmpDir, `${name}.json`);
+        fs.rmSync(capFile, { force: true });
+        // Listen on the assigned port like a real app, so a second pick sees it taken.
+        fs.writeFileSync(
+          path.join(tmpDir, `${name}.cjs`),
+          `require("node:http").createServer().listen(Number(process.env.PORT), "127.0.0.1", () => {\n  require("node:fs").writeFileSync(${JSON.stringify(capFile)}, JSON.stringify({ port: process.env.PORT, pid: process.pid }));\n});\n`
+        );
+        const childEnv: Record<string, string | undefined> = {
+          ...process.env,
+          ...proxyEnv(),
+          ...env,
+        };
+        for (const key of Object.keys(childEnv)) {
+          if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+        }
+        childEnv.NO_COLOR = "1";
+        let output = "";
+        const child = spawn(
+          process.execPath,
+          [CLI_PATH, "run", "--name", name, "node", `${name}.cjs`],
+          { cwd: tmpDir, env: childEnv, stdio: ["ignore", "pipe", "pipe"] }
+        );
+        children.push(child);
+        child.stdout?.on("data", (chunk) => (output += chunk.toString()));
+        child.stderr?.on("data", (chunk) => (output += chunk.toString()));
+        for (let i = 0; i < 60 && !fs.existsSync(capFile); i++) {
+          await new Promise((resolve) => setTimeout(resolve, 500));
+        }
+        if (!fs.existsSync(capFile))
+          throw new Error(`${name} never started. CLI output:\n${output}`);
+        const captured = JSON.parse(fs.readFileSync(capFile, "utf-8")) as {
+          port: string;
+          pid: number;
+        };
+        appPids.push(captured.pid);
+        return { port: Number(captured.port), output: () => output };
+      }
+
+      it("sequential gives the first app the bottom of the range and the next app the next port", async () => {
+        const range = [await getFreePort(), 0] as [number, number];
+        range[1] = range[0] + 20;
+        const config = { appPortStrategy: "sequential", appPortRange: range };
+        const first = await startApp("seq-one", config);
+        const second = await startApp("seq-two", config);
+        expect(first.port).toBe(range[0]);
+        expect(second.port).toBe(range[0] + 1);
+        expect(first.output()).toContain(`(sequential in ${range[0]}-${range[1]})`);
+      }, 60_000);
+
+      it("stable gives the same name the same port across restarts", async () => {
+        const base = await getFreePort();
+        const config = { appPortStrategy: "stable", appPortRange: [base, base + 200] };
+        const first = await startApp("stable-app", config);
+        await stopChild(children[0]!);
+        // The wrapper usually takes the app down with it; make sure, then wait.
+        try {
+          process.kill(appPids[0]!, "SIGKILL");
+        } catch {
+          // Already gone.
+        }
+        for (let i = 0; i < 50 && isAlive(appPids[0]!); i++) {
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        const again = await startApp("stable-app", config);
+        expect(again.port).toBe(first.port);
+      }, 60_000);
+
+      it("an exported strategy beats the file", async () => {
+        const base = await getFreePort();
+        const app = await startApp(
+          "env-wins",
+          { appPortStrategy: "random", appPortRange: [base, base + 20] },
+          { PORTLESS_APP_PORT_STRATEGY: "sequential" }
+        );
+        expect(app.port).toBe(base);
+      }, 60_000);
+
+      it("a fixed port beats the strategy", async () => {
+        const fixed = await getFreePort();
+        const app = await startApp(
+          "fixed-wins",
+          { appPortStrategy: "sequential", appPortRange: [4000, 4999] },
+          { PORTLESS_APP_PORT: String(fixed) }
+        );
+        expect(app.port).toBe(fixed);
+        expect(app.output()).toContain(`Using port ${fixed} (fixed)`);
+      }, 60_000);
+
+      it("rejects appPort beside appPortStrategy before anything runs", () => {
+        fs.writeFileSync(
+          path.join(tmpDir, "portless.json"),
+          JSON.stringify({ appPort: 4321, appPortStrategy: "sequential" })
+        );
+        const result = run(["run", "node", "-e", "0"], { env: proxyEnv(), cwd: tmpDir });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('"appPort" fixes the port');
+      });
     });
 
     it("accepts connections on IPv6 loopback when available", async (ctx) => {

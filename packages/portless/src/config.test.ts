@@ -281,6 +281,60 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it.each(["random", "stable", "sequential"])("accepts appPortStrategy %s", (strategy) => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ appPortStrategy: strategy, appPortRange: [4200, 4999] })
+    );
+    expect(loadConfig(tmpDir)?.config).toEqual({
+      appPortStrategy: strategy,
+      appPortRange: [4200, 4999],
+    });
+  });
+
+  it("throws when appPortStrategy is unknown", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ appPortStrategy: "first-free" })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/"appPortStrategy".*"random", "stable", "sequential"/);
+  });
+
+  it.for([[4200], [4200, 4999, 5000], ["4200", "4999"], [0, 4999], [4999, 4200]])(
+    "throws when appPortRange is %j",
+    (range) => {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ appPortRange: range }));
+      expect(() => loadConfig(tmpDir)).toThrow(/"appPortRange"/);
+    }
+  );
+
+  it("rejects appPort next to appPortStrategy in the same object", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ appPort: 4200, appPortStrategy: "sequential" })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/"appPort" fixes the port/);
+  });
+
+  it("allows a strategy at the root with a fixed port on one app", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ appPortStrategy: "sequential", apps: { "apps/api": { appPort: 7000 } } })
+    );
+    const loaded = loadConfig(tmpDir);
+    expect(resolveAppConfig(loaded!.config, tmpDir, path.join(tmpDir, "apps", "api"))).toEqual({
+      appPort: 7000,
+    });
+  });
+
+  it("validates the port keys inside apps entries too", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ apps: { "apps/web": { appPortRange: [1, 0] } } })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/"apps\.apps\/web\.appPortRange"/);
+  });
+
   it("warns on unknown top-level keys", () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fs.writeFileSync(
