@@ -255,6 +255,55 @@ describe("detectWorktreePrefix", () => {
     expect(result).toEqual({ prefix: "my-branch", source: "git branch" });
   });
 
+  it("gives branches that share a last segment the same prefix by default", () => {
+    setupWorktree(tmpDir, "team-a/login");
+    const first = detectWorktreePrefix(tmpDir);
+    setupWorktree(tmpDir, "team-b/login");
+    const second = detectWorktreePrefix(tmpDir);
+    expect(first).toEqual({ prefix: "login", source: "git branch" });
+    expect(second).toEqual({ prefix: "login", source: "git branch" });
+  });
+
+  describe('with { prefix: "branch" }', () => {
+    const options = { prefix: "branch" as const };
+
+    it("keeps every segment of a branch name with slashes", () => {
+      setupWorktree(tmpDir, "feature/My_Branch");
+      const result = detectWorktreePrefix(tmpDir, options);
+      expect(result).toEqual({ prefix: "feature-my-branch", source: "git branch" });
+    });
+
+    it("gives branches that share a last segment distinct prefixes", () => {
+      setupWorktree(tmpDir, "team-a/login");
+      const first = detectWorktreePrefix(tmpDir, options);
+      setupWorktree(tmpDir, "team-b/login");
+      const second = detectWorktreePrefix(tmpDir, options);
+      expect(first).toEqual({ prefix: "team-a-login", source: "git branch" });
+      expect(second).toEqual({ prefix: "team-b-login", source: "git branch" });
+    });
+
+    it("treats feature/main as a feature branch, not the default branch", () => {
+      setupWorktree(tmpDir, "feature/main");
+      const result = detectWorktreePrefix(tmpDir, options);
+      expect(result).toEqual({ prefix: "feature-main", source: "git branch" });
+    });
+
+    it("still returns null for the default branch itself", () => {
+      setupWorktree(tmpDir, "main");
+      expect(detectWorktreePrefix(tmpDir, options)).toBeNull();
+    });
+
+    it("truncates a long branch name to a legal label", () => {
+      const longBranch = "team-a/ctd-1744-improve-visibility-of-later-and-undated-notifications";
+      expect(longBranch.length).toBeGreaterThan(63);
+      setupWorktree(tmpDir, longBranch);
+      const result = detectWorktreePrefix(tmpDir, options);
+      expect(result).not.toBeNull();
+      expect(result!.prefix.length).toBeLessThanOrEqual(63);
+      expect(result!.prefix.startsWith("team-a-ctd-1744")).toBe(true);
+    });
+  });
+
   it("returns null when no .git found at all", () => {
     const result = detectWorktreePrefix(tmpDir);
     expect(result).toBeNull();
@@ -440,6 +489,18 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
 
     const result = detectWorktreePrefix(wtDir);
     expect(result).toEqual({ prefix: "main", source: "git branch" });
+  });
+
+  it('keeps every segment of a slash-prefixed branch with { prefix: "branch" }', () => {
+    const repo = path.join(tmpDir, "repo");
+    initRepoWithCommit(repo);
+
+    runGit(repo, ["branch", "feature/main"]);
+    const wtDir = path.join(tmpDir, "wt-feature-main");
+    runGit(repo, ["worktree", "add", wtDir, "feature/main"]);
+
+    const result = detectWorktreePrefix(wtDir, { prefix: "branch" });
+    expect(result).toEqual({ prefix: "feature-main", source: "git branch" });
   });
 
   it("truncates prefix when branch name exceeds 63 characters", () => {

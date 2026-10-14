@@ -145,7 +145,12 @@ portless run next dev   # -> https://myapp.localhost
 
 # Linked worktree on branch "fix-ui"
 portless run next dev   # -> https://fix-ui.myapp.localhost
+
+# Linked worktree on branch "feature/auth"
+portless run next dev   # -> https://auth.myapp.localhost
 ```
+
+By default the label is the last segment of the branch name, so branches that share a tail, such as `team-a/login` and `team-b/login`, would share a URL. Set `"worktree": { "prefix": "branch" }` in `portless.json` to use the whole branch name instead (`feature-auth.myapp.localhost`).
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
@@ -338,14 +343,15 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 Optional config file. Portless looks for it in the current directory.
 
-| Field     | Type    | Default                    | Description                                              |
-| --------- | ------- | -------------------------- | -------------------------------------------------------- |
-| `name`    | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
-| `script`  | string  | `"dev"`                    | Name of a package.json script to run                     |
-| `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
-| `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
-| `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
+| Field      | Type    | Default                    | Description                                                                                |
+| ---------- | ------- | -------------------------- | ------------------------------------------------------------------------------------------ |
+| `name`     | string  | inferred from package.json | Base app name (worktree prefix still applies)                                              |
+| `script`   | string  | `"dev"`                    | Name of a package.json script to run                                                       |
+| `appPort`  | number  | auto-assigned              | Fixed port for the child process                                                           |
+| `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)                                     |
+| `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path                                   |
+| `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo                                    |
+| `worktree` | object  |                            | `{ "prefix": "branch" }` labels worktrees with the whole branch name, not its last segment |
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
 

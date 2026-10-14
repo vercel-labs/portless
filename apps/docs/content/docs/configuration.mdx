@@ -73,6 +73,16 @@ The name is inferred from `package.json` if not set in config. The script defaul
       <td>`true`</td>
       <td>Set `false` to use direct spawning instead of turborepo in multi-app mode.</td>
     </tr>
+    <tr>
+      <td>`worktree`</td>
+      <td>object</td>
+      <td></td>
+      <td>
+        `{ "prefix": "branch" }` labels worktrees with the whole branch name (`feature/auth` →
+        `feature-auth`) instead of its last segment (`auth`), so branches that share a tail get
+        distinct hostnames.
+      </td>
+    </tr>
   </tbody>
 </table>
 
