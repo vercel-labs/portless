@@ -1,6 +1,7 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   escapeHtml,
+  formatUptime,
   formatUrl,
   isErrnoException,
   isProcessAlive,
@@ -158,6 +159,38 @@ describe("formatUrl", () => {
     expect(formatUrl("myapp.localhost", 8080)).toBe("http://myapp.localhost:8080");
     expect(formatUrl("myapp.localhost", 3000)).toBe("http://myapp.localhost:3000");
   });
+});
+
+describe("formatUptime", () => {
+  const NOW = 1_700_000_000_000;
+
+  it.each([
+    [59_000, "59s"],
+    [60_000, "1m"],
+    [59 * 60_000, "59m"],
+    [60 * 60_000, "1h"],
+    [119 * 60_000, "1h"],
+    [23 * 60 * 60_000, "23h"],
+    [24 * 60 * 60_000, "1d"],
+    [400 * 24 * 60 * 60_000, "400d"],
+  ])("a route registered %d ms ago shows %s", (ageMs, expected) => {
+    expect(formatUptime(NOW - ageMs, NOW)).toBe(expected);
+  });
+
+  it("shows 0s for a registration time 30 seconds in the future", () => {
+    expect(formatUptime(NOW + 30_000, NOW)).toBe("0s");
+  });
+
+  it("shows nothing for a registration time 2 minutes in the future", () => {
+    expect(formatUptime(NOW + 120_000, NOW)).toBeNull();
+  });
+
+  it.each([undefined, 0, -1000, NaN, "1700000000000"])(
+    "shows nothing for an invalid registration time %s",
+    (registeredAt) => {
+      expect(formatUptime(registeredAt, NOW)).toBeNull();
+    }
+  );
 });
 
 describe("parseHostname", () => {

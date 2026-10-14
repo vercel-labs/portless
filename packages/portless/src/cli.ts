@@ -16,6 +16,7 @@ import {
 } from "./hosts-sync-auth.js";
 import {
   fixOwnership,
+  formatUptime,
   formatUrl,
   isErrnoException,
   isProcessAlive as isPidAlive,
@@ -1065,8 +1066,9 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   for (const route of routes) {
     const url = formatUrl(route.hostname, proxyPort, tls);
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
+    const uptime = route.pid === 0 ? null : formatUptime(route.registeredAt, Date.now());
     console.log(
-      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}`
+      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}${uptime ? ` ${colors.gray(`up ${uptime}`)}` : ""}`
     );
     if (route.tailscaleUrl) {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
@@ -1867,7 +1869,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
-  ${colors.cyan("portless list")}                    Show active routes
+  ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block

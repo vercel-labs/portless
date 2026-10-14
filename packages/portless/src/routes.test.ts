@@ -159,14 +159,19 @@ describe("RouteStore", () => {
 
   describe("addRoute", () => {
     it("adds a route to empty store", () => {
+      const before = Date.now();
       store.addRoute("myapp.localhost", 4001, process.pid);
+      const after = Date.now();
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0]).toEqual({
         hostname: "myapp.localhost",
         port: 4001,
         pid: process.pid,
+        registeredAt: expect.any(Number),
       });
+      expect(routes[0].registeredAt).toBeGreaterThanOrEqual(before);
+      expect(routes[0].registeredAt).toBeLessThanOrEqual(after);
     });
 
     it("replaces existing route with same hostname", () => {
@@ -442,6 +447,28 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].tailscaleFunnel).toBe(true);
+    });
+
+    it("updateRoute keeps the original registeredAt", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      const registeredAt = store.loadRoutes()[0].registeredAt;
+      store.updateRoute("myapp.localhost", {
+        tailscaleUrl: "https://devbox.example.ts.net",
+      });
+      const routes = store.loadRoutes();
+      expect(routes[0].tailscaleUrl).toBe("https://devbox.example.ts.net");
+      expect(routes[0].registeredAt).toBe(registeredAt);
+    });
+
+    it("loads routes with and without registeredAt unchanged (backward compat)", () => {
+      const routes = [
+        { hostname: "old.localhost", port: 4001, pid: process.pid },
+        { hostname: "new.localhost", port: 4002, pid: process.pid, registeredAt: 1700000000000 },
+        { hostname: "odd.localhost", port: 4003, pid: process.pid, registeredAt: "yesterday" },
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      expect(store.loadRoutes()).toEqual(routes);
     });
 
     it("loads routes without tailscale fields (backward compat)", () => {

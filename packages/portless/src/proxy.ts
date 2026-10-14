@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
-import { createLoopbackConnection, escapeHtml, formatUrl } from "./utils.js";
+import { createLoopbackConnection, escapeHtml, formatUptime, formatUrl } from "./utils.js";
 import { ARROW_SVG, renderPage } from "./pages.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
@@ -343,9 +343,18 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           ? host.slice(0, -matchedSuffix.length)
           : host;
       const safeSuggestion = escapeHtml(strippedHost);
+      const now = Date.now();
+      const items = routes
+        .map((r) => {
+          const age = formatUptime(r.registeredAt, now);
+          const label = r.pid === 0 ? "alias" : age && `up ${age}`;
+          const uptimeHtml = label ? `<span class="uptime">${label}</span>` : "";
+          return `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta">${uptimeHtml}<code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`;
+        })
+        .join("");
       const routesList =
         routes.length > 0
-          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
+          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${items}</ul></div>`
           : '<p class="empty">No apps running.</p>';
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(

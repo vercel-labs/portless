@@ -247,7 +247,7 @@ export class RouteStore {
         }
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);
-      const entry: RouteMapping = { hostname, port, pid };
+      const entry: RouteMapping = { hostname, port, pid, registeredAt: Date.now() };
       filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {

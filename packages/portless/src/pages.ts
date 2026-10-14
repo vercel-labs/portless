@@ -137,12 +137,22 @@ const PAGE_STYLES = `
     font-size: 14px;
     font-weight: 500;
     transition: color 0.15s ease;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .card-link:hover .name { color: var(--accent); }
   .card-link .meta {
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+  .card-link .uptime {
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .card-link .port {
     font-family: var(--font-mono);

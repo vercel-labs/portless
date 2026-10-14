@@ -372,6 +372,43 @@ describe("CLI", () => {
       const { status } = run(["list"]);
       expect(status).toBe(0);
     });
+
+    it("appends uptime after the pid and leaves aliases and legacy routes unchanged", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-uptime-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "app.localhost",
+              port: 4001,
+              pid: process.pid,
+              registeredAt: Date.now() - 3 * 60 * 60 * 1000,
+            },
+            { hostname: "docker.localhost", port: 4002, pid: 0 },
+            { hostname: "legacy.localhost", port: 4003, pid: process.pid },
+          ])
+        );
+
+        const { status, stdout } = run(["list"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        const lines = stdout.split("\n");
+        const row = (host: string) => lines.find((l) => l.includes(host))!.trimStart();
+        expect(row("app.localhost")).toMatch(/ {2}\(pid \d+\) up 3h$/);
+        expect(row("docker.localhost")).toMatch(/ {2}\(alias\)$/);
+        expect(row("legacy.localhost")).toMatch(/ {2}\(pid \d+\)$/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("doctor", () => {

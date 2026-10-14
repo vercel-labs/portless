@@ -118,6 +118,58 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("api.localhost");
     });
 
+    it("shows uptime for a route registered 2 hours ago in the 404 page", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "api.localhost", port: 4001, registeredAt: Date.now() - 2 * 3600 * 1000 },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("up 2h");
+    });
+
+    it("shows an alias label instead of uptime for pid 0 routes in the 404 page", async () => {
+      const routes: RouteInfo[] = [
+        {
+          hostname: "db.localhost",
+          port: 4001,
+          pid: 0,
+          registeredAt: Date.now() - 2 * 3600 * 1000,
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.body).toContain('class="uptime">alias<');
+      expect(res.body).not.toContain("up 2h");
+    });
+
+    it("renders routes without a valid registeredAt with no uptime in the 404 page", async () => {
+      const routes = [
+        { hostname: "old.localhost", port: 4001 },
+        { hostname: "bad.localhost", port: 4002, registeredAt: "yesterday" },
+      ] as RouteInfo[];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("old.localhost");
+      expect(res.body).toContain("bad.localhost");
+      expect(res.body).toContain("127.0.0.1:4001");
+      expect(res.body).toContain("127.0.0.1:4002");
+      expect(res.body).not.toContain('class="uptime"');
+    });
+
     it("includes correct port in 404 page links", async () => {
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
       const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
