@@ -300,7 +300,8 @@ async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   });
 }
 
-describe("CLI", () => {
+// A command that exits 0 waits up to EXIT_TIMEOUT_MS for a detached daemon.
+describe("CLI", { timeout: 15_000 }, () => {
   beforeAll(() => {
     if (!fs.existsSync(CLI_PATH)) {
       throw new Error(`Built CLI not found at ${CLI_PATH}. Run 'pnpm build' before running tests.`);
