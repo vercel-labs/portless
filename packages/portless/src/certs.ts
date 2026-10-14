@@ -6,7 +6,7 @@ import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fixOwnership } from "./utils.js";
 import {
-  isWSL,
+  hasWSLWindowsCA,
   isWindowsCATrusted,
   trustWindowsCA,
   untrustWindowsCA,
@@ -106,7 +106,7 @@ function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
     clearTrustRefreshPending(stateDir);
-    const marker = isWSL() ? `wsl:${fp}` : fp;
+    const marker = hasWSLWindowsCA() ? `wsl:${fp}` : fp;
     fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
     fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
   }
@@ -530,7 +530,7 @@ export function isCATrusted(stateDir: string): boolean {
   const marker = readTrustMarker(stateDir);
   if (marker) {
     const fp = caFingerprint(stateDir);
-    const expected = fp && isWSL() ? `wsl:${fp}` : fp;
+    const expected = fp && hasWSLWindowsCA() ? `wsl:${fp}` : fp;
     if (expected && marker === expected) return true;
   }
 
@@ -538,7 +538,7 @@ export function isCATrusted(stateDir: string): boolean {
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
     if (!isCATrustedLinux(stateDir)) return false;
-    if (!isWSL()) return true;
+    if (!hasWSLWindowsCA()) return true;
     try {
       return isWindowsCATrusted(caCertPath, wslWindowsCAStoreOptions());
     } catch {
@@ -959,7 +959,7 @@ export function createSNICallback(
  * On macOS, adds to the login keychain (no sudo required; the OS shows a
  * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
  * CA directory and runs the appropriate update command (requires sudo). WSL
- * also adds the CA to the Windows current-user Root store.
+ * with wslpath also adds the CA to the Windows current-user Root store.
  *
  * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
  */
@@ -1007,7 +1007,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
       const dest = path.join(config.certDir, "portless-ca.crt");
       fs.copyFileSync(caCertPath, dest);
       execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
-      if (isWSL()) {
+      if (hasWSLWindowsCA()) {
         trustWindowsCA(caCertPath, wslWindowsCAStoreOptions());
       }
       writeTrustMarker(stateDir);
@@ -1055,7 +1055,7 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
     return { removed: true };
   }
 
-  const runningInWSL = isWSL();
+  const runningInWSL = hasWSLWindowsCA();
   try {
     let result: { removed: boolean; error?: string };
     if (process.platform === "darwin") {

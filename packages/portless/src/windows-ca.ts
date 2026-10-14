@@ -66,6 +66,19 @@ export function wslWindowsCAStoreOptions(
   };
 }
 
+/** A WSL kernel alone does not provide Windows tools inside a Linux container. */
+export function hasWSLWindowsCA(
+  options: WSLDetectionOptions = {},
+  run: WindowsCACommandRunner = defaultRunner
+): boolean {
+  if (!isWSL(options)) return false;
+  try {
+    return Boolean(wslWindowsCAStoreOptions(run).command);
+  } catch {
+    return false;
+  }
+}
+
 function certificateFingerprint(certificatePath: string): string {
   const certificate = new crypto.X509Certificate(fs.readFileSync(certificatePath));
   return certificate.fingerprint.replace(/:/g, "").toLowerCase();
