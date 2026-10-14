@@ -58,6 +58,13 @@ function listen(server: AnyServer): Promise<void> {
   });
 }
 
+function makeRoutes(count: number): RouteInfo[] {
+  return Array.from({ length: count }, (_, i) => ({
+    hostname: `app${i}.localhost`,
+    port: 4000 + i,
+  }));
+}
+
 describe("createProxyServer", () => {
   const servers: AnyServer[] = [];
 
@@ -189,6 +196,40 @@ describe("createProxyServer", () => {
       expect(res.status).toBe(404);
       expect(res.body).toContain('href="http://myapp.localhost"');
       expect(res.body).not.toContain(":80");
+    });
+
+    it("renders the filter controls and script only above 5 routes", async () => {
+      const five = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(5), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(five);
+      const fiveRes = await request(five, { host: "other.localhost" });
+      expect(fiveRes.body).not.toContain('type="search"');
+      expect(fiveRes.body).not.toContain("<script>");
+
+      const six = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(6), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(six);
+      const sixRes = await request(six, { host: "other.localhost" });
+      expect(sixRes.body).toContain('type="search"');
+      expect(sixRes.body).toContain("<script>");
+    });
+
+    it("renders the filter controls and no-match message hidden for a long list", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(20), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.body).toMatch(/<div class="filter" hidden>/);
+      expect(res.body).toMatch(/<p class="empty" role="status" hidden>/);
+      const input = res.body.match(/<input[^>]*>/)![0];
+      expect(input).toContain('type="search"');
+      expect(input).toContain('autocomplete="off"');
+      expect(input).toContain("aria-label=");
+      expect(res.body).not.toContain("<form");
     });
 
     it("proxies request to matching route", async () => {
@@ -1284,6 +1325,19 @@ describe("createProxyServer", () => {
       expect(res.status).toBe(404);
       expect(res.body).not.toContain("<script>alert(1)</script>");
       expect(res.body).toContain("&lt;script&gt;");
+    });
+
+    it("keeps a hostile requested host out of the filter script", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(6), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: '"</script><script>' });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("&lt;/script&gt;&lt;script&gt;");
+      expect(res.body.match(/<script>/g)).toHaveLength(1);
+      expect(res.body.match(/<\/script>/g)).toHaveLength(1);
     });
 
     it("escapes route hostnames in active apps list", async () => {

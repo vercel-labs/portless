@@ -4,7 +4,14 @@ import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
 import { createLoopbackConnection, escapeHtml, formatUptime, formatUrl } from "./utils.js";
-import { ARROW_SVG, renderPage } from "./pages.js";
+import {
+  ARROW_SVG,
+  FILTER_CONTROLS,
+  FILTER_NO_MATCH,
+  FILTER_SCRIPT,
+  FILTER_THRESHOLD,
+  renderPage,
+} from "./pages.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -344,6 +351,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           : host;
       const safeSuggestion = escapeHtml(strippedHost);
       const now = Date.now();
+      const filterable = routes.length > FILTER_THRESHOLD;
       const items = routes
         .map((r) => {
           const age = formatUptime(r.registeredAt, now);
@@ -354,7 +362,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         .join("");
       const routesList =
         routes.length > 0
-          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${items}</ul></div>`
+          ? `<div class="section"><p class="label">Active apps</p>${filterable ? FILTER_CONTROLS : ""}<ul class="card">${items}</ul>${filterable ? FILTER_NO_MATCH : ""}</div>${filterable ? `<script>${FILTER_SCRIPT}</script>` : ""}`
           : '<p class="empty">No apps running.</p>';
       res.writeHead(404, { "Content-Type": "text/html" });
       res.end(
