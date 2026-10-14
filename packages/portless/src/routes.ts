@@ -30,6 +30,7 @@ export interface RouteMapping extends RouteInfo {
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
+  tailscaleHttp?: boolean;
   ngrokUrl?: string;
   ngrokPid?: number;
 }
@@ -40,6 +41,7 @@ type RouteMetadataPatch = {
   tailscaleUrl?: string | null;
   tailscaleHttpsPort?: number | null;
   tailscaleFunnel?: boolean | null;
+  tailscaleHttp?: boolean | null;
   ngrokUrl?: string | null;
   ngrokPid?: number | null;
 };
@@ -349,6 +351,10 @@ export class RouteStore {
         if (fields.tailscaleFunnel === null) delete route.tailscaleFunnel;
         else if (fields.tailscaleFunnel !== undefined)
           route.tailscaleFunnel = fields.tailscaleFunnel;
+      }
+      if ("tailscaleHttp" in fields) {
+        if (fields.tailscaleHttp === null) delete route.tailscaleHttp;
+        else if (fields.tailscaleHttp !== undefined) route.tailscaleHttp = fields.tailscaleHttp;
       }
       if ("ngrokUrl" in fields) {
         if (fields.ngrokUrl === null) delete route.ngrokUrl;
