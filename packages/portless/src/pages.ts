@@ -8,13 +8,15 @@ export const FILTER_THRESHOLD = 5;
 
 // Revealed by the filter script; stay hidden when scripting is unavailable.
 export const FILTER_CONTROLS =
-  '<div class="filter" hidden><input type="search" placeholder="Filter apps" autocomplete="off" aria-label="Filter apps by hostname"></div>';
+  '<div class="filter" hidden><input type="search" placeholder="Filter apps" autocomplete="off" aria-label="Filter apps by hostname"><button type="button" aria-pressed="false">Newest first</button></div>';
 export const FILTER_NO_MATCH = '<p class="empty" role="status" hidden>No apps match.</p>';
 
 /** Static inline script for the hostname filter. Interpolates no request or route data. */
 export const FILTER_SCRIPT = `(function () {
   var bar = document.querySelector(".filter");
   var input = bar.querySelector("input");
+  var list = document.querySelector(".card");
+  var sort = bar.querySelector("button");
   var rows = document.querySelectorAll(".card > li");
   var none = document.querySelector(".empty[role=status]");
   function apply() {
@@ -28,6 +30,10 @@ export const FILTER_SCRIPT = `(function () {
     none.hidden = shown > 0;
   }
   input.addEventListener("input", apply);
+  sort.addEventListener("click", function () {
+    list.append(...[...list.children].reverse());
+    sort.setAttribute("aria-pressed", sort.getAttribute("aria-pressed") !== "true");
+  });
   apply();
   bar.hidden = false;
 })();`;
@@ -196,9 +202,11 @@ const PAGE_STYLES = `
     transform: translateX(2px);
     color: var(--text-2);
   }
-  .filter { margin-bottom: 10px; }
+  .filter { display: flex; gap: 8px; margin-bottom: 10px; }
+  .filter[hidden] { display: none; }
   .filter input {
-    width: 100%;
+    flex: 1;
+    min-width: 0;
     font: inherit;
     font-size: 14px;
     color: var(--fg);
@@ -208,7 +216,24 @@ const PAGE_STYLES = `
     padding: 10px 12px;
   }
   .filter input::placeholder { color: var(--text-3); }
-  .filter input:focus-visible {
+  .filter button {
+    font: inherit;
+    font-size: 14px;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .filter button[aria-pressed="true"] {
+    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--accent);
+  }
+  .filter input:focus-visible,
+  .filter button:focus-visible {
     outline: 2px solid var(--accent);
     outline-offset: 1px;
   }

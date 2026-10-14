@@ -232,6 +232,21 @@ describe("createProxyServer", () => {
       expect(res.body).not.toContain("<form");
     });
 
+    it("renders a newest-first toggle in the hidden controls row, rows in registration order", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(20), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      const controls = res.body.match(/<div class="filter" hidden>.*?<\/div>/)![0];
+      expect(controls).toContain(
+        '<button type="button" aria-pressed="false">Newest first</button>'
+      );
+      const names = [...res.body.matchAll(/app(\d+)\.localhost<\/span>/g)].map((m) => Number(m[1]));
+      expect(names).toEqual(Array.from({ length: 20 }, (_, i) => i));
+    });
+
     it("proxies request to matching route", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
