@@ -65,8 +65,10 @@ export class RouteConflictError extends Error {
 
   constructor(hostname: string, existingPid: number) {
     super(
-      `"${hostname}" is already registered by a running process (PID ${existingPid}). ` +
-        `Use --force to override.`
+      existingPid === 0
+        ? `"${hostname}" is a static alias. Use --force to replace it; re-add the alias with "portless alias" afterwards.`
+        : `"${hostname}" is already registered by a running process (PID ${existingPid}). ` +
+            `Use --force to override.`
     );
     this.name = "RouteConflictError";
     this.hostname = hostname;
@@ -234,16 +236,19 @@ export class RouteStore {
     try {
       const routes = this.loadRoutes(true);
       const existing = routes.find((r) => r.hostname === hostname);
-      if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
+      const isAlias = existing?.pid === 0;
+      if (existing && existing.pid !== pid && (isAlias || this.isProcessAlive(existing.pid))) {
         if (!force) {
           throw new RouteConflictError(hostname, existing.pid);
         }
-        // --force: kill the existing process before taking over
-        try {
-          process.kill(existing.pid, "SIGTERM");
-          killedPid = existing.pid;
-        } catch {
-          // Process may have exited between the check and the kill; non-fatal
+        // --force: kill the existing process before taking over; an alias has none
+        if (!isAlias) {
+          try {
+            process.kill(existing.pid, "SIGTERM");
+            killedPid = existing.pid;
+          } catch {
+            // Process may have exited between the check and the kill; non-fatal
+          }
         }
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);

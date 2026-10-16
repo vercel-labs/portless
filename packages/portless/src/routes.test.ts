@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -255,6 +255,30 @@ describe("RouteStore", () => {
         } catch {
           // already dead
         }
+      }
+    });
+
+    it("refuses to replace a static alias without --force", () => {
+      store.addRoute("db.localhost", 5432, 0);
+      expect(() => store.addRoute("db.localhost", 4002, process.pid)).toThrow(
+        '"db.localhost" is a static alias. Use --force to replace it; re-add the alias with "portless alias" afterwards.'
+      );
+    });
+
+    it("replaces a static alias with --force without sending any signal", () => {
+      const realKill = process.kill.bind(process);
+      const kill = vi
+        .spyOn(process, "kill")
+        .mockImplementation((pid, signal) => (signal ? true : realKill(pid, signal)));
+      try {
+        store.addRoute("db.localhost", 5432, 0);
+        expect(store.addRoute("db.localhost", 4002, process.pid, true)).toBeUndefined();
+        expect(kill.mock.calls.filter(([, signal]) => signal)).toEqual([]);
+        const routes = store.loadRoutes();
+        expect(routes).toHaveLength(1);
+        expect(routes[0]).toMatchObject({ port: 4002, pid: process.pid });
+      } finally {
+        kill.mockRestore();
       }
     });
 
