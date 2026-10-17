@@ -29,7 +29,7 @@ import {
   cleanHostsFile,
   shouldAutoSyncHosts,
 } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import { FILE_MODE, RouteConflictError, RouteStore, type RouteMapping } from "./routes.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
@@ -39,7 +39,8 @@ import {
   registerServe,
   unregisterTailscale,
 } from "./tailscale.js";
-import { ensureNgrokAvailable, startNgrok, stopNgrok, stopNgrokProcess } from "./ngrok.js";
+import { ensureNgrokAvailable, startNgrok, stopNgrokProcess, stopTunnelPid } from "./tunnel.js";
+import { ensureCloudflaredAvailable, startCloudflare } from "./cloudflare.js";
 import {
   inferProjectName,
   detectWorktreePrefix,
@@ -63,6 +64,7 @@ import {
   findPidsOnPort,
   killOrphanedProcessGroup,
   getProcessStartTime,
+  getProcessCommand,
   getDefaultPort,
   getDefaultTlds,
   getProxyBindTargets,
@@ -538,14 +540,66 @@ function addRoutes(
 function stopOrphanedProcessGroups(store: RouteStore): void {
   const seen = new Set<number>();
   for (const route of store.loadRoutesRaw()) {
+    if (route.pid === 0 || isPidAlive(route.pid)) continue;
+    for (const t of stopRecordedTunnels(route, true)) {
+      const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
+      console.log(colors.yellow(message));
+    }
     const pgid = route.childPgid;
-    if (!pgid || seen.has(pgid) || route.pid === 0 || isPidAlive(route.pid)) continue;
+    if (!pgid || seen.has(pgid)) continue;
     seen.add(pgid);
     if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
       console.log(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
     }
+  }
+}
+
+const PROCESS_TUNNELS = [
+  {
+    label: "ngrok",
+    binary: "ngrok",
+    env: "PORTLESS_NGROK",
+    via: "ngrok",
+    install: "https://ngrok.com/download",
+    urlField: "ngrokUrl",
+    pidField: "ngrokPid",
+    ensure: ensureNgrokAvailable,
+    start: startNgrok,
+  },
+  {
+    label: "Cloudflare",
+    binary: "cloudflared",
+    env: "PORTLESS_CLOUDFLARE",
+    via: "Cloudflare Tunnel",
+    install: "https://developers.cloudflare.com/tunnel/downloads/",
+    urlField: "cloudflareUrl",
+    pidField: "cloudflarePid",
+    ensure: ensureCloudflaredAvailable,
+    start: startCloudflare,
+  },
+] as const;
+
+type ProcessTunnel = (typeof PROCESS_TUNNELS)[number];
+
+/** Stop the tunnel processes recorded on a route; `verify` skips pids not running the tunnel binary. */
+function stopRecordedTunnels(route: RouteMapping, verify = false): ProcessTunnel[] {
+  return PROCESS_TUNNELS.filter((t) => {
+    const pid = route[t.pidField];
+    if (!pid || (verify && getProcessCommand(pid) !== t.binary)) return false;
+    stopTunnelPid(pid);
+    return true;
+  });
+}
+
+/** Print the install or auth hint that matches a tunnel error message. */
+function printTunnelHint(t: ProcessTunnel, message: string): void {
+  if (message.includes(`${t.binary} CLI not found`)) {
+    console.error(colors.blue(`Install ${t.binary}: ${t.install}`));
+  } else if (t.binary === "ngrok" && message.includes("authentication is not configured")) {
+    console.error(colors.blue("Configure ngrok authentication:"));
+    console.error(colors.cyan("  ngrok config add-authtoken <token>"));
   }
 }
 
@@ -1072,8 +1126,10 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
     }
-    if (route.ngrokUrl) {
-      console.log(`    ${colors.gray("ngrok:")} ${colors.green(route.ngrokUrl)}`);
+    for (const t of PROCESS_TUNNELS) {
+      const tunnelUrl = route[t.urlField];
+      if (tunnelUrl)
+        console.log(`    ${colors.gray(t.label.toLowerCase() + ":")} ${colors.green(tunnelUrl)}`);
     }
   }
   console.log();
@@ -1251,7 +1307,7 @@ async function runApp(
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
   const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
-  const wantsNgrok = isEnabledEnv(process.env.PORTLESS_NGROK);
+  const tunnels = PROCESS_TUNNELS.filter((t) => isEnabledEnv(process.env[t.env]));
   let tsBaseUrl: string | undefined;
 
   if (wantsTailscale) {
@@ -1274,15 +1330,13 @@ async function runApp(
     }
   }
 
-  if (wantsNgrok) {
+  for (const t of tunnels) {
     try {
-      ensureNgrokAvailable();
+      t.ensure();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
-      if (message.includes("not found")) {
-        console.error(colors.blue("Install ngrok: https://ngrok.com/download"));
-      }
+      printTunnelHint(t, message);
       process.exit(1);
     }
   }
@@ -1402,24 +1456,26 @@ async function runApp(
   // Readiness was already checked at the top of runApp().
   let tailscaleHttpsPort: number | undefined;
   let tailscaleUrl: string | undefined;
-  let ngrokUrl: string | undefined;
-  let ngrokProcess: Awaited<ReturnType<typeof startNgrok>> | undefined;
-  let stoppingNgrok = false;
-  let ngrokRouteReady = false;
-  let ngrokExitHandled = false;
-  let pendingNgrokExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  type TunnelRun = {
+    t: ProcessTunnel;
+    proc?: Awaited<ReturnType<typeof startNgrok>>;
+    ready?: boolean;
+    handled?: boolean;
+    pending?: () => void;
+  };
+  const tunnelRuns = tunnels.map((t): TunnelRun => ({ t }));
+  let stoppingTunnels = false;
 
-  const handleNgrokExit = (code: number | null, signal: NodeJS.Signals | null) => {
-    if (stoppingNgrok || ngrokExitHandled) return;
-    if (!ngrokRouteReady) {
-      pendingNgrokExit = { code, signal };
+  const handleTunnelExit = (run: TunnelRun, code: number | null, signal: NodeJS.Signals | null) => {
+    if (stoppingTunnels || run.handled) return;
+    if (!run.ready) {
+      run.pending = () => handleTunnelExit(run, code, signal);
       return;
     }
-    ngrokExitHandled = true;
-    ngrokUrl = undefined;
+    run.handled = true;
     console.warn(
       colors.yellow(
-        `Warning: ngrok tunnel for ${hostname} stopped${formatProcessExitSuffix(
+        `Warning: ${run.t.label} tunnel for ${hostname} stopped${formatProcessExitSuffix(
           code,
           signal
         )}. Removing its public URL from the route list.`
@@ -1427,8 +1483,8 @@ async function runApp(
     );
     try {
       store.updateRoute(hostname, {
-        ngrokUrl: null,
-        ngrokPid: null,
+        [run.t.urlField]: null,
+        [run.t.pidField]: null,
       });
     } catch {
       // Best-effort cleanup; non-fatal
@@ -1481,39 +1537,33 @@ async function runApp(
     }
   }
 
-  if (wantsNgrok) {
+  for (const run of tunnelRuns) {
     try {
-      ngrokProcess = await startNgrok(port, {
+      run.proc = await run.t.start(port, {
         hostHeader: hostname,
-        onExit: handleNgrokExit,
+        onExit: (code, signal) => handleTunnelExit(run, code, signal),
+        configPath: path.join(store.dir, "cloudflared.yml"),
       });
-      ngrokUrl = ngrokProcess.url;
-      console.log(chalk.green(`  ngrok -> ${ngrokUrl}`));
-      console.log(chalk.gray("  (accessible from the public internet via ngrok)\n"));
+      console.log(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
+      console.log(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
 
       try {
         store.updateRoute(hostname, {
-          ngrokUrl,
-          ngrokPid: ngrokProcess.pid,
+          [run.t.urlField]: run.proc.url,
+          [run.t.pidField]: run.proc.pid,
         });
       } catch {
         // Non-fatal: route display metadata only
       } finally {
-        ngrokRouteReady = true;
-        if (pendingNgrokExit) {
-          handleNgrokExit(pendingNgrokExit.code, pendingNgrokExit.signal);
-          pendingNgrokExit = undefined;
-        }
+        run.ready = true;
+        run.pending?.();
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
-      if (message.includes("not found")) {
-        console.error(colors.blue("Install ngrok: https://ngrok.com/download"));
-      } else if (message.includes("authentication")) {
-        console.error(colors.blue("Configure ngrok authentication:"));
-        console.error(colors.cyan("  ngrok config add-authtoken <token>"));
-      }
+      printTunnelHint(run.t, message);
+      stoppingTunnels = true;
+      for (const started of tunnelRuns) stopNgrokProcess(started.proc?.child);
       try {
         unregisterTailscale({
           tailscaleHttpsPort,
@@ -1578,6 +1628,10 @@ async function runApp(
     )
   );
 
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.once(signal, () => (stoppingTunnels = true));
+  }
+
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
@@ -1590,7 +1644,9 @@ async function runApp(
       // own LAN discovery natively.
       ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
       ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
-      ...(ngrokUrl ? { PORTLESS_NGROK_URL: ngrokUrl } : {}),
+      ...Object.fromEntries(
+        tunnelRuns.flatMap((r) => (r.proc && !r.handled ? [[`${r.t.env}_URL`, r.proc.url]] : []))
+      ),
       ...caEnv,
     },
     onSpawn: (pid) => {
@@ -1604,8 +1660,8 @@ async function runApp(
       }
     },
     onCleanup: () => {
-      stoppingNgrok = true;
-      stopNgrokProcess(ngrokProcess?.child);
+      stoppingTunnels = true;
+      for (const run of tunnelRuns) stopNgrokProcess(run.proc?.child);
       try {
         unregisterTailscale({
           tailscaleHttpsPort,
@@ -1680,6 +1736,10 @@ function applySharingFlag(flag: string): boolean {
     process.env.PORTLESS_NGROK = "1";
     return true;
   }
+  if (flag === "--cloudflare") {
+    process.env.PORTLESS_CLOUDFLARE = "1";
+    return true;
+  }
   return false;
 }
 
@@ -1720,6 +1780,7 @@ ${colors.bold("Options:")}
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
+  --cloudflare           Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1759,7 +1820,7 @@ ${colors.bold("Examples:")}
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --help"
+          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
         )
       );
       process.exit(1);
@@ -1799,7 +1860,9 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --ngrok")
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
+        )
       );
       process.exit(1);
     }
@@ -1825,7 +1888,9 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --ngrok")
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
+        )
       );
       process.exit(1);
     }
@@ -1995,6 +2060,7 @@ ${colors.bold("Options:")}
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
+  --cloudflare                  Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -2011,6 +2077,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
+  PORTLESS_CLOUDFLARE=1         Share apps publicly via Cloudflare (same as --cloudflare)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
@@ -2021,6 +2088,7 @@ ${colors.bold("Child process environment:")}
   PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
   PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
   PORTLESS_NGROK_URL            ngrok URL of the app (when --ngrok is active)
+  PORTLESS_CLOUDFLARE_URL       Cloudflare URL of the app (when --cloudflare is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
 
 ${colors.bold("Safari / DNS:")}
@@ -2180,9 +2248,8 @@ ${colors.bold("Options:")}
         // Tailscale may not be installed; non-fatal
       }
     }
-    if (route.ngrokPid) {
-      stopNgrok(route);
-      console.log(colors.green(`Stopped ngrok tunnel for ${route.hostname}.`));
+    for (const t of stopRecordedTunnels(route)) {
+      console.log(colors.green(`Stopped ${t.label} tunnel for ${route.hostname}.`));
     }
   }
 
@@ -2278,9 +2345,8 @@ ${colors.bold("Options:")}
         // Tailscale CLI may not be installed; non-fatal during prune
       }
     }
-    if (route.ngrokPid) {
-      stopNgrok(route);
-      console.log(`  ${route.hostname} - stopped ngrok tunnel`);
+    for (const t of stopRecordedTunnels(route)) {
+      console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
   }
 
@@ -4331,7 +4397,13 @@ async function main() {
     process.exit(1);
   }
 
-  const globalBooleanFlags = new Set(["--lan", "--tailscale", "--funnel", "--ngrok"]);
+  const globalBooleanFlags = new Set([
+    "--lan",
+    "--tailscale",
+    "--funnel",
+    "--ngrok",
+    "--cloudflare",
+  ]);
   const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
   const childlessCommands = new Set([
     "--help",
@@ -4449,6 +4521,9 @@ async function main() {
   }
   if (stripGlobalFlag("--ngrok", false)) {
     process.env.PORTLESS_NGROK = "1";
+  }
+  if (stripGlobalFlag("--cloudflare", false)) {
+    process.env.PORTLESS_CLOUDFLARE = "1";
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

@@ -1310,6 +1310,20 @@ export function getProcessStartTime(pid: number): string | null {
   }
 }
 
+/** Read the executable name of a process. Returns null on Windows or when it cannot be read. */
+export function getProcessCommand(pid: number): string | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const output = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    return path.basename(output.trim()) || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Kill a process group left behind by a portless session that died without
  * cleaning up. The group is only signaled while its leader is alive, still

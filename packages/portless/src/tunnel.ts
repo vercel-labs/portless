@@ -1,11 +1,12 @@
 import { spawn, spawnSync } from "node:child_process";
+import { guardWindowsOrphans } from "./cli-utils.js";
 
 const NGROK_BINARY = "ngrok";
 const NGROK_START_TIMEOUT_MS = 30_000;
 const NGROK_COMMAND_TIMEOUT_MS = 10_000;
 const OUTPUT_BUFFER_LIMIT = 16_384;
 
-export interface NgrokChildProcess {
+export interface TunnelChildProcess {
   pid?: number;
   stdout: NodeJS.ReadableStream | null;
   stderr: NodeJS.ReadableStream | null;
@@ -14,39 +15,52 @@ export interface NgrokChildProcess {
   on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
 }
 
-export type NgrokSpawner = (args: string[]) => NgrokChildProcess;
+export type TunnelSpawner = (args: string[]) => TunnelChildProcess;
 
-interface NgrokCommandResult {
+interface TunnelCommandResult {
   status: number | null;
   stdout: string;
   stderr: string;
   error?: Error;
 }
 
-export type NgrokCommandRunner = (args: string[]) => NgrokCommandResult;
+export type TunnelCommandRunner = (args: string[]) => TunnelCommandResult;
 
 export interface StartNgrokOptions {
   hostHeader?: string;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
-  spawner?: NgrokSpawner;
+  spawner?: TunnelSpawner;
   timeoutMs?: number;
 }
 
 export interface StartedNgrok {
   url: string;
   pid?: number;
-  child: NgrokChildProcess;
+  child: TunnelChildProcess;
 }
 
-function defaultSpawner(args: string[]): NgrokChildProcess {
-  return spawn(NGROK_BINARY, args, {
+export interface TunnelProvider {
+  binary: string;
+  versionArgs: string[];
+  buildArgs(localPort: number, options: StartNgrokOptions): string[];
+  extractUrl(output: string): string | null;
+  formatOutputError(output: string): Error;
+  notFound: string;
+  timeout: string;
+}
+
+function defaultSpawner(binary: string, args: string[]): TunnelChildProcess {
+  const spawnedAt = Date.now();
+  const child = spawn(binary, args, {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
-  }) as NgrokChildProcess;
+  });
+  guardWindowsOrphans(child, spawnedAt);
+  return child as TunnelChildProcess;
 }
 
-function defaultRunner(args: string[]): NgrokCommandResult {
-  const result = spawnSync(NGROK_BINARY, args, {
+function defaultRunner(binary: string, args: string[]): TunnelCommandResult {
+  const result = spawnSync(binary, args, {
     encoding: "utf-8",
     killSignal: "SIGKILL",
     timeout: NGROK_COMMAND_TIMEOUT_MS,
@@ -59,18 +73,16 @@ function defaultRunner(args: string[]): NgrokCommandResult {
   };
 }
 
-function normalizeSpace(value: string): string {
+export function normalizeSpace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
 
-function formatSpawnError(error: Error): Error {
+function formatSpawnError(provider: TunnelProvider, error: Error): Error {
   const errno = error as NodeJS.ErrnoException;
   if (errno.code === "ENOENT") {
-    return new Error(
-      "ngrok CLI not found. Install ngrok (https://ngrok.com/download) and ensure `ngrok` is on PATH."
-    );
+    return new Error(provider.notFound);
   }
-  return new Error(`Failed to start ngrok: ${error.message}`);
+  return new Error(`Failed to start ${provider.binary}: ${error.message}`);
 }
 
 function formatOutputError(output: string): Error {
@@ -90,15 +102,24 @@ function formatOutputError(output: string): Error {
   );
 }
 
-export function ensureNgrokAvailable(runner: NgrokCommandRunner = defaultRunner): void {
-  const result = runner(["version"]);
+export function ensureTunnelAvailable(
+  provider: TunnelProvider,
+  runner: TunnelCommandRunner = (args) => defaultRunner(provider.binary, args)
+): void {
+  const result = runner(provider.versionArgs);
   if (result.error) {
-    throw formatSpawnError(result.error);
+    throw formatSpawnError(provider, result.error);
   }
   if (result.status !== 0) {
     const details = normalizeSpace(result.stderr || result.stdout);
-    throw new Error(`Failed to check ngrok version: ${details || "unknown ngrok error"}`);
+    throw new Error(
+      `Failed to check ${provider.binary} version: ${details || `unknown ${provider.binary} error`}`
+    );
   }
+}
+
+export function ensureNgrokAvailable(runner?: TunnelCommandRunner): void {
+  ensureTunnelAvailable(ngrok, runner);
 }
 
 function cleanUrl(value: string): string {
@@ -142,19 +163,40 @@ export function buildNgrokArgs(localPort: number, hostHeader = "rewrite"): strin
   ];
 }
 
+const ngrok: TunnelProvider = {
+  binary: NGROK_BINARY,
+  versionArgs: ["version"],
+  buildArgs: (localPort, options) => buildNgrokArgs(localPort, options.hostHeader),
+  extractUrl: extractNgrokUrl,
+  formatOutputError,
+  notFound:
+    "ngrok CLI not found. Install ngrok (https://ngrok.com/download) and ensure `ngrok` is on PATH.",
+  timeout:
+    "Timed out waiting for ngrok to print a public URL. Check that ngrok is authenticated and can connect.",
+};
+
 export function startNgrok(
   localPort: number,
   options: StartNgrokOptions = {}
 ): Promise<StartedNgrok> {
-  const spawner = options.spawner ?? defaultSpawner;
-  const timeoutMs = options.timeoutMs ?? NGROK_START_TIMEOUT_MS;
-  const args = buildNgrokArgs(localPort, options.hostHeader);
+  return startTunnel(ngrok, localPort, options);
+}
 
-  let child: NgrokChildProcess;
+export function startTunnel(
+  provider: TunnelProvider,
+  localPort: number,
+  options: StartNgrokOptions
+): Promise<StartedNgrok> {
+  const spawner = options.spawner ?? ((args) => defaultSpawner(provider.binary, args));
+  const timeoutMs = options.timeoutMs ?? NGROK_START_TIMEOUT_MS;
+  const args = provider.buildArgs(localPort, options);
+
+  let child: TunnelChildProcess;
   try {
     child = spawner(args);
   } catch (err: unknown) {
-    return Promise.reject(formatSpawnError(err instanceof Error ? err : new Error(String(err))));
+    const error = err instanceof Error ? err : new Error(String(err));
+    return Promise.reject(formatSpawnError(provider, error));
   }
 
   return new Promise((resolve, reject) => {
@@ -175,7 +217,7 @@ export function startNgrok(
       if (output.length > OUTPUT_BUFFER_LIMIT) {
         output = output.slice(-OUTPUT_BUFFER_LIMIT);
       }
-      const url = extractNgrokUrl(output);
+      const url = provider.extractUrl(output);
       if (url) {
         settle(() => {
           started = true;
@@ -190,19 +232,13 @@ export function startNgrok(
       } catch {
         // non-fatal
       }
-      settle(() =>
-        reject(
-          new Error(
-            "Timed out waiting for ngrok to print a public URL. Check that ngrok is authenticated and can connect."
-          )
-        )
-      );
+      settle(() => reject(new Error(provider.timeout)));
     }, timeoutMs);
 
     child.stdout?.on("data", appendOutput);
     child.stderr?.on("data", appendOutput);
     child.on("error", (err) => {
-      settle(() => reject(formatSpawnError(err)));
+      settle(() => reject(formatSpawnError(provider, err)));
     });
     child.on("exit", (code, signal) => {
       if (settled) {
@@ -211,14 +247,14 @@ export function startNgrok(
       }
       settle(() => {
         const suffix = signal ? ` (signal ${signal})` : code !== null ? ` (exit ${code})` : "";
-        const error = formatOutputError(output);
+        const error = provider.formatOutputError(output);
         reject(new Error(`${error.message}${suffix}`));
       });
     });
   });
 }
 
-export function stopNgrokProcess(child: NgrokChildProcess | undefined): void {
+export function stopNgrokProcess(child: TunnelChildProcess | undefined): void {
   if (!child) return;
   try {
     child.kill("SIGTERM");
@@ -227,10 +263,10 @@ export function stopNgrokProcess(child: NgrokChildProcess | undefined): void {
   }
 }
 
-export function stopNgrok(route: { ngrokPid?: number }): void {
-  if (!route.ngrokPid) return;
+export function stopTunnelPid(pid: number | undefined): void {
+  if (!pid) return;
   try {
-    process.kill(route.ngrokPid, "SIGTERM");
+    process.kill(pid, "SIGTERM");
   } catch {
     // Process may already be gone, or may belong to another user.
   }

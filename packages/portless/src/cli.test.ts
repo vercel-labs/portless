@@ -328,6 +328,8 @@ describe("CLI", () => {
       expect(stdout).toContain("--ngrok");
       expect(stdout).toContain("PORTLESS_NGROK");
       expect(stdout).toContain("PORTLESS_NGROK_URL");
+      expect(stdout).toContain("--cloudflare");
+      expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
     });
 
@@ -870,9 +872,10 @@ describe("CLI", () => {
         "start",
         "--lan",
         "--ngrok",
+        "--cloudflare",
       ]);
       expect(status).toBe(0);
-      expect(args).toEqual(["start", "--lan", "--ngrok"]);
+      expect(args).toEqual(["start", "--lan", "--ngrok", "--cloudflare"]);
       expect(env.PORTLESS_LAN).toBe("1");
     });
 
@@ -2506,6 +2509,20 @@ describe("CLI", () => {
         expect(stderr).toContain("ngrok CLI not found");
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("--cloudflare flag", () => {
+    it("fails with actionable message when cloudflared is not installed", () => {
+      for (const [args, env] of [
+        [["myapp", "--cloudflare", "echo", "hi"], {}],
+        [["myapp", "echo", "hi"], { PORTLESS_CLOUDFLARE: "1" }],
+        [["run", "--cloudflare", "echo", "hi"], {}],
+      ] as const) {
+        const result = run([...args], { env: { ...env, PATH: "/tmp/portless-no-cloudflared" } });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("cloudflared CLI not found");
       }
     });
   });

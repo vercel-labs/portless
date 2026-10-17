@@ -383,6 +383,17 @@ Set `PORTLESS_NGROK=1` in your shell profile or `.env` to enable ngrok by defaul
 
 Requires the ngrok CLI to be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again.
 
+## Cloudflare sharing
+
+Expose your dev server to the public internet with a Cloudflare quick tunnel. No Cloudflare account is needed:
+
+```bash
+portless myapp --cloudflare next dev
+# -> https://<random>.trycloudflare.com (public)
+```
+
+Set `PORTLESS_CLOUDFLARE=1` to enable it by default. `portless list` shows the Cloudflare URL, and the app gets it as `PORTLESS_CLOUDFLARE_URL`. You can combine it with `--ngrok`, `--tailscale` or `--funnel`. The tunnel stops when the app exits. Quick tunnels do not support Server-Sent Events, allow at most 200 in-flight requests, and get a new URL on every run. Requires the [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) CLI on your PATH.
+
 ## Commands
 
 ```bash
@@ -440,6 +451,7 @@ portless service uninstall       # Remove the startup service
 --tailscale                      Share the app on your Tailscale network (tailnet)
 --funnel                         Share the app publicly via Tailscale Funnel
 --ngrok                          Share the app publicly via ngrok
+--cloudflare                     Share the app publicly via a Cloudflare quick tunnel
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
 ```
@@ -459,6 +471,7 @@ PORTLESS_SYNC_HOSTS=0            Disable auto-sync of /etc/hosts (on by default)
 PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as --tailscale)
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)
+PORTLESS_CLOUDFLARE=1            Share apps publicly via Cloudflare (same as --cloudflare)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 
 # Injected into child processes
@@ -467,6 +480,7 @@ HOST                             Usually 127.0.0.1 (omitted for Expo in LAN mode
 PORTLESS_URL                     Primary public URL (e.g. https://myapp.localhost)
 PORTLESS_TAILSCALE_URL           Tailscale URL of the app (when --tailscale is active)
 PORTLESS_NGROK_URL               ngrok URL of the app (when --ngrok is active)
+PORTLESS_CLOUDFLARE_URL          Cloudflare URL of the app (when --cloudflare is active)
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
@@ -557,3 +571,4 @@ pnpm format           # Format all files with Prettier
 - macOS, Linux, or Windows
 - Tailscale CLI (optional, for `--tailscale` and `--funnel`)
 - ngrok CLI (optional, for `--ngrok`)
+- cloudflared CLI (optional, for `--cloudflare`)

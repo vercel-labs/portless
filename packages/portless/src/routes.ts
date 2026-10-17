@@ -32,6 +32,8 @@ export interface RouteMapping extends RouteInfo {
   tailscaleFunnel?: boolean;
   ngrokUrl?: string;
   ngrokPid?: number;
+  cloudflareUrl?: string;
+  cloudflarePid?: number;
 }
 
 type RouteMetadataPatch = {
@@ -42,6 +44,8 @@ type RouteMetadataPatch = {
   tailscaleFunnel?: boolean | null;
   ngrokUrl?: string | null;
   ngrokPid?: number | null;
+  cloudflareUrl?: string | null;
+  cloudflarePid?: number | null;
 };
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
@@ -357,6 +361,14 @@ export class RouteStore {
       if ("ngrokPid" in fields) {
         if (fields.ngrokPid === null) delete route.ngrokPid;
         else if (fields.ngrokPid !== undefined) route.ngrokPid = fields.ngrokPid;
+      }
+      if ("cloudflareUrl" in fields) {
+        if (fields.cloudflareUrl === null) delete route.cloudflareUrl;
+        else if (fields.cloudflareUrl !== undefined) route.cloudflareUrl = fields.cloudflareUrl;
+      }
+      if ("cloudflarePid" in fields) {
+        if (fields.cloudflarePid === null) delete route.cloudflarePid;
+        else if (fields.cloudflarePid !== undefined) route.cloudflarePid = fields.cloudflarePid;
       }
       this.saveRoutes(routes);
     } finally {
