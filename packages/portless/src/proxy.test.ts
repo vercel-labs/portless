@@ -86,6 +86,42 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("Not Found");
     });
 
+    it("returns 421 with a DNS note for a public host that has no route", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "example.com" });
+      expect(res.status).toBe(421);
+      expect(res.headers["x-content-type-options"]).toBe("nosniff");
+      expect(res.body).toContain("DNS sent example.com to this computer");
+      expect(res.body).not.toContain("Active apps");
+    });
+
+    it("keeps the 404 page for unknown names inside every configured TLD and for IP hosts", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+          tlds: ["test", "localhost"],
+        })
+      );
+      await listen(server);
+
+      for (const host of [
+        "unknown.localhost",
+        "unknown.test",
+        "localhost",
+        "MyApp.Localhost",
+        "127.0.0.1:1355",
+      ]) {
+        const res = await request(server, { host });
+        expect(res.status).toBe(404);
+      }
+    });
+
     it("returns 404 with HTML page for unknown host", async () => {
       const routes: RouteInfo[] = [];
       const server = trackServer(
@@ -497,7 +533,8 @@ describe("createProxyServer", () => {
       await listen(server);
 
       const res = await request(server, { host: "other-device.tail1234.ts.net" });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(421);
+      expect(res.body).not.toContain("my-device");
     });
 
     it("matches the tailscale route registered for the request port", async () => {
@@ -1228,7 +1265,7 @@ describe("createProxyServer", () => {
       await listen(server);
 
       // The proxy extracts hostname from the Host header before the colon
-      const res = await request(server, { host: "<script>alert(1)</script>" });
+      const res = await request(server, { host: "<script>alert(1)</script>.localhost" });
       expect(res.status).toBe(404);
       expect(res.body).not.toContain("<script>alert(1)</script>");
       expect(res.body).toContain("&lt;script&gt;");
