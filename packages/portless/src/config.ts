@@ -23,6 +23,8 @@ export interface PortlessConfig extends AppConfig {
 export interface LoadedConfig {
   config: PortlessConfig;
   configDir: string;
+  /** File the config was read from: `portless.json` or `package.json`. */
+  source: "portless.json" | "package.json";
 }
 
 const CONFIG_FILENAME = "portless.json";
@@ -38,7 +40,7 @@ export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
     const raw = fs.readFileSync(configPath, "utf-8");
     const parsed = JSON.parse(raw);
     validateConfig(parsed, configPath);
-    return { config: parsed, configDir: cwd };
+    return { config: parsed, configDir: cwd, source: "portless.json" };
   } catch (err) {
     if (isErrnoException(err) && err.code === "ENOENT") {
       return loadConfigFromPackageJson(cwd);
@@ -67,7 +69,7 @@ function loadConfigFromPackageJson(dir: string): LoadedConfig | null {
       const config = normalizePortlessValue(pkg.portless);
       if (config === null) return null;
       validateConfig(config, `${pkgPath} "portless"`);
-      return { config: config as PortlessConfig, configDir: dir };
+      return { config: config as PortlessConfig, configDir: dir, source: "package.json" };
     }
   } catch (err) {
     if (isErrnoException(err) && err.code === "ENOENT") return null;

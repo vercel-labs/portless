@@ -109,6 +109,7 @@ describe("loadConfig", () => {
     expect(result).not.toBeNull();
     expect(result!.config.name).toBe("myapp");
     expect(result!.configDir).toBe(tmpDir);
+    expect(result!.source).toBe("portless.json");
   });
 
   it("does not walk up from a subdirectory", () => {
@@ -164,6 +165,7 @@ describe("loadConfig", () => {
     expect(result!.config.name).toBe("myapp");
     expect(result!.config.script).toBe("dev");
     expect(result!.configDir).toBe(tmpDir);
+    expect(result!.source).toBe("package.json");
   });
 
   it("loads string shorthand from package.json portless key", () => {
