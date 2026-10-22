@@ -275,6 +275,43 @@ function openssl(args: string[], options?: { input?: string }): string {
   }
 }
 
+/**
+ * How far a signed certificate's notBefore is moved into the past, so a client
+ * whose clock runs a little behind this machine still accepts a fresh cert.
+ */
+const NOT_BEFORE_SKEW_MS = 5 * 60 * 1000;
+
+let notBeforeSupported: boolean | undefined;
+
+/**
+ * Whether `openssl x509 -req` accepts `-not_before`, given `openssl version`
+ * output. OpenSSL added it in 3.4; LibreSSL and older OpenSSL builds lack it.
+ */
+export function opensslSupportsNotBefore(version: string): boolean {
+  const match = /^OpenSSL (\d+)\.(\d+)/.exec(version.trim());
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && minor >= 4);
+}
+
+/**
+ * Arguments that backdate a signed certificate's notBefore by a few minutes,
+ * or none when the local openssl cannot set it (today's behavior there).
+ */
+function backdatedNotBeforeArgs(): string[] {
+  if (notBeforeSupported === undefined) {
+    try {
+      notBeforeSupported = opensslSupportsNotBefore(openssl(["version"]));
+    } catch {
+      notBeforeSupported = false;
+    }
+  }
+  if (!notBeforeSupported) return [];
+  const start = new Date(Date.now() - NOT_BEFORE_SKEW_MS).toISOString();
+  return ["-not_before", start.replace(/[-:T]/g, "").slice(0, 14) + "Z"];
+}
+
 const execFileAsync = promisify(execFileCb);
 
 /**
@@ -445,6 +482,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
     srlPath,
     "-out",
     serverCertPath,
+    ...backdatedNotBeforeArgs(),
     "-days",
     SERVER_VALIDITY_DAYS.toString(),
     "-extfile",
@@ -816,6 +854,7 @@ async function generateHostCertAsync(
     srlPath,
     "-out",
     certPath,
+    ...backdatedNotBeforeArgs(),
     "-days",
     SERVER_VALIDITY_DAYS.toString(),
     "-extfile",
