@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -136,6 +136,31 @@ describe("RouteStore", () => {
       const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(raw).toHaveLength(1);
       expect(raw[0].hostname).toBe("alive.localhost");
+    });
+
+    it("keeps routes whose process exists but cannot be signaled (EPERM)", () => {
+      const deniedPid = 999998;
+      const realKill = process.kill.bind(process);
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        if (pid === deniedPid) {
+          throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+        }
+        return realKill(pid, signal);
+      });
+      try {
+        const routes = [{ hostname: "denied.localhost", port: 4001, pid: deniedPid }];
+        store.ensureDir();
+        fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+
+        expect(store.loadRoutes(true).map((r) => r.hostname)).toEqual(["denied.localhost"]);
+        const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+        expect(raw).toHaveLength(1);
+        expect(() => store.addRoute("denied.localhost", 4002, process.pid)).toThrow(
+          RouteConflictError
+        );
+      } finally {
+        kill.mockRestore();
+      }
     });
   });
 

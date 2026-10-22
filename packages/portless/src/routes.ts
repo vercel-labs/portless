@@ -170,8 +170,10 @@ export class RouteStore {
     try {
       process.kill(pid, 0);
       return true;
-    } catch {
-      return false;
+    } catch (err) {
+      // EPERM: the process exists but this caller may not signal it (another
+      // user, or a sandbox that denies signals), so its routes are still live.
+      return isErrnoException(err) && err.code === "EPERM";
     }
   }
 
