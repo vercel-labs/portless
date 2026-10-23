@@ -1644,6 +1644,12 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
       "--mode",
     ],
   },
+  vitepress: {
+    strictPort: true,
+    serverSubcommands: ["dev", "serve", "preview"],
+    nonServerSubcommands: ["build", "init"],
+    defaultIsServer: true,
+  },
   vp: { strictPort: true, serverSubcommands: ["dev"], defaultIsServer: false },
   "react-router": { strictPort: true, serverSubcommands: ["dev"], defaultIsServer: false },
   rsbuild: {

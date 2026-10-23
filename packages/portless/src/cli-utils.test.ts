@@ -589,6 +589,25 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
+  it("injects for vitepress dev but not build", () => {
+    const dev = ["vitepress", "dev", "docs"];
+    injectFrameworkFlags(dev, 4567);
+    expect(dev).toEqual([
+      "vitepress",
+      "dev",
+      "docs",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+
+    const build = ["vitepress", "build"];
+    injectFrameworkFlags(build, 4567);
+    expect(build).toEqual(["vitepress", "build"]);
+  });
+
   it("injects for rsbuild without --strictPort", () => {
     const args = ["rsbuild", "dev"];
     injectFrameworkFlags(args, 4567);

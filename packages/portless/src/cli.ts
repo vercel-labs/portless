@@ -1985,13 +1985,13 @@ ${colors.bold("How it works:")}
      (apps get a random port in the 4000-4999 range via PORT)
   3. Access via https://<name>.localhost
   4. .localhost domains auto-resolve to 127.0.0.1
-  5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
-     Expo, React Native) get --port and, when needed, --host flags
-     injected automatically, including through a package script whose command
-     starts with the framework. Only server commands (dev, serve, preview,
-     start, a bare vite, or vite [root]) get them; build, optimize, test and
-     the like reject them, and an invocation portless cannot classify is left
-     alone too. Expo --localhost, --lan and --tunnel modes are preserved while
+  5. Frameworks that ignore PORT (Vite, VitePlus, VitePress, Astro, React
+     Router, Angular, Expo, React Native) get --port and, when needed, --host
+     flags injected automatically, including through a package script whose
+     command starts with the framework. Only server commands (dev, serve,
+     preview, start, a bare vite, or vite [root]) get them; build, optimize,
+     test and the like reject them, and an invocation portless cannot classify
+     is left alone too. Expo --localhost, --lan and --tunnel modes are preserved while
      the assigned port is still injected.
      Portless also leaves a script alone when it is
      compound (&&, |, ;), ends in a # comment, ends its own option list with
