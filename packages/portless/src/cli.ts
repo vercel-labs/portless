@@ -2010,6 +2010,7 @@ ${colors.bold("HTTP/2 + HTTPS (default):")}
   On first use, portless generates a local CA and adds it to your
   system trust store. No browser warnings. Disable with --no-tls.
   On WSL, portless also adds the CA to the Windows user certificate store.
+  Linux containers on a WSL2 host use only the Linux trust store.
 
 ${colors.bold("LAN mode:")}
   Use --lan to make services accessible from other devices (phones,

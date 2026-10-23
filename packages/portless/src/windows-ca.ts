@@ -21,6 +21,7 @@ type WSLDetectionOptions = {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;
   release?: string;
+  hasWslpath?: boolean;
 };
 
 const commandOptions: ExecFileSyncOptionsWithStringEncoding = {
@@ -41,7 +42,8 @@ export function isWSL(options: WSLDetectionOptions = {}): boolean {
   if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) return true;
 
   const release = options.release ?? os.release();
-  return release.toLowerCase().includes("microsoft");
+  if (!release.toLowerCase().includes("microsoft")) return false;
+  return options.hasWslpath ?? fs.existsSync("/usr/bin/wslpath");
 }
 
 /**
