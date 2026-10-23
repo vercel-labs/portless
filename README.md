@@ -486,7 +486,36 @@ PORTLESS_CLOUDFLARE_URL          Cloudflare URL of the app (when --cloudflare is
 NODE_EXTRA_CA_CERTS              Path to the portless CA (when HTTPS is active)
 ```
 
-> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+> **Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## MCP server
+
+```bash
+portless mcp [--tools <profiles>]
+```
+
+Starts a stdio MCP server that exchanges line-delimited JSON-RPC messages over standard input and output. `--tools` accepts comma-separated profiles. The default is `core`; `default` aliases `core`, and `full` aliases `all`.
+
+- `core`: `list`, `get`, `alias_add`, `alias_remove`, `tools_profiles`
+- `proxy`: `proxy_start`, `proxy_stop`
+- `diagnostics`: `doctor`, `prune`, `version`
+- `all`: every tool in the profiles above
+
+All tools except `tools_profiles` accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments. `cwd` defaults to the server's working directory, `extraArgs` are appended after the tool's typed arguments, and `timeoutMs` defaults to 120000. Bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments.
+
+The server does not expose dev-server launch commands: `portless run`, `portless <name> <cmd>`, `portless --name <name> <cmd>`, and zero-argument mode start foreground dev servers, and MCP has no detached form. `portless proxy start --foreground` blocks. `portless trust`, `portless clean`, `portless hosts sync`, `portless hosts clean`, and `portless service` may prompt for sudo and require a TTY. `portless mcp` and `portless mcp --help` are omitted because they are the server itself and human help.
+
+Use this client configuration for the default `core` profile:
+
+```json
+{ "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }
+```
+
+Use this configuration to enable every tool:
+
+```json
+{ "mcpServers": { "portless": { "command": "portless", "args": ["mcp", "--tools", "all"] } } }
+```
 
 ## Uninstall / reset
 

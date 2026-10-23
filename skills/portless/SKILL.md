@@ -345,7 +345,15 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless run --help`                             | Show help for a subcommand (also: alias, hosts, clean)         |
 | `portless --version` / `-v`                       | Show version                                                   |
 
-**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, and `service` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## MCP server
+
+`portless mcp [--tools <profiles>]` starts a stdio MCP server. It defaults to `core`, which provides route listing, URL lookup, static alias management, and profile discovery. Add comma-separated `proxy`, `diagnostics`, or `all` profiles as needed. `default` aliases `core`, and `full` aliases `all`. The `tools_profiles` tool lists available profiles. Shared tool arguments are `cwd`, `extraArgs`, and `timeoutMs`; bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. MCP does not run dev servers; start them with `portless run <cmd>` in a shell.
+
+```json
+{ "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }
+```
 
 ## portless.json
 
