@@ -449,6 +449,25 @@ describe("RouteStore", () => {
       expect(routes[0].tailscaleFunnel).toBe(true);
     });
 
+    it("persists http flag via updateRoute", () => {
+      store.addRoute("api.localhost", 4456, process.pid);
+      store.updateRoute("api.localhost", {
+        tailscaleUrl: "http://100.101.102.103",
+        tailscaleHttpsPort: 80,
+        tailscaleHttp: true,
+      });
+      const routes = store.loadRoutes();
+      expect(routes[0].tailscaleHttp).toBe(true);
+    });
+
+    it("deletes the http flag when set to null", () => {
+      store.addRoute("api.localhost", 4456, process.pid);
+      store.updateRoute("api.localhost", { tailscaleHttp: true });
+      store.updateRoute("api.localhost", { tailscaleHttp: null });
+      const routes = store.loadRoutes();
+      expect(routes[0].tailscaleHttp).toBeUndefined();
+    });
+
     it("updateRoute keeps the original registeredAt", () => {
       store.addRoute("myapp.localhost", 4123, process.pid);
       const registeredAt = store.loadRoutes()[0].registeredAt;
@@ -477,6 +496,7 @@ describe("RouteStore", () => {
       expect(routes).toHaveLength(1);
       expect(routes[0].tailscaleUrl).toBeUndefined();
       expect(routes[0].tailscaleHttpsPort).toBeUndefined();
+      expect(routes[0].tailscaleHttp).toBeUndefined();
     });
 
     it("updateRoute is a no-op for nonexistent hostname", () => {
