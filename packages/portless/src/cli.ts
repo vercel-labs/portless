@@ -1986,8 +1986,9 @@ ${colors.bold("How it works:")}
   3. Access via https://<name>.localhost
   4. .localhost domains auto-resolve to 127.0.0.1
   5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
-     Expo, React Native) get --port and, when needed, --host flags
-     injected automatically, including through a package script whose command
+     Expo, React Native, Wrangler) get --port and, when needed, --host flags
+     injected automatically (--ip for Wrangler), including through a package
+     script whose command
      starts with the framework. Only server commands (dev, serve, preview,
      start, a bare vite, or vite [root]) get them; build, optimize, test and
      the like reject them, and an invocation portless cannot classify is left

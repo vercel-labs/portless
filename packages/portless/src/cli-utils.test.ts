@@ -619,6 +619,24 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
   });
 
+  it("injects --port and --ip for wrangler dev", () => {
+    const args = ["wrangler", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--port", "4567", "--ip", "127.0.0.1"]);
+  });
+
+  it("skips --ip injection for wrangler when --ip is already present", () => {
+    const args = ["wrangler", "dev", "--ip", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--ip", "0.0.0.0", "--port", "4567"]);
+  });
+
+  it("skips --ip injection for wrangler when --ip=value is present", () => {
+    const args = ["wrangler", "dev", "--ip=0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--ip=0.0.0.0", "--port", "4567"]);
+  });
+
   it("skips --host for expo in LAN mode (Metro defaults to LAN)", () => {
     const prev = process.env.PORTLESS_LAN;
     process.env.PORTLESS_LAN = "1";
@@ -665,6 +683,7 @@ describe("injectFrameworkFlags", () => {
     ["react-router", "typegen"],
     ["rsbuild", "inspect"],
     ["react-native", "bundle"],
+    ["wrangler", "deploy"],
   ])("does not inject into %s %s", (framework, subcommand) => {
     const args = [framework, subcommand];
     injectFrameworkFlags(args, 4567);
