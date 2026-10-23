@@ -1290,6 +1290,59 @@ describe("CLI", () => {
     });
   });
 
+  describe("name source in run output", () => {
+    let tmpDir: string;
+    let projectDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-name-source-"));
+      projectDir = path.join(tmpDir, "project");
+      fs.mkdirSync(projectDir);
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    async function runNamed(files: Record<string, unknown>): Promise<string> {
+      for (const [file, content] of Object.entries(files)) {
+        fs.writeFileSync(path.join(projectDir, file), JSON.stringify(content));
+      }
+      const env = {
+        PORTLESS_STATE_DIR: path.join(tmpDir, "state"),
+        PORTLESS_PORT: (await getFreePort()).toString(),
+        PORTLESS_HTTPS: "0",
+      };
+      try {
+        const { stdout } = run(["run", process.execPath, "-e", "0"], { env, cwd: projectDir });
+        return stdout;
+      } finally {
+        run(["proxy", "stop"], { env, cwd: projectDir });
+      }
+    }
+
+    it.skipIf(process.platform === "win32")(
+      'reports package.json when the name comes from its "portless" key',
+      async () => {
+        const stdout = await runNamed({ "package.json": { name: "pkg", portless: "foo" } });
+        expect(stdout).toContain('Name "foo" (from package.json)');
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "reports portless.json when the name comes from portless.json",
+      async () => {
+        const stdout = await runNamed({
+          "package.json": { name: "pkg" },
+          "portless.json": { name: "bar" },
+        });
+        expect(stdout).toContain('Name "bar" (from portless.json)');
+      },
+      30_000
+    );
+  });
+
   describe("persisted LAN marker", () => {
     let tmpDir: string;
 
