@@ -1093,6 +1093,128 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
+  it("injects flags for npm exec astro dev with a separator", () => {
+    const args = ["npm", "exec", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "astro",
+      "dev",
+      "--",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npm exec -- astro dev without an extra separator", () => {
+    const args = ["npm", "exec", "--", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "--",
+      "astro",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npm x astro dev with a separator", () => {
+    const args = ["npm", "x", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "x",
+      "astro",
+      "dev",
+      "--",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npm exec --package astro -- astro dev", () => {
+    const args = ["npm", "exec", "--package", "astro", "--", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "--package",
+      "astro",
+      "--",
+      "astro",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+    const prefixed = ["npm", "--prefix", "./app", "exec", "--", "vite", "dev"];
+    injectFrameworkFlags(prefixed, 4567);
+    expect(prefixed).toEqual([
+      "npm",
+      "--prefix",
+      "./app",
+      "exec",
+      "--",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("appends only missing flags after a separator for npm exec astro dev -- --port 3000", () => {
+    const args = ["npm", "exec", "astro", "dev", "--", "--port", "3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "astro",
+      "dev",
+      "--",
+      "--port",
+      "3000",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects past an option npm consumes for npm exec vite dev --port=3000", () => {
+    const args = ["npm", "exec", "vite", "dev", "--port=3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "vite",
+      "dev",
+      "--port=3000",
+      "--",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("does not inject when npm may consume an option value for npm exec vite --loglevel info build", () => {
+    const args = ["npm", "exec", "vite", "--loglevel", "info", "build"];
+    expect(injectFrameworkFlags(args, 4567)).toEqual([]);
+    expect(args).toEqual(["npm", "exec", "vite", "--loglevel", "info", "build"]);
+  });
+
   it("injects flags for npx rsbuild dev", () => {
     const args = ["npx", "rsbuild", "dev"];
     injectFrameworkFlags(args, 4567);
@@ -1516,6 +1638,23 @@ describe("injectPackageScriptFrameworkFlags", () => {
     const args = ["bun", "run", "dev"];
     injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
     expect(args).toEqual(["bun", "run", "dev", "--port", "4567", "--strictPort"]);
+  });
+
+  it("forwards flags through a script that uses npm exec with a separator", () => {
+    writeScripts({ dev: "npm exec -- vite dev" });
+    const args = ["npm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "npm",
+      "run",
+      "dev",
+      "--",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
   });
 
   it("ignores commands that are not <pm> run <script>", () => {

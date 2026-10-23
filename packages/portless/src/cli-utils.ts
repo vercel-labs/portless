@@ -1678,6 +1678,7 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
 type PackageRunnerSpec = {
   subcommands: string[];
   valueFlags?: string[];
+  separatorRequired?: boolean;
 };
 
 const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
@@ -1689,6 +1690,11 @@ const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
   pnpx: { subcommands: [], valueFlags: ["-p", "--package"] },
   yarn: { subcommands: ["dlx", "exec"] },
   pnpm: { subcommands: ["dlx", "exec"] },
+  npm: {
+    subcommands: ["exec", "x"],
+    valueFlags: ["-c", "--call", "--package", "-w", "--workspace", "--prefix"],
+    separatorRequired: true,
+  },
 };
 
 /**
@@ -1700,8 +1706,10 @@ type FrameworkInvocation = {
   basename: string;
   framework: FrameworkSpec;
   frameworkIndex: number;
-  frameworkArgs: string[];
+  /** Null when npm parses the options after the framework and one of them may consume the next argument. */
+  frameworkArgs: string[] | null;
   insertionIndex: number;
+  separator?: string;
 };
 
 function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
@@ -1709,6 +1717,8 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
 
   const first = path.basename(commandArgs[0]);
   let frameworkIndex: number | null = FRAMEWORKS_NEEDING_PORT[first] ? 0 : null;
+  let runnerSeparator = false;
+  let needsSeparator = false;
 
   if (frameworkIndex === null) {
     const runner = PACKAGE_RUNNERS[first];
@@ -1719,7 +1729,10 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
       while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
         const option = commandArgs[i];
         i++;
-        if (option === "--") break;
+        if (option === "--") {
+          runnerSeparator = true;
+          break;
+        }
         if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
       }
     };
@@ -1741,19 +1754,46 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
       const name = path.basename(commandArgs[i]);
       frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
     }
+
+    if (frameworkIndex !== null) {
+      needsSeparator = Boolean(runner.separatorRequired) && !runnerSeparator;
+    }
   }
 
   if (frameworkIndex === null) return null;
   const basename = path.basename(commandArgs[frameworkIndex]);
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
   const optionEnd = commandArgs.indexOf("--", frameworkIndex + 1);
-  const insertionIndex = optionEnd === -1 ? commandArgs.length : optionEnd;
+  const insertionIndex = needsSeparator || optionEnd === -1 ? commandArgs.length : optionEnd;
+  let frameworkArgs: string[] | null;
+  if (needsSeparator) {
+    const beforeSeparator =
+      optionEnd === -1
+        ? commandArgs.slice(frameworkIndex + 1)
+        : commandArgs.slice(frameworkIndex + 1, optionEnd);
+    const npmMayConsumeValue = beforeSeparator.some(
+      (arg, i) =>
+        arg.startsWith("-") &&
+        !arg.includes("=") &&
+        i + 1 < beforeSeparator.length &&
+        !beforeSeparator[i + 1].startsWith("-")
+    );
+    frameworkArgs = npmMayConsumeValue
+      ? null
+      : [
+          ...beforeSeparator.filter((arg) => !arg.startsWith("-")),
+          ...(optionEnd === -1 ? [] : commandArgs.slice(optionEnd + 1)),
+        ];
+  } else {
+    frameworkArgs = commandArgs.slice(frameworkIndex + 1, insertionIndex);
+  }
   return {
     basename,
     framework,
     frameworkIndex,
-    frameworkArgs: commandArgs.slice(frameworkIndex + 1, insertionIndex),
+    frameworkArgs,
     insertionIndex,
+    ...(needsSeparator && optionEnd === -1 ? { separator: "--" } : {}),
   };
 }
 
@@ -1842,9 +1882,9 @@ function invokesFrameworkServer(frameworkArgs: string[], framework: FrameworkSpe
 export function injectFrameworkFlags(commandArgs: string[], port: number): string[] {
   const invocation = parseFrameworkInvocation(commandArgs);
   if (!invocation) return [];
-  const { basename, framework, frameworkArgs, insertionIndex } = invocation;
+  const { basename, framework, frameworkArgs, insertionIndex, separator } = invocation;
 
-  if (!invokesFrameworkServer(frameworkArgs, framework)) return [];
+  if (!frameworkArgs || !invokesFrameworkServer(frameworkArgs, framework)) return [];
 
   const flags: string[] = [];
 
@@ -1866,8 +1906,9 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): strin
     }
   }
 
-  commandArgs.splice(insertionIndex, 0, ...flags);
-  return flags;
+  const inserted = separator && flags.length > 0 ? [separator, ...flags] : flags;
+  commandArgs.splice(insertionIndex, 0, ...inserted);
+  return inserted;
 }
 
 /** Package managers whose `<pm> run <script>` delegates to a package.json script. */
@@ -2010,11 +2051,10 @@ function isSafeToInjectIntoScript(
   // trailing comment entirely.
   const rawScriptText = resolveScriptRaw(scriptName, packageDir);
   if (rawScriptText && isUnsafeToAppendArgs(rawScriptText)) return false;
-  // A script that ends its own option list keeps everything after `--` as
-  // positional data, so appended flags arrive as data too and the framework
-  // never reads them as options. Appending cannot reach past a `--` that lives
-  // inside the script, so leave the script alone.
-  if (rawScript.includes("--")) return false;
+  // A `--` after the framework name ends its option list, so appended flags
+  // would arrive as positional data.
+  const invocation = parseFrameworkInvocation(rawScript);
+  if (invocation && rawScript.includes("--", invocation.frameworkIndex + 1)) return false;
   // Non-server subcommands need no check here: injectFrameworkFlags appends
   // nothing for them.
   return true;
