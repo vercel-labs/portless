@@ -376,6 +376,24 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const route = findRoute(routes, rawHost, strict);
 
     if (!route) {
+      const lowerHost = host.toLowerCase();
+      const nameHost = lowerHost.endsWith(".") ? lowerHost.slice(0, -1) : lowerHost;
+      const isPortlessName = tldSuffixes.some(
+        (suffix) => nameHost === suffix.slice(1) || nameHost.endsWith(suffix)
+      );
+      const isIpAddress = net.isIPv4(host) || rawHost.startsWith("[");
+      if (!isPortlessName && !isIpAddress) {
+        const message = `DNS sent ${host} to this computer. This is not the real site.`;
+        sendProxyError(req, res, 421, "misdirected_request", message, host, () =>
+          renderPage(
+            421,
+            "Misdirected Request",
+            `<div class="content"><p class="desc">${escapeHtml(message)}</p></div>`
+          )
+        );
+        return;
+      }
+
       const safeHost = escapeHtml(host);
       const matchedSuffix = tldSuffixes
         .filter((suffix) => host.endsWith(suffix))

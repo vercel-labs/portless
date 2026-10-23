@@ -1999,7 +1999,7 @@ ${colors.bold("How it works:")}
      script, or is invoked with runner flags before the script name
      (bun run --bun dev); set the port in those yourself
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
-  7. Proxy errors (404, 502, 508) are an HTML page for browsers and JSON
+  7. Proxy errors (404, 421 misdirected, 502, 508) are an HTML page for browsers and JSON
      ({"error","upstream","message"}) for clients that do not accept text/html
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 

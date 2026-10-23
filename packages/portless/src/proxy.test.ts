@@ -99,6 +99,66 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("Not Found");
     });
 
+    it("returns a 421 HTML page with a DNS note for a public host that has no route", async () => {
+      const routes = makeRoutes(1);
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "<script>alert(1)</script>.com" });
+      expect(res.status).toBe(421);
+      expect(res.headers["content-type"]).toBe("text/html");
+      expect(res.headers.vary).toBe("Accept");
+      expect(res.body).toContain("Misdirected Request");
+      expect(res.body).toContain(
+        "DNS sent &lt;script&gt;alert(1)&lt;/script&gt;.com to this computer"
+      );
+      expect(res.body).not.toContain("<script>alert(1)</script>");
+      expect(res.body).not.toContain("app0.localhost");
+      expect(res.body).not.toContain("Active apps");
+    });
+
+    it("returns a 421 JSON error for a public host that has no route", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "example.com", accept: "application/json" });
+      expect(res.status).toBe(421);
+      expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+      expect(JSON.parse(res.body)).toEqual({
+        error: "misdirected_request",
+        upstream: "example.com",
+        message: "DNS sent example.com to this computer. This is not the real site.",
+      });
+    });
+
+    it("keeps the 404 page for unknown names inside every configured TLD and for IP hosts", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+          tlds: ["test", "localhost"],
+        })
+      );
+      await listen(server);
+
+      for (const host of [
+        "unknown.localhost",
+        "unknown.localhost.",
+        "unknown.test",
+        "localhost",
+        "MyApp.Localhost",
+        "127.0.0.1:1355",
+      ]) {
+        const res = await request(server, { host });
+        expect(res.status).toBe(404);
+      }
+    });
+
     it("returns 404 with HTML page for unknown host", async () => {
       const routes: RouteInfo[] = [];
       const server = trackServer(
@@ -611,7 +671,8 @@ describe("createProxyServer", () => {
       await listen(server);
 
       const res = await request(server, { host: "other-device.tail1234.ts.net" });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(421);
+      expect(res.body).not.toContain("my-device");
     });
 
     it("matches the tailscale route registered for the request port", async () => {
@@ -1452,7 +1513,7 @@ describe("createProxyServer", () => {
       await listen(server);
 
       // The proxy extracts hostname from the Host header before the colon
-      const res = await request(server, { host: "<script>alert(1)</script>" });
+      const res = await request(server, { host: "<script>alert(1)</script>.localhost" });
       expect(res.status).toBe(404);
       expect(res.body).not.toContain("<script>alert(1)</script>");
       expect(res.body).toContain("&lt;script&gt;");
@@ -1464,7 +1525,7 @@ describe("createProxyServer", () => {
       );
       await listen(server);
 
-      const res = await request(server, { host: '"</script><script>' });
+      const res = await request(server, { host: '"</script><script>.localhost' });
       expect(res.status).toBe(404);
       expect(res.body).toContain("&lt;/script&gt;&lt;script&gt;");
       expect(res.body.match(/<script>/g)).toHaveLength(1);
