@@ -9,8 +9,9 @@
     "outDir": "dist",
     "rootDir": "src",
     "declaration": true,
+    "types": ["node"],
     "resolveJsonModule": true
   },
-  "include": ["src/**/*"],
+  "include": ["src/**/*.ts"],
   "exclude": ["node_modules", "dist"]
 }

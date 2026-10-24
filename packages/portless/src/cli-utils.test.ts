@@ -595,6 +595,12 @@ describe("injectFrameworkFlags", () => {
     expect(args).toEqual(["rsbuild", "dev", "--port", "4567", "--host", "127.0.0.1"]);
   });
 
+  it("injects for vinext without --strictPort", () => {
+    const args = ["vinext", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vinext", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
   it("injects for astro without --strictPort", () => {
     const args = ["astro", "dev"];
     injectFrameworkFlags(args, 4567);
@@ -744,6 +750,9 @@ describe("injectFrameworkFlags", () => {
     ["react-router", "typegen"],
     ["rsbuild", "inspect"],
     ["react-native", "bundle"],
+    ["vinext", "build"],
+    ["vinext", "check"],
+    ["vinext", "lint"],
   ])("does not inject into %s %s", (framework, subcommand) => {
     const args = [framework, subcommand];
     injectFrameworkFlags(args, 4567);
@@ -796,7 +805,11 @@ describe("injectFrameworkFlags", () => {
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["expo", "serve", "--port", "4567", "--host", "localhost"]);
   });
-
+  it("injects for vinext start, which serves the start on a port", () => {
+    const args = ["vinext", "start"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["vinext", "start", "--port", "4567", "--hostname", "127.0.0.1"]);
+  });
   it("does not inject when the flag grammar of the CLI is unknown", () => {
     // `vp` declares no value flags, so `--mode dev build` and `--open build`
     // cannot both be resolved and the subcommand stays unidentified.
@@ -848,6 +861,10 @@ describe("injectFrameworkFlags", () => {
     const args = ["astro"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["astro"]);
+
+    const vinextargs = ["vinext"];
+    injectFrameworkFlags(vinextargs, 4567);
+    expect(vinextargs).toEqual(["vinext"]);
   });
 
   it("injects past a root positional that follows a server subcommand", () => {
@@ -1416,7 +1433,12 @@ describe("injectPackageScriptFrameworkFlags", () => {
     injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
     expect(args).toEqual(["bun", "run", "dev", "--host", "localhost"]);
   });
-
+  it("injects the missing --host when --port is already present in the script", () => {
+    writeScripts({ dev: "vinext dev --port 4567" });
+    const args = ["bun", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual(["bun", "run", "dev", "--host", "127.0.0.1"]);
+  });
   it.each(["--localhost", "--lan", "--tunnel"])(
     "preserves Expo connection mode %s through a package script",
     (mode) => {
@@ -1471,6 +1493,7 @@ describe("injectPackageScriptFrameworkFlags", () => {
       test: "vp test",
       export: "expo export",
       check: "astro check",
+      init: "vinext init",
     });
     for (const script of ["optimize", "test", "export", "check"]) {
       const args = ["bun", "run", script];
