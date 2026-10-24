@@ -1489,6 +1489,12 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
   ng: { strictPort: false, serverSubcommands: ["serve", "dev", "s"], defaultIsServer: false },
   "react-native": { strictPort: false, serverSubcommands: ["start"], defaultIsServer: false },
   expo: { strictPort: false, serverSubcommands: ["start", "serve"], defaultIsServer: true },
+  vinext: {
+    strictPort: false,
+    serverSubcommands: ["dev", "start"],
+    nonServerSubcommands: ["init", "build", "check", "lint"],
+    defaultIsServer: false,
+  },
 };
 
 type PackageRunnerSpec = {
@@ -1670,15 +1676,18 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): strin
       flags.push("--strictPort");
     }
   }
-
+  const isVinextStart = basename === "vinext" && frameworkArgs[0] === "start";
   const hasHostChoice =
     hasCliOption(frameworkArgs, "--host") ||
+    hasCliOption(frameworkArgs, "--hostname") ||
+    hasCliOption(frameworkArgs, "-H") ||
     (basename === "expo" &&
       ["--localhost", "--lan", "--tunnel"].some((option) => hasCliOption(frameworkArgs, option)));
   if (!hasHostChoice) {
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
     if (!isExpoLan) {
-      flags.push("--host", basename === "expo" ? "localhost" : "127.0.0.1");
+      const hostFlag = isVinextStart ? "--hostname" : "--host";
+      flags.push(hostFlag, basename === "expo" ? "localhost" : "127.0.0.1");
     }
   }
 
