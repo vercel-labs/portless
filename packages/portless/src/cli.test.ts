@@ -1072,6 +1072,37 @@ describe("CLI", () => {
       expect(status).toBe(1);
       expect(stderr).toContain("No alias name");
     });
+
+    it("prints help without registering a route when --help follows the arguments", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-help-"));
+      try {
+        const { status, stdout } = run(["alias", "mydb", "5432", "--help"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless alias");
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects unknown flags without registering a route", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-flag-"));
+      try {
+        for (const args of [
+          ["alias", "mydb", "5432", "--frce"],
+          ["alias", "mydb", "5432", "--remove"],
+        ]) {
+          const { status, stderr } = run(args, { env: { PORTLESS_STATE_DIR: tmpDir } });
+          expect(status).toBe(1);
+          expect(stderr).toContain(`Unknown flag "${args[3]}"`);
+        }
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("hosts subcommand", () => {
@@ -1281,6 +1312,18 @@ describe("CLI", () => {
     it("exits 1 for unknown proxy subcommand", () => {
       const { status } = run(["proxy", "typo"]);
       expect(status).toBe(1);
+    });
+
+    it("prints help instead of stopping when stop is given --help", () => {
+      const { status, stdout } = run(["proxy", "stop", "-p", "59999", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless proxy stop");
+    });
+
+    it("exits 1 for unknown proxy stop flags", () => {
+      const { status, stderr } = run(["proxy", "stop", "--frce"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain('Unknown flag "--frce"');
     });
 
     it("warns when a running proxy uses a different explicit config", async () => {
@@ -2099,6 +2142,12 @@ describe("CLI", () => {
 
     it("prints help with -h", () => {
       const { status, stdout } = run(["get", "-h"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless get");
+    });
+
+    it("prints help when --help follows the name", () => {
+      const { status, stdout } = run(["get", "myapp", "--help"], { env: getEnv() });
       expect(status).toBe(0);
       expect(stdout).toContain("portless get");
     });
