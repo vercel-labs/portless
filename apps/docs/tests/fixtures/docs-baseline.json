@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "f6b7b42cba8bb925703792905cc72481b6a6af83c4d334b41bc3554e8ae5e6e7",
-      "markdownBodySha256": "f6b7b42cba8bb925703792905cc72481b6a6af83c4d334b41bc3554e8ae5e6e7",
+      "mdxSha256": "5de45bb16e2831df3b29fd0224cbdac88b954771025ca9dec5054fa028c88627",
+      "markdownBodySha256": "5de45bb16e2831df3b29fd0224cbdac88b954771025ca9dec5054fa028c88627",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -110,8 +110,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "a7b47987215f9a82300b572280a551797564a17677eed473fb5ff02a7fa0201d",
-      "markdownBodySha256": "a7b47987215f9a82300b572280a551797564a17677eed473fb5ff02a7fa0201d",
+      "mdxSha256": "9da1ac2a9a5757ed28daefb1bd2f7a4af62f54e00e0dfc845eb0c1e6062f1e70",
+      "markdownBodySha256": "9da1ac2a9a5757ed28daefb1bd2f7a4af62f54e00e0dfc845eb0c1e6062f1e70",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",

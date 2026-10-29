@@ -178,7 +178,16 @@ portless proxy start
   <tbody>
     <tr>
       <td>`-p, --port <number>`</td>
-      <td>Proxy port (default: 443, or 80 with `--no-tls`). Auto-elevates with sudo only when the bind needs root. A failed elevation exits 1 without switching ports.</td>
+      <td>Proxy port (default: 443, or 80 with `--no-tls`). Auto-elevates with sudo only when the bind needs root, unless `--unprivileged` is set. A failed elevation exits 1 without switching ports.</td>
+    </tr>
+    <tr>
+      <td>`--unprivileged`</td>
+      <td>
+        Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers
+        only. Serves plain HTTP on port 80 unless `--https` is given, never writes the hosts file,
+        and is remembered for auto-start. On Linux, requires `net.ipv4.ip_unprivileged_port_start`
+        to cover the port.
+      </td>
     </tr>
     <tr>
       <td>`--no-tls`</td>
