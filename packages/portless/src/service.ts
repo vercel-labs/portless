@@ -13,7 +13,7 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
-import { fixOwnership, resolveUserHome } from "./utils.js";
+import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
@@ -193,8 +193,8 @@ function parseBooleanEnv(value: string | undefined): boolean | null {
 }
 
 function parsePortValue(value: string, source: string): number {
-  const port = parseInt(value, 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
+  const port = parsePort(value);
+  if (port === null) {
     throw new Error(`${source} must be a number between 1 and 65535.`);
   }
   return port;

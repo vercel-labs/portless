@@ -9,6 +9,7 @@ import {
   createSNICallback,
   ensureCerts,
   isCATrusted,
+  opensslSupportsNotBefore,
   sanitizeHostForFilename,
   trustCA,
   untrustCA,
@@ -93,6 +94,24 @@ describe("sanitizeHostForFilename", () => {
   });
 });
 
+/** Milliseconds since a PEM cert's notBefore. */
+function certAgeMs(certPath: string): number {
+  const cert = new crypto.X509Certificate(fs.readFileSync(certPath));
+  return Date.now() - new Date(cert.validFrom).getTime();
+}
+
+const localOpensslBackdates = opensslSupportsNotBefore(
+  execFileSync("openssl", ["version"], { encoding: "utf-8" })
+);
+
+describe("opensslSupportsNotBefore", () => {
+  it("is true only from OpenSSL 3.4 on", () => {
+    expect(opensslSupportsNotBefore("OpenSSL 3.4.0 22 Oct 2024")).toBe(true);
+    expect(opensslSupportsNotBefore("OpenSSL 3.3.2 3 Sep 2024")).toBe(false);
+    expect(opensslSupportsNotBefore("LibreSSL 3.3.6")).toBe(false);
+  });
+});
+
 describe("ensureCerts", () => {
   let tmpDir: string;
 
@@ -111,6 +130,19 @@ describe("ensureCerts", () => {
     expect(fs.existsSync(result.certPath)).toBe(true);
     expect(fs.existsSync(result.keyPath)).toBe(true);
     expect(fs.existsSync(result.caPath)).toBe(true);
+  });
+
+  it("backdates the CA and server certs' notBefore when openssl can set it", () => {
+    const result = ensureCerts(tmpDir);
+    if (localOpensslBackdates) {
+      expect(certAgeMs(result.caPath)).toBeGreaterThan(4 * 60 * 1000);
+      expect(certAgeMs(result.caPath)).toBeLessThan(6 * 60 * 1000);
+      expect(certAgeMs(result.certPath)).toBeGreaterThan(4 * 60 * 1000);
+      expect(certAgeMs(result.certPath)).toBeLessThan(6 * 60 * 1000);
+    } else {
+      expect(certAgeMs(result.caPath)).toBeLessThan(60 * 1000);
+      expect(certAgeMs(result.certPath)).toBeLessThan(60 * 1000);
+    }
   });
 
   it("returns valid PEM certificates", () => {
@@ -387,7 +419,61 @@ describe("createSNICallback", () => {
     expect(fs.existsSync(hostCertPath)).toBe(true);
 
     const cert = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
-    expect(cert.subjectAltName).toContain("DNS:myapp.localhost");
+    expect(cert.subjectAltName).toBe("DNS:myapp.localhost");
+  });
+
+  it("reissues a cached host cert that has a bare TLD wildcard SAN", async () => {
+    const hostDir = path.join(tmpDir, "host-certs");
+    fs.mkdirSync(hostDir, { recursive: true });
+    const keyPath = path.join(hostDir, "myapp_localhost-key.pem");
+    const certPath = path.join(hostDir, "myapp_localhost.pem");
+    execFileSync("openssl", [
+      "ecparam",
+      "-genkey",
+      "-name",
+      "prime256v1",
+      "-noout",
+      "-out",
+      keyPath,
+    ]);
+    execFileSync("openssl", [
+      "req",
+      "-new",
+      "-x509",
+      "-key",
+      keyPath,
+      "-out",
+      certPath,
+      "-days",
+      "30",
+      "-subj",
+      "/CN=myapp.localhost",
+      "-addext",
+      "subjectAltName=DNS:myapp.localhost,DNS:*.localhost",
+    ]);
+
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    await new Promise<void>((resolve, reject) => {
+      sniCallback("myapp.localhost", (err) => (err ? reject(err) : resolve()));
+    });
+
+    const cert = new crypto.X509Certificate(fs.readFileSync(certPath));
+    expect(cert.subjectAltName).toBe("DNS:myapp.localhost");
+  });
+
+  it("backdates a host cert's notBefore when openssl can set it", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    await new Promise<void>((resolve, reject) => {
+      sniCallback("skew.localhost", (err) => (err ? reject(err) : resolve()));
+    });
+
+    const hostCertPath = path.join(tmpDir, "host-certs", "skew_localhost.pem");
+    if (localOpensslBackdates) {
+      expect(certAgeMs(hostCertPath)).toBeGreaterThan(4 * 60 * 1000);
+      expect(certAgeMs(hostCertPath)).toBeLessThan(6 * 60 * 1000);
+    } else {
+      expect(certAgeMs(hostCertPath)).toBeLessThan(60 * 1000);
+    }
   });
 
   it("generates per-hostname cert for multi-level subdomains", async () => {
@@ -508,6 +594,22 @@ describe("createSNICallback", () => {
     });
     const reissued = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
     expect(reissued.verify(newCa.publicKey)).toBe(true);
+  });
+
+  it("refuses hostnames outside the configured TLDs without issuing a cert", async () => {
+    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    for (const name of [
+      "outside.example.com",
+      "localhost.example.net",
+      "evillocalhost",
+      "outside.example.com,DNS:app.localhost",
+    ]) {
+      const error = await new Promise<Error | null>((resolve) => {
+        sniCallback(name, (err) => resolve(err));
+      });
+      expect(error).toBeInstanceOf(Error);
+    }
+    expect(fs.existsSync(path.join(tmpDir, "host-certs"))).toBe(false);
   });
 
   it("returns error via callback when state dir is invalid", async () => {
