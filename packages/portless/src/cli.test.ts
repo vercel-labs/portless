@@ -5,6 +5,12 @@ import * as http from "node:http";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
+  HOSTS_SYNC_AUTH_PROOF_HEADER,
+  generateHostsSyncToken,
+  writeHostsSyncToken,
+} from "./hosts-sync-auth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
@@ -233,13 +239,22 @@ async function startMockProxy(
 ): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
   const port = options.port ?? (await getFreePort());
   const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
+  const token = options.acknowledgeHostsSync !== false ? generateHostsSyncToken() : null;
+  if (token) writeHostsSyncToken(dir, token);
   fs.writeFileSync(
     scriptPath,
     [
       'const http = require("node:http");',
+      token ? 'const crypto = require("node:crypto");' : "",
       "const server = http.createServer((req, res) => {",
       '  res.setHeader("X-Portless", "1");',
-      options.acknowledgeHostsSync !== false
+      token
+        ? `  const challenge = req.headers[${JSON.stringify(HOSTS_SYNC_AUTH_CHALLENGE_HEADER)}];
+  if (typeof challenge === "string") {
+    res.setHeader(${JSON.stringify(HOSTS_SYNC_AUTH_PROOF_HEADER)}, crypto.createHmac("sha256", ${JSON.stringify(token)}).update(challenge).digest("hex"));
+  }`
+        : "",
+      token
         ? '  if (req.method === "POST" && req.url === "/.portless/hosts-sync") { res.writeHead(204); res.end(); return; }'
         : "",
       '  res.end("ok");',
@@ -328,6 +343,8 @@ describe("CLI", () => {
       expect(stdout).toContain("--ngrok");
       expect(stdout).toContain("PORTLESS_NGROK");
       expect(stdout).toContain("PORTLESS_NGROK_URL");
+      expect(stdout).toContain("--cloudflare");
+      expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
     });
 
@@ -371,6 +388,43 @@ describe("CLI", () => {
       // it doesn't crash and returns 0.
       const { status } = run(["list"]);
       expect(status).toBe(0);
+    });
+
+    it("appends uptime after the pid and leaves aliases and legacy routes unchanged", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-uptime-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "app.localhost",
+              port: 4001,
+              pid: process.pid,
+              registeredAt: Date.now() - 3 * 60 * 60 * 1000,
+            },
+            { hostname: "docker.localhost", port: 4002, pid: 0 },
+            { hostname: "legacy.localhost", port: 4003, pid: process.pid },
+          ])
+        );
+
+        const { status, stdout } = run(["list"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        const lines = stdout.split("\n");
+        const row = (host: string) => lines.find((l) => l.includes(host))!.trimStart();
+        expect(row("app.localhost")).toMatch(/ {2}\(pid \d+\) up 3h$/);
+        expect(row("docker.localhost")).toMatch(/ {2}\(alias\)$/);
+        expect(row("legacy.localhost")).toMatch(/ {2}\(pid \d+\)$/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -870,9 +924,10 @@ describe("CLI", () => {
         "start",
         "--lan",
         "--ngrok",
+        "--cloudflare",
       ]);
       expect(status).toBe(0);
-      expect(args).toEqual(["start", "--lan", "--ngrok"]);
+      expect(args).toEqual(["start", "--lan", "--ngrok", "--cloudflare"]);
       expect(env.PORTLESS_LAN).toBe("1");
     });
 
@@ -988,6 +1043,26 @@ describe("CLI", () => {
       const { status, stderr } = run(["alias", "mydb", "notaport"]);
       expect(status).toBe(1);
       expect(stderr).toContain("Invalid port");
+    });
+
+    it("exits 1 without registering a route for a port with trailing text", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-port-"));
+      try {
+        const { status, stderr } = run(["alias", "mydb", "192.168.1.1:8123"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain('Invalid port "192.168.1.1:8123"');
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("proxy stop exits 1 for a port with trailing text", () => {
+      const { status, stderr } = run(["proxy", "stop", "-p", "8123abc"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid port number: 8123abc");
     });
 
     it("exits 1 when --remove has no name", () => {
@@ -1164,6 +1239,8 @@ describe("CLI", () => {
         env: {
           PORTLESS: "0",
           PORTLESS_STATE_DIR: tmpDir,
+          HOME: tmpDir,
+          USERPROFILE: tmpDir,
         },
       });
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -2598,6 +2675,20 @@ describe("CLI", () => {
         expect(stderr).toContain("ngrok CLI not found");
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("--cloudflare flag", () => {
+    it("fails with actionable message when cloudflared is not installed", () => {
+      for (const [args, env] of [
+        [["myapp", "--cloudflare", "echo", "hi"], {}],
+        [["myapp", "echo", "hi"], { PORTLESS_CLOUDFLARE: "1" }],
+        [["run", "--cloudflare", "echo", "hi"], {}],
+      ] as const) {
+        const result = run([...args], { env: { ...env, PATH: "/tmp/portless-no-cloudflared" } });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("cloudflared CLI not found");
       }
     });
   });

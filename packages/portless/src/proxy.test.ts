@@ -31,6 +31,7 @@ function request(
     path?: string;
     method?: string;
     headers?: http.OutgoingHttpHeaders;
+    accept?: string | null;
   }
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
@@ -38,13 +39,18 @@ function request(
     if (!addr || typeof addr === "string") {
       return reject(new Error("Server not listening"));
     }
+    const accept = options.accept === undefined ? "text/html" : options.accept;
     const req = http.request(
       {
         hostname: options.hostname || "127.0.0.1",
         port: addr.port,
         path: options.path || "/",
         method: options.method || "GET",
-        headers: { host: options.host || "", ...options.headers },
+        headers: {
+          host: options.host || "",
+          ...(accept === null ? {} : { accept }),
+          ...options.headers,
+        },
       },
       (res) => {
         let body = "";
@@ -61,6 +67,13 @@ function listen(server: AnyServer): Promise<void> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve());
   });
+}
+
+function makeRoutes(count: number): RouteInfo[] {
+  return Array.from({ length: count }, (_, i) => ({
+    hostname: `app${i}.localhost`,
+    port: 4000 + i,
+  }));
 }
 
 describe("createProxyServer", () => {
@@ -89,6 +102,66 @@ describe("createProxyServer", () => {
       const res = await request(server, { host: "nonexistent.localhost" });
       expect(res.status).toBe(404);
       expect(res.body).toContain("Not Found");
+    });
+
+    it("returns a 421 HTML page with a DNS note for a public host that has no route", async () => {
+      const routes = makeRoutes(1);
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "<script>alert(1)</script>.com" });
+      expect(res.status).toBe(421);
+      expect(res.headers["content-type"]).toBe("text/html");
+      expect(res.headers.vary).toBe("Accept");
+      expect(res.body).toContain("Misdirected Request");
+      expect(res.body).toContain(
+        "DNS sent &lt;script&gt;alert(1)&lt;/script&gt;.com to this computer"
+      );
+      expect(res.body).not.toContain("<script>alert(1)</script>");
+      expect(res.body).not.toContain("app0.localhost");
+      expect(res.body).not.toContain("Active apps");
+    });
+
+    it("returns a 421 JSON error for a public host that has no route", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "example.com", accept: "application/json" });
+      expect(res.status).toBe(421);
+      expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+      expect(JSON.parse(res.body)).toEqual({
+        error: "misdirected_request",
+        upstream: "example.com",
+        message: "DNS sent example.com to this computer. This is not the real site.",
+      });
+    });
+
+    it("keeps the 404 page for unknown names inside every configured TLD and for IP hosts", async () => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [],
+          proxyPort: TEST_PROXY_PORT,
+          tld: "test",
+          tlds: ["test", "localhost"],
+        })
+      );
+      await listen(server);
+
+      for (const host of [
+        "unknown.localhost",
+        "unknown.localhost.",
+        "unknown.test",
+        "localhost",
+        "MyApp.Localhost",
+        "127.0.0.1:1355",
+      ]) {
+        const res = await request(server, { host });
+        expect(res.status).toBe(404);
+      }
     });
 
     it("returns 404 with HTML page for unknown host", async () => {
@@ -123,6 +196,58 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("api.localhost");
     });
 
+    it("shows uptime for a route registered 2 hours ago in the 404 page", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "api.localhost", port: 4001, registeredAt: Date.now() - 2 * 3600 * 1000 },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("up 2h");
+    });
+
+    it("shows an alias label instead of uptime for pid 0 routes in the 404 page", async () => {
+      const routes: RouteInfo[] = [
+        {
+          hostname: "db.localhost",
+          port: 4001,
+          pid: 0,
+          registeredAt: Date.now() - 2 * 3600 * 1000,
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.body).toContain('class="uptime">alias<');
+      expect(res.body).not.toContain("up 2h");
+    });
+
+    it("renders routes without a valid registeredAt with no uptime in the 404 page", async () => {
+      const routes = [
+        { hostname: "old.localhost", port: 4001 },
+        { hostname: "bad.localhost", port: 4002, registeredAt: "yesterday" },
+      ] as RouteInfo[];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("old.localhost");
+      expect(res.body).toContain("bad.localhost");
+      expect(res.body).toContain("127.0.0.1:4001");
+      expect(res.body).toContain("127.0.0.1:4002");
+      expect(res.body).not.toContain('class="uptime"');
+    });
+
     it("includes correct port in 404 page links", async () => {
       const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
       const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
@@ -142,6 +267,55 @@ describe("createProxyServer", () => {
       expect(res.status).toBe(404);
       expect(res.body).toContain('href="http://myapp.localhost"');
       expect(res.body).not.toContain(":80");
+    });
+
+    it("renders the filter controls and script only above 5 routes", async () => {
+      const five = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(5), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(five);
+      const fiveRes = await request(five, { host: "other.localhost" });
+      expect(fiveRes.body).not.toContain('type="search"');
+      expect(fiveRes.body).not.toContain("<script>");
+
+      const six = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(6), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(six);
+      const sixRes = await request(six, { host: "other.localhost" });
+      expect(sixRes.body).toContain('type="search"');
+      expect(sixRes.body).toContain("<script>");
+    });
+
+    it("renders the filter controls and no-match message hidden for a long list", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(20), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      expect(res.body).toMatch(/<div class="filter" hidden>/);
+      expect(res.body).toMatch(/<p class="empty" role="status" hidden>/);
+      const input = res.body.match(/<input[^>]*>/)![0];
+      expect(input).toContain('type="search"');
+      expect(input).toContain('autocomplete="off"');
+      expect(input).toContain("aria-label=");
+      expect(res.body).not.toContain("<form");
+    });
+
+    it("renders a newest-first toggle in the hidden controls row, rows in registration order", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(20), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost" });
+      const controls = res.body.match(/<div class="filter" hidden>.*?<\/div>/)![0];
+      expect(controls).toContain(
+        '<button type="button" aria-pressed="false">Newest first</button>'
+      );
+      const names = [...res.body.matchAll(/app(\d+)\.localhost<\/span>/g)].map((m) => Number(m[1]));
+      expect(names).toEqual(Array.from({ length: 20 }, (_, i) => i));
     });
 
     it("proxies request to matching route", async () => {
@@ -502,7 +676,8 @@ describe("createProxyServer", () => {
       await listen(server);
 
       const res = await request(server, { host: "other-device.tail1234.ts.net" });
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(421);
+      expect(res.body).not.toContain("my-device");
     });
 
     it("matches the tailscale route registered for the request port", async () => {
@@ -787,6 +962,152 @@ describe("createProxyServer", () => {
       expect(errors.length).toBeGreaterThan(0);
       expect(errors[0]).toContain("dead.localhost");
     });
+
+    const errorScenarios = [
+      {
+        name: "404",
+        status: 404,
+        error: "not_found",
+        host: "missing.localhost",
+        routes: [] as RouteInfo[],
+        headers: {} as http.OutgoingHttpHeaders,
+        message: "No app registered for missing.localhost",
+      },
+      {
+        name: "502",
+        status: 502,
+        error: "bad_gateway",
+        host: "dead.localhost",
+        routes: [{ hostname: "dead.localhost", port: 59999 }] as RouteInfo[],
+        headers: {} as http.OutgoingHttpHeaders,
+        message: "The target app is not responding. It may have crashed.",
+      },
+      {
+        name: "508",
+        status: 508,
+        error: "loop_detected",
+        host: "app.localhost",
+        routes: [{ hostname: "app.localhost", port: 59999 }] as RouteInfo[],
+        headers: { "x-portless-hops": "5" } as http.OutgoingHttpHeaders,
+        message: "Request passed through portless 5 times",
+      },
+    ];
+
+    it.each(errorScenarios)("returns a compact JSON $name error to JSON clients", async (s) => {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => s.routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: s.host,
+        accept: "application/json",
+        headers: s.headers,
+      });
+      expect(res.status).toBe(s.status);
+      expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+      expect(res.headers.vary).toBe("Accept");
+      expect(JSON.parse(res.body)).toEqual({
+        error: s.error,
+        upstream: s.host,
+        message: s.message,
+      });
+    });
+
+    it.each([["*/*"], [null]])("returns JSON when Accept is %s", async (accept) => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "missing.localhost", accept });
+      expect(res.status).toBe(404);
+      expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+    });
+
+    it("returns the HTML page to browsers", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, {
+        host: "missing.localhost",
+        accept: "text/html,application/xhtml+xml,*/*;q=0.8",
+      });
+      expect(res.status).toBe(404);
+      expect(res.headers["content-type"]).toBe("text/html");
+      expect(res.headers.vary).toBe("Accept");
+      expect(res.body).toContain("Not Found");
+    });
+
+    it("passes an upstream 5xx JSON response through unchanged for JSON clients", async () => {
+      const upstreamBody = '{"error":"database unavailable","retry":true}';
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(503, { "Content-Type": "application/json", "X-Backend": "yes" });
+          res.end(upstreamBody);
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "api.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "api.localhost", accept: "application/json" });
+      expect(res.status).toBe(503);
+      expect(res.headers["content-type"]).toBe("application/json");
+      expect(res.headers["x-backend"]).toBe("yes");
+      expect(res.headers.vary).toBeUndefined();
+      expect(res.body).toBe(upstreamBody);
+    });
+
+    it("keeps reading the request body after a 502 so the connection can be reused", async () => {
+      const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: 59999 }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+        })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const bodySize = 1024 * 1024;
+      const client = net.createConnection(addr.port, "127.0.0.1");
+      const responses = await new Promise<number>((resolve, reject) => {
+        let data = "";
+        const count = () => (data.match(/HTTP\/1\.1 502/g) || []).length;
+        const timer = setTimeout(() => resolve(count()), 2000);
+        client.on("data", (chunk) => {
+          data += chunk;
+          if (count() === 2) {
+            clearTimeout(timer);
+            resolve(2);
+          }
+        });
+        client.on("error", reject);
+        client.write(
+          `POST / HTTP/1.1\r\nHost: dead.localhost\r\nContent-Length: ${bodySize}\r\n\r\n`
+        );
+        client.write(Buffer.alloc(bodySize));
+        client.write("GET / HTTP/1.1\r\nHost: dead.localhost\r\n\r\n");
+      });
+      client.destroy();
+      expect(responses).toBe(2);
+    });
   });
 
   describe("X-Portless header", () => {
@@ -848,6 +1169,7 @@ describe("createProxyServer", () => {
             method: "GET",
             headers: {
               host: "app.localhost",
+              accept: "text/html",
               "x-portless-hops": "5",
             },
           },
@@ -1073,7 +1395,7 @@ describe("createProxyServer", () => {
             port: proxyAddr.port,
             path: "/api/tasks",
             method: "GET",
-            headers: { host: "frontend.localhost" },
+            headers: { host: "frontend.localhost", accept: "text/html" },
           },
           (res) => {
             let body = "";
@@ -1142,6 +1464,7 @@ describe("createProxyServer", () => {
             method: "GET",
             headers: {
               host: "app.test",
+              accept: "text/html",
               "x-portless-hops": "5",
             },
           },
@@ -1233,10 +1556,23 @@ describe("createProxyServer", () => {
       await listen(server);
 
       // The proxy extracts hostname from the Host header before the colon
-      const res = await request(server, { host: "<script>alert(1)</script>" });
+      const res = await request(server, { host: "<script>alert(1)</script>.localhost" });
       expect(res.status).toBe(404);
       expect(res.body).not.toContain("<script>alert(1)</script>");
       expect(res.body).toContain("&lt;script&gt;");
+    });
+
+    it("keeps a hostile requested host out of the filter script", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => makeRoutes(6), proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: '"</script><script>.localhost' });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("&lt;/script&gt;&lt;script&gt;");
+      expect(res.body.match(/<script>/g)).toHaveLength(1);
+      expect(res.body.match(/<\/script>/g)).toHaveLength(1);
     });
 
     it("escapes route hostnames in active apps list", async () => {
@@ -1494,20 +1830,21 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
   function httpsRequest(
     server: AnyServer,
-    options: { host?: string; path?: string; method?: string }
+    options: { host?: string; path?: string; method?: string; accept?: string | null }
   ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
     return new Promise((resolve, reject) => {
       const addr = server.address();
       if (!addr || typeof addr === "string") {
         return reject(new Error("Server not listening"));
       }
+      const accept = options.accept === undefined ? "text/html" : options.accept;
       const req = https.request(
         {
           hostname: "127.0.0.1",
           port: addr.port,
           path: options.path || "/",
           method: options.method || "GET",
-          headers: { host: options.host || "" },
+          headers: { host: options.host || "", ...(accept === null ? {} : { accept }) },
           rejectUnauthorized: false,
         },
         (res) => {
@@ -1617,6 +1954,25 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
     expect(result.status).toBe(404);
     expect(result.protocol).toBe("h2");
+  });
+
+  it("returns compact JSON errors over TLS to JSON clients", async () => {
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const res = await httpsRequest(server, {
+      host: "missing.localhost",
+      accept: "application/json",
+    });
+    expect(res.status).toBe(404);
+    expect(res.headers["content-type"]).toBe("application/json; charset=utf-8");
+    expect(JSON.parse(res.body).error).toBe("not_found");
   });
 
   it("forwards the :authority hostname as Host to the backend (h2 -> HTTP/1.1)", async () => {

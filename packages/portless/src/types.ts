@@ -8,6 +8,10 @@ export interface RouteInfo {
    * matches this URL's hostname are routed to the same upstream.
    */
   tailscaleUrl?: string;
+  /** Epoch milliseconds when the route was registered. Absent on routes from older versions. */
+  registeredAt?: number;
+  /** Owning process id. Static aliases use 0. */
+  pid?: number;
 }
 
 export interface ProxyServerOptions {

@@ -1,8 +1,89 @@
 # Changelog
 
-## 0.15.8
+## 0.15.12
 
 <!-- release:start -->
+
+### New Features
+
+- **MCP server**: Added `portless mcp` with tool profiles for route lookup, static aliases, proxy management, and diagnostics. (#513)
+- **VitePress support**: Inject the assigned port and bind address for VitePress dev, serve, and preview commands. (#508)
+- **Wrangler support**: Inject the assigned port and `--ip` bind address for `wrangler dev`. (#509)
+
+### Bug Fixes
+
+- **npm exec framework flags**: Pass injected framework options through `npm exec` and `npm x` after npm's option separator, while leaving ambiguous commands untouched. (#511)
+- **Misdirected requests**: Return 421 for hostnames outside the configured TLDs instead of showing the app list, using HTML or JSON to match the client. (#512)
+- **WSL-hosted containers**: Use the Linux trust store in containers that inherit a WSL2 kernel without Windows integration tools. (#507)
+
+### Contributors
+
+- @lahfir
+- @ericclemmons
+- @KennyMcSimpson
+- @alistair3149
+- @corvus-vardelabs
+- @desilvakai
+- @tlq5l
+
+<!-- release:end -->
+
+## 0.15.11
+
+### Bug Fixes
+
+- **Static aliases**: Allow `--force` to replace a static alias without treating it as a running process, and explain when the alias must be re-added. (#476)
+- **Configuration source**: Report whether the configured app name came from `package.json` or `portless.json`. (#490)
+- **Route liveness**: Keep live routes when the current user lacks permission to signal their processes. (#498)
+- **Tailscale ports**: Account for ports held by foreground serve and funnel sessions when assigning HTTPS ports. (#499)
+- **Astro global options**: Inject the assigned port and host when global options appear before the Astro subcommand. (#500)
+- **Certificate scope**: Reject TLS server names outside the configured TLDs or with invalid hostname characters, and limit new macOS CA trust to SSL. (#497)
+- **Certificate clock skew**: Backdate CA, server, and host certificates by five minutes on OpenSSL 3.4 or newer so clients with slightly slower clocks can connect. (#501)
+- **Windows helper processes**: Hide console windows for OpenSSL and other helper commands when running without a terminal. (#502)
+- **Backend failures**: Drain the remaining request body after a backend error so client connections do not stall. (#489)
+
+### Contributors
+
+- @lahfir
+- @tlq5l
+- @bercedev
+- @sensei-woo
+- @gyanu2507
+- @snomiao
+- @arturo-tikamaru
+
+## 0.15.10
+
+### Bug Fixes
+
+- **Host certificates**: Omit invalid sibling wildcard names from two-label host certificates and regenerate cached certificates that contain them, fixing TLS rejection on Apple platforms. (#491)
+- **Proxy error responses**: Return JSON for portless-generated 404, 502, and 508 errors when the client does not accept HTML. (#485)
+- **Port validation**: Reject malformed port values instead of accepting leading digits across CLI flags, environment variables, aliases, and service configuration. (#493)
+
+### Contributors
+
+- @lahfir
+- @BlvckParrot
+- @BetterAndBetterII
+
+## 0.15.9
+
+### New Features
+
+- Added **Cloudflare quick tunnels** with `--cloudflare` to share apps through a public URL (#480)
+- Added **route uptime** to the proxy app list and `portless list` (#472)
+- Added **hostname filtering** and a **newest-first toggle** to the proxy's 404-page app list (#473, #474)
+
+### Bug Fixes
+
+- Fixed **uppercase URL schemes** so HTTP and HTTPS prefixes are removed correctly from hostnames (#484)
+
+### Contributors
+
+- @lahfir
+- @kumburovicbranko682-boop
+
+## 0.15.8
 
 ### Bug Fixes
 
@@ -13,7 +94,6 @@
 ### Contributors
 
 - @Railly
-<!-- release:end -->
 
 ## 0.15.7
 
