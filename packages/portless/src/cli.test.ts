@@ -1307,6 +1307,40 @@ describe("CLI", () => {
     });
   });
 
+  describe("persisted unprivileged marker", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-unpriv-marker-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it.each([
+      ["keeps unprivileged mode from the marker after a stop", undefined, true],
+      ["PORTLESS_UNPRIVILEGED=0 overrides the marker", "0", false],
+    ])("%s", async (_name, envValue, expected) => {
+      const proxyPort = await getFreePort();
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: proxyPort.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_UNPRIVILEGED: envValue,
+      };
+      fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+
+      try {
+        const start = run(["proxy", "start"], { env });
+        expect(start.status).toBe(0);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(expected);
+      } finally {
+        run(["proxy", "stop", "-p", proxyPort.toString()], { env });
+      }
+    });
+  });
+
   describe("persisted LAN marker", () => {
     let tmpDir: string;
 

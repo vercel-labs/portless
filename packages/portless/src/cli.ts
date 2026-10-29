@@ -221,6 +221,7 @@ function defaultProxyConfig(
 
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
+  persistedUnprivileged: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -279,9 +280,11 @@ function resolveProxyConfig(options: {
     config.useWildcard = options.useWildcard;
   }
 
-  if (options.explicit.unprivileged) {
-    config.unprivileged = options.unprivileged;
-  }
+  // Like LAN mode, a stopped unprivileged proxy keeps its mode for the next
+  // start through proxy.unprivileged unless PORTLESS_UNPRIVILEGED overrides it.
+  config.unprivileged = options.explicit.unprivileged
+    ? options.unprivileged
+    : options.persistedUnprivileged;
 
   // Unprivileged mode promises no prompt of any kind, and trusting a
   // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
@@ -1202,6 +1205,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
   };
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
+    persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
     explicit,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
@@ -2104,7 +2108,8 @@ ${colors.bold("Options:")}
   --unprivileged                Take a port below 1024 without sudo: bind the wildcard
                                 address and accept loopback peers only. Serves plain
                                 HTTP on port 80 unless --https is also given, and
-                                never writes the hosts file
+                                never writes the hosts file. Remembered after
+                                stop; PORTLESS_UNPRIVILEGED=0 switches back
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -3286,6 +3291,7 @@ ${colors.bold("LAN mode (--lan):")}
   }
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
+    persistedUnprivileged: readUnprivilegedMarker(stateDir),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
