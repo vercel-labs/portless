@@ -14,6 +14,7 @@ import {
   INTERNAL_LAN_IP_FLAG,
   LEGACY_SYSTEM_STATE_DIR,
   PRIVILEGED_PORT_THRESHOLD,
+  canBindProxyPort,
   RISKY_TLDS,
   USER_STATE_DIR,
   discoverState,
@@ -2336,4 +2337,30 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
     }
     expect(isAlive(orphanPid)).toBe(false);
   });
+});
+
+describe("canBindProxyPort", () => {
+  it("returns true for a free unprivileged port", async () => {
+    const port = await findFreePort();
+    await expect(canBindProxyPort(port, getProxyBindTargets(false))).resolves.toBe(true);
+  });
+
+  it("leaves EADDRINUSE to the real listen", async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as net.AddressInfo;
+    try {
+      await expect(canBindProxyPort(port, [{ host: "127.0.0.1" }])).resolves.toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it.runIf(process.platform === "darwin" && process.getuid?.() !== 0)(
+    "reports EACCES for a privileged loopback bind and allows the wildcard on macOS",
+    async () => {
+      await expect(canBindProxyPort(81, getProxyBindTargets(false))).resolves.toBe(false);
+      await expect(canBindProxyPort(81, getProxyBindTargets(true))).resolves.toBe(true);
+    }
+  );
 });

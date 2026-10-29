@@ -49,6 +49,7 @@ import {
 } from "./auto.js";
 import {
   buildProxyStartConfig,
+  canBindProxyPort,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_ENV,
@@ -344,6 +345,20 @@ function getProxyConfigMismatchMessages(
   }
 
   return messages;
+}
+
+/**
+ * Whether starting the proxy on `port` needs sudo. Ports below 1024 are only
+ * elevated when a bind on the real listener targets fails with EACCES, so a
+ * Linux `ip_unprivileged_port_start` sysctl or a wildcard bind on macOS skips
+ * the prompt.
+ */
+async function proxyPortNeedsElevation(port: number, lanMode: boolean): Promise<boolean> {
+  if (isWindows || port >= PRIVILEGED_PORT_THRESHOLD || (process.getuid?.() ?? -1) === 0) {
+    return false;
+  }
+  const lanBind = lanMode && isMdnsSupported().supported;
+  return !(await canBindProxyPort(port, getProxyBindTargets(lanBind)));
 }
 
 function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string {
@@ -1162,7 +1177,7 @@ async function ensureProxyRunning(
   }
 
   const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
-  const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
+  const needsSudo = await proxyPortNeedsElevation(effectivePort, startConfig.lanMode);
   const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
   const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
 
@@ -1980,7 +1995,8 @@ ${colors.bold("Options:")}
                                 Adds worktree prefix in git worktrees
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
-                                Standard ports auto-elevate with sudo on macOS/Linux
+                                Standard ports auto-elevate with sudo when the bind needs root
+                                Failed elevation exits nonzero without changing ports
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -3209,7 +3225,7 @@ ${colors.bold("LAN mode (--lan):")}
     console.warn(colors.cyan("  portless hosts sync"));
   }
 
-  let store = new RouteStore(stateDir, {
+  const store = new RouteStore(stateDir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
@@ -3280,9 +3296,9 @@ ${colors.bold("LAN mode (--lan):")}
     useWildcard: desiredWildcard,
   };
 
-  // Privileged ports require root on Unix. Auto-elevate with sudo when
-  // possible, falling back to the unprivileged port when sudo is unavailable.
-  if (!isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
+  // Privileged ports require root on Unix unless the platform grants the bind.
+  // Auto-elevate with sudo only when a probe bind fails with EACCES.
+  if (await proxyPortNeedsElevation(proxyPort, lanMode)) {
     const startArgs = [
       process.execPath,
       getEntryScript(),
@@ -3303,15 +3319,11 @@ ${colors.bold("LAN mode (--lan):")}
         proxyPort,
       }).args,
     ];
-    const fallbackCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, resolvedConfig);
-    const currentCommand = formatProxyStartCommand(proxyPort, resolvedConfig);
+    const recoveryCommand = formatProxyStartCommand(proxyPort, resolvedConfig);
 
     console.log(
       colors.yellow(`Port ${proxyPort} requires elevated privileges. Requesting sudo...`)
     );
-    if (!hasExplicitPort) {
-      console.log(colors.gray(`(To skip sudo, use an unprivileged port: ${fallbackCommand})`));
-    }
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -3332,40 +3344,21 @@ ${colors.bold("LAN mode (--lan):")}
       return;
     }
 
-    if (result.signal) {
-      process.exit(1);
-    }
-
-    // sudo failed: fall back to the unprivileged port if the user didn't
-    // explicitly request a privileged one.
-    if (!hasExplicitPort) {
-      proxyPort = FALLBACK_PROXY_PORT;
-      console.log(colors.yellow(`Falling back to port ${proxyPort}.`));
-      console.log(
-        colors.blue(`For clean URLs without port numbers, re-run and accept the sudo prompt:`)
-      );
-      console.log(colors.cyan(`  ${fallbackCommand}`));
-
-      if (await isProxyRunning(proxyPort)) {
-        console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
-        return;
-      }
-
-      // Re-initialize state for the fallback port and fall through to the
-      // normal startup path below.
-      stateDir = resolveStateDir(proxyPort);
-      store = new RouteStore(stateDir, {
-        onWarning: (msg: string) => console.warn(colors.yellow(msg)),
-      });
-    } else {
-      // Explicit port was requested but sudo failed; error out.
-      console.error(
-        colors.red(`Error: Port ${proxyPort} requires elevated privileges and sudo failed.`)
-      );
-      console.error(colors.blue("Try again (portless will prompt for sudo):"));
-      console.error(colors.cyan(`  ${currentCommand}`));
-      process.exit(1);
-    }
+    // Never fall back to another port: scripted callers would continue with
+    // URLs that point at a port nothing listens on.
+    const failure = result.error
+      ? result.error.message
+      : result.signal
+        ? `terminated by signal ${result.signal}`
+        : `exited with status ${result.status}`;
+    console.error(
+      colors.red(
+        `Error: Port ${proxyPort} requires elevated privileges, but sudo elevation failed: ${failure}.`
+      )
+    );
+    console.error(colors.blue("Resolve the sudo error, then rerun the requested startup:"));
+    console.error(colors.cyan(`  ${recoveryCommand}`));
+    process.exit(1);
   }
 
   // Prepare TLS options if HTTPS is requested
