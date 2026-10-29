@@ -25,6 +25,12 @@ export interface ProxyServerOptions {
    * Defaults to true.
    */
   strict?: boolean;
+  /**
+   * When true, refuse every connection whose peer is not a loopback address:
+   * at accept time, and again per request and per upgrade. Set when the proxy
+   * binds the wildcard address only to take a privileged port without root.
+   */
+  loopbackOnly?: boolean;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
   /** Run the daemon-owned hosts sync for the current route table. */

@@ -1928,6 +1928,98 @@ describe("CLI", () => {
       expect(stop.stdout).toContain("Proxy stopped");
     });
 
+    it("binds the wildcard address and remembers the mode with --unprivileged", async () => {
+      const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).toContain(`listening on 0.0.0.0:${testPort}`);
+      expect(log).toContain("(unprivileged, loopback peers only)");
+
+      const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      // Like the TLS and LAN markers, the mode survives a stop so the next
+      // auto-start reuses it.
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+    });
+
+    it("reads unprivileged mode from PORTLESS_UNPRIVILEGED", async () => {
+      const start = run(["proxy", "start"], {
+        env: { ...proxyEnv(), PORTLESS_UNPRIVILEGED: "1" },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+    });
+
+    it("serves plain HTTP in unprivileged mode unless HTTPS is explicit", async () => {
+      const start = run(["proxy", "start", "--unprivileged"], {
+        env: { ...proxyEnv(), PORTLESS_HTTPS: undefined },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain(
+        `HTTP proxy listening on 0.0.0.0:${testPort}`
+      );
+    });
+
+    it("keeps HTTPS in unprivileged mode when asked, without touching the trust store", async () => {
+      const start = run(["proxy", "start", "--unprivileged", "--https"], {
+        env: { ...proxyEnv(), PORTLESS_HTTPS: undefined },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+      expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
+    }, 30_000);
+
+    it("never writes the hosts file in unprivileged mode", async () => {
+      const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+
+      // A new route is what makes the daemon sync the hosts file. The alias
+      // command waits for the daemon's answer to its sync request, and the
+      // daemon logs any write failure before answering, so no wait is needed.
+      const alias = run(["alias", "hostsless", "4567"], { env: proxyEnv() });
+      expect(alias.status).toBe(0);
+
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).not.toContain("Could not write");
+    });
+
+    it("refuses PORTLESS_SYNC_HOSTS=1 together with --unprivileged", () => {
+      const start = run(["proxy", "start", "--unprivileged"], {
+        env: { ...proxyEnv(), PORTLESS_SYNC_HOSTS: "1" },
+      });
+      expect(start.status).toBe(1);
+      expect(start.stderr).toContain("cannot be combined with unprivileged mode");
+      expect(start.stderr).toContain("portless hosts sync");
+    });
+
+    it("says up front that a custom TLD needs hosts entries in unprivileged mode", async () => {
+      const start = run(["proxy", "start", "--unprivileged", "--tld", "test"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+      expect(start.stdout + start.stderr).toContain("Hosts sync is disabled");
+      expect(start.stdout + start.stderr).toContain("portless hosts sync");
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+    });
+
+    it("keeps binding loopback only without the flag", async () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).toContain(`listening on 127.0.0.1:${testPort}`);
+      expect(log).not.toContain("unprivileged");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
+    });
+
     it("accepts connections on IPv6 loopback when available", async (ctx) => {
       const ipv6Probe = http.createServer();
       const ipv6Available = await new Promise<boolean>((resolve, reject) => {

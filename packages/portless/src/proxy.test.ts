@@ -7,7 +7,12 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createProxyServer, HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import {
+  createHttpRedirectServer,
+  createProxyServer,
+  HOSTS_SYNC_PATH,
+  PORTLESS_HEADER,
+} from "./proxy.js";
 import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_PROOF_HEADER } from "./hosts-sync-auth.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
@@ -2607,4 +2612,177 @@ describe("internal hosts-sync route", () => {
       expect(res.status).not.toBe(204);
     }
   );
+});
+
+describe("loopbackOnly", () => {
+  const servers: AnyServer[] = [];
+  let certDir: string;
+  let tlsCert: Buffer;
+  let tlsKey: Buffer;
+
+  /** A non-internal IPv4 address of this machine; connecting to it makes the peer non-loopback. */
+  const lanIp = Object.values(os.networkInterfaces())
+    .flat()
+    .find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address;
+
+  function track<T extends AnyServer>(server: T): T {
+    servers.push(server);
+    return server;
+  }
+
+  function listenAll(server: AnyServer): Promise<number> {
+    return new Promise((resolve) => {
+      server.listen(0, "0.0.0.0", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("no address");
+        resolve(addr.port);
+      });
+    });
+  }
+
+  async function backend(): Promise<{ port: number; hits: () => number }> {
+    let hits = 0;
+    const server = track(
+      http.createServer((_req, res) => {
+        hits++;
+        res.end("app");
+      })
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no address");
+    return { port: addr.port, hits: () => hits };
+  }
+
+  /** Plain request from `hostname` to the same host; resolves to the status or the socket error code. */
+  function plainRequest(
+    hostname: string,
+    port: number,
+    headers: http.OutgoingHttpHeaders = {}
+  ): Promise<{ status?: number; error?: string }> {
+    return new Promise((resolve) => {
+      const req = http.request(
+        { hostname, port, headers: { host: "myapp.localhost", ...headers } },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve({ status: res.statusCode }));
+        }
+      );
+      req.on("error", (err: NodeJS.ErrnoException) => resolve({ error: err.code ?? err.message }));
+      req.end();
+    });
+  }
+
+  function tlsRequest(
+    hostname: string,
+    port: number
+  ): Promise<{ status?: number; error?: string }> {
+    return new Promise((resolve) => {
+      const req = https.request(
+        {
+          hostname,
+          port,
+          servername: "myapp.localhost",
+          rejectUnauthorized: false,
+          headers: { host: "myapp.localhost" },
+          // No keep-alive, so closing the server never waits on this socket.
+          agent: false,
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve({ status: res.statusCode }));
+        }
+      );
+      req.on("error", (err: NodeJS.ErrnoException) => resolve({ error: err.code ?? err.message }));
+      req.end();
+    });
+  }
+
+  beforeAll(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-loopback-only-"));
+    const certs = ensureCerts(certDir);
+    tlsCert = fs.readFileSync(certs.certPath);
+    tlsKey = fs.readFileSync(certs.keyPath);
+  }, 30_000);
+
+  afterAll(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    for (const s of servers) {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  it("still serves loopback peers through the wildcard-bound plain server", async () => {
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+        loopbackOnly: true,
+      })
+    );
+    const port = await listenAll(server);
+    expect(await plainRequest("127.0.0.1", port)).toEqual({ status: 200 });
+    expect(app.hits()).toBe(1);
+  });
+
+  it("closes a non-loopback peer before the plain request reaches a backend", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+        loopbackOnly: true,
+      })
+    );
+    const port = await listenAll(server);
+    const result = await plainRequest(lanIp, port);
+    expect(result.status).toBeUndefined();
+    expect(result.error).toBeDefined();
+    expect(app.hits()).toBe(0);
+  });
+
+  it("accepts the same non-loopback peer when loopbackOnly is off", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+      })
+    );
+    const port = await listenAll(server);
+    expect(await plainRequest(lanIp, port)).toEqual({ status: 200 });
+    expect(app.hits()).toBe(1);
+  });
+
+  it("closes a non-loopback peer before the TLS handshake", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+        loopbackOnly: true,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    const port = await listenAll(server);
+    expect((await tlsRequest(lanIp, port)).status).toBeUndefined();
+    expect(await tlsRequest("127.0.0.1", port)).toEqual({ status: 200 });
+    expect(app.hits()).toBe(1);
+  });
+
+  it("guards the HTTP-to-HTTPS redirect listener the same way", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const server = track(createHttpRedirectServer(443, true));
+    const port = await listenAll(server);
+    expect((await plainRequest(lanIp, port)).status).toBeUndefined();
+    expect(await plainRequest("127.0.0.1", port)).toEqual({ status: 302 });
+  });
 });

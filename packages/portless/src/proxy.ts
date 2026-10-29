@@ -259,6 +259,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     tld = "localhost",
     tlds = [tld],
     strict = true,
+    loopbackOnly = false,
     onError = (msg: string) => console.error(msg),
     onHostsSyncRequest,
     hostsSyncToken,
@@ -267,7 +268,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
   const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
+  const refusesPeer = (address: string | undefined) => loopbackOnly && !isLoopbackPeer(address);
+
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (refusesPeer(req.socket.remoteAddress)) {
+      res.writeHead(403, { "Content-Type": "text/plain", [PORTLESS_HEADER]: "1" });
+      res.end("Forbidden");
+      return;
+    }
     const reqTls = isEncrypted(req);
     res.setHeader(PORTLESS_HEADER, "1");
     const rawHost = getRequestHost(req);
@@ -448,6 +456,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
     socket.on("error", () => socket.destroy());
+    if (refusesPeer(socket.remoteAddress)) {
+      socket.destroy();
+      return;
+    }
 
     const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
     if (hops >= MAX_PROXY_HOPS) {
@@ -592,6 +604,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const compatReq = req as unknown as http.IncomingMessage;
     req.stream.on("error", () => {});
     res.setHeader(PORTLESS_HEADER, "1");
+    if (refusesPeer(compatReq.socket?.remoteAddress)) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
 
     // Classic CONNECT tunneling is not a portless feature; only WebSocket
     // bridging is supported.
@@ -814,6 +831,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       socket.on("error", () => {
         socket.destroy();
       });
+      if (refusesPeer(socket.remoteAddress)) {
+        socket.destroy();
+        return;
+      }
       socket.once("readable", () => {
         const buf: Buffer | null = socket.read(1);
         if (!buf) {
@@ -845,19 +866,50 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
 
-  return httpServer;
+  return loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
+}
+
+/**
+ * Wrap `inner` in the server that actually listens, so a connection from a
+ * non-loopback peer is closed before the HTTP parser reads a byte. The inner
+ * server only ever receives sockets that passed the check.
+ */
+function guardLoopbackOnly(inner: http.Server): net.Server {
+  // Sockets handed over with emit("connection") are not in the inner
+  // server's connection list, so its close() cannot end their keep-alive
+  // idle time and the wrapper's close() would wait for them. Track them here.
+  const sockets = new Set<net.Socket>();
+  const wrapper = net.createServer((socket) => {
+    if (!isLoopbackPeer(socket.remoteAddress)) {
+      socket.destroy();
+      return;
+    }
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    inner.emit("connection", socket);
+  });
+  const origClose = wrapper.close.bind(wrapper);
+  wrapper.close = function (cb?: (err?: Error) => void) {
+    inner.close();
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    return origClose(cb);
+  } as typeof wrapper.close;
+  return wrapper;
 }
 
 /**
  * Create a minimal HTTP server that 302-redirects every request to HTTPS.
  * Meant to run on port 80 alongside an HTTPS proxy on port 443.
  */
-export function createHttpRedirectServer(httpsPort: number): http.Server {
-  return http.createServer((req, res) => {
+export function createHttpRedirectServer(httpsPort: number, loopbackOnly = false): net.Server {
+  const server = http.createServer((req, res) => {
     const host = (req.headers.host || "localhost").split(":")[0];
     const portSuffix = httpsPort === 443 ? "" : `:${httpsPort}`;
     const location = `https://${host}${portSuffix}${req.url || "/"}`;
     res.writeHead(302, { Location: location, [PORTLESS_HEADER]: "1" });
     res.end();
   });
+  return loopbackOnly ? guardLoopbackOnly(server) : server;
 }

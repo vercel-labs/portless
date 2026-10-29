@@ -272,6 +272,22 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<key>PORTLESS_WILDCARD</key>");
   });
 
+  it("persists unprivileged mode in a Linux service", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      installConfig: { proxyPort: 80, useHttps: false, unprivileged: true },
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.execStart).toContain("--unprivileged");
+    expect(spec.unit).toContain('Environment=PORTLESS_UNPRIVILEGED="1"');
+  });
+
   it("persists no-TLS, custom TLD, and custom state in a Linux service", () => {
     const spec = buildServiceSpec({
       platform: "linux",
