@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import { HOSTS_SYNC_PATH, PORTLESS_HEADER, type ProxyServer } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
@@ -1015,7 +1015,14 @@ export async function findFreePort(
  * When `tls` is true, uses HTTPS with certificate verification disabled
  * (the proxy may use a self-signed or locally-trusted CA cert).
  */
-export function isProxyRunning(port: number, tls = false): Promise<boolean> {
+export function isProxyRunning(port: number, tls?: boolean): Promise<boolean> {
+  // Bun's TLS listener cannot accept the plain-HTTP probe on its TLS port.
+  // Preserve explicit protocol probes; auto-detection checks both on Bun.
+  if (tls === undefined && process.versions.bun) {
+    return Promise.all([isProxyRunning(port, false), isProxyRunning(port, true)]).then((results) =>
+      results.some(Boolean)
+    );
+  }
   return new Promise((resolve) => {
     const requestFn = tls ? https.request : http.request;
     const req = requestFn(
@@ -1039,6 +1046,18 @@ export function isProxyRunning(port: number, tls = false): Promise<boolean> {
     });
     req.end();
   });
+}
+
+/** A failed hostname must not prevent healthy routes from starting or refreshing. */
+export async function refreshProxyTls(
+  server: ProxyServer,
+  onError: (error: unknown) => void
+): Promise<void> {
+  try {
+    await server.refreshTlsContexts?.();
+  } catch (error) {
+    onError(error);
+  }
 }
 
 /** Display name for the hosts file in user-facing text. */
