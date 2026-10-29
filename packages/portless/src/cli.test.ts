@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1303,6 +1304,100 @@ describe("CLI", () => {
       } finally {
         if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe.skipIf(process.platform === "win32")("unprivileged proxy peers", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-unpriv-peers-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function nonLoopbackIpv4(): string | null {
+      for (const entries of Object.values(os.networkInterfaces())) {
+        for (const entry of entries ?? []) {
+          if (entry.family === "IPv4" && !entry.internal) return entry.address;
+        }
+      }
+      return null;
+    }
+
+    /** Resolve the status line of a plain HTTP request, or "closed" when the socket ends first. */
+    function requestStatus(host: string, port: number): Promise<string> {
+      return new Promise((resolve) => {
+        const socket = net.connect({ host, port });
+        let data = "";
+        socket.setTimeout(3000, () => socket.destroy());
+        socket.on("connect", () =>
+          socket.write("GET / HTTP/1.1\r\nHost: demo.localhost\r\nConnection: close\r\n\r\n")
+        );
+        socket.on("data", (chunk) => (data += chunk.toString()));
+        socket.on("error", () => {});
+        socket.on("close", () => resolve(data.split("\r\n")[0] || "closed"));
+      });
+    }
+
+    /** Whether this machine can reach its own non-loopback address on a wildcard listener. */
+    async function canReachSelf(address: string): Promise<boolean> {
+      const server = http.createServer((_req, res) => res.end("ok"));
+      await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
+      const { port } = server.address() as net.AddressInfo;
+      try {
+        return (await requestStatus(address, port)).startsWith("HTTP/1.1 200");
+      } finally {
+        server.close();
+      }
+    }
+
+    async function lanAddressOrSkip(ctx: { skip: () => void }): Promise<string> {
+      const address = nonLoopbackIpv4();
+      if (!address || !(await canReachSelf(address))) ctx.skip();
+      return address!;
+    }
+
+    it("refuses non-loopback peers on the proxy listener", async (ctx) => {
+      const lanAddress = await lanAddressOrSkip(ctx);
+      const proxyPort = await getFreePort();
+      const env = { PORTLESS_STATE_DIR: tmpDir };
+      const portArgs = ["-p", proxyPort.toString()];
+
+      try {
+        const start = run(["proxy", "start", "--unprivileged", "--no-tls", ...portArgs], { env });
+        expect(start.status).toBe(0);
+        expect(await requestStatus("127.0.0.1", proxyPort)).toMatch(/^HTTP\/1\.1 \d{3}/);
+        expect(await requestStatus(lanAddress, proxyPort)).toBe("closed");
+      } finally {
+        run(["proxy", "stop", ...portArgs], { env });
+      }
+    });
+
+    it("refuses non-loopback peers on the HTTPS redirect listener", async (ctx) => {
+      const lanAddress = await lanAddressOrSkip(ctx);
+      // The redirect listener always takes port 80.
+      const probe = net.createServer();
+      const port80Free = await new Promise<boolean>((resolve) => {
+        probe.once("error", () => resolve(false));
+        probe.listen(80, "0.0.0.0", () => probe.close(() => resolve(true)));
+      });
+      if (!port80Free) ctx.skip();
+
+      const proxyPort = await getFreePort();
+      const env = { PORTLESS_STATE_DIR: tmpDir };
+      const portArgs = ["-p", proxyPort.toString()];
+
+      try {
+        const start = run(["proxy", "start", "--unprivileged", "--https", ...portArgs], { env });
+        expect(start.status).toBe(0);
+        expect(await requestStatus("127.0.0.1", 80)).toMatch(/^HTTP\/1\.1 302/);
+        expect(await requestStatus(lanAddress, 80)).toBe("closed");
+      } finally {
+        run(["proxy", "stop", ...portArgs], { env });
       }
     });
   });

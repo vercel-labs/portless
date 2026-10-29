@@ -5,6 +5,7 @@ import {
   buildServiceUninstallSudoArgs,
   handleService,
   tryUninstallService,
+  parseServiceInstallConfig,
 } from "./service.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -270,6 +271,19 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<key>PORTLESS_LAN_IP</key>");
     expect(spec.plist).toContain("<string>192.168.1.42</string>");
     expect(spec.plist).toContain("<key>PORTLESS_WILDCARD</key>");
+  });
+
+  it("defaults an unprivileged service to plain HTTP on port 80", () => {
+    const config = parseServiceInstallConfig(["service", "install", "--unprivileged"], {});
+    expect(config).toMatchObject({ unprivileged: true, useHttps: false, proxyPort: 80 });
+  });
+
+  it.each([
+    [["--unprivileged", "--https"], {}],
+    [["--unprivileged"], { PORTLESS_HTTPS: "1" }],
+  ])("keeps HTTPS for an unprivileged service when asked: %j %j", (flags, env) => {
+    const config = parseServiceInstallConfig(["service", "install", ...flags], env);
+    expect(config).toMatchObject({ unprivileged: true, useHttps: true, proxyPort: 443 });
   });
 
   it("persists unprivileged mode in a Linux service", () => {

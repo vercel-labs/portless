@@ -240,7 +240,7 @@ function collectServiceExtraEnv(
   return extraEnv;
 }
 
-function parseServiceInstallConfig(
+export function parseServiceInstallConfig(
   args: string[],
   env: NodeJS.ProcessEnv | Record<string, string> = process.env,
   options: { allowRuntimeFlags?: boolean } = {}
@@ -255,6 +255,7 @@ function parseServiceInstallConfig(
   }
 
   const envHttps = parseBooleanEnv(env.PORTLESS_HTTPS);
+  let httpsExplicit = envHttps !== null;
   if (envHttps !== null) {
     config.useHttps = envHttps;
   }
@@ -303,9 +304,11 @@ function parseServiceInstallConfig(
         break;
       case "--https":
         config.useHttps = true;
+        httpsExplicit = true;
         break;
       case "--no-tls":
         config.useHttps = false;
+        httpsExplicit = true;
         break;
       case "--lan":
         config.lanMode = true;
@@ -333,11 +336,13 @@ function parseServiceInstallConfig(
       case "--cert":
         config.customCertPath = getFlagValue(tokens, i, token);
         config.useHttps = true;
+        httpsExplicit = true;
         i += 1;
         break;
       case "--key":
         config.customKeyPath = getFlagValue(tokens, i, token);
         config.useHttps = true;
+        httpsExplicit = true;
         i += 1;
         break;
       case "--state-dir":
@@ -360,6 +365,12 @@ function parseServiceInstallConfig(
     (!config.customCertPath && config.customKeyPath)
   ) {
     throw new Error("--cert and --key must be used together.");
+  }
+
+  // Match proxy start: unprivileged mode serves plain HTTP on 80 unless
+  // HTTPS was asked for.
+  if (config.unprivileged && !httpsExplicit) {
+    config.useHttps = false;
   }
 
   if (!env.PORTLESS_PORT && !tokens.includes("--port") && !tokens.includes("-p")) {
