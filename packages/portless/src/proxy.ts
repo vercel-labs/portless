@@ -511,6 +511,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     if (!proxyReqHeaders.host) {
       proxyReqHeaders.host = getRequestHost(req);
     }
+    // HTTP/2 frames the body itself, so a stream can carry DATA with no
+    // content-length. Node only adds chunked framing by default for methods
+    // that usually have a body, so a GET, DELETE or OPTIONS body would reach
+    // the backend unframed and be parsed as garbage after the request.
+    const h2Stream = (req as unknown as http2.Http2ServerRequest).stream;
+    if (h2Stream && !h2Stream.endAfterHeaders && proxyReqHeaders["content-length"] === undefined) {
+      proxyReqHeaders["transfer-encoding"] = "chunked";
+    }
 
     const send = () => {
       // The client may have gone away while the request waited for a socket.
@@ -557,7 +565,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           !res.headersSent &&
           REPLAYABLE_METHODS.has(req.method || "") &&
           // The first attempt consumed the body, so only bodiless requests replay.
-          !req.headers["transfer-encoding"] &&
+          !proxyReqHeaders["transfer-encoding"] &&
           !Number(req.headers["content-length"])
         ) {
           req.unpipe(proxyReq);

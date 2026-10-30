@@ -2068,6 +2068,55 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(result.protocol).toBe("h2");
   });
 
+  it("keeps an unframed h2 body from reaching another client's pooled request", async () => {
+    const received: { url?: string; auth?: string }[] = [];
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        received.push({ url: req.url, auth: req.headers.authorization });
+        req.resume();
+        req.on("end", () => res.end("ok"));
+      })
+    );
+    backend.on("clientError", (_err: Error, socket: net.Socket) => socket.destroy());
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: backendAddr.port }],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const send = (path: string, headers: http2.OutgoingHttpHeaders, body?: string) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+      return new Promise<number>((resolve, reject) => {
+        const req = client.request(
+          { ":method": "GET", ":path": path, ":authority": "myapp.localhost", ...headers },
+          { endStream: body === undefined }
+        );
+        req.on("response", (h) => resolve(h[":status"] as number));
+        req.on("error", reject);
+        req.on("close", () => client.close());
+        req.resume();
+        if (body !== undefined) req.end(body);
+      });
+    };
+
+    // An incomplete request in a GET body must not prefix the next request
+    // that reuses the same upstream socket.
+    expect(await send("/", {}, "GET /admin HTTP/1.1\r\nX-Ignore: ")).toBe(200);
+    expect(await send("/profile", { authorization: "Bearer victim" })).toBe(200);
+
+    expect(received.some((r) => r.url === "/admin")).toBe(false);
+    expect(received).toContainEqual({ url: "/profile", auth: "Bearer victim" });
+  });
+
   it("returns compact JSON errors over TLS to JSON clients", async () => {
     const server = trackServer(
       createProxyServer({
