@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "7ed869ed34cd97ac7f475f8ae6579e4e34adeb3058ee9f8b3d5fdeb71053f2a3",
-      "markdownBodySha256": "7ed869ed34cd97ac7f475f8ae6579e4e34adeb3058ee9f8b3d5fdeb71053f2a3",
+      "mdxSha256": "5de45bb16e2831df3b29fd0224cbdac88b954771025ca9dec5054fa028c88627",
+      "markdownBodySha256": "5de45bb16e2831df3b29fd0224cbdac88b954771025ca9dec5054fa028c88627",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -79,6 +79,7 @@
         [2, "OS startup service", "os-startup-service"],
         [3, "LAN mode", "lan-mode"],
         [2, "Hosts", "hosts"],
+        [2, "MCP server", "mcp-server"],
         [2, "Bypass portless", "bypass-portless"],
         [2, "Info", "info"]
       ]
@@ -109,8 +110,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "2c2d026e9a3a6099dad1e60c59e8d53f103b84bdedf173a266e6bc2f8f88aba4",
-      "markdownBodySha256": "2c2d026e9a3a6099dad1e60c59e8d53f103b84bdedf173a266e6bc2f8f88aba4",
+      "mdxSha256": "9da1ac2a9a5757ed28daefb1bd2f7a4af62f54e00e0dfc845eb0c1e6062f1e70",
+      "markdownBodySha256": "9da1ac2a9a5757ed28daefb1bd2f7a4af62f54e00e0dfc845eb0c1e6062f1e70",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",
@@ -136,8 +137,8 @@
       "title": "Changelog | portless",
       "markdownTitle": "Changelog",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "8a18a8dc6e8b93a3d528a9789c23603497dc2e2aabfb91e161887790be9ccbf5",
-      "markdownBodySha256": "8a18a8dc6e8b93a3d528a9789c23603497dc2e2aabfb91e161887790be9ccbf5",
+      "mdxSha256": "033c60fa34a2ea8de652ada87544727339a8eb0fe84ec03a6d0f2b286ab9ce68",
+      "markdownBodySha256": "033c60fa34a2ea8de652ada87544727339a8eb0fe84ec03a6d0f2b286ab9ce68",
       "ssr": [
         "Agent-readable documentation",
         "Framework flags through package scripts",

@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
-import { fixOwnership, isErrnoException } from "./utils.js";
+import { fixOwnership, isErrnoException, isProcessAlive as isPidAlive } from "./utils.js";
 
 /** How long (ms) before a lock directory is considered stale and forcibly removed. */
 const STALE_LOCK_THRESHOLD_MS = 10_000;
@@ -32,6 +32,8 @@ export interface RouteMapping extends RouteInfo {
   tailscaleFunnel?: boolean;
   ngrokUrl?: string;
   ngrokPid?: number;
+  cloudflareUrl?: string;
+  cloudflarePid?: number;
 }
 
 type RouteMetadataPatch = {
@@ -42,6 +44,8 @@ type RouteMetadataPatch = {
   tailscaleFunnel?: boolean | null;
   ngrokUrl?: string | null;
   ngrokPid?: number | null;
+  cloudflareUrl?: string | null;
+  cloudflarePid?: number | null;
 };
 
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
@@ -65,8 +69,10 @@ export class RouteConflictError extends Error {
 
   constructor(hostname: string, existingPid: number) {
     super(
-      `"${hostname}" is already registered by a running process (PID ${existingPid}). ` +
-        `Use --force to override.`
+      existingPid === 0
+        ? `"${hostname}" is a static alias. Use --force to replace it; re-add the alias with "portless alias" afterwards.`
+        : `"${hostname}" is already registered by a running process (PID ${existingPid}). ` +
+            `Use --force to override.`
     );
     this.name = "RouteConflictError";
     this.hostname = hostname;
@@ -168,12 +174,7 @@ export class RouteStore {
   }
 
   private isProcessAlive(pid: number): boolean {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
+    return pid === 0 || isPidAlive(pid);
   }
 
   /**
@@ -239,20 +240,23 @@ export class RouteStore {
     try {
       const routes = this.loadRoutes(true);
       const existing = routes.find((r) => r.hostname === hostname);
-      if (existing && existing.pid !== pid && this.isProcessAlive(existing.pid)) {
+      const isAlias = existing?.pid === 0;
+      if (existing && existing.pid !== pid && (isAlias || this.isProcessAlive(existing.pid))) {
         if (!force) {
           throw new RouteConflictError(hostname, existing.pid);
         }
-        // --force: kill the existing process before taking over
-        try {
-          process.kill(existing.pid, "SIGTERM");
-          killedPid = existing.pid;
-        } catch {
-          // Process may have exited between the check and the kill; non-fatal
+        // --force: kill the existing process before taking over; an alias has none
+        if (!isAlias) {
+          try {
+            process.kill(existing.pid, "SIGTERM");
+            killedPid = existing.pid;
+          } catch {
+            // Process may have exited between the check and the kill; non-fatal
+          }
         }
       }
       const filtered = routes.filter((r) => r.hostname !== hostname);
-      const entry: RouteMapping = { hostname, port, pid };
+      const entry: RouteMapping = { hostname, port, pid, registeredAt: Date.now() };
       filtered.push(entry);
       this.saveRoutes(filtered);
     } finally {
@@ -362,6 +366,14 @@ export class RouteStore {
       if ("ngrokPid" in fields) {
         if (fields.ngrokPid === null) delete route.ngrokPid;
         else if (fields.ngrokPid !== undefined) route.ngrokPid = fields.ngrokPid;
+      }
+      if ("cloudflareUrl" in fields) {
+        if (fields.cloudflareUrl === null) delete route.cloudflareUrl;
+        else if (fields.cloudflareUrl !== undefined) route.cloudflareUrl = fields.cloudflareUrl;
+      }
+      if ("cloudflarePid" in fields) {
+        if (fields.cloudflarePid === null) delete route.cloudflarePid;
+        else if (fields.cloudflarePid !== undefined) route.cloudflarePid = fields.cloudflarePid;
       }
       this.saveRoutes(routes);
     } finally {

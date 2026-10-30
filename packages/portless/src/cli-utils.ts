@@ -10,7 +10,7 @@ import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
-import { createLoopbackConnection, resolveUserHome } from "./utils.js";
+import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -211,11 +211,75 @@ function signalTrackedProcesses(
   }
 }
 
-/** Return explicit IPv4 and IPv6 listener targets for the effective proxy mode. */
-export function getProxyBindTargets(lanMode: boolean): ProxyBindTarget[] {
-  return lanMode
+/**
+ * Return explicit IPv4 and IPv6 listener targets for the effective proxy mode.
+ * LAN mode binds the unspecified addresses so other devices can reach the
+ * proxy. Unprivileged mode binds them too, because macOS lets a non-root
+ * process take a port below 1024 only on the wildcard address; the proxy
+ * then refuses every peer that is not loopback itself.
+ */
+export function getProxyBindTargets(lanMode: boolean, unprivileged = false): ProxyBindTarget[] {
+  return lanMode || unprivileged
     ? [{ host: IPV4_LAN_PROXY_HOST }, { host: IPV6_LAN_PROXY_HOST, ipv6Only: true }]
     : [{ host: IPV4_LOOPBACK_PROXY_HOST }, { host: IPV6_LOOPBACK_PROXY_HOST, ipv6Only: true }];
+}
+
+/**
+ * Check whether this process may bind `port` on every target without root.
+ * Resolves false only when a bind fails with EACCES (or EPERM), so callers can
+ * elevate for that case alone. Any other outcome, such as EADDRINUSE, resolves
+ * true and is left for the real listen to report.
+ */
+export async function canBindProxyPort(
+  port: number,
+  targets: readonly ProxyBindTarget[]
+): Promise<boolean> {
+  for (const target of targets) {
+    const code = await new Promise<string | null>((resolve) => {
+      const probe = net.createServer();
+      probe.once("error", (err: NodeJS.ErrnoException) => resolve(err.code ?? "UNKNOWN"));
+      probe.listen({ port, host: target.host, ipv6Only: target.ipv6Only, exclusive: true }, () =>
+        probe.close(() => resolve(null))
+      );
+    });
+    if (code === "EACCES" || code === "EPERM") return false;
+  }
+  return true;
+}
+
+/**
+ * Whether this process can bind `port` without root on `platform`. macOS
+ * allows any port on the wildcard address since Mojave. Linux moves the
+ * boundary with `net.ipv4.ip_unprivileged_port_start`. Windows has none.
+ */
+export function canBindWithoutRoot(
+  port: number,
+  platform: NodeJS.Platform = process.platform,
+  readUnprivilegedPortStart: () => string = () =>
+    fs.readFileSync("/proc/sys/net/ipv4/ip_unprivileged_port_start", "utf-8")
+): { ok: true } | { ok: false; reason: string } {
+  if (port >= PRIVILEGED_PORT_THRESHOLD || platform === "darwin" || platform === "win32") {
+    return { ok: true };
+  }
+  if (platform !== "linux") {
+    return {
+      ok: false,
+      reason: `Binding port ${port} without root is not supported on ${platform}.`,
+    };
+  }
+  let start: number;
+  try {
+    start = parseInt(readUnprivilegedPortStart().trim(), 10);
+  } catch {
+    return { ok: false, reason: "Could not read net.ipv4.ip_unprivileged_port_start." };
+  }
+  if (!Number.isNaN(start) && port >= start) {
+    return { ok: true };
+  }
+  return {
+    ok: false,
+    reason: `Port ${port} is below net.ipv4.ip_unprivileged_port_start (${Number.isNaN(start) ? "unreadable" : start}).`,
+  };
 }
 
 /**
@@ -392,8 +456,8 @@ export function getProtocolPort(tls: boolean): number {
 export function getDefaultPort(tls?: boolean): number {
   const envPort = process.env.PORTLESS_PORT;
   if (envPort) {
-    const port = parseInt(envPort, 10);
-    if (!isNaN(port) && port >= 1 && port <= 65535) return port;
+    const port = parsePort(envPort);
+    if (port !== null) return port;
   }
   return tls === undefined ? FALLBACK_PROXY_PORT : getProtocolPort(tls);
 }
@@ -438,6 +502,32 @@ export function readTlsMarker(dir: string): boolean {
 /** Write or remove the TLS marker in the state directory. */
 export function writeTlsMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, TLS_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
+/** Name of the marker file that remembers unprivileged mode across proxy restarts. */
+const UNPRIVILEGED_MARKER_FILE = "proxy.unprivileged";
+
+/** Read the unprivileged-mode marker from a state directory. */
+export function readUnprivilegedMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, UNPRIVILEGED_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+/** Write or remove the unprivileged-mode marker in the state directory. */
+export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, UNPRIVILEGED_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
   } else {
@@ -719,6 +809,15 @@ export function isLanEnvEnabled(): boolean {
 }
 
 /**
+ * Return whether unprivileged mode is requested via the PORTLESS_UNPRIVILEGED
+ * env var: bind the wildcard address, accept loopback peers only, never sudo.
+ */
+export function isUnprivilegedEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_UNPRIVILEGED;
+  return val === "1" || val === "true";
+}
+
+/**
  * Read the last-known proxy configuration from the state directory on disk.
  * Unlike {@link discoverState}, this does not check whether the proxy is
  * actually running. It simply reads whatever state files exist so a
@@ -732,6 +831,7 @@ export function readPersistedProxyState(): {
   tld: string;
   tlds: string[];
   lanMode: boolean;
+  unprivileged: boolean;
 } | null {
   const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
   const port = readPortFromDir(dir);
@@ -740,7 +840,8 @@ export function readPersistedProxyState(): {
     const tlds = readTldsFromDir(dir);
     const tld = tlds[0] ?? DEFAULT_TLD;
     const lanIp = readLanMarker(dir);
-    return { port, tls, tld, tlds, lanMode: lanIp !== null };
+    const unprivileged = readUnprivilegedMarker(dir);
+    return { port, tls, tld, tlds, lanMode: lanIp !== null, unprivileged };
   }
 
   return null;
@@ -756,6 +857,7 @@ export function buildProxyStartConfig(options: {
   tld: string;
   tlds?: readonly string[];
   useWildcard?: boolean;
+  unprivileged?: boolean;
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
@@ -801,6 +903,10 @@ export function buildProxyStartConfig(options: {
 
   if (options.useWildcard) {
     args.push("--wildcard");
+  }
+
+  if (options.unprivileged) {
+    args.push("--unprivileged");
   }
 
   if (options.skipTrust) {
@@ -1264,6 +1370,7 @@ export function findPidsOnPort(port: number): number[] {
       const output = execSync("netstat -ano -p tcp", {
         encoding: "utf-8",
         timeout: PID_LOOKUP_TIMEOUT_MS,
+        windowsHide: true,
       });
       const pid = parsePidFromNetstat(output, port);
       return pid === null ? [] : [pid];
@@ -1347,6 +1454,20 @@ export function getProcessStartTime(pid: number): string | null {
   }
 }
 
+/** Read the executable name of a process. Returns null on Windows or when it cannot be read. */
+export function getProcessCommand(pid: number): string | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const output = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    return path.basename(output.trim()) || null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Kill a process group left behind by a portless session that died without
  * cleaning up. The group is only signaled while its leader is alive, still
@@ -1379,25 +1500,7 @@ export function killOrphanedProcessGroup(
  * Returns null if the PID cannot be determined.
  */
 export function findPidOnPort(port: number): number | null {
-  try {
-    if (isWindows) {
-      const output = execSync("netstat -ano -p tcp", {
-        encoding: "utf-8",
-        timeout: PID_LOOKUP_TIMEOUT_MS,
-      });
-      return parsePidFromNetstat(output, port);
-    }
-
-    const output = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, {
-      encoding: "utf-8",
-      timeout: PID_LOOKUP_TIMEOUT_MS,
-    });
-    // lsof may return multiple PIDs (one per line); take the first
-    const pid = parseInt(output.trim().split("\n")[0], 10);
-    return isNaN(pid) ? null : pid;
-  } catch {
-    return null;
-  }
+  return findPidsOnPort(port)[0] ?? null;
 }
 
 /**
@@ -1639,6 +1742,7 @@ type FrameworkSpec = {
   defaultIsServer: boolean;
   positionalRootIsServer?: boolean;
   valueFlags?: string[];
+  hostFlag?: string;
 };
 
 const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
@@ -1678,6 +1782,12 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
       "--mode",
     ],
   },
+  vitepress: {
+    strictPort: true,
+    serverSubcommands: ["dev", "serve", "preview"],
+    nonServerSubcommands: ["build", "init"],
+    defaultIsServer: true,
+  },
   vp: { strictPort: true, serverSubcommands: ["dev"], defaultIsServer: false },
   "react-router": { strictPort: true, serverSubcommands: ["dev"], defaultIsServer: false },
   rsbuild: {
@@ -1705,15 +1815,37 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
       "--root",
     ],
   },
-  astro: { strictPort: false, serverSubcommands: ["dev", "preview"], defaultIsServer: false },
+  astro: {
+    strictPort: false,
+    serverSubcommands: ["dev", "preview"],
+    defaultIsServer: false,
+    valueFlags: [
+      "--base",
+      "--config",
+      "--host",
+      "--mode",
+      "--open",
+      "--outDir",
+      "--port",
+      "--root",
+      "--site",
+    ],
+  },
   ng: { strictPort: false, serverSubcommands: ["serve", "dev", "s"], defaultIsServer: false },
   "react-native": { strictPort: false, serverSubcommands: ["start"], defaultIsServer: false },
   expo: { strictPort: false, serverSubcommands: ["start", "serve"], defaultIsServer: true },
+  wrangler: {
+    strictPort: false,
+    serverSubcommands: ["dev"],
+    defaultIsServer: false,
+    hostFlag: "--ip",
+  },
 };
 
 type PackageRunnerSpec = {
   subcommands: string[];
   valueFlags?: string[];
+  separatorRequired?: boolean;
 };
 
 const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
@@ -1725,6 +1857,11 @@ const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
   pnpx: { subcommands: [], valueFlags: ["-p", "--package"] },
   yarn: { subcommands: ["dlx", "exec"] },
   pnpm: { subcommands: ["dlx", "exec"] },
+  npm: {
+    subcommands: ["exec", "x"],
+    valueFlags: ["-c", "--call", "--package", "-w", "--workspace", "--prefix"],
+    separatorRequired: true,
+  },
 };
 
 /**
@@ -1736,8 +1873,10 @@ type FrameworkInvocation = {
   basename: string;
   framework: FrameworkSpec;
   frameworkIndex: number;
-  frameworkArgs: string[];
+  /** Null when npm parses the options after the framework and one of them may consume the next argument. */
+  frameworkArgs: string[] | null;
   insertionIndex: number;
+  separator?: string;
 };
 
 function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
@@ -1745,6 +1884,8 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
 
   const first = path.basename(commandArgs[0]);
   let frameworkIndex: number | null = FRAMEWORKS_NEEDING_PORT[first] ? 0 : null;
+  let runnerSeparator = false;
+  let needsSeparator = false;
 
   if (frameworkIndex === null) {
     const runner = PACKAGE_RUNNERS[first];
@@ -1755,7 +1896,10 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
       while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
         const option = commandArgs[i];
         i++;
-        if (option === "--") break;
+        if (option === "--") {
+          runnerSeparator = true;
+          break;
+        }
         if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
       }
     };
@@ -1777,19 +1921,46 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
       const name = path.basename(commandArgs[i]);
       frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
     }
+
+    if (frameworkIndex !== null) {
+      needsSeparator = Boolean(runner.separatorRequired) && !runnerSeparator;
+    }
   }
 
   if (frameworkIndex === null) return null;
   const basename = path.basename(commandArgs[frameworkIndex]);
   const framework = FRAMEWORKS_NEEDING_PORT[basename];
   const optionEnd = commandArgs.indexOf("--", frameworkIndex + 1);
-  const insertionIndex = optionEnd === -1 ? commandArgs.length : optionEnd;
+  const insertionIndex = needsSeparator || optionEnd === -1 ? commandArgs.length : optionEnd;
+  let frameworkArgs: string[] | null;
+  if (needsSeparator) {
+    const beforeSeparator =
+      optionEnd === -1
+        ? commandArgs.slice(frameworkIndex + 1)
+        : commandArgs.slice(frameworkIndex + 1, optionEnd);
+    const npmMayConsumeValue = beforeSeparator.some(
+      (arg, i) =>
+        arg.startsWith("-") &&
+        !arg.includes("=") &&
+        i + 1 < beforeSeparator.length &&
+        !beforeSeparator[i + 1].startsWith("-")
+    );
+    frameworkArgs = npmMayConsumeValue
+      ? null
+      : [
+          ...beforeSeparator.filter((arg) => !arg.startsWith("-")),
+          ...(optionEnd === -1 ? [] : commandArgs.slice(optionEnd + 1)),
+        ];
+  } else {
+    frameworkArgs = commandArgs.slice(frameworkIndex + 1, insertionIndex);
+  }
   return {
     basename,
     framework,
     frameworkIndex,
-    frameworkArgs: commandArgs.slice(frameworkIndex + 1, insertionIndex),
+    frameworkArgs,
     insertionIndex,
+    ...(needsSeparator && optionEnd === -1 ? { separator: "--" } : {}),
   };
 }
 
@@ -1878,9 +2049,9 @@ function invokesFrameworkServer(frameworkArgs: string[], framework: FrameworkSpe
 export function injectFrameworkFlags(commandArgs: string[], port: number): string[] {
   const invocation = parseFrameworkInvocation(commandArgs);
   if (!invocation) return [];
-  const { basename, framework, frameworkArgs, insertionIndex } = invocation;
+  const { basename, framework, frameworkArgs, insertionIndex, separator } = invocation;
 
-  if (!invokesFrameworkServer(frameworkArgs, framework)) return [];
+  if (!frameworkArgs || !invokesFrameworkServer(frameworkArgs, framework)) return [];
 
   const flags: string[] = [];
 
@@ -1891,19 +2062,21 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): strin
     }
   }
 
+  const hostFlag = framework.hostFlag ?? "--host";
   const hasHostChoice =
-    hasCliOption(frameworkArgs, "--host") ||
+    hasCliOption(frameworkArgs, hostFlag) ||
     (basename === "expo" &&
       ["--localhost", "--lan", "--tunnel"].some((option) => hasCliOption(frameworkArgs, option)));
   if (!hasHostChoice) {
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
     if (!isExpoLan) {
-      flags.push("--host", basename === "expo" ? "localhost" : "127.0.0.1");
+      flags.push(hostFlag, basename === "expo" ? "localhost" : "127.0.0.1");
     }
   }
 
-  commandArgs.splice(insertionIndex, 0, ...flags);
-  return flags;
+  const inserted = separator && flags.length > 0 ? [separator, ...flags] : flags;
+  commandArgs.splice(insertionIndex, 0, ...inserted);
+  return inserted;
 }
 
 /** Package managers whose `<pm> run <script>` delegates to a package.json script. */
@@ -2046,11 +2219,10 @@ function isSafeToInjectIntoScript(
   // trailing comment entirely.
   const rawScriptText = resolveScriptRaw(scriptName, packageDir);
   if (rawScriptText && isUnsafeToAppendArgs(rawScriptText)) return false;
-  // A script that ends its own option list keeps everything after `--` as
-  // positional data, so appended flags arrive as data too and the framework
-  // never reads them as options. Appending cannot reach past a `--` that lives
-  // inside the script, so leave the script alone.
-  if (rawScript.includes("--")) return false;
+  // A `--` after the framework name ends its option list, so appended flags
+  // would arrive as positional data.
+  const invocation = parseFrameworkInvocation(rawScript);
+  if (invocation && rawScript.includes("--", invocation.frameworkIndex + 1)) return false;
   // Non-server subcommands need no check here: injectFrameworkFlags appends
   // nothing for them.
   return true;

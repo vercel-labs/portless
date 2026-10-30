@@ -2,9 +2,17 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { canBindProxyPort, getProxyBindTargets } from "./cli-utils.js";
+import {
+  HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
+  HOSTS_SYNC_AUTH_PROOF_HEADER,
+  generateHostsSyncToken,
+  writeHostsSyncToken,
+} from "./hosts-sync-auth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
@@ -233,13 +241,22 @@ async function startMockProxy(
 ): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
   const port = options.port ?? (await getFreePort());
   const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
+  const token = options.acknowledgeHostsSync !== false ? generateHostsSyncToken() : null;
+  if (token) writeHostsSyncToken(dir, token);
   fs.writeFileSync(
     scriptPath,
     [
       'const http = require("node:http");',
+      token ? 'const crypto = require("node:crypto");' : "",
       "const server = http.createServer((req, res) => {",
       '  res.setHeader("X-Portless", "1");',
-      options.acknowledgeHostsSync !== false
+      token
+        ? `  const challenge = req.headers[${JSON.stringify(HOSTS_SYNC_AUTH_CHALLENGE_HEADER)}];
+  if (typeof challenge === "string") {
+    res.setHeader(${JSON.stringify(HOSTS_SYNC_AUTH_PROOF_HEADER)}, crypto.createHmac("sha256", ${JSON.stringify(token)}).update(challenge).digest("hex"));
+  }`
+        : "",
+      token
         ? '  if (req.method === "POST" && req.url === "/.portless/hosts-sync") { res.writeHead(204); res.end(); return; }'
         : "",
       '  res.end("ok");',
@@ -329,6 +346,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("--ngrok");
       expect(stdout).toContain("PORTLESS_NGROK");
       expect(stdout).toContain("PORTLESS_NGROK_URL");
+      expect(stdout).toContain("--cloudflare");
+      expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
     });
 
@@ -372,6 +391,43 @@ describe("CLI", { timeout: 15_000 }, () => {
       // it doesn't crash and returns 0.
       const { status } = run(["list"]);
       expect(status).toBe(0);
+    });
+
+    it("appends uptime after the pid and leaves aliases and legacy routes unchanged", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-uptime-"));
+      const proxyPort = await getFreePort();
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "app.localhost",
+              port: 4001,
+              pid: process.pid,
+              registeredAt: Date.now() - 3 * 60 * 60 * 1000,
+            },
+            { hostname: "docker.localhost", port: 4002, pid: 0 },
+            { hostname: "legacy.localhost", port: 4003, pid: process.pid },
+          ])
+        );
+
+        const { status, stdout } = run(["list"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        const lines = stdout.split("\n");
+        const row = (host: string) => lines.find((l) => l.includes(host))!.trimStart();
+        expect(row("app.localhost")).toMatch(/ {2}\(pid \d+\) up 3h$/);
+        expect(row("docker.localhost")).toMatch(/ {2}\(alias\)$/);
+        expect(row("legacy.localhost")).toMatch(/ {2}\(pid \d+\)$/);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -871,9 +927,10 @@ describe("CLI", { timeout: 15_000 }, () => {
         "start",
         "--lan",
         "--ngrok",
+        "--cloudflare",
       ]);
       expect(status).toBe(0);
-      expect(args).toEqual(["start", "--lan", "--ngrok"]);
+      expect(args).toEqual(["start", "--lan", "--ngrok", "--cloudflare"]);
       expect(env.PORTLESS_LAN).toBe("1");
     });
 
@@ -989,6 +1046,26 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["alias", "mydb", "notaport"]);
       expect(status).toBe(1);
       expect(stderr).toContain("Invalid port");
+    });
+
+    it("exits 1 without registering a route for a port with trailing text", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-port-"));
+      try {
+        const { status, stderr } = run(["alias", "mydb", "192.168.1.1:8123"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain('Invalid port "192.168.1.1:8123"');
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("proxy stop exits 1 for a port with trailing text", () => {
+      const { status, stderr } = run(["proxy", "stop", "-p", "8123abc"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid port number: 8123abc");
     });
 
     it("exits 1 when --remove has no name", () => {
@@ -1165,6 +1242,8 @@ describe("CLI", { timeout: 15_000 }, () => {
         env: {
           PORTLESS: "0",
           PORTLESS_STATE_DIR: tmpDir,
+          HOME: tmpDir,
+          USERPROFILE: tmpDir,
         },
       });
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1227,6 +1306,244 @@ describe("CLI", { timeout: 15_000 }, () => {
       } finally {
         if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe.skipIf(process.platform === "win32")("privileged proxy startup", () => {
+    function writeNonRootPreload(dir: string): string {
+      const preloadPath = path.join(dir, "non-root-preload.cjs");
+      fs.writeFileSync(
+        preloadPath,
+        'Object.defineProperty(process, "getuid", { value: () => 1000, configurable: true });\n'
+      );
+      return preloadPath;
+    }
+
+    // A sysctl such as ip_unprivileged_port_start=0 (the Docker default)
+    // grants the bind, so portless correctly never reaches sudo.
+    async function privilegedPortIsGranted(): Promise<boolean> {
+      return canBindProxyPort(443, getProxyBindTargets(false));
+    }
+
+    function cleanupRecordedProxy(stateDir: string): void {
+      const pidPath = path.join(stateDir, "proxy.pid");
+      if (!fs.existsSync(pidPath)) return;
+      const pid = Number.parseInt(fs.readFileSync(pidPath, "utf-8"), 10);
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) return;
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // The daemon may have already exited.
+      }
+    }
+
+    it("exits nonzero without starting or persisting a fallback when sudo fails", async (ctx) => {
+      if (await privilegedPortIsGranted()) ctx.skip();
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-sudo-failure-"));
+      const stateDir = path.join(tmpDir, "state");
+      const fakeBinDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(fakeBinDir);
+      const fakeSudoPath = path.join(fakeBinDir, "sudo");
+      fs.writeFileSync(fakeSudoPath, "#!/bin/sh\nexit 23\n");
+      fs.chmodSync(fakeSudoPath, 0o755);
+      const preloadPath = writeNonRootPreload(tmpDir);
+      const certPath = path.join(tmpDir, "cert.pem");
+      const keyPath = path.join(tmpDir, "key.pem");
+      const env = {
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        PORTLESS_STATE_DIR: stateDir,
+        NODE_OPTIONS: `--require=${preloadPath}`,
+      };
+      const args = [
+        "proxy",
+        "start",
+        "--cert",
+        certPath,
+        "--key",
+        keyPath,
+        "--tld",
+        "test",
+        "--wildcard",
+      ];
+
+      try {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const result = run(args, { env });
+          const output = result.stdout + result.stderr;
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain(
+            "Error: Port 443 requires elevated privileges, but sudo elevation failed"
+          );
+          expect(result.stderr).toContain(
+            `sudo portless proxy start --cert ${certPath} --key ${keyPath} --tld test --wildcard`
+          );
+          expect(output).not.toContain("Falling back");
+          expect(output).not.toContain("already running on port 1355");
+          expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
+        }
+      } finally {
+        cleanupRecordedProxy(stateDir);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("uses the same fatal path when sudo cannot be spawned", async (ctx) => {
+      if (await privilegedPortIsGranted()) ctx.skip();
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-missing-sudo-"));
+      const stateDir = path.join(tmpDir, "state");
+      const emptyBinDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(emptyBinDir);
+      const preloadPath = writeNonRootPreload(tmpDir);
+
+      try {
+        const result = run(["proxy", "start"], {
+          env: {
+            PATH: emptyBinDir,
+            PORTLESS_STATE_DIR: stateDir,
+            NODE_OPTIONS: `--require=${preloadPath}`,
+          },
+        });
+        const output = result.stdout + result.stderr;
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("sudo elevation failed");
+        expect(result.stderr).toContain("spawnSync sudo ENOENT");
+        expect(result.stderr).toContain("sudo portless proxy start --https");
+        expect(output).not.toContain("Falling back");
+        expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
+      } finally {
+        cleanupRecordedProxy(stateDir);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe.skipIf(process.platform === "win32")("unprivileged proxy peers", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-unpriv-peers-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function nonLoopbackIpv4(): string | null {
+      for (const entries of Object.values(os.networkInterfaces())) {
+        for (const entry of entries ?? []) {
+          if (entry.family === "IPv4" && !entry.internal) return entry.address;
+        }
+      }
+      return null;
+    }
+
+    /** Resolve the status line of a plain HTTP request, or "closed" when the socket ends first. */
+    function requestStatus(host: string, port: number): Promise<string> {
+      return new Promise((resolve) => {
+        const socket = net.connect({ host, port });
+        let data = "";
+        socket.setTimeout(3000, () => socket.destroy());
+        socket.on("connect", () =>
+          socket.write("GET / HTTP/1.1\r\nHost: demo.localhost\r\nConnection: close\r\n\r\n")
+        );
+        socket.on("data", (chunk) => (data += chunk.toString()));
+        socket.on("error", () => {});
+        socket.on("close", () => resolve(data.split("\r\n")[0] || "closed"));
+      });
+    }
+
+    /** Whether this machine can reach its own non-loopback address on a wildcard listener. */
+    async function canReachSelf(address: string): Promise<boolean> {
+      const server = http.createServer((_req, res) => res.end("ok"));
+      await new Promise<void>((resolve) => server.listen(0, "0.0.0.0", resolve));
+      const { port } = server.address() as net.AddressInfo;
+      try {
+        return (await requestStatus(address, port)).startsWith("HTTP/1.1 200");
+      } finally {
+        server.close();
+      }
+    }
+
+    async function lanAddressOrSkip(ctx: { skip: () => void }): Promise<string> {
+      const address = nonLoopbackIpv4();
+      if (!address || !(await canReachSelf(address))) ctx.skip();
+      return address!;
+    }
+
+    it("refuses non-loopback peers on the proxy listener", async (ctx) => {
+      const lanAddress = await lanAddressOrSkip(ctx);
+      const proxyPort = await getFreePort();
+      const env = { PORTLESS_STATE_DIR: tmpDir };
+      const portArgs = ["-p", proxyPort.toString()];
+
+      try {
+        const start = run(["proxy", "start", "--unprivileged", "--no-tls", ...portArgs], { env });
+        expect(start.status).toBe(0);
+        expect(await requestStatus("127.0.0.1", proxyPort)).toMatch(/^HTTP\/1\.1 \d{3}/);
+        expect(await requestStatus(lanAddress, proxyPort)).toBe("closed");
+      } finally {
+        run(["proxy", "stop", ...portArgs], { env });
+      }
+    });
+
+    it("refuses non-loopback peers on the HTTPS redirect listener", async (ctx) => {
+      const lanAddress = await lanAddressOrSkip(ctx);
+      // The redirect listener always takes port 80.
+      const probe = net.createServer();
+      const port80Free = await new Promise<boolean>((resolve) => {
+        probe.once("error", () => resolve(false));
+        probe.listen(80, "0.0.0.0", () => probe.close(() => resolve(true)));
+      });
+      if (!port80Free) ctx.skip();
+
+      const proxyPort = await getFreePort();
+      const env = { PORTLESS_STATE_DIR: tmpDir };
+      const portArgs = ["-p", proxyPort.toString()];
+
+      try {
+        const start = run(["proxy", "start", "--unprivileged", "--https", ...portArgs], { env });
+        expect(start.status).toBe(0);
+        expect(await requestStatus("127.0.0.1", 80)).toMatch(/^HTTP\/1\.1 302/);
+        expect(await requestStatus(lanAddress, 80)).toBe("closed");
+      } finally {
+        run(["proxy", "stop", ...portArgs], { env });
+      }
+    });
+  });
+
+  describe("persisted unprivileged marker", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-unpriv-marker-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it.each([
+      ["keeps unprivileged mode from the marker after a stop", undefined, true],
+      ["PORTLESS_UNPRIVILEGED=0 overrides the marker", "0", false],
+    ])("%s", async (_name, envValue, expected) => {
+      const proxyPort = await getFreePort();
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: proxyPort.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_UNPRIVILEGED: envValue,
+      };
+      fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+
+      try {
+        const start = run(["proxy", "start"], { env });
+        expect(start.status).toBe(0);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(expected);
+      } finally {
+        run(["proxy", "stop", "-p", proxyPort.toString()], { env });
       }
     });
   });
@@ -1929,6 +2246,98 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stop.stdout).toContain("Proxy stopped");
     });
 
+    it("binds the wildcard address and remembers the mode with --unprivileged", async () => {
+      const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).toContain(`listening on 0.0.0.0:${testPort}`);
+      expect(log).toContain("(unprivileged, loopback peers only)");
+
+      const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      // Like the TLS and LAN markers, the mode survives a stop so the next
+      // auto-start reuses it.
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+    });
+
+    it("reads unprivileged mode from PORTLESS_UNPRIVILEGED", async () => {
+      const start = run(["proxy", "start"], {
+        env: { ...proxyEnv(), PORTLESS_UNPRIVILEGED: "1" },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+    });
+
+    it("serves plain HTTP in unprivileged mode unless HTTPS is explicit", async () => {
+      const start = run(["proxy", "start", "--unprivileged"], {
+        env: { ...proxyEnv(), PORTLESS_HTTPS: undefined },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain(
+        `HTTP proxy listening on 0.0.0.0:${testPort}`
+      );
+    });
+
+    it("keeps HTTPS in unprivileged mode when asked, without touching the trust store", async () => {
+      const start = run(["proxy", "start", "--unprivileged", "--https"], {
+        env: { ...proxyEnv(), PORTLESS_HTTPS: undefined },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+      expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
+    }, 30_000);
+
+    it("never writes the hosts file in unprivileged mode", async () => {
+      const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+
+      // A new route is what makes the daemon sync the hosts file. The alias
+      // command waits for the daemon's answer to its sync request, and the
+      // daemon logs any write failure before answering, so no wait is needed.
+      const alias = run(["alias", "hostsless", "4567"], { env: proxyEnv() });
+      expect(alias.status).toBe(0);
+
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).not.toContain("Could not write");
+    });
+
+    it("refuses PORTLESS_SYNC_HOSTS=1 together with --unprivileged", () => {
+      const start = run(["proxy", "start", "--unprivileged"], {
+        env: { ...proxyEnv(), PORTLESS_SYNC_HOSTS: "1" },
+      });
+      expect(start.status).toBe(1);
+      expect(start.stderr).toContain("cannot be combined with unprivileged mode");
+      expect(start.stderr).toContain("portless hosts sync");
+    });
+
+    it("says up front that a custom TLD needs hosts entries in unprivileged mode", async () => {
+      const start = run(["proxy", "start", "--unprivileged", "--tld", "test"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+      expect(start.stdout + start.stderr).toContain("Hosts sync is disabled");
+      expect(start.stdout + start.stderr).toContain("portless hosts sync");
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+    });
+
+    it("keeps binding loopback only without the flag", async () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).toContain(`listening on 127.0.0.1:${testPort}`);
+      expect(log).not.toContain("unprivileged");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
+    });
+
     it("accepts connections on IPv6 loopback when available", async (ctx) => {
       const ipv6Probe = http.createServer();
       const ipv6Available = await new Promise<boolean>((resolve, reject) => {
@@ -2507,6 +2916,20 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(stderr).toContain("ngrok CLI not found");
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("--cloudflare flag", () => {
+    it("fails with actionable message when cloudflared is not installed", () => {
+      for (const [args, env] of [
+        [["myapp", "--cloudflare", "echo", "hi"], {}],
+        [["myapp", "echo", "hi"], { PORTLESS_CLOUDFLARE: "1" }],
+        [["run", "--cloudflare", "echo", "hi"], {}],
+      ] as const) {
+        const result = run([...args], { env: { ...env, PATH: "/tmp/portless-no-cloudflared" } });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain("cloudflared CLI not found");
       }
     });
   });

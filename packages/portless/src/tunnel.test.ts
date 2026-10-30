@@ -1,16 +1,19 @@
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
+import { buildCloudflareArgs, extractCloudflareUrl, startCloudflare } from "./cloudflare.js";
 import {
   buildNgrokArgs,
   ensureNgrokAvailable,
   extractNgrokUrl,
   startNgrok,
   stopNgrokProcess,
-  type NgrokCommandRunner,
-  type NgrokChildProcess,
-  type NgrokSpawner,
-} from "./ngrok.js";
+  type TunnelCommandRunner as NgrokCommandRunner,
+  type TunnelChildProcess as NgrokChildProcess,
+  type TunnelSpawner as NgrokSpawner,
+} from "./tunnel.js";
 
 class MockNgrokChild extends EventEmitter {
   pid = 12345;
@@ -191,5 +194,50 @@ describe("ngrok", () => {
       stopNgrokProcess(child as unknown as NgrokChildProcess);
       expect(child.killedWith).toBe("SIGTERM");
     });
+  });
+});
+
+const BANNER =
+  "INF Thank you for trying Cloudflare Tunnel.\nINF |  https://red-fox-ab.trycloudflare.com  |\n";
+const REGISTERED = "INF Registered tunnel connection connIndex=0 protocol=quic\n";
+const QUICK_URL = "https://red-fox-ab.trycloudflare.com";
+const configPath = `${fs.mkdtempSync(`${os.tmpdir()}/portless-cf-`)}/c.yml`;
+
+describe("cloudflare", () => {
+  it("builds a quick tunnel command that ignores the user config", () => {
+    expect(buildCloudflareArgs(4123, "myapp.localhost", "/c.yml").join(" ")).toBe(
+      "tunnel --no-autoupdate --grace-period 1s --config /c.yml --url http://127.0.0.1:4123 --http-host-header myapp.localhost"
+    );
+  });
+
+  it("reports the URL only once a connection is registered", () => {
+    expect(extractCloudflareUrl(BANNER)).toBeNull();
+    expect(extractCloudflareUrl(BANNER + REGISTERED)).toBe(QUICK_URL);
+    expect(extractCloudflareUrl("https://api.trycloudflare.com\n" + REGISTERED)).toBeNull();
+    expect(extractCloudflareUrl(BANNER + "INF Connection 4b2f-9a7b registered\n")).toBe(QUICK_URL);
+  });
+
+  it("writes an empty config and resolves once connected", async () => {
+    const child = new MockNgrokChild();
+    const promise = startCloudflare(4123, { configPath, spawner: createSpawner(child) });
+    expect(fs.readFileSync(configPath, "utf-8")).toBe("{}");
+    child.stderr.write(BANNER + REGISTERED);
+    await expect(promise).resolves.toMatchObject({ url: QUICK_URL, pid: 12345 });
+  });
+
+  it("reports ERR lines, or a generic message, when cloudflared exits early", async () => {
+    const fail = (output: string) => {
+      const child = new MockNgrokChild();
+      const promise = startCloudflare(4123, { configPath, spawner: createSpawner(child) });
+      child.stderr.write(output);
+      child.emit("exit", 1, null);
+      return promise.catch((err: Error) => err.message);
+    };
+    expect(await fail(BANNER + "2026-10-16T12:00:01Z ERR failed to request quick Tunnel\n")).toBe(
+      "Failed to start Cloudflare tunnel: 2026-10-16T12:00:01Z ERR failed to request quick Tunnel (exit 1)"
+    );
+    expect(await fail(BANNER)).toBe(
+      "Failed to start Cloudflare tunnel: cloudflared exited before connecting (exit 1)"
+    );
   });
 });

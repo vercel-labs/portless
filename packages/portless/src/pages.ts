@@ -3,6 +3,41 @@ import { GEIST_SANS_400, GEIST_SANS_500, GEIST_MONO_400, GEIST_PIXEL } from "./f
 export const ARROW_SVG =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
+/** Route count above which the 404 page offers a hostname filter. */
+export const FILTER_THRESHOLD = 5;
+
+// Revealed by the filter script; stay hidden when scripting is unavailable.
+export const FILTER_CONTROLS =
+  '<div class="filter" hidden><input type="search" placeholder="Filter apps" autocomplete="off" aria-label="Filter apps by hostname"><button type="button" aria-pressed="false">Newest first</button></div>';
+export const FILTER_NO_MATCH = '<p class="empty" role="status" hidden>No apps match.</p>';
+
+/** Static inline script for the hostname filter. Interpolates no request or route data. */
+export const FILTER_SCRIPT = `(function () {
+  var bar = document.querySelector(".filter");
+  var input = bar.querySelector("input");
+  var list = document.querySelector(".card");
+  var sort = bar.querySelector("button");
+  var rows = document.querySelectorAll(".card > li");
+  var none = document.querySelector(".empty[role=status]");
+  function apply() {
+    var query = input.value.trim().toLowerCase();
+    var shown = 0;
+    rows.forEach(function (row) {
+      var hit = row.querySelector(".name").textContent.toLowerCase().includes(query);
+      row.hidden = !hit;
+      if (hit) shown++;
+    });
+    none.hidden = shown > 0;
+  }
+  input.addEventListener("input", apply);
+  sort.addEventListener("click", function () {
+    list.append(...[...list.children].reverse());
+    sort.setAttribute("aria-pressed", sort.getAttribute("aria-pressed") !== "true");
+  });
+  apply();
+  bar.hidden = false;
+})();`;
+
 const PAGE_STYLES = `
   @font-face {
     font-family: 'Geist';
@@ -119,10 +154,9 @@ const PAGE_STYLES = `
     border-radius: 12px;
     overflow: hidden;
   }
-  .card > li {
-    border-bottom: 1px solid var(--border);
+  .card > li:not([hidden]) ~ li:not([hidden]) {
+    border-top: 1px solid var(--border);
   }
-  .card > li:last-child { border-bottom: none; }
   .card-link {
     display: flex;
     align-items: center;
@@ -137,12 +171,22 @@ const PAGE_STYLES = `
     font-size: 14px;
     font-weight: 500;
     transition: color 0.15s ease;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
   .card-link:hover .name { color: var(--accent); }
   .card-link .meta {
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+  .card-link .uptime {
+    font-size: 13px;
+    color: var(--text-3);
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
   }
   .card-link .port {
     font-family: var(--font-mono);
@@ -157,6 +201,41 @@ const PAGE_STYLES = `
   .card-link:hover .arrow {
     transform: translateX(2px);
     color: var(--text-2);
+  }
+  .filter { display: flex; gap: 8px; margin-bottom: 10px; }
+  .filter[hidden] { display: none; }
+  .filter input {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 14px;
+    color: var(--fg);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+  }
+  .filter input::placeholder { color: var(--text-3); }
+  .filter button {
+    font: inherit;
+    font-size: 14px;
+    color: var(--text-2);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  .filter button[aria-pressed="true"] {
+    color: var(--accent);
+    background: var(--surface);
+    border-color: var(--accent);
+  }
+  .filter input:focus-visible,
+  .filter button:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
   }
   .terminal {
     font-family: var(--font-mono);

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
@@ -137,6 +137,31 @@ describe("RouteStore", () => {
       expect(raw).toHaveLength(1);
       expect(raw[0].hostname).toBe("alive.localhost");
     });
+
+    it("keeps routes whose process exists but cannot be signaled (EPERM)", () => {
+      const deniedPid = 999998;
+      const realKill = process.kill.bind(process);
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        if (pid === deniedPid) {
+          throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+        }
+        return realKill(pid, signal);
+      });
+      try {
+        const routes = [{ hostname: "denied.localhost", port: 4001, pid: deniedPid }];
+        store.ensureDir();
+        fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+
+        expect(store.loadRoutes(true).map((r) => r.hostname)).toEqual(["denied.localhost"]);
+        const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+        expect(raw).toHaveLength(1);
+        expect(() => store.addRoute("denied.localhost", 4002, process.pid)).toThrow(
+          RouteConflictError
+        );
+      } finally {
+        kill.mockRestore();
+      }
+    });
   });
 
   describe("saveRoutes (via addRoute)", () => {
@@ -159,14 +184,19 @@ describe("RouteStore", () => {
 
   describe("addRoute", () => {
     it("adds a route to empty store", () => {
+      const before = Date.now();
       store.addRoute("myapp.localhost", 4001, process.pid);
+      const after = Date.now();
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0]).toEqual({
         hostname: "myapp.localhost",
         port: 4001,
         pid: process.pid,
+        registeredAt: expect.any(Number),
       });
+      expect(routes[0].registeredAt).toBeGreaterThanOrEqual(before);
+      expect(routes[0].registeredAt).toBeLessThanOrEqual(after);
     });
 
     it("replaces existing route with same hostname", () => {
@@ -255,6 +285,30 @@ describe("RouteStore", () => {
         } catch {
           // already dead
         }
+      }
+    });
+
+    it("refuses to replace a static alias without --force", () => {
+      store.addRoute("db.localhost", 5432, 0);
+      expect(() => store.addRoute("db.localhost", 4002, process.pid)).toThrow(
+        '"db.localhost" is a static alias. Use --force to replace it; re-add the alias with "portless alias" afterwards.'
+      );
+    });
+
+    it("replaces a static alias with --force without sending any signal", () => {
+      const realKill = process.kill.bind(process);
+      const kill = vi
+        .spyOn(process, "kill")
+        .mockImplementation((pid, signal) => (signal ? true : realKill(pid, signal)));
+      try {
+        store.addRoute("db.localhost", 5432, 0);
+        expect(store.addRoute("db.localhost", 4002, process.pid, true)).toBeUndefined();
+        expect(kill.mock.calls.filter(([, signal]) => signal)).toEqual([]);
+        const routes = store.loadRoutes();
+        expect(routes).toHaveLength(1);
+        expect(routes[0]).toMatchObject({ port: 4002, pid: process.pid });
+      } finally {
+        kill.mockRestore();
       }
     });
 
@@ -477,6 +531,28 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].tailscaleFunnel).toBe(true);
+    });
+
+    it("updateRoute keeps the original registeredAt", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      const registeredAt = store.loadRoutes()[0].registeredAt;
+      store.updateRoute("myapp.localhost", {
+        tailscaleUrl: "https://devbox.example.ts.net",
+      });
+      const routes = store.loadRoutes();
+      expect(routes[0].tailscaleUrl).toBe("https://devbox.example.ts.net");
+      expect(routes[0].registeredAt).toBe(registeredAt);
+    });
+
+    it("loads routes with and without registeredAt unchanged (backward compat)", () => {
+      const routes = [
+        { hostname: "old.localhost", port: 4001, pid: process.pid },
+        { hostname: "new.localhost", port: 4002, pid: process.pid, registeredAt: 1700000000000 },
+        { hostname: "odd.localhost", port: 4003, pid: process.pid, registeredAt: "yesterday" },
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      expect(store.loadRoutes()).toEqual(routes);
     });
 
     it("loads routes without tailscale fields (backward compat)", () => {
