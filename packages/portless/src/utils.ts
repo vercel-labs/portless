@@ -79,6 +79,8 @@ export function createLoopbackConnection(port: number): net.Socket {
     host: "localhost",
     port,
     autoSelectFamily: true,
+    // Give a local dial time to finish after a stall without lowering Node's default.
+    autoSelectFamilyAttemptTimeout: Math.max(2_000, net.getDefaultAutoSelectFamilyAttemptTimeout()),
     lookup: loopbackLookup as net.LookupFunction,
   });
 }
