@@ -2223,6 +2223,14 @@ async function handleTrust(): Promise<void> {
       );
     }
   }
+  // Adding a CA the system already trusts asks for authorization again (a
+  // Keychain dialog on macOS, sudo on Linux), so scripts that run `trust` to
+  // be sure would prompt on every run. Ask the OS, not the marker: `trust`
+  // also repairs trust after the CA was removed from the store.
+  if (isCATrusted(dir, { useMarker: false })) {
+    console.log(colors.green("Local CA is already in the system trust store."));
+    return;
+  }
   const result = trustCA(dir);
   if (result.trusted) {
     console.log(colors.green("Local CA added to system trust store."));

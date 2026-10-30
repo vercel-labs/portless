@@ -577,13 +577,20 @@ export function ensureCerts(stateDir: string): {
 
 /**
  * Check if the portless CA is already installed in the system trust store.
+ *
+ * By default a marker left by an earlier successful trust answers without
+ * asking the OS. Pass `useMarker: false` to always ask the OS: the marker
+ * still matches after the user removes the CA from the store.
  */
-export function isCATrusted(stateDir: string): boolean {
+export function isCATrusted(
+  stateDir: string,
+  { useMarker = true }: { useMarker?: boolean } = {}
+): boolean {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) return false;
 
   // Fast path: if we previously trusted this exact CA, skip the OS check.
-  const marker = readTrustMarker(stateDir);
+  const marker = useMarker ? readTrustMarker(stateDir) : null;
   if (marker) {
     const fp = caFingerprint(stateDir);
     const expected = fp && isWSL() ? `wsl:${fp}` : fp;

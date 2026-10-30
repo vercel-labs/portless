@@ -15,6 +15,7 @@ import {
   untrustCA,
   untrustCALinux,
 } from "./certs.js";
+import { isWSL } from "./windows-ca.js";
 
 /**
  * Return the signature algorithm string for a PEM cert file using openssl.
@@ -643,6 +644,19 @@ describe("isCATrusted", () => {
 
   it("returns false for an empty directory", () => {
     expect(isCATrusted(path.join(tmpDir, "nonexistent"))).toBe(false);
+  });
+
+  it("asks the OS instead of the trust marker when useMarker is false", () => {
+    ensureCerts(tmpDir);
+    const fingerprint = crypto
+      .createHash("sha256")
+      .update(fs.readFileSync(path.join(tmpDir, "ca.pem")))
+      .digest("hex");
+    fs.writeFileSync(path.join(tmpDir, "ca.trusted"), `${isWSL() ? "wsl:" : ""}${fingerprint}\n`);
+
+    // The marker matches, but the OS has never seen this freshly made CA.
+    expect(isCATrusted(tmpDir)).toBe(true);
+    expect(isCATrusted(tmpDir, { useMarker: false })).toBe(false);
   });
 });
 
