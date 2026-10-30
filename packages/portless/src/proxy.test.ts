@@ -413,14 +413,16 @@ describe("createProxyServer", () => {
       const res = await request(server, {
         host: "myapp.localhost",
         headers: {
-          connection: "keep-alive",
+          connection: "close",
           "keep-alive": "timeout=5",
           "proxy-connection": "keep-alive",
           upgrade: "h2c",
         },
       });
       expect(res.status).toBe(200);
-      expect(received.connection).toBe("close");
+      // the pooled upstream agent sets its own keep-alive, a forwarded client
+      // value would show up as close
+      expect(received.connection).toBe("keep-alive");
       expect(received["keep-alive"]).toBeUndefined();
       expect(received["proxy-connection"]).toBeUndefined();
       expect(received.upgrade).toBeUndefined();
@@ -1107,6 +1109,116 @@ describe("createProxyServer", () => {
       });
       client.destroy();
       expect(responses).toBe(2);
+    });
+  });
+
+  describe("upstream connections", () => {
+    it("reuses one upstream connection across requests (issue #370)", async () => {
+      const connections = new Set<net.Socket>();
+      const backend = trackServer(http.createServer((_req, res) => res.end("ok")));
+      backend.on("connection", (socket) => connections.add(socket));
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      for (let i = 0; i < 5; i++) {
+        expect((await request(server, { host: "myapp.localhost" })).status).toBe(200);
+      }
+      expect(connections.size).toBe(1);
+    });
+
+    it("keeps serving requests while many long-lived responses are open", async () => {
+      // SSE and streaming responses hold their upstream socket for good, so a
+      // cap on open sockets would leave every later request waiting forever
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          if (req.url === "/stream") {
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.write("data: hi\n\n");
+            return;
+          }
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      const proxyAddr = server.address();
+      if (!proxyAddr || typeof proxyAddr === "string") throw new Error("no addr");
+
+      const streams = await Promise.all(
+        Array.from(
+          { length: 80 },
+          () =>
+            new Promise<http.ClientRequest>((resolve, reject) => {
+              const req = http.get(
+                {
+                  port: proxyAddr.port,
+                  path: "/stream",
+                  headers: { host: "myapp.localhost" },
+                  agent: false,
+                },
+                (res) => res.once("data", () => resolve(req))
+              );
+              req.on("error", reject);
+            })
+        )
+      );
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("ok");
+      for (const stream of streams) stream.destroy();
+    });
+
+    it("replays a request when the backend resets a pooled connection", async () => {
+      // answer the first request on a connection then reset the next one, which
+      // is what an idle close looks like when it crosses our write
+      const handled = new WeakMap<net.Socket, number>();
+      let resets = 0;
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          const count = (handled.get(req.socket) ?? 0) + 1;
+          handled.set(req.socket, count);
+          if (count === 1) return res.end("ok");
+          resets++;
+          req.socket.resetAndDestroy();
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const errors: string[] = [];
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: (msg) => errors.push(msg),
+        })
+      );
+      await listen(server);
+
+      for (let i = 0; i < 4; i++) {
+        const res = await request(server, { host: "myapp.localhost" });
+        expect(res.status).toBe(200);
+        expect(res.body).toBe("ok");
+      }
+      expect(resets).toBeGreaterThan(0);
+      expect(errors).toEqual([]);
     });
   });
 
@@ -1954,6 +2066,55 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
     expect(result.status).toBe(404);
     expect(result.protocol).toBe("h2");
+  });
+
+  it("keeps an unframed h2 body from reaching another client's pooled request", async () => {
+    const received: { url?: string; auth?: string }[] = [];
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        received.push({ url: req.url, auth: req.headers.authorization });
+        req.resume();
+        req.on("end", () => res.end("ok"));
+      })
+    );
+    backend.on("clientError", (_err: Error, socket: net.Socket) => socket.destroy());
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: backendAddr.port }],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const send = (path: string, headers: http2.OutgoingHttpHeaders, body?: string) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+      return new Promise<number>((resolve, reject) => {
+        const req = client.request(
+          { ":method": "GET", ":path": path, ":authority": "myapp.localhost", ...headers },
+          { endStream: body === undefined }
+        );
+        req.on("response", (h) => resolve(h[":status"] as number));
+        req.on("error", reject);
+        req.on("close", () => client.close());
+        req.resume();
+        if (body !== undefined) req.end(body);
+      });
+    };
+
+    // An incomplete request in a GET body must not prefix the next request
+    // that reuses the same upstream socket.
+    expect(await send("/", {}, "GET /admin HTTP/1.1\r\nX-Ignore: ")).toBe(200);
+    expect(await send("/profile", { authorization: "Bearer victim" })).toBe(200);
+
+    expect(received.some((r) => r.url === "/admin")).toBe(false);
+    expect(received).toContainEqual({ url: "/profile", auth: "Bearer victim" });
   });
 
   it("returns compact JSON errors over TLS to JSON clients", async () => {
