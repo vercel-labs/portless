@@ -158,8 +158,10 @@ describe("tools/call validation", () => {
     expect(unknown.error?.code).toBe(-32602);
 
     const malformed = await createServer(["core"]).handleLine("not json");
-    expect(malformed?.id).toBeNull();
-    expect((malformed?.error as { code: number }).code).toBe(-32700);
+    expect(Array.isArray(malformed)).toBe(false);
+    const response = malformed as Record<string, unknown>;
+    expect(response.id).toBeNull();
+    expect((response.error as { code: number }).code).toBe(-32700);
   });
 
   it("returns an error result when the child cannot spawn", async () => {
@@ -178,6 +180,78 @@ describe("tools/call validation", () => {
       arguments: { timeoutMs: 2147483648 },
     });
     expect(res.result.isError).toBe(true);
+  });
+});
+
+describe("JSON-RPC batches", () => {
+  it("answers ping and tools/list in request order", async () => {
+    const res = await createServer(["core"]).handleLine(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        { jsonrpc: "2.0", id: 3, method: "tools/list" },
+      ])
+    );
+    expect(Array.isArray(res)).toBe(true);
+    const batch = res as { id: number; jsonrpc: string }[];
+    expect(batch).toHaveLength(2);
+    expect(batch.map((item) => item.id)).toEqual([2, 3]);
+    expect(batch.every((item) => item.jsonrpc === "2.0")).toBe(true);
+  });
+
+  it("keeps a one-request batch wrapped in an array", async () => {
+    const res = await createServer(["core"]).handleLine(
+      JSON.stringify([{ jsonrpc: "2.0", id: 2, method: "ping" }])
+    );
+    expect(Array.isArray(res)).toBe(true);
+    expect(res).toHaveLength(1);
+    expect(res).not.toHaveProperty("id");
+    expect((res as { id: number; jsonrpc: string }[])[0]).toMatchObject({
+      jsonrpc: "2.0",
+      id: 2,
+    });
+  });
+
+  it("omits a notification from the batch response", async () => {
+    const res = await createServer(["core"]).handleLine(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+      ])
+    );
+    expect(Array.isArray(res)).toBe(true);
+    expect(res).toHaveLength(1);
+    expect((res as { id: number }[])[0].id).toBe(2);
+  });
+
+  it("returns null for a notification-only batch", async () => {
+    const res = await createServer(["core"]).handleLine(
+      JSON.stringify([
+        { jsonrpc: "2.0", method: "notifications/initialized" },
+        { jsonrpc: "2.0", method: "notifications/cancelled" },
+      ])
+    );
+    expect(res).toBeNull();
+  });
+
+  it("rejects an empty batch with one invalid-request object", async () => {
+    const res = await createServer(["core"]).handleLine("[]");
+    expect(Array.isArray(res)).toBe(false);
+    const response = res as Record<string, unknown>;
+    expect(response.id).toBeNull();
+    expect((response.error as { code: number; message: string }).code).toBe(-32600);
+    expect((response.error as { message: string }).message).toBe("Invalid Request");
+  });
+
+  it("reports a non-object entry and still answers the request after it", async () => {
+    const res = await createServer(["core"]).handleLine(
+      JSON.stringify([1, { jsonrpc: "2.0", id: 2, method: "ping" }])
+    );
+    expect(Array.isArray(res)).toBe(true);
+    const batch = res as { id: unknown; error?: { code: number } }[];
+    expect(batch).toHaveLength(2);
+    expect(batch[0].id).toBeNull();
+    expect(batch[0].error?.code).toBe(-32600);
+    expect(batch[1].id).toBe(2);
   });
 });
 
@@ -369,5 +443,62 @@ describe("portless mcp end to end", () => {
     } finally {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
+  }, 40_000);
+
+  it("answers the reported 2025-03-26 batch script over stdio", async () => {
+    const env: Record<string, string | undefined> = { ...process.env, NO_COLOR: "1" };
+    delete env.PNPM_SCRIPT_SRC_DIR;
+    if (env.npm_command === "exec") delete env.npm_command;
+
+    const lines = [
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-03-26",
+          capabilities: {},
+          clientInfo: { name: "t", version: "1" },
+        },
+      }),
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        { jsonrpc: "2.0", id: 3, method: "tools/list" },
+      ]),
+      JSON.stringify({ jsonrpc: "2.0", id: 4, method: "ping" }),
+    ];
+
+    const out = await new Promise<{ stdout: string; code: number | null }>((resolve, reject) => {
+      const child = spawn(process.execPath, [CLI_PATH, "mcp"], {
+        env: { ...env, PORTLESS: "0" },
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stdout = "";
+      const timer = setTimeout(() => {
+        child.kill("SIGKILL");
+        reject(new Error("mcp server did not exit"));
+      }, 20_000);
+      child.stdout.on("data", (d) => (stdout += d));
+      child.on("close", (code) => {
+        clearTimeout(timer);
+        resolve({ stdout, code });
+      });
+      child.stdin.write(`${lines.join("\n")}\n`);
+      child.stdin.end();
+    });
+
+    const responses = out.stdout
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line));
+    expect(responses).toHaveLength(3);
+    expect(Array.isArray(responses[0])).toBe(false);
+    expect(responses[0].id).toBe(1);
+    expect(responses[0].result.protocolVersion).toBe("2025-03-26");
+    expect(responses[1].map((item: { id: number }) => item.id)).toEqual([2, 3]);
+    expect(responses[1].every((item: { jsonrpc: string }) => item.jsonrpc === "2.0")).toBe(true);
+    expect(Array.isArray(responses[2])).toBe(false);
+    expect(responses[2].id).toBe(4);
+    expect(out.code).toBe(0);
   }, 40_000);
 });
