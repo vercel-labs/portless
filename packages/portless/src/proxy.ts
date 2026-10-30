@@ -3,8 +3,21 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
-import { createLoopbackConnection, escapeHtml, formatUrl } from "./utils.js";
-import { ARROW_SVG, renderPage } from "./pages.js";
+import {
+  createLoopbackConnection,
+  escapeHtml,
+  formatUptime,
+  formatUrl,
+  parsePort,
+} from "./utils.js";
+import {
+  ARROW_SVG,
+  FILTER_CONTROLS,
+  FILTER_NO_MATCH,
+  FILTER_SCRIPT,
+  FILTER_THRESHOLD,
+  renderPage,
+} from "./pages.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -73,7 +86,7 @@ function isLoopbackPeer(address: string | undefined): boolean {
 function hasValidPort(authority: string, hostname: string): boolean {
   if (authority === hostname) return true;
   const port = authority.slice(hostname.length + 1);
-  return /^\d+$/.test(port) && Number(port) >= 1 && Number(port) <= 65535;
+  return parsePort(port) !== null;
 }
 
 function isLoopbackAuthority(authority: string): boolean {
@@ -236,6 +249,29 @@ function findRoute(
   );
 }
 
+/**
+ * Send a portless-generated error as the HTML page when the client accepts text/html, otherwise as a small JSON body.
+ * `renderHtml` is only called for HTML clients, so JSON clients never pay for building the page.
+ */
+function sendProxyError(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  status: number,
+  error: string,
+  message: string,
+  host: string,
+  renderHtml: () => string
+): void {
+  res.setHeader("Vary", "Accept");
+  if ((req.headers.accept ?? "").toLowerCase().includes("text/html")) {
+    res.writeHead(status, { "Content-Type": "text/html" });
+    res.end(renderHtml());
+    return;
+  }
+  res.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
+  res.end(JSON.stringify({ error, upstream: host, message }));
+}
+
 /** Server type returned by createProxyServer (plain HTTP/1.1 or net.Server TLS wrapper). */
 export type ProxyServer = http.Server | net.Server;
 
@@ -259,6 +295,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     tld = "localhost",
     tlds = [tld],
     strict = true,
+    loopbackOnly = false,
     onError = (msg: string) => console.error(msg),
     onHostsSyncRequest,
     hostsSyncToken,
@@ -267,7 +304,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
   const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
+  const refusesPeer = (address: string | undefined) => loopbackOnly && !isLoopbackPeer(address);
+
   const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+    if (refusesPeer(req.socket.remoteAddress)) {
+      res.writeHead(403, { "Content-Type": "text/plain", [PORTLESS_HEADER]: "1" });
+      res.end("Forbidden");
+      return;
+    }
     const reqTls = isEncrypted(req);
     res.setHeader(PORTLESS_HEADER, "1");
     const rawHost = getRequestHost(req);
@@ -315,18 +359,24 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           `This usually means a backend is proxying back through portless without rewriting ` +
           `the Host header. If you use Vite/webpack proxy, set changeOrigin: true.`
       );
-      res.writeHead(508, { "Content-Type": "text/html" });
-      res.end(
-        renderPage(
-          508,
-          "Loop Detected",
-          `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
+      sendProxyError(
+        req,
+        res,
+        508,
+        "loop_detected",
+        `Request passed through portless ${hops} times`,
+        host,
+        () =>
+          renderPage(
+            508,
+            "Loop Detected",
+            `<div class="content"><p class="desc">This request has passed through portless ${hops} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
   "/api": {
     target: "${reqTls ? "https" : "http"}://&lt;backend&gt;${escapeHtml(primaryTldSuffix)}${reqTls ? "" : ":&lt;port&gt;"}",
     changeOrigin: true,
   },
 }</pre></div></div>`
-        )
+          )
       );
       return;
     }
@@ -334,6 +384,24 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const route = findRoute(routes, rawHost, strict);
 
     if (!route) {
+      const lowerHost = host.toLowerCase();
+      const nameHost = lowerHost.endsWith(".") ? lowerHost.slice(0, -1) : lowerHost;
+      const isPortlessName = tldSuffixes.some(
+        (suffix) => nameHost === suffix.slice(1) || nameHost.endsWith(suffix)
+      );
+      const isIpAddress = net.isIPv4(host) || rawHost.startsWith("[");
+      if (!isPortlessName && !isIpAddress) {
+        const message = `DNS sent ${host} to this computer. This is not the real site.`;
+        sendProxyError(req, res, 421, "misdirected_request", message, host, () =>
+          renderPage(
+            421,
+            "Misdirected Request",
+            `<div class="content"><p class="desc">${escapeHtml(message)}</p></div>`
+          )
+        );
+        return;
+      }
+
       const safeHost = escapeHtml(host);
       const matchedSuffix = tldSuffixes
         .filter((suffix) => host.endsWith(suffix))
@@ -343,12 +411,21 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           ? host.slice(0, -matchedSuffix.length)
           : host;
       const safeSuggestion = escapeHtml(strippedHost);
+      const now = Date.now();
+      const filterable = routes.length > FILTER_THRESHOLD;
+      const items = routes
+        .map((r) => {
+          const age = formatUptime(r.registeredAt, now);
+          const label = r.pid === 0 ? "alias" : age && `up ${age}`;
+          const uptimeHtml = label ? `<span class="uptime">${label}</span>` : "";
+          return `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta">${uptimeHtml}<code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`;
+        })
+        .join("");
       const routesList =
         routes.length > 0
-          ? `<div class="section"><p class="label">Active apps</p><ul class="card">${routes.map((r) => `<li><a href="${escapeHtml(formatUrl(r.hostname, proxyPort, reqTls))}" class="card-link"><span class="name">${escapeHtml(r.hostname)}</span><span class="meta"><code class="port">127.0.0.1:${escapeHtml(String(r.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`).join("")}</ul></div>`
+          ? `<div class="section"><p class="label">Active apps</p>${filterable ? FILTER_CONTROLS : ""}<ul class="card">${items}</ul>${filterable ? FILTER_NO_MATCH : ""}</div>${filterable ? `<script>${FILTER_SCRIPT}</script>` : ""}`
           : '<p class="empty">No apps running.</p>';
-      res.writeHead(404, { "Content-Type": "text/html" });
-      res.end(
+      sendProxyError(req, res, 404, "not_found", `No app registered for ${host}`, host, () =>
         renderPage(
           404,
           "Not Found",
@@ -420,6 +497,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     );
 
     proxyReq.on("error", (err) => {
+      req.unpipe(proxyReq);
+      req.resume();
       onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
       if (!res.headersSent) {
         const errWithCode = err as NodeJS.ErrnoException;
@@ -427,8 +506,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           errWithCode.code === "ECONNREFUSED"
             ? "The target app is not responding. It may have crashed."
             : "The target app may not be running.";
-        res.writeHead(502, { "Content-Type": "text/html" });
-        res.end(
+        sendProxyError(req, res, 502, "bad_gateway", detail, getRequestHost(req), () =>
           renderPage(
             502,
             "Bad Gateway",
@@ -456,6 +534,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
     socket.on("error", () => socket.destroy());
+    if (refusesPeer(socket.remoteAddress)) {
+      socket.destroy();
+      return;
+    }
 
     const hops = parseInt(req.headers[PORTLESS_HOPS_HEADER] as string, 10) || 0;
     if (hops >= MAX_PROXY_HOPS) {
@@ -600,6 +682,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const compatReq = req as unknown as http.IncomingMessage;
     req.stream.on("error", () => {});
     res.setHeader(PORTLESS_HEADER, "1");
+    if (refusesPeer(compatReq.socket?.remoteAddress)) {
+      res.writeHead(403);
+      res.end();
+      return;
+    }
 
     // Classic CONNECT tunneling is not a portless feature; only WebSocket
     // bridging is supported.
@@ -822,6 +909,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       socket.on("error", () => {
         socket.destroy();
       });
+      if (refusesPeer(socket.remoteAddress)) {
+        socket.destroy();
+        return;
+      }
       socket.once("readable", () => {
         const buf: Buffer | null = socket.read(1);
         if (!buf) {
@@ -853,19 +944,50 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
 
-  return httpServer;
+  return loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
+}
+
+/**
+ * Wrap `inner` in the server that actually listens, so a connection from a
+ * non-loopback peer is closed before the HTTP parser reads a byte. The inner
+ * server only ever receives sockets that passed the check.
+ */
+function guardLoopbackOnly(inner: http.Server): net.Server {
+  // Sockets handed over with emit("connection") are not in the inner
+  // server's connection list, so its close() cannot end their keep-alive
+  // idle time and the wrapper's close() would wait for them. Track them here.
+  const sockets = new Set<net.Socket>();
+  const wrapper = net.createServer((socket) => {
+    if (!isLoopbackPeer(socket.remoteAddress)) {
+      socket.destroy();
+      return;
+    }
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    inner.emit("connection", socket);
+  });
+  const origClose = wrapper.close.bind(wrapper);
+  wrapper.close = function (cb?: (err?: Error) => void) {
+    inner.close();
+    for (const socket of sockets) {
+      socket.destroy();
+    }
+    return origClose(cb);
+  } as typeof wrapper.close;
+  return wrapper;
 }
 
 /**
  * Create a minimal HTTP server that 302-redirects every request to HTTPS.
  * Meant to run on port 80 alongside an HTTPS proxy on port 443.
  */
-export function createHttpRedirectServer(httpsPort: number): http.Server {
-  return http.createServer((req, res) => {
+export function createHttpRedirectServer(httpsPort: number, loopbackOnly = false): net.Server {
+  const server = http.createServer((req, res) => {
     const host = (req.headers.host || "localhost").split(":")[0];
     const portSuffix = httpsPort === 443 ? "" : `:${httpsPort}`;
     const location = `https://${host}${portSuffix}${req.url || "/"}`;
     res.writeHead(302, { Location: location, [PORTLESS_HEADER]: "1" });
     res.end();
   });
+  return loopbackOnly ? guardLoopbackOnly(server) : server;
 }

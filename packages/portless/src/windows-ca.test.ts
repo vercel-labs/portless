@@ -25,8 +25,19 @@ describe("isWSL", () => {
 
   it("detects a Microsoft WSL kernel release", () => {
     expect(
-      isWSL({ platform: "linux", env: {}, release: "5.15.90.1-microsoft-standard-WSL2" })
+      isWSL({
+        platform: "linux",
+        env: {},
+        release: "5.15.90.1-microsoft-standard-WSL2",
+        hasWslpath: true,
+      })
     ).toBe(true);
+  });
+
+  it("requires wslpath when detecting WSL from the kernel release", () => {
+    const release = "5.15.90.1-microsoft-standard-WSL2";
+    expect(isWSL({ platform: "linux", env: {}, release, hasWslpath: false })).toBe(false);
+    expect(isWSL({ platform: "linux", env: {}, release, hasWslpath: true })).toBe(true);
   });
 
   it("does not classify native Linux or Windows as WSL", () => {

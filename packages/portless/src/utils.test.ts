@@ -1,11 +1,13 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
   escapeHtml,
+  formatUptime,
   formatUrl,
   isErrnoException,
   isProcessAlive,
   parseHostname,
   parseHostnames,
+  parsePort,
   resolveUserHome,
 } from "./utils.js";
 
@@ -160,6 +162,38 @@ describe("formatUrl", () => {
   });
 });
 
+describe("formatUptime", () => {
+  const NOW = 1_700_000_000_000;
+
+  it.each([
+    [59_000, "59s"],
+    [60_000, "1m"],
+    [59 * 60_000, "59m"],
+    [60 * 60_000, "1h"],
+    [119 * 60_000, "1h"],
+    [23 * 60 * 60_000, "23h"],
+    [24 * 60 * 60_000, "1d"],
+    [400 * 24 * 60 * 60_000, "400d"],
+  ])("a route registered %d ms ago shows %s", (ageMs, expected) => {
+    expect(formatUptime(NOW - ageMs, NOW)).toBe(expected);
+  });
+
+  it("shows 0s for a registration time 30 seconds in the future", () => {
+    expect(formatUptime(NOW + 30_000, NOW)).toBe("0s");
+  });
+
+  it("shows nothing for a registration time 2 minutes in the future", () => {
+    expect(formatUptime(NOW + 120_000, NOW)).toBeNull();
+  });
+
+  it.each([undefined, 0, -1000, NaN, "1700000000000"])(
+    "shows nothing for an invalid registration time %s",
+    (registeredAt) => {
+      expect(formatUptime(registeredAt, NOW)).toBeNull();
+    }
+  );
+});
+
 describe("parseHostname", () => {
   it("appends .localhost to simple name", () => {
     expect(parseHostname("myapp")).toBe("myapp.localhost");
@@ -175,6 +209,12 @@ describe("parseHostname", () => {
 
   it("strips https:// protocol", () => {
     expect(parseHostname("https://myapp")).toBe("myapp.localhost");
+  });
+
+  it("strips an uppercase or mixed-case protocol", () => {
+    expect(parseHostname("HTTP://myapp.localhost")).toBe("myapp.localhost");
+    expect(parseHostname("HTTPS://myapp")).toBe("myapp.localhost");
+    expect(parseHostname("Https://MyApp/path")).toBe("myapp.localhost");
   });
 
   it("strips path after hostname", () => {
@@ -323,6 +363,13 @@ describe("parseHostnames", () => {
     ]);
   });
 
+  it("strips an uppercase protocol before building hostnames", () => {
+    expect(parseHostnames("HTTPS://myapp.test", ["localhost", "test"])).toEqual([
+      "myapp.localhost",
+      "myapp.test",
+    ]);
+  });
+
   it("deduplicates TLDs", () => {
     expect(parseHostnames("myapp", ["test", "test"])).toEqual(["myapp.test"]);
   });
@@ -341,5 +388,31 @@ describe("parseHostnames", () => {
 
   it("still throws when no TLD survives", () => {
     expect(() => parseHostnames("my..app", ["localhost", "test"])).toThrow(/consecutive dots/);
+  });
+});
+
+describe("parsePort", () => {
+  it("accepts whole numbers from 1 to 65535", () => {
+    expect(parsePort("1")).toBe(1);
+    expect(parsePort("8123")).toBe(8123);
+    expect(parsePort("65535")).toBe(65535);
+    expect(parsePort(" 3000 ")).toBe(3000);
+  });
+
+  it("rejects out of range and malformed values", () => {
+    for (const value of [
+      "",
+      "0",
+      "65536",
+      "192.168.1.1:8123",
+      "8123abc",
+      "81.23",
+      "1e3",
+      "30 00",
+      "3000abc",
+      "-1",
+    ]) {
+      expect(parsePort(value)).toBeNull();
+    }
   });
 });

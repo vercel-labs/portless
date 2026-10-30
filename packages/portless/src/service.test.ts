@@ -5,6 +5,7 @@ import {
   buildServiceUninstallSudoArgs,
   handleService,
   tryUninstallService,
+  parseServiceInstallConfig,
 } from "./service.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -270,6 +271,35 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<key>PORTLESS_LAN_IP</key>");
     expect(spec.plist).toContain("<string>192.168.1.42</string>");
     expect(spec.plist).toContain("<key>PORTLESS_WILDCARD</key>");
+  });
+
+  it("defaults an unprivileged service to plain HTTP on port 80", () => {
+    const config = parseServiceInstallConfig(["service", "install", "--unprivileged"], {});
+    expect(config).toMatchObject({ unprivileged: true, useHttps: false, proxyPort: 80 });
+  });
+
+  it.each([
+    [["--unprivileged", "--https"], {}],
+    [["--unprivileged"], { PORTLESS_HTTPS: "1" }],
+  ])("keeps HTTPS for an unprivileged service when asked: %j %j", (flags, env) => {
+    const config = parseServiceInstallConfig(["service", "install", ...flags], env);
+    expect(config).toMatchObject({ unprivileged: true, useHttps: true, proxyPort: 443 });
+  });
+
+  it("persists unprivileged mode in a Linux service", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      installConfig: { proxyPort: 80, useHttps: false, unprivileged: true },
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.execStart).toContain("--unprivileged");
+    expect(spec.unit).toContain('Environment=PORTLESS_UNPRIVILEGED="1"');
   });
 
   it("persists no-TLS, custom TLD, and custom state in a Linux service", () => {
