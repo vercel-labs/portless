@@ -471,6 +471,15 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           for (const h of HOP_BY_HOP_HEADERS) {
             delete responseHeaders[h];
           }
+        } else {
+          // Plain HTTP keeps the backend framing, so only the connection
+          // management headers are stripped, matching the request side.
+          // Otherwise the backend's Connection: close (sent because the
+          // proxy dials a fresh socket per request) reaches the client and
+          // defeats connection reuse on every response.
+          for (const h of REQUEST_HOP_BY_HOP_HEADERS) {
+            delete responseHeaders[h];
+          }
         }
         res.writeHead(proxyRes.statusCode || 502, responseHeaders);
         proxyRes.on("error", () => {

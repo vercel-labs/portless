@@ -2654,6 +2654,101 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(result.body).toBe("ok");
   });
 
+  it("strips hop-by-hop headers from proxied plain HTTP responses (issue #482)", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        // The backend answers Connection: close because the proxy dials a
+        // fresh socket per request; that per-hop header must not reach the
+        // client on the plain HTTP path either.
+        res.writeHead(200, {
+          "Content-Type": "text/plain",
+          Connection: "close",
+          "Keep-Alive": "timeout=99",
+          "Proxy-Connection": "keep-alive",
+          Upgrade: "h2c",
+          "X-Custom": "preserved",
+        });
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "plain.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    const res = await request(server, { host: "plain.localhost" });
+    expect(res.status).toBe(200);
+    // Node applies the proxy's own keep-alive policy once the backend's
+    // Connection: close is stripped, so the client sees keep-alive rather
+    // than the backend's close.
+    expect(res.headers.connection).toBe("keep-alive");
+    // Node adds its own Keep-Alive: timeout=5 on kept-alive responses, so
+    // assert the backend's distinctive value is gone rather than the header
+    // being absent.
+    expect(res.headers["keep-alive"]).not.toBe("timeout=99");
+    expect(res.headers["proxy-connection"]).toBeUndefined();
+    expect(res.headers.upgrade).toBeUndefined();
+    expect(res.headers["x-custom"]).toBe("preserved");
+    expect(res.body).toBe("ok");
+  });
+
+  it("reuses the client connection on plain HTTP responses (issue #482)", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        res.end("ok");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "plain.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+
+    let clientConnections = 0;
+    server.on("connection", () => {
+      clientConnections += 1;
+    });
+
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+    const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+    try {
+      for (let i = 0; i < 2; i++) {
+        const res = await new Promise<{ status: number | undefined }>((resolve, reject) => {
+          const req = http.request(
+            {
+              hostname: "127.0.0.1",
+              port: addr.port,
+              path: "/",
+              method: "GET",
+              headers: { host: "plain.localhost", accept: "text/html" },
+              agent,
+            },
+            (res) => {
+              res.resume();
+              res.on("end", () => resolve({ status: res.statusCode }));
+            }
+          );
+          req.on("error", reject);
+          req.end();
+        });
+        expect(res.status).toBe(200);
+      }
+    } finally {
+      agent.destroy();
+    }
+    expect(clientConnections).toBe(1);
+  });
+
   // streamResetBurst/streamResetRate server options require Node 22.11+;
   // on older versions they are silently ignored and GOAWAY fires at ~1000 resets.
   // Also skipped on Windows where the rapid burst overwhelms the test backend.
