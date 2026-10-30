@@ -2,6 +2,20 @@
 title: "Changelog"
 ---
 
+## 0.15.13
+
+### New Features
+
+- **Unprivileged proxy mode**: Added `--unprivileged` and `PORTLESS_UNPRIVILEGED=1` to bind supported low ports without sudo, accept only loopback peers, and preserve the mode across restarts and service installation. (#529)
+
+### Bug Fixes
+
+- **Proxy privileges**: Check whether the requested listener needs root before asking for sudo. If elevation fails, stop with an error instead of silently switching ports. (#528)
+
+### Documentation
+
+- Added shared technical writing guidance for documentation changes. (#524)
+
 ## 0.15.12
 
 ### New Features
