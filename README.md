@@ -543,6 +543,28 @@ Use this configuration to enable every tool:
 { "mcpServers": { "portless": { "command": "portless", "args": ["mcp", "--tools", "all"] } } }
 ```
 
+## Programmatic API
+
+For Node-based config files (Playwright, Vite proxy, `next.config.js`, etc.) you can `import { getUrl } from "portless"` to resolve service URLs without spawning the CLI:
+
+```ts
+import { getUrl } from "portless";
+
+const cms = await getUrl("cms");
+// cms.url      -> "https://cms.localhost"
+//                  ("https://feature-x.cms.localhost" in a linked worktree)
+// cms.port     -> 443
+// cms.tls      -> true
+
+// toString() coerces to the URL string:
+await fetch(`${cms}/api/health`);
+
+// Skip the worktree prefix for OAuth callbacks etc.:
+const stable = await getUrl("cms", { worktree: false });
+```
+
+Same hostname and worktree logic as `portless get`, reading port, TLS, and TLD from the active proxy's persisted state. The returned `ServiceUrl` object JSON-serializes to `{ url, hostname, port, tls, tld }`.
+
 ## Uninstall / reset
 
 To remove portless data from your machine (proxy state under `~/.portless` and the system state directory, the local CA from the OS trust store when portless installed it, and the portless block in `/etc/hosts`):
