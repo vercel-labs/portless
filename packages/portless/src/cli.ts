@@ -2483,8 +2483,13 @@ async function handleList(): Promise<void> {
   listRoutes(store, port, tls);
 }
 
+/** True when --help or -h appears anywhere after the command name. */
+function hasHelpFlag(args: string[]): boolean {
+  return args.slice(1).some((arg) => arg === "--help" || arg === "-h");
+}
+
 async function handleGet(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
+  if (hasHelpFlag(args)) {
     console.log(`
 ${colors.bold("portless get")} - Print the URL for a service.
 
@@ -2545,7 +2550,7 @@ ${colors.bold("Examples:")}
 }
 
 async function handleAlias(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
+  if (hasHelpFlag(args)) {
     console.log(`
 ${colors.bold("portless alias")} - Register a static route for services not managed by portless.
 
@@ -2562,12 +2567,22 @@ ${colors.bold("Examples:")}
     process.exit(0);
   }
 
+  // --remove is only a mode switch in first position; --force only applies when adding.
+  const isRemove = args[1] === "--remove";
+  for (const arg of args.slice(isRemove ? 2 : 1)) {
+    if (arg.startsWith("-") && (isRemove || arg !== "--force")) {
+      console.error(colors.red(`Error: Unknown flag "${arg}".`));
+      console.error(colors.blue(`Known flags: ${isRemove ? "--help" : "--force, --help"}`));
+      process.exit(1);
+    }
+  }
+
   const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  if (args[1] === "--remove") {
+  if (isRemove) {
     const aliasName = args[2];
     if (!aliasName) {
       console.error(colors.red("Error: No alias name provided."));
@@ -3119,7 +3134,17 @@ ${colors.bold("Options:")}
 }
 
 async function handleProxy(args: string[]): Promise<void> {
-  if (args[1] === "stop") {
+  if (args[1] === "stop" && !hasHelpFlag(args)) {
+    for (let i = 2; i < args.length; i++) {
+      if (args[i] === "--port" || args[i] === "-p") {
+        if (args[i + 1] && !args[i + 1].startsWith("-")) i++;
+      } else if (args[i].startsWith("-")) {
+        console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
+        console.error(colors.blue("Known flags: --port, -p, --help"));
+        process.exit(1);
+      }
+    }
+
     let explicitPort: number | undefined;
     const portIdx = args.indexOf("--port") !== -1 ? args.indexOf("--port") : args.indexOf("-p");
     if (portIdx !== -1) {
@@ -3151,7 +3176,8 @@ async function handleProxy(args: string[]): Promise<void> {
     return;
   }
 
-  const isProxyHelp = args[1] === "--help" || args[1] === "-h";
+  // "stop" only reaches here when it was given --help.
+  const isProxyHelp = args[1] === "--help" || args[1] === "-h" || args[1] === "stop";
   if (isProxyHelp || args[1] !== "start") {
     console.log(`
 ${colors.bold("portless proxy")} - Manage the portless proxy server.
