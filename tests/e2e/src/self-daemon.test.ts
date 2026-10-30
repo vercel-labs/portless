@@ -72,6 +72,14 @@ async function requestThroughProxy(hostname: string): Promise<number> {
   });
 }
 
+/** The proxy reloads routes.json on a debounce, so poll until it serves the route. */
+async function waitForRoute(hostname: string): Promise<number> {
+  return waitFor(async () => {
+    const status = await requestThroughProxy(hostname).catch(() => 0);
+    return status === 200 ? status : 0;
+  });
+}
+
 function readRoutes(): Array<{ hostname: string; port: number; pid: number }> {
   return JSON.parse(fs.readFileSync(path.join(stateDir!, "routes.json"), "utf8"));
 }
@@ -144,7 +152,7 @@ describe.skipIf(process.platform === "win32")("self-daemonizing command lifecycl
     expect(route).toBeDefined();
     appPort = route!.port;
     expect(findPidsOnPort(appPort)).toEqual([route!.pid]);
-    expect(await requestThroughProxy(route!.hostname)).toBe(200);
+    expect(await waitForRoute(route!.hostname)).toBe(200);
 
     // Let the proxy settle on the transferred route, as it would for a daemon
     // that runs for a while.
@@ -179,7 +187,7 @@ describe.skipIf(process.platform === "win32")("self-daemonizing command lifecycl
     const route = readRoutes().find((entry) => entry.hostname === "detached.localhost");
     expect(route).toBeDefined();
     appPort = route!.port;
-    expect(await requestThroughProxy(route!.hostname)).toBe(200);
+    expect(await waitForRoute(route!.hostname)).toBe(200);
   });
 
   it("removes the route when a foreground command exits", async () => {
