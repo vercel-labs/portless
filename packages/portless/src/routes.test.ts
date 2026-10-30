@@ -361,6 +361,41 @@ describe("RouteStore", () => {
     });
   });
 
+  describe("transferRoute", () => {
+    it("moves a route to another pid while the caller owns it", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid);
+      expect(store.transferRoute("myapp.localhost", process.pid, process.ppid)).toBe(true);
+      const routes = store.loadRoutes();
+      expect(routes).toHaveLength(1);
+      expect(routes[0].pid).toBe(process.ppid);
+      expect(routes[0].port).toBe(4001);
+    });
+
+    it("drops sharing URLs, whose tunnels stop with the previous owner", () => {
+      store.addRoute("myapp.localhost", 4001, process.pid);
+      store.updateRoute("myapp.localhost", {
+        ngrokUrl: "https://abc.ngrok.app",
+        ngrokPid: 123,
+        tailscaleUrl: "https://dev.tail1234.ts.net",
+        tailscaleHttpsPort: 8443,
+        tailscaleFunnel: true,
+      });
+      store.transferRoute("myapp.localhost", process.pid, process.ppid);
+      const route = store.loadRoutes()[0];
+      expect(route.ngrokUrl).toBeUndefined();
+      expect(route.ngrokPid).toBeUndefined();
+      expect(route.tailscaleUrl).toBeUndefined();
+      expect(route.tailscaleHttpsPort).toBeUndefined();
+      expect(route.tailscaleFunnel).toBeUndefined();
+    });
+
+    it("does not move a route owned by another pid", () => {
+      store.addRoute("myapp.localhost", 4001, process.ppid);
+      expect(store.transferRoute("myapp.localhost", process.pid, 1)).toBe(false);
+      expect(store.loadRoutes()[0].pid).toBe(process.ppid);
+    });
+  });
+
   describe("locking (via concurrent addRoute)", () => {
     it("handles stale lock by recovering and completing the operation", () => {
       store.ensureDir();

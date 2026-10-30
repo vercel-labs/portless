@@ -65,6 +65,7 @@ import {
   findPidOnPort,
   guardWindowsOrphans,
   findPidsOnPort,
+  findSelfDaemonizedListener,
   killOrphanedProcessGroup,
   getProcessStartTime,
   getProcessCommand,
@@ -664,6 +665,50 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
+/**
+ * Keep routes served when the command self-daemonized: its launcher exited
+ * but a listener is still on the assigned port. The routes move to that
+ * listener's pid, so the proxy keeps serving them and they drop on their own
+ * once it exits. A listener that already held the port before the command
+ * started is not the command's daemon, so its routes are left to cleanup.
+ * Issue #411.
+ */
+async function transferRoutesToDaemon(
+  store: RouteStore,
+  hostnames: readonly string[],
+  port: number,
+  processGroupId: number | undefined,
+  preexistingPid: number | null,
+  exitedCleanly: boolean
+): Promise<void> {
+  const listenerPid = await findSelfDaemonizedListener(
+    port,
+    processGroupId,
+    EXIT_TIMEOUT_MS,
+    exitedCleanly
+  );
+  if (listenerPid === null || listenerPid === preexistingPid) return;
+  let transferred = false;
+  for (const hostname of hostnames) {
+    try {
+      transferred = store.transferRoute(hostname, process.pid, listenerPid) || transferred;
+    } catch {
+      // Lock acquisition may fail during cleanup; the exit cleanup removes the route.
+    }
+  }
+  if (!transferred) return;
+  console.warn(
+    colors.yellow(
+      `Command exited but PID ${listenerPid} is still serving port ${port}. Keeping ${hostnames[0]} routed to it. Stop it with: kill ${listenerPid}`
+    )
+  );
+}
+
+/** PID already listening on a port before a command is spawned, if any. */
+async function findPreexistingListener(port: number): Promise<number | null> {
+  return (await isPortListening(port)) ? findPidOnPort(port) : null;
+}
+
 /** Warn on this terminal if a route it registered will not resolve. Issue #364. */
 function reportHostsSyncHere(
   hostnames: string[],
@@ -841,7 +886,12 @@ function startProxyServer(
 
   const createServer = () =>
     createProxyServer({
-      getRoutes: () => cachedRoutes,
+      // A route handed to a self-daemonized server outlives the file's last
+      // change, so a dead owner triggers a reload instead of serving it.
+      getRoutes: () => {
+        if (!cachedRoutes.every((route) => store.isRouteOwnerAlive(route))) reloadRoutes();
+        return cachedRoutes;
+      },
       proxyPort,
       tld,
       tlds,
@@ -1697,6 +1747,8 @@ async function runApp(
     )
   );
 
+  const preexistingListener = await findPreexistingListener(port);
+
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.once(signal, () => (stoppingTunnels = true));
   }
@@ -1718,6 +1770,8 @@ async function runApp(
       ),
       ...caEnv,
     },
+    onExit: (childPid, code) =>
+      transferRoutesToDaemon(store, hostnames, port, childPid, preexistingListener, code === 0),
     onSpawn: (pid) => {
       const childStartTime = getProcessStartTime(pid) ?? undefined;
       for (const host of hostnames) {
@@ -3896,6 +3950,7 @@ async function spawnProxiedApp(
   child: ReturnType<typeof spawn>;
   displayUrl: string;
   route: { store: RouteStore; hostnames: string[] } | null;
+  settled: Promise<void>;
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
 
@@ -3906,6 +3961,7 @@ async function spawnProxiedApp(
   let store: RouteStore | null = null;
   let hostnames: string[] = [];
   let displayUrl: string;
+  let appPort: number | undefined;
 
   if (usesPortless) {
     env = pkgEnv;
@@ -3915,7 +3971,7 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    const appPort = app.appPort ?? (await findFreePort());
+    appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -3940,25 +3996,48 @@ async function spawnProxiedApp(
     }
   }
 
+  const preexistingListener = appPort === undefined ? null : await findPreexistingListener(appPort);
   const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
   pipeOutput(child, chalk.cyan(`[${app.name}]`));
 
   const capturedStore = store;
   const capturedHostnames = hostnames;
-  child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
-    if (code !== 0 && code !== null) {
-      console.error(colors.red(`[${app.name}] exited with code ${code}`));
-    } else if (signal) {
-      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
-    }
-    if (capturedStore && capturedHostnames.length > 0) {
-      removeRoutes(capturedStore, capturedHostnames, process.pid);
-    }
+  const capturedPort = appPort;
+  const settled = new Promise<void>((resolve) => {
+    child.on("exit", (code, signal) => {
+      exitCodes.set(app.name, code);
+      if (code !== 0 && code !== null) {
+        console.error(colors.red(`[${app.name}] exited with code ${code}`));
+      } else if (signal) {
+        console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+      }
+      if (!capturedStore || capturedHostnames.length === 0 || capturedPort === undefined) {
+        resolve();
+        return;
+      }
+      const transfer = signal
+        ? Promise.resolve()
+        : transferRoutesToDaemon(
+            capturedStore,
+            capturedHostnames,
+            capturedPort,
+            child.pid,
+            preexistingListener,
+            code === 0
+          );
+      transfer
+        .catch(() => {
+          // Best-effort; the routes are removed below.
+        })
+        .finally(() => {
+          removeRoutes(capturedStore, capturedHostnames, process.pid);
+          resolve();
+        });
+    });
   });
 
   const route = store && hostnames.length > 0 ? { store, hostnames } : null;
-  return { child, displayUrl, route };
+  return { child, displayUrl, route, settled };
 }
 
 function spawnTaskApp(
@@ -4291,11 +4370,12 @@ async function runWithDirectSpawn(
   const exitCodes = new Map<string, number | null>();
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
+  const routeSettlements: Promise<void>[] = [];
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
   for (const app of proxiedApps) {
-    const { child, displayUrl, route } = await spawnProxiedApp(
+    const { child, displayUrl, route, settled } = await spawnProxiedApp(
       app,
       stateDir,
       proxyPort,
@@ -4305,6 +4385,7 @@ async function runWithDirectSpawn(
       exitCodes
     );
     children.push(child);
+    routeSettlements.push(settled);
     if (route) routeEntries.push(route);
     appUrls.push({ label: app.label, url: displayUrl });
   }
@@ -4360,6 +4441,7 @@ async function runWithDirectSpawn(
         })
     )
   );
+  await Promise.all(routeSettlements);
 
   const failed = [...exitCodes.entries()].filter(([, code]) => code !== 0 && code !== null);
   if (failed.length > 0) {
