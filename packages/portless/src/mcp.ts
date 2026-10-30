@@ -561,7 +561,7 @@ function resultResponse(id: unknown, result: Record<string, unknown>): Record<st
 
 /** A server for the given canonical profile names. */
 export function createServer(profiles: string[]): {
-  handleLine(line: string): Promise<Record<string, unknown> | null>;
+  handleLine(line: string): Promise<Record<string, unknown> | Record<string, unknown>[] | null>;
   readonly shutdown: boolean;
 } {
   let shutdown = false;
@@ -736,13 +736,30 @@ export function createServer(profiles: string[]): {
   }
 
   return {
-    async handleLine(line: string): Promise<Record<string, unknown> | null> {
+    async handleLine(
+      line: string
+    ): Promise<Record<string, unknown> | Record<string, unknown>[] | null> {
       if (line.trim().length === 0) return null;
       let message: unknown;
       try {
         message = JSON.parse(line);
       } catch (error) {
         return errorResponse(null, -32700, `Parse error: ${(error as Error).message}`);
+      }
+      if (Array.isArray(message)) {
+        if (message.length === 0) {
+          return errorResponse(null, -32600, "Invalid Request");
+        }
+        const responses: Record<string, unknown>[] = [];
+        for (const item of message) {
+          if (!isObject(item)) {
+            responses.push(errorResponse(null, -32600, "Invalid Request"));
+            continue;
+          }
+          const response = await handleRequest(item);
+          if (response !== null) responses.push(response);
+        }
+        return responses.length > 0 ? responses : null;
       }
       if (!isObject(message)) {
         return null;
