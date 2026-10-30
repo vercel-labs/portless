@@ -8,6 +8,10 @@ export interface RouteInfo {
    * matches this URL's hostname are routed to the same upstream.
    */
   tailscaleUrl?: string;
+  /** Epoch milliseconds when the route was registered. Absent on routes from older versions. */
+  registeredAt?: number;
+  /** Owning process id. Static aliases use 0. */
+  pid?: number;
 }
 
 export interface ProxyServerOptions {
@@ -25,6 +29,12 @@ export interface ProxyServerOptions {
    * Defaults to true.
    */
   strict?: boolean;
+  /**
+   * When true, refuse every connection whose peer is not a loopback address:
+   * at accept time, and again per request and per upgrade. Set when the proxy
+   * binds the wildcard address only to take a privileged port without root.
+   */
+  loopbackOnly?: boolean;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
   /** Run the daemon-owned hosts sync for the current route table. */

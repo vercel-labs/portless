@@ -25,6 +25,7 @@ const PORTLESS_STATE_FILES = [
   "server.csr",
   "server-ext.cnf",
   "ca.srl",
+  "cloudflared.yml",
 ] as const;
 
 const HOST_CERTS_DIR = "host-certs";

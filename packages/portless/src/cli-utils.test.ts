@@ -8,12 +8,14 @@ import { execFileSync } from "node:child_process";
 import {
   augmentedPath,
   buildProxyStartConfig,
+  canBindWithoutRoot,
   BLOCKED_PORTS,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
   LEGACY_SYSTEM_STATE_DIR,
   PRIVILEGED_PORT_THRESHOLD,
+  canBindProxyPort,
   RISKY_TLDS,
   USER_STATE_DIR,
   discoverState,
@@ -25,6 +27,7 @@ import {
   getProxyBindTargets,
   getRiskyTldReason,
   isHttpsEnvDisabled,
+  isUnprivilegedEnvEnabled,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
@@ -38,6 +41,7 @@ import {
   parseTldList,
   readLanMarker,
   readPersistedProxyState,
+  readUnprivilegedMarker,
   readTldFromDir,
   readTldsFromDir,
   resolveStateDir,
@@ -49,6 +53,7 @@ import {
   ownedProcessIds,
   getProcessStartTime,
   killOrphanedProcessGroup,
+  writeUnprivilegedMarker,
 } from "./cli-utils.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
@@ -60,6 +65,13 @@ describe("proxy listener interface", () => {
 
   it("uses IPv4 and IPv6 unspecified addresses in LAN mode", () => {
     expect(getProxyBindTargets(true)).toEqual([
+      { host: "0.0.0.0" },
+      { host: "::", ipv6Only: true },
+    ]);
+  });
+
+  it("uses the unspecified addresses in unprivileged mode outside LAN mode", () => {
+    expect(getProxyBindTargets(false, true)).toEqual([
       { host: "0.0.0.0" },
       { host: "::", ipv6Only: true },
     ]);
@@ -589,6 +601,25 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
+  it("injects for vitepress dev but not build", () => {
+    const dev = ["vitepress", "dev", "docs"];
+    injectFrameworkFlags(dev, 4567);
+    expect(dev).toEqual([
+      "vitepress",
+      "dev",
+      "docs",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+
+    const build = ["vitepress", "build"];
+    injectFrameworkFlags(build, 4567);
+    expect(build).toEqual(["vitepress", "build"]);
+  });
+
   it("injects for rsbuild without --strictPort", () => {
     const args = ["rsbuild", "dev"];
     injectFrameworkFlags(args, 4567);
@@ -599,6 +630,85 @@ describe("injectFrameworkFlags", () => {
     const args = ["astro", "dev"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects for astro when a global flag precedes the subcommand", () => {
+    const devArgs = ["astro", "--root", "apps/web", "dev"];
+    injectFrameworkFlags(devArgs, 4567);
+    expect(devArgs).toEqual([
+      "astro",
+      "--root",
+      "apps/web",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+
+    const previewArgs = ["astro", "--config", "astro.config.mjs", "preview"];
+    injectFrameworkFlags(previewArgs, 4567);
+    expect(previewArgs).toEqual([
+      "astro",
+      "--config",
+      "astro.config.mjs",
+      "preview",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it.each([[["--host", "0.0.0.0"]], [["--host=0.0.0.0"]]])(
+    "preserves an explicit astro host choice before the subcommand: %j",
+    (hostArgs) => {
+      const command = ["astro", "--root", "apps/web", ...hostArgs, "dev"];
+      const args = [...command];
+      injectFrameworkFlags(args, 4567);
+      expect(args).toEqual([...command, "--port", "4567"]);
+    }
+  );
+
+  it("injects astro flags before -- without treating trailing host data as an option", () => {
+    const args = ["astro", "--root", "apps/web", "dev", "--", "--host=0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "astro",
+      "--root",
+      "apps/web",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+      "--",
+      "--host=0.0.0.0",
+    ]);
+  });
+
+  it.each([
+    ["--root", "dev"],
+    ["--root", "preview"],
+    ["--config", "dev"],
+    ["--config", "preview"],
+  ])("does not mistake astro %s %s for a server subcommand", (flag, value) => {
+    const command = ["astro", flag, value, "build"];
+    const args = [...command];
+    expect(injectFrameworkFlags(args, 4567)).toEqual([]);
+    expect(args).toEqual(command);
+  });
+
+  it.each([
+    ["--root", "dev"],
+    ["--root", "preview"],
+    ["--config", "dev"],
+    ["--config", "preview"],
+  ])("recognizes astro dev after the consumed value %s %s", (flag, value) => {
+    const command = ["astro", flag, value, "dev"];
+    const args = [...command];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([...command, "--port", "4567", "--host", "127.0.0.1"]);
   });
 
   it("injects for ng without --strictPort", () => {
@@ -617,6 +727,24 @@ describe("injectFrameworkFlags", () => {
     const args = ["expo", "start"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
+  });
+
+  it("injects --port and --ip for wrangler dev", () => {
+    const args = ["wrangler", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--port", "4567", "--ip", "127.0.0.1"]);
+  });
+
+  it("skips --ip injection for wrangler when --ip is already present", () => {
+    const args = ["wrangler", "dev", "--ip", "0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--ip", "0.0.0.0", "--port", "4567"]);
+  });
+
+  it("skips --ip injection for wrangler when --ip=value is present", () => {
+    const args = ["wrangler", "dev", "--ip=0.0.0.0"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual(["wrangler", "dev", "--ip=0.0.0.0", "--port", "4567"]);
   });
 
   it("skips --host for expo in LAN mode (Metro defaults to LAN)", () => {
@@ -665,6 +793,7 @@ describe("injectFrameworkFlags", () => {
     ["react-router", "typegen"],
     ["rsbuild", "inspect"],
     ["react-native", "bundle"],
+    ["wrangler", "deploy"],
   ])("does not inject into %s %s", (framework, subcommand) => {
     const args = [framework, subcommand];
     injectFrameworkFlags(args, 4567);
@@ -1012,6 +1141,128 @@ describe("injectFrameworkFlags", () => {
     const args = ["pnpm", "exec", "astro", "dev"];
     injectFrameworkFlags(args, 4567);
     expect(args).toEqual(["pnpm", "exec", "astro", "dev", "--port", "4567", "--host", "127.0.0.1"]);
+  });
+
+  it("injects flags for npm exec astro dev with a separator", () => {
+    const args = ["npm", "exec", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "astro",
+      "dev",
+      "--",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npm exec -- astro dev without an extra separator", () => {
+    const args = ["npm", "exec", "--", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "--",
+      "astro",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npm x astro dev with a separator", () => {
+    const args = ["npm", "x", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "x",
+      "astro",
+      "dev",
+      "--",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects flags for npm exec --package astro -- astro dev", () => {
+    const args = ["npm", "exec", "--package", "astro", "--", "astro", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "--package",
+      "astro",
+      "--",
+      "astro",
+      "dev",
+      "--port",
+      "4567",
+      "--host",
+      "127.0.0.1",
+    ]);
+    const prefixed = ["npm", "--prefix", "./app", "exec", "--", "vite", "dev"];
+    injectFrameworkFlags(prefixed, 4567);
+    expect(prefixed).toEqual([
+      "npm",
+      "--prefix",
+      "./app",
+      "exec",
+      "--",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("appends only missing flags after a separator for npm exec astro dev -- --port 3000", () => {
+    const args = ["npm", "exec", "astro", "dev", "--", "--port", "3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "astro",
+      "dev",
+      "--",
+      "--port",
+      "3000",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("injects past an option npm consumes for npm exec vite dev --port=3000", () => {
+    const args = ["npm", "exec", "vite", "dev", "--port=3000"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "npm",
+      "exec",
+      "vite",
+      "dev",
+      "--port=3000",
+      "--",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
+  it("does not inject when npm may consume an option value for npm exec vite --loglevel info build", () => {
+    const args = ["npm", "exec", "vite", "--loglevel", "info", "build"];
+    expect(injectFrameworkFlags(args, 4567)).toEqual([]);
+    expect(args).toEqual(["npm", "exec", "vite", "--loglevel", "info", "build"]);
   });
 
   it("injects flags for npx rsbuild dev", () => {
@@ -1439,6 +1690,23 @@ describe("injectPackageScriptFrameworkFlags", () => {
     expect(args).toEqual(["bun", "run", "dev", "--port", "4567", "--strictPort"]);
   });
 
+  it("forwards flags through a script that uses npm exec with a separator", () => {
+    writeScripts({ dev: "npm exec -- vite dev" });
+    const args = ["npm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir);
+    expect(args).toEqual([
+      "npm",
+      "run",
+      "dev",
+      "--",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
   it("ignores commands that are not <pm> run <script>", () => {
     writeScripts({ dev: "vite dev" });
     for (const args of [
@@ -1735,6 +2003,15 @@ describe("buildProxyStartConfig", () => {
         "--wildcard",
       ],
     });
+  });
+
+  it("emits --unprivileged only when requested", () => {
+    const base = { useHttps: false, lanMode: false, tld: "localhost" };
+    expect(buildProxyStartConfig({ ...base, unprivileged: true }).args).toEqual([
+      "--no-tls",
+      "--unprivileged",
+    ]);
+    expect(buildProxyStartConfig(base).args).toEqual(["--no-tls"]);
   });
 
   it("passes auto-detected LAN IP through an internal flag", () => {
@@ -2058,6 +2335,7 @@ describe("readPersistedProxyState", () => {
       tld: "local",
       tlds: ["local"],
       lanMode: true,
+      unprivileged: false,
     });
   });
 
@@ -2335,5 +2613,126 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
       await new Promise((r) => setTimeout(r, 20));
     }
     expect(isAlive(orphanPid)).toBe(false);
+  });
+});
+
+describe("canBindProxyPort", () => {
+  it("returns true for a free unprivileged port", async () => {
+    const port = await findFreePort();
+    await expect(canBindProxyPort(port, getProxyBindTargets(false))).resolves.toBe(true);
+  });
+
+  it("leaves EADDRINUSE to the real listen", async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as net.AddressInfo;
+    try {
+      await expect(canBindProxyPort(port, [{ host: "127.0.0.1" }])).resolves.toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it.runIf(process.platform === "darwin" && process.getuid?.() !== 0)(
+    "reports EACCES for a privileged loopback bind and allows the wildcard on macOS",
+    async () => {
+      await expect(canBindProxyPort(81, getProxyBindTargets(false))).resolves.toBe(false);
+      await expect(canBindProxyPort(81, getProxyBindTargets(true))).resolves.toBe(true);
+    }
+  );
+});
+
+describe("canBindWithoutRoot", () => {
+  const unreadable = () => {
+    throw new Error("ENOENT");
+  };
+
+  it("allows any port at or above the privileged threshold on every platform", () => {
+    expect(canBindWithoutRoot(PRIVILEGED_PORT_THRESHOLD, "freebsd", unreadable)).toEqual({
+      ok: true,
+    });
+    expect(canBindWithoutRoot(8080, "linux", unreadable)).toEqual({ ok: true });
+  });
+
+  it("allows a privileged port on macOS and Windows without consulting a sysctl", () => {
+    expect(canBindWithoutRoot(80, "darwin", unreadable)).toEqual({ ok: true });
+    expect(canBindWithoutRoot(443, "win32", unreadable)).toEqual({ ok: true });
+  });
+
+  it("follows net.ipv4.ip_unprivileged_port_start on Linux", () => {
+    expect(canBindWithoutRoot(80, "linux", () => "80\n")).toEqual({ ok: true });
+    expect(canBindWithoutRoot(443, "linux", () => "80\n")).toEqual({ ok: true });
+    expect(canBindWithoutRoot(79, "linux", () => "80\n")).toEqual({
+      ok: false,
+      reason: "Port 79 is below net.ipv4.ip_unprivileged_port_start (80).",
+    });
+    expect(canBindWithoutRoot(80, "linux", () => "1024\n")).toMatchObject({ ok: false });
+  });
+
+  it("reports an unreadable sysctl instead of guessing", () => {
+    expect(canBindWithoutRoot(80, "linux", unreadable)).toEqual({
+      ok: false,
+      reason: "Could not read net.ipv4.ip_unprivileged_port_start.",
+    });
+  });
+
+  it("refuses a privileged port on platforms it does not know", () => {
+    expect(canBindWithoutRoot(80, "freebsd", unreadable)).toMatchObject({ ok: false });
+  });
+});
+
+describe("isUnprivilegedEnvEnabled", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each(["1", "true"])("is on for PORTLESS_UNPRIVILEGED=%s", (value) => {
+    vi.stubEnv("PORTLESS_UNPRIVILEGED", value);
+    expect(isUnprivilegedEnvEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "yes", ""])("is off for PORTLESS_UNPRIVILEGED=%s", (value) => {
+    vi.stubEnv("PORTLESS_UNPRIVILEGED", value);
+    expect(isUnprivilegedEnvEnabled()).toBe(false);
+  });
+
+  it("is off when unset", () => {
+    vi.stubEnv("PORTLESS_UNPRIVILEGED", undefined);
+    expect(isUnprivilegedEnvEnabled()).toBe(false);
+  });
+});
+
+describe("readUnprivilegedMarker / writeUnprivilegedMarker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-unpriv-marker-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("is absent by default", () => {
+    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
+  });
+
+  it("round-trips through write and remove", () => {
+    writeUnprivilegedMarker(tmpDir, true);
+    expect(readUnprivilegedMarker(tmpDir)).toBe(true);
+    writeUnprivilegedMarker(tmpDir, false);
+    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
+  });
+
+  it("is part of the persisted proxy state", () => {
+    vi.stubEnv("PORTLESS_STATE_DIR", tmpDir);
+    try {
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "8080");
+      expect(readPersistedProxyState()?.unprivileged).toBe(false);
+      writeUnprivilegedMarker(tmpDir, true);
+      expect(readPersistedProxyState()?.unprivileged).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

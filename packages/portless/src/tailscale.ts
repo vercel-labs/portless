@@ -52,6 +52,7 @@ function defaultRunner(args: string[]): TailscaleCommandResult {
     encoding: "utf-8",
     killSignal: "SIGKILL",
     timeout: TAILSCALE_COMMAND_TIMEOUT_MS,
+    windowsHide: true,
   });
   return {
     status: result.status,
@@ -209,11 +210,12 @@ interface ServeStatusWeb {
 interface ServeStatusJson {
   Web?: ServeStatusWeb;
   TCP?: Record<string, unknown>;
+  Foreground?: Record<string, ServeStatusJson>;
 }
 
 /**
  * Query `tailscale serve status --json` and return the set of HTTPS ports
- * currently in use.
+ * currently in use, including ports held by foreground sessions.
  */
 export function getUsedServePorts(runner: TailscaleCommandRunner = defaultRunner): Set<number> {
   const result = runner(["serve", "status", "--json"]);
@@ -223,18 +225,21 @@ export function getUsedServePorts(runner: TailscaleCommandRunner = defaultRunner
   try {
     const config = JSON.parse(result.stdout) as ServeStatusJson;
     const ports = new Set<number>();
-    if (config.Web) {
-      for (const hostPort of Object.keys(config.Web)) {
-        const match = hostPort.match(/:(\d+)$/);
-        if (match) {
-          ports.add(parseInt(match[1], 10));
+    for (const session of [config, ...Object.values(config.Foreground ?? {})]) {
+      if (!session || typeof session !== "object") continue;
+      if (session.Web) {
+        for (const hostPort of Object.keys(session.Web)) {
+          const match = hostPort.match(/:(\d+)$/);
+          if (match) {
+            ports.add(parseInt(match[1], 10));
+          }
         }
       }
-    }
-    if (config.TCP) {
-      for (const portStr of Object.keys(config.TCP)) {
-        const p = parseInt(portStr, 10);
-        if (!isNaN(p)) ports.add(p);
+      if (session.TCP) {
+        for (const portStr of Object.keys(session.TCP)) {
+          const p = parseInt(portStr, 10);
+          if (!isNaN(p)) ports.add(p);
+        }
       }
     }
     return ports;

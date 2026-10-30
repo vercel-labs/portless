@@ -74,6 +74,10 @@ portless docs.myapp next dev
       <td>`--ngrok`</td>
       <td>Share the app publicly via ngrok.</td>
     </tr>
+    <tr>
+      <td>`--cloudflare`</td>
+      <td>Share the app publicly via a Cloudflare quick tunnel. Requires `cloudflared`.</td>
+    </tr>
   </tbody>
 </table>
 
@@ -119,7 +123,7 @@ portless alias --remove my-postgres # remove the alias
 portless list
 ```
 
-Shows active routes and their assigned ports.
+Shows active routes, their assigned ports, and how long each app has been running.
 
 ## Doctor
 
@@ -174,7 +178,16 @@ portless proxy start
   <tbody>
     <tr>
       <td>`-p, --port <number>`</td>
-      <td>Proxy port (default: 443, or 80 with `--no-tls`). Auto-elevates with sudo.</td>
+      <td>Proxy port (default: 443, or 80 with `--no-tls`). Auto-elevates with sudo only when the bind needs root, unless `--unprivileged` is set. A failed elevation exits 1 without switching ports.</td>
+    </tr>
+    <tr>
+      <td>`--unprivileged`</td>
+      <td>
+        Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers
+        only. Serves plain HTTP on port 80 unless `--https` is given, never writes the hosts file,
+        and is remembered for auto-start. On Linux, requires `net.ipv4.ip_unprivileged_port_start`
+        to cover the port.
+      </td>
     </tr>
     <tr>
       <td>`--no-tls`</td>
@@ -278,6 +291,20 @@ portless hosts clean    # remove portless entries from /etc/hosts
 Auto-sync is on by default. Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
 Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
+
+## MCP server
+
+```bash
+portless mcp [--tools <profiles>]
+```
+
+Starts a stdio MCP server using line-delimited JSON-RPC. The default `core` profile includes route listing, URL lookup, static alias management, and profile discovery. Use comma-separated profiles: `proxy` adds proxy start and stop tools, `diagnostics` adds doctor, prune, and version tools, and `all` enables every tool. `default` aliases `core`; `full` aliases `all`.
+
+Tools accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments, except `tools_profiles`. Bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. The server does not run dev servers; use `portless run <cmd>` in a shell.
+
+```json
+{ "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }
+```
 
 ## Bypass portless
 

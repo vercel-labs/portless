@@ -16,11 +16,13 @@ import {
 } from "./hosts-sync-auth.js";
 import {
   fixOwnership,
+  formatUptime,
   formatUrl,
   isErrnoException,
   isProcessAlive as isPidAlive,
   parseHostname,
   parseHostnames,
+  parsePort,
 } from "./utils.js";
 import {
   checkHostResolution,
@@ -29,7 +31,7 @@ import {
   cleanHostsFile,
   shouldAutoSyncHosts,
 } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore } from "./routes.js";
+import { FILE_MODE, RouteConflictError, RouteStore, type RouteMapping } from "./routes.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
@@ -39,7 +41,8 @@ import {
   registerServe,
   unregisterTailscale,
 } from "./tailscale.js";
-import { ensureNgrokAvailable, startNgrok, stopNgrok, stopNgrokProcess } from "./ngrok.js";
+import { ensureNgrokAvailable, startNgrok, stopNgrokProcess, stopTunnelPid } from "./tunnel.js";
+import { ensureCloudflaredAvailable, startCloudflare } from "./cloudflare.js";
 import {
   inferProjectName,
   detectWorktreePrefix,
@@ -49,6 +52,7 @@ import {
 } from "./auto.js";
 import {
   buildProxyStartConfig,
+  canBindProxyPort,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_ENV,
@@ -63,9 +67,14 @@ import {
   findPidsOnPort,
   killOrphanedProcessGroup,
   getProcessStartTime,
+  getProcessCommand,
   getDefaultPort,
   getDefaultTlds,
   getProxyBindTargets,
+  canBindWithoutRoot,
+  isUnprivilegedEnvEnabled,
+  readUnprivilegedMarker,
+  writeUnprivilegedMarker,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -120,7 +129,7 @@ import {
   loadPackagePortlessConfig,
   ConfigValidationError,
 } from "./config.js";
-import type { AppConfig } from "./config.js";
+import type { AppConfig, LoadedConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -132,6 +141,7 @@ import {
 } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
 import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
+import { runMcp } from "./mcp.js";
 
 const chalk = colors;
 
@@ -161,6 +171,7 @@ type ProxyConfigExplicitness = {
   lanIp: boolean;
   tlds: boolean;
   useWildcard: boolean;
+  unprivileged: boolean;
 };
 
 type ProxyConfig = {
@@ -173,6 +184,8 @@ type ProxyConfig = {
   tld: string;
   tlds: string[];
   useWildcard: boolean;
+  /** Bind the wildcard address, accept loopback peers only, never elevate. */
+  unprivileged: boolean;
 };
 
 function normalizeTlds(tlds: readonly string[]): string[] {
@@ -203,11 +216,13 @@ function defaultProxyConfig(
     tld: primaryTld(effectiveTlds),
     tlds: effectiveTlds,
     useWildcard: false,
+    unprivileged: false,
   };
 }
 
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
+  persistedUnprivileged: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -217,6 +232,7 @@ function resolveProxyConfig(options: {
   lanIp: string | null;
   tlds: string[];
   useWildcard: boolean;
+  unprivileged: boolean;
 }): ProxyConfig {
   const config = defaultProxyConfig(
     options.defaultTlds,
@@ -265,6 +281,18 @@ function resolveProxyConfig(options: {
     config.useWildcard = options.useWildcard;
   }
 
+  // Like LAN mode, a stopped unprivileged proxy keeps its mode for the next
+  // start through proxy.unprivileged unless PORTLESS_UNPRIVILEGED overrides it.
+  config.unprivileged = options.explicit.unprivileged
+    ? options.unprivileged
+    : options.persistedUnprivileged;
+
+  // Unprivileged mode promises no prompt of any kind, and trusting a
+  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
+  if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
+    config.useHttps = false;
+  }
+
   if (!config.lanMode) {
     config.lanIp = null;
     config.lanIpExplicit = false;
@@ -301,6 +329,7 @@ function readCurrentProxyConfig(dir: string): ProxyConfig {
     tld,
     tlds,
     useWildcard: false,
+    unprivileged: readUnprivilegedMarker(dir),
   };
 }
 
@@ -333,6 +362,14 @@ function getProxyConfigMismatchMessages(
     );
   }
 
+  if (explicit.unprivileged && desiredConfig.unprivileged !== actualConfig.unprivileged) {
+    messages.push(
+      desiredConfig.unprivileged
+        ? "requested unprivileged mode, but the running proxy was started with elevation"
+        : "requested elevated mode, but the running proxy is unprivileged"
+    );
+  }
+
   if (
     explicit.tlds &&
     (desiredConfig.tlds.length !== actualConfig.tlds.length ||
@@ -346,8 +383,22 @@ function getProxyConfigMismatchMessages(
   return messages;
 }
 
+/**
+ * Whether starting the proxy on `port` needs sudo. Ports below 1024 are only
+ * elevated when a bind on the real listener targets fails with EACCES, so a
+ * Linux `ip_unprivileged_port_start` sysctl or a wildcard bind on macOS skips
+ * the prompt.
+ */
+async function proxyPortNeedsElevation(port: number, lanMode: boolean): Promise<boolean> {
+  if (isWindows || port >= PRIVILEGED_PORT_THRESHOLD || (process.getuid?.() ?? -1) === 0) {
+    return false;
+  }
+  const lanBind = lanMode && isMdnsSupported().supported;
+  return !(await canBindProxyPort(port, getProxyBindTargets(lanBind)));
+}
+
 function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string {
-  const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
+  const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && !config.unprivileged;
   const { args } = buildProxyStartConfig({
     useHttps: config.useHttps,
     customCertPath: config.customCertPath,
@@ -358,6 +409,7 @@ function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string
     tld: config.tld,
     tlds: config.tlds,
     useWildcard: config.useWildcard,
+    unprivileged: config.unprivileged,
     includePort: proxyPort !== getDefaultPort(config.useHttps),
     proxyPort,
   });
@@ -369,7 +421,8 @@ function printProxyConfigMismatch(
   desiredConfig: ProxyConfig,
   messages: string[]
 ): never {
-  const needsSudo = !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD;
+  const needsSudo =
+    !isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && !desiredConfig.unprivileged;
   const portFlag = proxyPort !== getDefaultPort(desiredConfig.useHttps) ? ` -p ${proxyPort}` : "";
   console.error(
     chalk.yellow(`Proxy is already running on port ${proxyPort} with a different config.`)
@@ -538,14 +591,66 @@ function addRoutes(
 function stopOrphanedProcessGroups(store: RouteStore): void {
   const seen = new Set<number>();
   for (const route of store.loadRoutesRaw()) {
+    if (route.pid === 0 || isPidAlive(route.pid)) continue;
+    for (const t of stopRecordedTunnels(route, true)) {
+      const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
+      console.log(colors.yellow(message));
+    }
     const pgid = route.childPgid;
-    if (!pgid || seen.has(pgid) || route.pid === 0 || isPidAlive(route.pid)) continue;
+    if (!pgid || seen.has(pgid)) continue;
     seen.add(pgid);
     if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
       console.log(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
     }
+  }
+}
+
+const PROCESS_TUNNELS = [
+  {
+    label: "ngrok",
+    binary: "ngrok",
+    env: "PORTLESS_NGROK",
+    via: "ngrok",
+    install: "https://ngrok.com/download",
+    urlField: "ngrokUrl",
+    pidField: "ngrokPid",
+    ensure: ensureNgrokAvailable,
+    start: startNgrok,
+  },
+  {
+    label: "Cloudflare",
+    binary: "cloudflared",
+    env: "PORTLESS_CLOUDFLARE",
+    via: "Cloudflare Tunnel",
+    install: "https://developers.cloudflare.com/tunnel/downloads/",
+    urlField: "cloudflareUrl",
+    pidField: "cloudflarePid",
+    ensure: ensureCloudflaredAvailable,
+    start: startCloudflare,
+  },
+] as const;
+
+type ProcessTunnel = (typeof PROCESS_TUNNELS)[number];
+
+/** Stop the tunnel processes recorded on a route; `verify` skips pids not running the tunnel binary. */
+function stopRecordedTunnels(route: RouteMapping, verify = false): ProcessTunnel[] {
+  return PROCESS_TUNNELS.filter((t) => {
+    const pid = route[t.pidField];
+    if (!pid || (verify && getProcessCommand(pid) !== t.binary)) return false;
+    stopTunnelPid(pid);
+    return true;
+  });
+}
+
+/** Print the install or auth hint that matches a tunnel error message. */
+function printTunnelHint(t: ProcessTunnel, message: string): void {
+  if (message.includes(`${t.binary} CLI not found`)) {
+    console.error(colors.blue(`Install ${t.binary}: ${t.install}`));
+  } else if (t.binary === "ngrok" && message.includes("authentication is not configured")) {
+    console.error(colors.blue("Configure ngrok authentication:"));
+    console.error(colors.cyan("  ngrok config add-authtoken <token>"));
   }
 }
 
@@ -583,7 +688,8 @@ function startProxyServer(
   tlsOptions?: { cert: Buffer; key: Buffer },
   lanIp?: string | null,
   strict?: boolean,
-  customCert = false
+  customCert = false,
+  unprivileged = false
 ): void {
   store.ensureDir();
 
@@ -591,8 +697,11 @@ function startProxyServer(
   const mdnsSupport = isMdnsSupported();
   let activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
   const lanModeActive = activeLanIp !== null;
-  const bindTargets = getProxyBindTargets(lanModeActive);
+  const bindTargets = getProxyBindTargets(lanModeActive, unprivileged);
   const primaryBindTarget = bindTargets[0]!;
+  // LAN mode wants remote peers; unprivileged mode binds the same addresses
+  // only to get the port, so it keeps the proxy loopback-only itself.
+  const loopbackOnly = unprivileged && !lanModeActive;
   const lanIpPinned = !!process.env.PORTLESS_LAN_IP;
   let lanMonitor: ReturnType<typeof startLanIpMonitor> | null = null;
   if (lanIp && !mdnsSupport.supported) {
@@ -618,7 +727,9 @@ function startProxyServer(
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
-  const autoSyncHosts = shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
+  // Writing the hosts file needs root, which unprivileged mode never has, so
+  // it does not try; `proxy start` refuses an explicit PORTLESS_SYNC_HOSTS=1.
+  const autoSyncHosts = !unprivileged && shouldAutoSyncHosts(process.env.PORTLESS_SYNC_HOSTS);
   const hostsSyncToken = generateHostsSyncToken();
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
@@ -735,6 +846,7 @@ function startProxyServer(
       tld,
       tlds,
       strict,
+      loopbackOnly,
       onError: (msg) => console.error(colors.red(msg)),
       onHostsSyncRequest,
       hostsSyncToken,
@@ -778,7 +890,7 @@ function startProxyServer(
 
   const proto = isTls ? "HTTPS/2" : "HTTP";
   const tldLabel = tlds.length > 1 || tld !== DEFAULT_TLD ? ` (TLDs: ${formatTldList(tlds)})` : "";
-  const modeLabel = strict === false ? " (wildcard)" : "";
+  const modeLabel = `${strict === false ? " (wildcard)" : ""}${loopbackOnly ? " (unprivileged, loopback peers only)" : ""}`;
 
   for (const bindTarget of bindTargets.slice(1)) {
     const additionalServer = createServer();
@@ -807,7 +919,7 @@ function startProxyServer(
   // proxy on 443 still works; users just won't get automatic redirects).
   if (isTls && proxyPort !== 80) {
     for (const bindTarget of bindTargets) {
-      const redirectServer = createHttpRedirectServer(proxyPort);
+      const redirectServer = createHttpRedirectServer(proxyPort, loopbackOnly);
       redirectServers.add(redirectServer);
       redirectServer.on("error", () => {
         redirectServers.delete(redirectServer);
@@ -833,6 +945,7 @@ function startProxyServer(
     writeCustomCertMarker(store.dir, isTls && customCert);
     writeTldsFile(store.dir, tlds);
     writeLanMarker(store.dir, activeLanIp);
+    writeUnprivilegedMarker(store.dir, unprivileged);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
     console.log(
       colors.green(
@@ -1065,15 +1178,18 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   for (const route of routes) {
     const url = formatUrl(route.hostname, proxyPort, tls);
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
+    const uptime = route.pid === 0 ? null : formatUptime(route.registeredAt, Date.now());
     console.log(
-      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}`
+      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}${uptime ? ` ${colors.gray(`up ${uptime}`)}` : ""}`
     );
     if (route.tailscaleUrl) {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
     }
-    if (route.ngrokUrl) {
-      console.log(`    ${colors.gray("ngrok:")} ${colors.green(route.ngrokUrl)}`);
+    for (const t of PROCESS_TUNNELS) {
+      const tunnelUrl = route[t.urlField];
+      if (tunnelUrl)
+        console.log(`    ${colors.gray(t.label.toLowerCase() + ":")} ${colors.green(tunnelUrl)}`);
     }
   }
   console.log();
@@ -1100,9 +1216,11 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     lanIp: process.env.PORTLESS_LAN_IP !== undefined,
     tlds: process.env.PORTLESS_TLD !== undefined,
     useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+    unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
   };
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
+    persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
     explicit,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
@@ -1112,6 +1230,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     lanIp: process.env.PORTLESS_LAN_IP || null,
     tlds: envTlds,
     useWildcard: isWildcardEnvEnabled(),
+    unprivileged: isUnprivilegedEnvEnabled(),
   });
   return { explicit, desiredConfig, envTld, envTlds };
 }
@@ -1155,6 +1274,9 @@ async function ensureProxyRunning(
     if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
       startConfig.lanMode = persisted.lanMode;
     }
+    if (!explicit.unprivileged && persisted.unprivileged !== desiredConfig.unprivileged) {
+      startConfig.unprivileged = persisted.unprivileged;
+    }
     const envPort = getDefaultPort(startConfig.useHttps);
     if (persisted.port !== envPort) {
       startPort = persisted.port;
@@ -1162,7 +1284,9 @@ async function ensureProxyRunning(
   }
 
   const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
-  const needsSudo = !isWindows && effectivePort < PRIVILEGED_PORT_THRESHOLD;
+  const needsSudo =
+    !startConfig.unprivileged &&
+    (await proxyPortNeedsElevation(effectivePort, startConfig.lanMode));
   const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
   const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
 
@@ -1192,6 +1316,7 @@ async function ensureProxyRunning(
     tld: startConfig.tld,
     tlds: startConfig.tlds,
     useWildcard: startConfig.useWildcard,
+    unprivileged: startConfig.unprivileged,
     includePort: startPort !== undefined,
     proxyPort: startPort,
   });
@@ -1251,7 +1376,7 @@ async function runApp(
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
   const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
-  const wantsNgrok = isEnabledEnv(process.env.PORTLESS_NGROK);
+  const tunnels = PROCESS_TUNNELS.filter((t) => isEnabledEnv(process.env[t.env]));
   let tsBaseUrl: string | undefined;
 
   if (wantsTailscale) {
@@ -1274,15 +1399,13 @@ async function runApp(
     }
   }
 
-  if (wantsNgrok) {
+  for (const t of tunnels) {
     try {
-      ensureNgrokAvailable();
+      t.ensure();
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
-      if (message.includes("not found")) {
-        console.error(colors.blue("Install ngrok: https://ngrok.com/download"));
-      }
+      printTunnelHint(t, message);
       process.exit(1);
     }
   }
@@ -1402,24 +1525,26 @@ async function runApp(
   // Readiness was already checked at the top of runApp().
   let tailscaleHttpsPort: number | undefined;
   let tailscaleUrl: string | undefined;
-  let ngrokUrl: string | undefined;
-  let ngrokProcess: Awaited<ReturnType<typeof startNgrok>> | undefined;
-  let stoppingNgrok = false;
-  let ngrokRouteReady = false;
-  let ngrokExitHandled = false;
-  let pendingNgrokExit: { code: number | null; signal: NodeJS.Signals | null } | undefined;
+  type TunnelRun = {
+    t: ProcessTunnel;
+    proc?: Awaited<ReturnType<typeof startNgrok>>;
+    ready?: boolean;
+    handled?: boolean;
+    pending?: () => void;
+  };
+  const tunnelRuns = tunnels.map((t): TunnelRun => ({ t }));
+  let stoppingTunnels = false;
 
-  const handleNgrokExit = (code: number | null, signal: NodeJS.Signals | null) => {
-    if (stoppingNgrok || ngrokExitHandled) return;
-    if (!ngrokRouteReady) {
-      pendingNgrokExit = { code, signal };
+  const handleTunnelExit = (run: TunnelRun, code: number | null, signal: NodeJS.Signals | null) => {
+    if (stoppingTunnels || run.handled) return;
+    if (!run.ready) {
+      run.pending = () => handleTunnelExit(run, code, signal);
       return;
     }
-    ngrokExitHandled = true;
-    ngrokUrl = undefined;
+    run.handled = true;
     console.warn(
       colors.yellow(
-        `Warning: ngrok tunnel for ${hostname} stopped${formatProcessExitSuffix(
+        `Warning: ${run.t.label} tunnel for ${hostname} stopped${formatProcessExitSuffix(
           code,
           signal
         )}. Removing its public URL from the route list.`
@@ -1427,8 +1552,8 @@ async function runApp(
     );
     try {
       store.updateRoute(hostname, {
-        ngrokUrl: null,
-        ngrokPid: null,
+        [run.t.urlField]: null,
+        [run.t.pidField]: null,
       });
     } catch {
       // Best-effort cleanup; non-fatal
@@ -1481,39 +1606,33 @@ async function runApp(
     }
   }
 
-  if (wantsNgrok) {
+  for (const run of tunnelRuns) {
     try {
-      ngrokProcess = await startNgrok(port, {
+      run.proc = await run.t.start(port, {
         hostHeader: hostname,
-        onExit: handleNgrokExit,
+        onExit: (code, signal) => handleTunnelExit(run, code, signal),
+        configPath: path.join(store.dir, "cloudflared.yml"),
       });
-      ngrokUrl = ngrokProcess.url;
-      console.log(chalk.green(`  ngrok -> ${ngrokUrl}`));
-      console.log(chalk.gray("  (accessible from the public internet via ngrok)\n"));
+      console.log(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
+      console.log(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
 
       try {
         store.updateRoute(hostname, {
-          ngrokUrl,
-          ngrokPid: ngrokProcess.pid,
+          [run.t.urlField]: run.proc.url,
+          [run.t.pidField]: run.proc.pid,
         });
       } catch {
         // Non-fatal: route display metadata only
       } finally {
-        ngrokRouteReady = true;
-        if (pendingNgrokExit) {
-          handleNgrokExit(pendingNgrokExit.code, pendingNgrokExit.signal);
-          pendingNgrokExit = undefined;
-        }
+        run.ready = true;
+        run.pending?.();
       }
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
-      if (message.includes("not found")) {
-        console.error(colors.blue("Install ngrok: https://ngrok.com/download"));
-      } else if (message.includes("authentication")) {
-        console.error(colors.blue("Configure ngrok authentication:"));
-        console.error(colors.cyan("  ngrok config add-authtoken <token>"));
-      }
+      printTunnelHint(run.t, message);
+      stoppingTunnels = true;
+      for (const started of tunnelRuns) stopNgrokProcess(started.proc?.child);
       try {
         unregisterTailscale({
           tailscaleHttpsPort,
@@ -1578,6 +1697,10 @@ async function runApp(
     )
   );
 
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
+    process.once(signal, () => (stoppingTunnels = true));
+  }
+
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
@@ -1590,7 +1713,9 @@ async function runApp(
       // own LAN discovery natively.
       ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
       ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
-      ...(ngrokUrl ? { PORTLESS_NGROK_URL: ngrokUrl } : {}),
+      ...Object.fromEntries(
+        tunnelRuns.flatMap((r) => (r.proc && !r.handled ? [[`${r.t.env}_URL`, r.proc.url]] : []))
+      ),
       ...caEnv,
     },
     onSpawn: (pid) => {
@@ -1604,8 +1729,8 @@ async function runApp(
       }
     },
     onCleanup: () => {
-      stoppingNgrok = true;
-      stopNgrokProcess(ngrokProcess?.child);
+      stoppingTunnels = true;
+      for (const run of tunnelRuns) stopNgrokProcess(run.proc?.child);
       try {
         unregisterTailscale({
           tailscaleHttpsPort,
@@ -1647,8 +1772,8 @@ function parseAppPort(value: string | undefined): number {
     console.error(colors.red("Error: --app-port requires a port number."));
     process.exit(1);
   }
-  const port = parseInt(value, 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
+  const port = parsePort(value);
+  if (port === null) {
     console.error(colors.red(`Error: Invalid app port "${value}". Must be 1-65535.`));
     process.exit(1);
   }
@@ -1658,8 +1783,8 @@ function parseAppPort(value: string | undefined): number {
 function appPortFromEnv(): number | undefined {
   const envVal = process.env.PORTLESS_APP_PORT;
   if (!envVal) return undefined;
-  const port = parseInt(envVal, 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
+  const port = parsePort(envVal);
+  if (port === null) {
     console.error(colors.red(`Error: Invalid PORTLESS_APP_PORT="${envVal}". Must be 1-65535.`));
     process.exit(1);
   }
@@ -1678,6 +1803,10 @@ function applySharingFlag(flag: string): boolean {
   }
   if (flag === "--ngrok") {
     process.env.PORTLESS_NGROK = "1";
+    return true;
+  }
+  if (flag === "--cloudflare") {
+    process.env.PORTLESS_CLOUDFLARE = "1";
     return true;
   }
   return false;
@@ -1720,6 +1849,7 @@ ${colors.bold("Options:")}
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
+  --cloudflare           Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -1759,7 +1889,7 @@ ${colors.bold("Examples:")}
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --help"
+          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
         )
       );
       process.exit(1);
@@ -1799,7 +1929,9 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --ngrok")
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
+        )
       );
       process.exit(1);
     }
@@ -1825,7 +1957,9 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
-        colors.blue("Known flags: --force, --app-port, --tailscale, --funnel, --ngrok")
+        colors.blue(
+          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
+        )
       );
       process.exit(1);
     }
@@ -1863,11 +1997,12 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
   ${colors.cyan("portless proxy stop")}              Stop the proxy
+  ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
-  ${colors.cyan("portless list")}                    Show active routes
+  ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
@@ -1917,13 +2052,14 @@ ${colors.bold("How it works:")}
      (apps get a random port in the 4000-4999 range via PORT)
   3. Access via https://<name>.localhost
   4. .localhost domains auto-resolve to 127.0.0.1
-  5. Frameworks that ignore PORT (Vite, VitePlus, Astro, React Router, Angular,
-     Expo, React Native) get --port and, when needed, --host flags
-     injected automatically, including through a package script whose command
-     starts with the framework. Only server commands (dev, serve, preview,
-     start, a bare vite, or vite [root]) get them; build, optimize, test and
-     the like reject them, and an invocation portless cannot classify is left
-     alone too. Expo --localhost, --lan and --tunnel modes are preserved while
+  5. Frameworks that ignore PORT (Vite, VitePlus, VitePress, Astro, React
+     Router, Angular, Expo, React Native, Wrangler) get --port and, when
+     needed, --host flags injected automatically (--ip for Wrangler),
+     including through a package script whose command starts with the
+     framework. Only server commands (dev, serve, preview, start, a bare
+     vite, or vite [root]) get them; build, optimize, test and the like
+     reject them, and an invocation portless cannot classify is left alone
+     too. Expo --localhost, --lan and --tunnel modes are preserved while
      the assigned port is still injected.
      Portless also leaves a script alone when it is
      compound (&&, |, ;), ends in a # comment, ends its own option list with
@@ -1931,6 +2067,8 @@ ${colors.bold("How it works:")}
      script, or is invoked with runner flags before the script name
      (bun run --bun dev); set the port in those yourself
   6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
+  7. Proxy errors (404, 421 misdirected, 502, 508) are an HTML page for browsers and JSON
+     ({"error","upstream","message"}) for clients that do not accept text/html
   Elevated proxy processes keep the invoking user's ~/.portless state directory.
 
 ${colors.bold("HTTP/2 + HTTPS (default):")}
@@ -1940,6 +2078,7 @@ ${colors.bold("HTTP/2 + HTTPS (default):")}
   On first use, portless generates a local CA and adds it to your
   system trust store. No browser warnings. Disable with --no-tls.
   On WSL, portless also adds the CA to the Windows user certificate store.
+  Linux containers on a WSL2 host use only the Linux trust store.
 
 ${colors.bold("LAN mode:")}
   Use --lan to make services accessible from other devices (phones,
@@ -1980,7 +2119,14 @@ ${colors.bold("Options:")}
                                 Adds worktree prefix in git worktrees
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
-                                Standard ports auto-elevate with sudo on macOS/Linux
+                                Standard ports auto-elevate with sudo when the bind needs root
+                                Failed elevation exits nonzero without changing ports
+                                unless --unprivileged is set
+  --unprivileged                Take a port below 1024 without sudo: bind the wildcard
+                                address and accept loopback peers only. Serves plain
+                                HTTP on port 80 unless --https is also given, and
+                                never writes the hosts file. Remembered after
+                                stop; PORTLESS_UNPRIVILEGED=0 switches back
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -1995,6 +2141,7 @@ ${colors.bold("Options:")}
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
+  --cloudflare                  Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
   --force                       Kill the existing process and take over its route
   --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
   --                            Stop flag parsing; everything after is passed to the child
@@ -2007,10 +2154,12 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
+  PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
+  PORTLESS_CLOUDFLARE=1         Share apps publicly via Cloudflare (same as --cloudflare)
   PORTLESS_STATE_DIR=<path>     Override the state directory
   PORTLESS=0                    Run command directly without proxy
 
@@ -2021,6 +2170,7 @@ ${colors.bold("Child process environment:")}
   PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
   PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
   PORTLESS_NGROK_URL            ngrok URL of the app (when --ngrok is active)
+  PORTLESS_CLOUDFLARE_URL       Cloudflare URL of the app (when --cloudflare is active)
   NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
 
 ${colors.bold("Safari / DNS:")}
@@ -2041,7 +2191,7 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, doctor, trust, clean, prune, proxy, service are subcommands and
+  run, get, alias, hosts, list, doctor, trust, clean, prune, proxy, service, mcp are subcommands and
   cannot be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
@@ -2180,9 +2330,8 @@ ${colors.bold("Options:")}
         // Tailscale may not be installed; non-fatal
       }
     }
-    if (route.ngrokPid) {
-      stopNgrok(route);
-      console.log(colors.green(`Stopped ngrok tunnel for ${route.hostname}.`));
+    for (const t of stopRecordedTunnels(route)) {
+      console.log(colors.green(`Stopped ${t.label} tunnel for ${route.hostname}.`));
     }
   }
 
@@ -2278,9 +2427,8 @@ ${colors.bold("Options:")}
         // Tailscale CLI may not be installed; non-fatal during prune
       }
     }
-    if (route.ngrokPid) {
-      stopNgrok(route);
-      console.log(`  ${route.hostname} - stopped ngrok tunnel`);
+    for (const t of stopRecordedTunnels(route)) {
+      console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
   }
 
@@ -2451,8 +2599,8 @@ ${colors.bold("Examples:")}
   }
 
   const hostnames = buildHostnames(aliasName, tlds);
-  const port = parseInt(aliasPort, 10);
-  if (isNaN(port) || port < 1 || port > 65535) {
+  const port = parsePort(aliasPort);
+  if (port === null) {
     console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
     process.exit(1);
   }
@@ -2977,10 +3125,13 @@ async function handleProxy(args: string[]): Promise<void> {
     if (portIdx !== -1) {
       const portValue = args[portIdx + 1];
       if (portValue && !portValue.startsWith("-")) {
-        const parsed = parseInt(portValue, 10);
-        if (!isNaN(parsed) && parsed >= 1 && parsed <= 65535) {
-          explicitPort = parsed;
+        const parsed = parsePort(portValue);
+        if (parsed === null) {
+          console.error(colors.red(`Error: Invalid port number: ${portValue}`));
+          console.error(colors.blue("Port must be between 1 and 65535."));
+          process.exit(1);
         }
+        explicitPort = parsed;
       }
     }
 
@@ -3011,6 +3162,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
+  ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
@@ -3032,6 +3184,7 @@ ${colors.bold("LAN mode (--lan):")}
 
   const isForeground = args.includes("--foreground");
   const skipTrust = args.includes("--skip-trust");
+  const hasUnprivilegedFlag = args.includes("--unprivileged");
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
   const hasHttpsFlag = args.includes("--https");
@@ -3079,12 +3232,13 @@ ${colors.bold("LAN mode (--lan):")}
       console.error(colors.cyan("  portless proxy start -p 8080"));
       process.exit(1);
     }
-    proxyPort = parseInt(portValue, 10);
-    if (isNaN(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
+    const parsed = parsePort(portValue);
+    if (parsed === null) {
       console.error(colors.red(`Error: Invalid port number: ${portValue}`));
       console.error(colors.blue("Port must be between 1 and 65535."));
       process.exit(1);
     }
+    proxyPort = parsed;
     hasExplicitPort = true;
   }
 
@@ -3134,6 +3288,7 @@ ${colors.bold("LAN mode (--lan):")}
     lanIp: process.env.PORTLESS_LAN_IP !== undefined,
     tlds: tldFlagValues.length > 0 || process.env.PORTLESS_TLD !== undefined,
     useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
+    unprivileged: hasUnprivilegedFlag || process.env.PORTLESS_UNPRIVILEGED !== undefined,
   };
 
   // Resolve state directory based on the port
@@ -3154,6 +3309,7 @@ ${colors.bold("LAN mode (--lan):")}
   }
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
+    persistedUnprivileged: readUnprivilegedMarker(stateDir),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
@@ -3163,6 +3319,7 @@ ${colors.bold("LAN mode (--lan):")}
     lanIp: process.env.PORTLESS_LAN_IP || null,
     tlds,
     useWildcard,
+    unprivileged: hasUnprivilegedFlag || isUnprivilegedEnvEnabled(),
   });
   const lanMode = desiredConfig.lanMode;
   useHttps = desiredConfig.useHttps;
@@ -3171,6 +3328,7 @@ ${colors.bold("LAN mode (--lan):")}
   tld = desiredConfig.tld;
   tlds = desiredConfig.tlds;
   const desiredWildcard = desiredConfig.useWildcard;
+  const desiredUnprivileged = desiredConfig.unprivileged;
   let lanIp: string | null = desiredConfig.lanIpExplicit ? desiredConfig.lanIp : null;
 
   if (!hasExplicitPort && runningPort === null) {
@@ -3196,8 +3354,28 @@ ${colors.bold("LAN mode (--lan):")}
     }
   }
 
+  const syncExplicitlyOn =
+    process.env.PORTLESS_SYNC_HOSTS === "1" || process.env.PORTLESS_SYNC_HOSTS === "true";
+  if (desiredUnprivileged && syncExplicitlyOn) {
+    console.error(
+      colors.red("Error: PORTLESS_SYNC_HOSTS=1 cannot be combined with unprivileged mode.")
+    );
+    console.error(
+      colors.blue(`Writing ${HOSTS_DISPLAY} needs root, which unprivileged mode never asks for.`)
+    );
+    console.error(
+      colors.blue(
+        "Unset PORTLESS_SYNC_HOSTS, or start without --unprivileged. To add entries once:"
+      )
+    );
+    console.error(colors.cyan("  portless hosts sync"));
+    process.exit(1);
+  }
+
   const syncDisabled =
-    process.env.PORTLESS_SYNC_HOSTS === "0" || process.env.PORTLESS_SYNC_HOSTS === "false";
+    desiredUnprivileged ||
+    process.env.PORTLESS_SYNC_HOSTS === "0" ||
+    process.env.PORTLESS_SYNC_HOSTS === "false";
   const nonDefaultTlds = tlds.filter((configuredTld) => configuredTld !== DEFAULT_TLD);
   if (nonDefaultTlds.length > 0 && !lanMode && syncDisabled) {
     console.warn(
@@ -3209,7 +3387,7 @@ ${colors.bold("LAN mode (--lan):")}
     console.warn(colors.cyan("  portless hosts sync"));
   }
 
-  let store = new RouteStore(stateDir, {
+  const store = new RouteStore(stateDir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
@@ -3278,11 +3456,32 @@ ${colors.bold("LAN mode (--lan):")}
     tld,
     tlds,
     useWildcard: desiredWildcard,
+    unprivileged: desiredUnprivileged,
   };
 
-  // Privileged ports require root on Unix. Auto-elevate with sudo when
-  // possible, falling back to the unprivileged port when sudo is unavailable.
-  if (!isWindows && proxyPort < PRIVILEGED_PORT_THRESHOLD && (process.getuid?.() ?? -1) !== 0) {
+  const isRoot = (process.getuid?.() ?? -1) === 0;
+
+  // Unprivileged mode never elevates and never falls back to another port:
+  // either the platform lets this process bind the port, or we say exactly
+  // what to change and stop (scripted runs must not get a different URL).
+  if (desiredUnprivileged && !isWindows && !isRoot) {
+    const check = canBindWithoutRoot(proxyPort);
+    if (!check.ok) {
+      console.error(colors.red(`Error: ${check.reason}`));
+      if (process.platform === "linux") {
+        console.error(colors.blue("Allow it once per machine:"));
+        console.error(
+          colors.cyan(`  sudo sysctl -w net.ipv4.ip_unprivileged_port_start=${proxyPort}`)
+        );
+      }
+      console.error(colors.blue("Or start without --unprivileged to elevate with sudo."));
+      process.exit(1);
+    }
+  }
+
+  // Privileged ports require root on Unix unless the platform grants the bind.
+  // Auto-elevate with sudo only when a probe bind fails with EACCES.
+  if (!desiredUnprivileged && (await proxyPortNeedsElevation(proxyPort, lanMode))) {
     const startArgs = [
       process.execPath,
       getEntryScript(),
@@ -3303,15 +3502,11 @@ ${colors.bold("LAN mode (--lan):")}
         proxyPort,
       }).args,
     ];
-    const fallbackCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, resolvedConfig);
-    const currentCommand = formatProxyStartCommand(proxyPort, resolvedConfig);
+    const recoveryCommand = formatProxyStartCommand(proxyPort, resolvedConfig);
 
     console.log(
       colors.yellow(`Port ${proxyPort} requires elevated privileges. Requesting sudo...`)
     );
-    if (!hasExplicitPort) {
-      console.log(colors.gray(`(To skip sudo, use an unprivileged port: ${fallbackCommand})`));
-    }
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -3332,40 +3527,21 @@ ${colors.bold("LAN mode (--lan):")}
       return;
     }
 
-    if (result.signal) {
-      process.exit(1);
-    }
-
-    // sudo failed: fall back to the unprivileged port if the user didn't
-    // explicitly request a privileged one.
-    if (!hasExplicitPort) {
-      proxyPort = FALLBACK_PROXY_PORT;
-      console.log(colors.yellow(`Falling back to port ${proxyPort}.`));
-      console.log(
-        colors.blue(`For clean URLs without port numbers, re-run and accept the sudo prompt:`)
-      );
-      console.log(colors.cyan(`  ${fallbackCommand}`));
-
-      if (await isProxyRunning(proxyPort)) {
-        console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
-        return;
-      }
-
-      // Re-initialize state for the fallback port and fall through to the
-      // normal startup path below.
-      stateDir = resolveStateDir(proxyPort);
-      store = new RouteStore(stateDir, {
-        onWarning: (msg: string) => console.warn(colors.yellow(msg)),
-      });
-    } else {
-      // Explicit port was requested but sudo failed; error out.
-      console.error(
-        colors.red(`Error: Port ${proxyPort} requires elevated privileges and sudo failed.`)
-      );
-      console.error(colors.blue("Try again (portless will prompt for sudo):"));
-      console.error(colors.cyan(`  ${currentCommand}`));
-      process.exit(1);
-    }
+    // Never fall back to another port: scripted callers would continue with
+    // URLs that point at a port nothing listens on.
+    const failure = result.error
+      ? result.error.message
+      : result.signal
+        ? `terminated by signal ${result.signal}`
+        : `exited with status ${result.status}`;
+    console.error(
+      colors.red(
+        `Error: Port ${proxyPort} requires elevated privileges, but sudo elevation failed: ${failure}.`
+      )
+    );
+    console.error(colors.blue("Resolve the sudo error, then rerun the requested startup:"));
+    console.error(colors.cyan(`  ${recoveryCommand}`));
+    process.exit(1);
   }
 
   // Prepare TLS options if HTTPS is requested
@@ -3405,7 +3581,16 @@ ${colors.bold("LAN mode (--lan):")}
         console.log(colors.green("Generated local CA certificate."));
       }
 
-      if (!skipTrust && !isCATrusted(stateDir)) {
+      if (desiredUnprivileged && !isCATrusted(stateDir)) {
+        // Installing the CA elevates, which this mode never does.
+        console.warn(colors.yellow("The portless CA is not in the system trust store."));
+        console.warn(
+          colors.yellow(
+            "Browsers will show certificate warnings. Trust it once (asks for admin rights):"
+          )
+        );
+        console.warn(colors.cyan("  portless trust"));
+      } else if (!skipTrust && !isCATrusted(stateDir)) {
         console.log(colors.yellow("Adding CA to system trust store..."));
         const trustResult = trustCA(stateDir);
         if (trustResult.trusted) {
@@ -3447,7 +3632,8 @@ ${colors.bold("LAN mode (--lan):")}
       tlsOptions,
       lanIp,
       desiredWildcard ? false : undefined,
-      !!(customCertPath && customKeyPath)
+      !!(customCertPath && customKeyPath),
+      desiredUnprivileged
     );
     return;
   }
@@ -3478,6 +3664,7 @@ ${colors.bold("LAN mode (--lan):")}
         tld,
         tlds,
         useWildcard: desiredWildcard,
+        unprivileged: desiredUnprivileged,
         foreground: true,
         includePort: true,
         proxyPort,
@@ -3519,15 +3706,18 @@ ${colors.bold("LAN mode (--lan):")}
   }
 }
 
+type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
+
 /**
- * Load the effective AppConfig for the current directory from portless.json.
+ * Load the effective AppConfig for the current directory from portless.json or
+ * the package.json "portless" key, tagged with the file it came from.
  * Handles both single-app (top-level fields) and monorepo (apps map) configs.
  */
-function loadAppConfig(cwd: string = process.cwd()): AppConfig | null {
+function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null {
   try {
     const loaded = loadConfig(cwd);
     if (!loaded) return null;
-    return resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    return { ...resolveAppConfig(loaded.config, loaded.configDir, cwd), source: loaded.source };
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -3592,7 +3782,7 @@ async function handleDefaultMode(
 async function handleDefaultSingle(
   cwd: string,
   scriptName: string,
-  appConfig: AppConfig | null
+  appConfig: AppConfigWithSource | null
 ): Promise<void> {
   const resolved = resolveScriptCommand(scriptName, cwd);
   if (!resolved) {
@@ -3608,7 +3798,7 @@ async function handleDefaultSingle(
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName(cwd);
     baseName = inferred.name;
@@ -4220,7 +4410,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
       .split(".")
       .map((label) => truncateLabel(label))
       .join(".");
-    nameSource = "portless.json";
+    nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName();
     baseName = inferred.name;
@@ -4331,7 +4521,18 @@ async function main() {
     process.exit(1);
   }
 
-  const globalBooleanFlags = new Set(["--lan", "--tailscale", "--funnel", "--ngrok"]);
+  if (args[0] === "mcp") {
+    await runMcp(args.slice(1));
+    return;
+  }
+
+  const globalBooleanFlags = new Set([
+    "--lan",
+    "--tailscale",
+    "--funnel",
+    "--ngrok",
+    "--cloudflare",
+  ]);
   const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
   const childlessCommands = new Set([
     "--help",
@@ -4450,6 +4651,9 @@ async function main() {
   if (stripGlobalFlag("--ngrok", false)) {
     process.env.PORTLESS_NGROK = "1";
   }
+  if (stripGlobalFlag("--cloudflare", false)) {
+    process.env.PORTLESS_CLOUDFLARE = "1";
+  }
 
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);
@@ -4462,7 +4666,7 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, doctor, trust, clean, prune, proxy, service).
+  // subcommand (run, alias, hosts, list, doctor, trust, clean, prune, proxy, service, mcp).
   if (args[0] === "--name") {
     args.shift();
     if (!args[0]) {

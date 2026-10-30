@@ -207,6 +207,19 @@ function isCertSansComplete(certPath: string): boolean {
 }
 
 /**
+ * Check whether a certificate has a wildcard SAN directly under a bare TLD
+ * (such as "*.localhost"). Apple platforms reject such certificates outright.
+ */
+function hasTldWildcardSan(certPath: string): boolean {
+  try {
+    const cert = new crypto.X509Certificate(fs.readFileSync(certPath));
+    return /DNS:\*\.[^.,\s]+(,|$)/.test(cert.subjectAltName ?? "");
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Check whether a certificate uses a strong signature algorithm.
  * Reject SHA-1 signatures to avoid OpenSSL "ca md too weak" failures.
  *
@@ -265,6 +278,7 @@ function openssl(args: string[], options?: { input?: string }): string {
       timeout: OPENSSL_TIMEOUT_MS,
       input: options?.input,
       stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
       ...(extraEnv && Object.keys(extraEnv).length > 0
         ? { env: { ...process.env, ...extraEnv } }
         : {}),
@@ -273,6 +287,33 @@ function openssl(args: string[], options?: { input?: string }): string {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
+}
+
+const NOT_BEFORE_SKEW_MS = 5 * 60 * 1000;
+
+let notBeforeSupported: boolean | undefined;
+
+/** Whether `openssl x509 -req` accepts `-not_before` for the given `openssl version` output. */
+export function opensslSupportsNotBefore(version: string): boolean {
+  const match = /^OpenSSL (\d+)\.(\d+)/.exec(version.trim());
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 3 || (major === 3 && minor >= 4);
+}
+
+/** `-not_before` args that backdate a signed cert, or none if unsupported. */
+function backdatedNotBeforeArgs(): string[] {
+  if (notBeforeSupported === undefined) {
+    try {
+      notBeforeSupported = opensslSupportsNotBefore(openssl(["version"]));
+    } catch {
+      notBeforeSupported = false;
+    }
+  }
+  if (!notBeforeSupported) return [];
+  const start = new Date(Date.now() - NOT_BEFORE_SKEW_MS).toISOString();
+  return ["-not_before", start.replace(/[-:T]/g, "").slice(0, 14) + "Z"];
 }
 
 const execFileAsync = promisify(execFileCb);
@@ -288,6 +329,7 @@ async function opensslAsync(args: string[]): Promise<string> {
     const { stdout } = await execFileAsync("openssl", args, {
       encoding: "utf-8",
       timeout: OPENSSL_TIMEOUT_MS,
+      windowsHide: true,
       ...(extraEnv && Object.keys(extraEnv).length > 0
         ? { env: { ...process.env, ...extraEnv } }
         : {}),
@@ -297,6 +339,18 @@ async function opensslAsync(args: string[]): Promise<string> {
     const message = err instanceof Error ? err.message : String(err);
     throw new Error(`openssl failed: ${message}\n\n${opensslErrorMessage()}`);
   }
+}
+
+/** Async version of backdatedNotBeforeArgs. */
+async function backdatedNotBeforeArgsAsync(): Promise<string[]> {
+  if (notBeforeSupported === undefined) {
+    try {
+      notBeforeSupported = opensslSupportsNotBefore(await opensslAsync(["version"]));
+    } catch {
+      notBeforeSupported = false;
+    }
+  }
+  return backdatedNotBeforeArgs();
 }
 
 // ---------------------------------------------------------------------------
@@ -352,6 +406,7 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
       keyPath,
       "-out",
       certPath,
+      ...backdatedNotBeforeArgs(),
       "-days",
       CA_VALIDITY_DAYS.toString(),
       "-config",
@@ -445,6 +500,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
     srlPath,
     "-out",
     serverCertPath,
+    ...backdatedNotBeforeArgs(),
     "-days",
     SERVER_VALIDITY_DAYS.toString(),
     "-extfile",
@@ -773,12 +829,9 @@ async function generateHostCertAsync(
   // Generate CSR
   await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
 
-  // Build SAN list: include the exact hostname plus a wildcard at the same level
-  // e.g., for "chat.json-render2.localhost" -> also add "*.json-render2.localhost"
   const sans = [`DNS:${hostname}`];
   const parts = hostname.split(".");
-  if (parts.length >= 2) {
-    // Add a wildcard for sibling subdomains at the same level
+  if (parts.length >= 3) {
     sans.push(`DNS:*.${parts.slice(1).join(".")}`);
   }
 
@@ -816,6 +869,7 @@ async function generateHostCertAsync(
     srlPath,
     "-out",
     certPath,
+    ...(await backdatedNotBeforeArgsAsync()),
     "-days",
     SERVER_VALIDITY_DAYS.toString(),
     "-extfile",
@@ -879,8 +933,14 @@ export function createSNICallback(
     // For .localhost: RFC 2606 §2 designates it as a reserved TLD, so
     // "*.localhost" sits at the public-suffix boundary and TLS specs do
     // not permit wildcard certificates at that level.
-    if (servername === "localhost" && configuredTlds.includes("localhost")) {
+    if (servername === "localhost") {
       cb(null, defaultCtx);
+      return;
+    }
+
+    const name = servername.toLowerCase();
+    if (!/^[a-z0-9.-]+$/.test(name) || !configuredTlds.some((tld) => name.endsWith(`.${tld}`))) {
+      cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
       return;
     }
 
@@ -901,7 +961,8 @@ export function createSNICallback(
       fileExists(certPath) &&
       fileExists(keyPath) &&
       isCertValid(certPath) &&
-      isCertSignatureStrong(certPath)
+      isCertSignatureStrong(certPath) &&
+      !hasTldWildcardSan(certPath)
     ) {
       try {
         const hostCert = fs.readFileSync(certPath);
@@ -983,6 +1044,8 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
             "-d",
             "-r",
             "trustRoot",
+            "-p",
+            "ssl",
             "-k",
             "/Library/Keychains/System.keychain",
             caCertPath,
@@ -993,7 +1056,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
         const keychain = loginKeychainPath();
         execFileSync(
           "security",
-          ["add-trusted-cert", "-r", "trustRoot", "-k", keychain, caCertPath],
+          ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, caCertPath],
           { stdio: "pipe", timeout: MACOS_SECURITY_AUTH_TIMEOUT_MS }
         );
       }
