@@ -185,6 +185,8 @@ Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automa
 
 Portless stores its state (routes, PID file, port file) in `~/.portless`. When the proxy runs under sudo, this remains the invoking user's home directory so unprivileged apps and the proxy share route registrations. Override with the `PORTLESS_STATE_DIR` environment variable.
 
+A state directory tracks one proxy. While it runs, `portless proxy start -p <port>` on another port exits 1. Stop the running proxy first, or give the second proxy its own `PORTLESS_STATE_DIR`.
+
 ### Environment variables
 
 | Variable                | Description                                                                    |

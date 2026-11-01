@@ -3217,6 +3217,11 @@ ${colors.bold("LAN mode (--lan):")}
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+
+${colors.bold("State directory:")}
+  A state directory tracks one proxy. While it runs, starting a proxy on
+  another port fails. Stop it first, or give the second proxy its own
+  PORTLESS_STATE_DIR.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
