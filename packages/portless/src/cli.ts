@@ -61,6 +61,7 @@ import {
   WAIT_FOR_PROXY_INTERVAL_MS,
   WAIT_FOR_PROXY_MAX_ATTEMPTS,
   discoverState,
+  readPortFromDir,
   findFreePort,
   findPidOnPort,
   guardWindowsOrphans,
@@ -985,22 +986,26 @@ function startProxyServer(
     }
     if (activeLanIp) cleanupMdns();
     closeAuxiliaryServers();
-    try {
-      fs.unlinkSync(store.pidPath);
-    } catch {
-      // PID file may already be removed; non-fatal
+    // Older versions let a second proxy take over this state directory. Leave
+    // the state alone when proxy.pid names that other proxy.
+    if ((readProxyPid(store.pidPath) ?? process.pid) === process.pid) {
+      try {
+        fs.unlinkSync(store.pidPath);
+      } catch {
+        // PID file may already be removed; non-fatal
+      }
+      try {
+        fs.unlinkSync(store.portFilePath);
+      } catch {
+        // Port file may already be removed; non-fatal
+      }
+      writeTlsMarker(store.dir, false);
+      writeCustomCertMarker(store.dir, false);
+      writeTldFile(store.dir, DEFAULT_TLD);
+      writeLanMarker(store.dir, null);
+      removeHostsSyncToken(store.dir);
+      if (autoSyncHosts) cleanHostsFile();
     }
-    try {
-      fs.unlinkSync(store.portFilePath);
-    } catch {
-      // Port file may already be removed; non-fatal
-    }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
-    removeHostsSyncToken(store.dir);
-    if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
     setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
@@ -1031,28 +1036,62 @@ function sudoStopOrHint(port: number): void {
   }
 }
 
+function readProxyPid(pidPath: string): number | null {
+  try {
+    const pid = parseInt(fs.readFileSync(pidPath, "utf-8"), 10);
+    return isNaN(pid) ? null : pid;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Port of the live proxy that the state files track, when it is not `port`.
+ * That proxy owns the state files, so work on `port` must not touch them.
+ */
+async function findOtherTrackedProxyPort(store: RouteStore, port: number): Promise<number | null> {
+  const trackedPort = readPortFromDir(store.dir);
+  if (trackedPort === null || trackedPort === port) return null;
+  const pid = readProxyPid(store.pidPath);
+  if (pid === null || !isPidAlive(pid)) return null;
+  const serving =
+    (await isProxyRunning(trackedPort)) ||
+    (!!process.env.PORTLESS_STATE_DIR && (await isPortListening(trackedPort)));
+  return serving ? trackedPort : null;
+}
+
 async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
+  const otherTrackedPort = await findOtherTrackedProxyPort(store, proxyPort);
 
-  if (!fs.existsSync(pidPath)) {
-    // PID file is missing; check whether something is still listening.
+  if (!fs.existsSync(pidPath) || otherTrackedPort !== null) {
+    // The PID file is missing or belongs to another proxy; check whether
+    // something is still listening on the requested port.
     // Use plain HTTP: the TLS proxy accepts it via byte-peeking, and this
     // avoids false negatives from TLS handshake timeouts.
     if (await isProxyRunning(proxyPort)) {
-      console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
+      console.log(
+        colors.yellow(
+          otherTrackedPort === null
+            ? `PID file is missing but port ${proxyPort} is still in use.`
+            : `PID file tracks the proxy on port ${otherTrackedPort}; leaving it running.`
+        )
+      );
       const pid = findPidOnPort(proxyPort);
       if (pid !== null) {
         try {
           process.kill(pid, "SIGTERM");
-          try {
-            fs.unlinkSync(store.portFilePath);
-          } catch {
-            // Port file may already be absent; non-fatal
+          if (otherTrackedPort === null) {
+            try {
+              fs.unlinkSync(store.portFilePath);
+            } catch {
+              // Port file may already be absent; non-fatal
+            }
+            writeTlsMarker(store.dir, false);
+            writeCustomCertMarker(store.dir, false);
+            writeTldFile(store.dir, DEFAULT_TLD);
+            writeLanMarker(store.dir, null);
           }
-          writeTlsMarker(store.dir, false);
-          writeCustomCertMarker(store.dir, false);
-          writeTldFile(store.dir, DEFAULT_TLD);
-          writeLanMarker(store.dir, null);
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
@@ -3409,6 +3448,21 @@ ${colors.bold("LAN mode (--lan):")}
       colors.blue(`To restart: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
     );
     return;
+  }
+
+  // One state directory tracks one proxy. Starting a second would overwrite
+  // proxy.pid and proxy.port and leave the first running untracked.
+  const otherTrackedPort = await findOtherTrackedProxyPort(store, proxyPort);
+  if (otherTrackedPort !== null) {
+    console.error(colors.red(`Error: A proxy is already running on port ${otherTrackedPort}.`));
+    console.error(colors.blue("To move it, stop it first:"));
+    console.error(
+      colors.cyan(
+        `  portless proxy stop -p ${otherTrackedPort} && portless proxy start -p ${proxyPort}`
+      )
+    );
+    console.error(colors.blue("To run a second proxy, give it its own PORTLESS_STATE_DIR."));
+    process.exit(1);
   }
 
   if (lanMode) {
