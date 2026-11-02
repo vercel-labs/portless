@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { RouteStore, RouteConflictError } from "./routes.js";
+import { RouteStore, RouteConflictError, PortTakenError } from "./routes.js";
 
 describe("RouteStore", () => {
   let tmpDir: string;
@@ -315,6 +315,47 @@ describe("RouteStore", () => {
     it("returns undefined when no conflicting process exists", () => {
       const killedPid = store.addRoute("app.localhost", 4001, process.pid, true);
       expect(killedPid).toBeUndefined();
+    });
+  });
+
+  describe("addRoute with portSharers", () => {
+    it("throws PortTakenError when another live route holds the port", () => {
+      store.addRoute("a.localhost", 4466, process.pid);
+      expect(() =>
+        store.addRoute("b.localhost", 4466, process.ppid, false, ["b.localhost"])
+      ).toThrow(PortTakenError);
+      expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["a.localhost"]);
+    });
+
+    it("throws PortTakenError for another app of the same process", () => {
+      store.addRoute("web.localhost", 4466, process.pid);
+      expect(() =>
+        store.addRoute("api.localhost", 4466, process.pid, false, ["api.localhost"])
+      ).toThrow(PortTakenError);
+    });
+
+    it("takes the port when its previous owner is dead", () => {
+      store.ensureDir();
+      fs.writeFileSync(
+        store.getRoutesPath(),
+        JSON.stringify([{ hostname: "a.localhost", port: 4466, pid: 999999 }])
+      );
+      store.addRoute("b.localhost", 4466, process.pid, false, ["b.localhost"]);
+      expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["b.localhost"]);
+    });
+
+    it("lets the hostnames of one app share its port", () => {
+      const hostnames = ["a.localhost", "a.test"];
+      for (const hostname of hostnames) {
+        store.addRoute(hostname, 4466, process.pid, false, hostnames);
+      }
+      expect(store.loadRoutes()).toHaveLength(2);
+    });
+
+    it("still lets a fixed port be shared without portSharers", () => {
+      store.addRoute("a.localhost", 4466, process.pid);
+      store.addRoute("b.localhost", 4466, process.ppid);
+      expect(store.loadRoutes()).toHaveLength(2);
     });
   });
 

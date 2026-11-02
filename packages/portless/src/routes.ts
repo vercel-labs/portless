@@ -81,6 +81,20 @@ export class RouteConflictError extends Error {
 }
 
 /**
+ * Thrown when an app port is already assigned to another live route. Callers
+ * that picked the port themselves pick another one.
+ */
+export class PortTakenError extends Error {
+  readonly port: number;
+
+  constructor(port: number, holder: string) {
+    super(`Port ${port} is already assigned to "${holder}".`);
+    this.name = "PortTakenError";
+    this.port = port;
+  }
+}
+
+/**
  * Manages route mappings stored as a JSON file on disk.
  * Supports file locking and stale-route cleanup.
  */
@@ -230,8 +244,18 @@ export class RouteStore {
    * by another live process, that process is sent SIGTERM before the route is
    * replaced. Returns the PID of the killed process (if any) so the caller can
    * log it.
+   *
+   * With `portSharers`, throws PortTakenError when a live route outside that
+   * list already uses `port`, so two apps never share an app port. The list
+   * holds the hostnames of the app being registered, one per TLD.
    */
-  addRoute(hostname: string, port: number, pid: number, force = false): number | undefined {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    portSharers?: readonly string[]
+  ): number | undefined {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
@@ -239,6 +263,14 @@ export class RouteStore {
     let killedPid: number | undefined;
     try {
       const routes = this.loadRoutes(true);
+      if (portSharers) {
+        const holder = routes.find(
+          (r) => r.port === port && r.hostname !== hostname && !portSharers.includes(r.hostname)
+        );
+        if (holder) {
+          throw new PortTakenError(port, holder.hostname);
+        }
+      }
       const existing = routes.find((r) => r.hostname === hostname);
       const isAlias = existing?.pid === 0;
       if (existing && existing.pid !== pid && (isAlias || this.isProcessAlive(existing.pid))) {
