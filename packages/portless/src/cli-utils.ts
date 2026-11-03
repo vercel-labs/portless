@@ -1792,6 +1792,12 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
     defaultIsServer: false,
     hostFlag: "--ip",
   },
+  vinext: {
+    strictPort: false,
+    serverSubcommands: ["dev", "start"],
+    nonServerSubcommands: ["init", "build", "check", "lint"],
+    defaultIsServer: false,
+  },
 };
 
 type PackageRunnerSpec = {
@@ -2013,10 +2019,13 @@ export function injectFrameworkFlags(commandArgs: string[], port: number): strin
       flags.push("--strictPort");
     }
   }
-
-  const hostFlag = framework.hostFlag ?? "--host";
+  const isVinextStart = basename === "vinext" && frameworkArgs[0] === "start";
+  const hostFlag = isVinextStart ? "--hostname" : (framework.hostFlag ?? "--host");
   const hasHostChoice =
     hasCliOption(frameworkArgs, hostFlag) ||
+    hasCliOption(frameworkArgs, "--host") ||
+    (isVinextStart &&
+      (hasCliOption(frameworkArgs, "--hostname") || hasCliOption(frameworkArgs, "-H"))) ||
     (basename === "expo" &&
       ["--localhost", "--lan", "--tunnel"].some((option) => hasCliOption(frameworkArgs, option)));
   if (!hasHostChoice) {
