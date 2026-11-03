@@ -234,6 +234,7 @@ describe("toToolResult", () => {
 const OMITTED_COMMANDS: Record<string, string> = {
   portless: "zero-arg and named mode run foreground dev servers",
   "portless run": "runs a foreground dev server",
+  "portless compose up": "runs Docker Compose, often in the foreground",
   "portless mcp": "the MCP server itself",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",

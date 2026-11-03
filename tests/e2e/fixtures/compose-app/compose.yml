@@ -1,0 +1,15 @@
+# Two services publish the same host port; portless compose runs both.
+name: portless-e2e-compose
+services:
+  web:
+    image: traefik/whoami:v1.11.0
+    ports: ["8080:80"]
+  api:
+    image: traefik/whoami:v1.11.0
+    labels:
+      portless.name: backend
+    ports: ["8080:80"]
+  cache:
+    image: traefik/whoami:v1.11.0
+    labels:
+      portless.enable: "false"

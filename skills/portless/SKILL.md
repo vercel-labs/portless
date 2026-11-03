@@ -339,6 +339,9 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless alias --remove <name>`                  | Remove a static route                                          |
 | `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                      |
 | `portless alias --remove <name> --tld test`       | Remove the route for selected configured TLDs                  |
+| `portless compose up [args...]`                   | Run a Docker Compose project with a route per service          |
+| `portless compose down [args...]`                 | Stop the compose project and remove its routes                 |
+| `portless.enable` / `.name` / `.ports` labels     | Skip a compose service, rename its route, or pick its ports    |
 | `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
@@ -353,7 +356,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless run --help`                             | Show help for a subcommand (also: alias, hosts, clean)         |
 | `portless --version` / `-v`                       | Show version                                                   |
 
-**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## MCP server
 
