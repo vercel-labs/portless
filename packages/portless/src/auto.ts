@@ -160,28 +160,32 @@ export interface WorktreePrefix {
   source: string;
 }
 
+export type WorktreePrefixStyle = "last-segment" | "branch";
+
 /**
- * Prepend a worktree prefix to a base hostname, or return the base name
- * unchanged when not in a worktree. Both single-app and multi-app modes
- * use this so a bare `portless` in a git worktree produces the same
- * `<prefix>.<name>` hostnames in either layout.
+ * Compose a worktree label with a base hostname, using the configured template
+ * when present. No label returns the base name.
  */
-export function applyWorktreePrefix(baseName: string, worktree: WorktreePrefix | null): string {
-  return worktree ? `${worktree.prefix}.${baseName}` : baseName;
+export function applyWorktreePrefix(
+  baseName: string,
+  worktree: WorktreePrefix | null,
+  template?: string
+): string {
+  if (!worktree) return baseName;
+  if (template) {
+    return template.replaceAll("{worktree}", worktree.prefix).replaceAll("{name}", baseName);
+  }
+  return `${worktree.prefix}.${baseName}`;
 }
 
 /** Branch names that represent the default/primary checkout — no prefix needed. */
 const DEFAULT_BRANCHES = new Set(["main", "master"]);
 
-/**
- * Convert a branch name to a worktree prefix. Uses only the last segment
- * after the final `/` (e.g. `feature/auth` → `auth`). Returns null for
- * default branches, detached HEAD, or names that sanitize to empty.
- */
-function branchToPrefix(branch: string): string | null {
+/** Convert a branch to a worktree prefix using the configured style. */
+function branchToPrefix(branch: string, style: WorktreePrefixStyle): string | null {
   if (!branch || branch === "HEAD" || DEFAULT_BRANCHES.has(branch)) return null;
-  const lastSegment = branch.split("/").pop()!;
-  const prefix = sanitizeForHostname(lastSegment);
+  const label = style === "branch" ? branch : branch.split("/").pop()!;
+  const prefix = sanitizeForHostname(label);
   return prefix || null;
 }
 
@@ -194,17 +198,20 @@ function branchToPrefix(branch: string): string | null {
  *      uses worktrees and checkouts need distinguishing.
  *   2. `git rev-parse --abbrev-ref HEAD` — get the current branch name.
  *   3. If the branch is `main` or `master`, no prefix (primary checkout).
- *   4. Otherwise, the sanitized branch name is the prefix.
+ *   4. Otherwise, its sanitized label is the prefix, using the requested style.
  *
  * Falls back to parsing `.git` file + HEAD when git CLI is unavailable.
  */
-export function detectWorktreePrefix(cwd: string = process.cwd()): WorktreePrefix | null {
+export function detectWorktreePrefix(
+  cwd: string = process.cwd(),
+  style: WorktreePrefixStyle = "last-segment"
+): WorktreePrefix | null {
   // Primary: git CLI
-  const cliResult = detectWorktreeViaCli(cwd);
+  const cliResult = detectWorktreeViaCli(cwd, style);
   if (cliResult !== undefined) return cliResult;
 
   // Fallback: parse .git file and HEAD when git binary is unavailable
-  return detectWorktreeViaFilesystem(cwd);
+  return detectWorktreeViaFilesystem(cwd, style);
 }
 
 /**
@@ -213,7 +220,10 @@ export function detectWorktreePrefix(cwd: string = process.cwd()): WorktreePrefi
  *   - `null` if not in a linked worktree, or on main/master
  *   - `undefined` if git CLI is unavailable (caller should try fallback)
  */
-function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
+function detectWorktreeViaCli(
+  cwd: string,
+  style: WorktreePrefixStyle
+): WorktreePrefix | null | undefined {
   try {
     const listOutput = execFileSync("git", ["worktree", "list", "--porcelain"], {
       cwd,
@@ -267,7 +277,7 @@ function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
       windowsHide: true,
     }).trim();
 
-    const prefix = branchToPrefix(branch);
+    const prefix = branchToPrefix(branch, style);
     if (!prefix) return null;
 
     return { prefix, source: "git branch" };
@@ -281,7 +291,10 @@ function detectWorktreeViaCli(cwd: string): WorktreePrefix | null | undefined {
  * `startDir` looking for a `.git` file (worktrees have a file, not a
  * directory) and reads the branch name from the gitdir's HEAD file.
  */
-function detectWorktreeViaFilesystem(startDir: string): WorktreePrefix | null {
+function detectWorktreeViaFilesystem(
+  startDir: string,
+  style: WorktreePrefixStyle
+): WorktreePrefix | null {
   let dir = startDir;
   for (;;) {
     const gitPath = path.join(dir, ".git");
@@ -303,7 +316,7 @@ function detectWorktreeViaFilesystem(startDir: string): WorktreePrefix | null {
 
         // Read the branch name from the worktree's HEAD file
         const branch = readBranchFromHead(path.resolve(dir, gitdir));
-        const prefix = branchToPrefix(branch ?? "");
+        const prefix = branchToPrefix(branch ?? "", style);
         if (!prefix) return null;
 
         return { prefix, source: "git branch" };

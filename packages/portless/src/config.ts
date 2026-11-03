@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { WorktreePrefixStyle } from "./auto.js";
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -8,11 +9,17 @@ export class ConfigValidationError extends Error {
   }
 }
 
+export interface WorktreeConfig {
+  prefix?: WorktreePrefixStyle;
+  hostnameTemplate?: string;
+}
+
 export interface AppConfig {
   name?: string;
   script?: string;
   appPort?: number;
   proxy?: boolean;
+  worktree?: WorktreeConfig;
 }
 
 export interface PortlessConfig extends AppConfig {
@@ -101,6 +108,13 @@ export function loadPackagePortlessConfig(dir: string): AppConfig | null {
   return null;
 }
 
+export function mergeWorktreeConfig(
+  ...configs: (WorktreeConfig | undefined)[]
+): WorktreeConfig | undefined {
+  const merged: WorktreeConfig = Object.assign({}, ...configs);
+  return Object.keys(merged).length > 0 ? merged : undefined;
+}
+
 /**
  * Resolve the effective AppConfig for a specific package directory.
  * If the config has an `apps` map, match the package dir by walking
@@ -117,16 +131,25 @@ export function resolveAppConfig(
       let candidate = rel;
       while (candidate) {
         if (config.apps[candidate]) {
-          return config.apps[candidate];
+          const app = config.apps[candidate];
+          const worktree = mergeWorktreeConfig(config.worktree, app.worktree);
+          return worktree ? { ...app, worktree } : app;
         }
         const parent = path.dirname(candidate);
         if (parent === "." || parent === candidate) break;
         candidate = normalizePath(parent);
       }
     }
-    return {};
+    const worktree = mergeWorktreeConfig(config.worktree);
+    return worktree ? { worktree } : {};
   }
-  return { name: config.name, script: config.script, appPort: config.appPort, proxy: config.proxy };
+  return {
+    name: config.name,
+    script: config.script,
+    appPort: config.appPort,
+    proxy: config.proxy,
+    worktree: config.worktree,
+  };
 }
 
 /**
@@ -312,8 +335,9 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo"]);
-const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy"]);
+const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo", "worktree"]);
+const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree"]);
+const KNOWN_WORKTREE_KEYS = new Set(["prefix", "hostnameTemplate"]);
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) {
@@ -358,6 +382,8 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
       throw new ConfigValidationError(`"turbo" in ${configPath} must be a boolean.`);
     }
   }
+
+  if (obj.worktree !== undefined) validateWorktreeConfig(obj.worktree, "worktree", configPath);
 
   if (obj.apps !== undefined) {
     if (typeof obj.apps !== "object" || obj.apps === null || Array.isArray(obj.apps)) {
@@ -407,7 +433,35 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
     }
   }
 
+  if (obj.worktree !== undefined) {
+    validateWorktreeConfig(obj.worktree, `${prefix}.worktree`, configPath);
+  }
+
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
+}
+
+function validateWorktreeConfig(value: unknown, prefix: string, configPath: string): void {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new ConfigValidationError(`"${prefix}" in ${configPath} must be an object.`);
+  }
+  const obj = value as Record<string, unknown>;
+
+  if (obj.prefix !== undefined && obj.prefix !== "last-segment" && obj.prefix !== "branch") {
+    throw new ConfigValidationError(
+      `"${prefix}.prefix" in ${configPath} must be "last-segment" or "branch".`
+    );
+  }
+
+  if (
+    obj.hostnameTemplate !== undefined &&
+    (typeof obj.hostnameTemplate !== "string" || !obj.hostnameTemplate.includes("{worktree}"))
+  ) {
+    throw new ConfigValidationError(
+      `"${prefix}.hostnameTemplate" in ${configPath} must be a string containing {worktree}.`
+    );
+  }
+
+  warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, prefix);
 }
 
 function warnUnknownKeys(

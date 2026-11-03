@@ -50,6 +50,7 @@ import {
   truncateLabel,
   sanitizeForHostname,
 } from "./auto.js";
+import type { WorktreePrefix, WorktreePrefixStyle } from "./auto.js";
 import {
   buildProxyStartConfig,
   canBindProxyPort,
@@ -127,9 +128,10 @@ import {
   splitCommand,
   detectPackageManager,
   loadPackagePortlessConfig,
+  mergeWorktreeConfig,
   ConfigValidationError,
 } from "./config.js";
-import type { AppConfig, LoadedConfig } from "./config.js";
+import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -1364,7 +1366,7 @@ async function runApp(
   tls: boolean,
   tlds: string[],
   force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
@@ -1475,8 +1477,7 @@ async function runApp(
     console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
-    console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
+    console.log(chalk.gray(`-- Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
@@ -1758,6 +1759,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** Override the worktree label (from --prefix flag). Empty disables it. */
+  prefix?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -1813,16 +1816,17 @@ function applySharingFlag(flag: string): boolean {
 }
 
 /**
- * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
+ * Parse `run` subcommand arguments: `[--name <name>] [--prefix <label>] [--force] [--] <command...>`
  *
- * `--name`, `--force`, and `--app-port` are recognized. `--` stops flag
- * parsing. Everything after the flag region is the child command, passed
- * through untouched.
+ * `--name`, `--prefix`, `--force`, and `--app-port` are recognized. `--`
+ * stops flag parsing. Everything after the flag region is the child command,
+ * passed through untouched.
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let prefix: string | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -1844,6 +1848,7 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
+  --prefix <label>       Override the worktree label (an empty value disables it)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -1858,14 +1863,17 @@ ${colors.bold("Name inference (in order):")}
   3. Git repo root directory name
   4. Current directory basename
 
-  Use --name to override the inferred name while keeping worktree prefixes.
-  In git worktrees, the branch name is prepended as a subdomain prefix
-  (e.g. feature-auth.myapp.localhost).
+  In git worktrees the branch becomes a subdomain prefix (e.g.
+  feature-auth.myapp.localhost); the default label is its last segment. Set
+  "worktree.prefix" to "branch" for the whole branch, or
+  "worktree.hostnameTemplate" with {worktree} and optional {name}. --prefix
+  and PORTLESS_PREFIX override detection; empty disables it.
 
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
+  portless run --prefix pr-42 next dev  # -> https://pr-42.<project>.localhost
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
 `);
@@ -1883,13 +1891,21 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (args[i] === "--prefix") {
+      i++;
+      if (args[i] === undefined || args[i].startsWith("-")) {
+        console.error(colors.red("Error: --prefix requires a value (use \"\" to disable)."));
+        console.error(colors.cyan("  portless run --prefix <label> <command...>"));
+        process.exit(1);
+      }
+      prefix = args[i];
     } else if (applySharingFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
+          "Known flags: --name, --prefix, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
         )
       );
       process.exit(1);
@@ -1899,7 +1915,7 @@ ${colors.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, prefix, commandArgs: args.slice(i) };
 }
 
 /**
@@ -2115,8 +2131,8 @@ ${colors.bold("ngrok sharing:")}
   ${colors.cyan("portless myapp --ngrok next dev")}
 
 ${colors.bold("Options:")}
-  run [--name <name>] <cmd>      Infer project name (or override with --name)
-                                Adds worktree prefix in git worktrees
+  run [--name <name>] [--prefix <label>] <cmd>
+                                Infer project name and add a worktree prefix
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo when the bind needs root
@@ -2153,6 +2169,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
+  PORTLESS_PREFIX=<label>       Override the worktree label; an empty value disables it
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
@@ -2491,14 +2508,13 @@ ${colors.bold("portless get")} - Print the URL for a service.
 ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}
 
-Constructs the URL using the same hostname and worktree logic as
-"portless run", then prints it to stdout. Useful for wiring services
-together:
+Constructs the URL using the same hostname and worktree logic as "portless run".
+PORTLESS_PREFIX and config worktree options apply; PORTLESS_PREFIX="" skips worktree naming.
 
   BACKEND_URL=$(portless get backend)
 
 ${colors.bold("Options:")}
-  --no-worktree          Skip worktree prefix detection
+  --no-worktree          Skip worktree naming (detection, PORTLESS_PREFIX, and config)
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2534,8 +2550,11 @@ ${colors.bold("Examples:")}
   }
 
   const name = positional[0];
-  const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const appConfig = skipWorktree ? null : loadAppConfig();
+  const worktree = skipWorktree
+    ? null
+    : resolveWorktreeLabel(process.cwd(), appConfig?.worktree, process.env.PORTLESS_PREFIX);
+  const effectiveName = applyWorktreePrefix(name, worktree, appConfig?.worktree?.hostnameTemplate);
 
   const { port, tls, tlds } = await discoverState();
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
@@ -3708,6 +3727,17 @@ ${colors.bold("LAN mode (--lan):")}
 
 type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
 
+function resolveWorktreeLabel(
+  cwd: string,
+  worktree?: WorktreeConfig,
+  label?: string,
+  labelSource = "PORTLESS_PREFIX"
+): WorktreePrefix | null {
+  if (label === undefined) return detectWorktreePrefix(cwd, worktree?.prefix);
+  const prefix = sanitizeForHostname(label);
+  return prefix ? { prefix, source: labelSource } : null;
+}
+
 /**
  * Load the effective AppConfig for the current directory from portless.json or
  * the package.json "portless" key, tagged with the file it came from.
@@ -3805,8 +3835,12 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = detectWorktreePrefix(cwd);
-  const effectiveName = applyWorktreePrefix(baseName, worktree);
+  const worktree = resolveWorktreeLabel(cwd, appConfig?.worktree, process.env.PORTLESS_PREFIX);
+  const effectiveName = applyWorktreePrefix(
+    baseName,
+    worktree,
+    appConfig?.worktree?.hostnameTemplate
+  );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3821,7 +3855,7 @@ async function handleDefaultSingle(
     tls,
     tlds,
     false,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
     lanMode,
     lanIp
@@ -4037,10 +4071,20 @@ async function handleDefaultMulti(
 
   const apps: MultiAppEntry[] = [];
 
-  // In a git worktree, prefix every app's hostname with the branch name so
-  // parallel worktrees of the same monorepo don't collide on <name>.localhost.
-  // Mirrors handleDefaultSingle; single-app mode already does this.
-  const worktree = detectWorktreePrefix(wsRoot);
+  const explicitPrefix = process.env.PORTLESS_PREFIX;
+  const explicitWorktree =
+    explicitPrefix === undefined
+      ? undefined
+      : resolveWorktreeLabel(wsRoot, undefined, explicitPrefix);
+  const detectedWorktrees = new Map<WorktreePrefixStyle, WorktreePrefix | null>();
+  const worktreeFor = (worktreeConfig: WorktreeConfig | undefined): WorktreePrefix | null => {
+    if (explicitWorktree !== undefined) return explicitWorktree;
+    const style = worktreeConfig?.prefix ?? "last-segment";
+    if (!detectedWorktrees.has(style)) {
+      detectedWorktrees.set(style, detectWorktreePrefix(wsRoot, style));
+    }
+    return detectedWorktrees.get(style)!;
+  };
 
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
@@ -4060,6 +4104,7 @@ async function handleDefaultMulti(
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
       ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
+      worktree: mergeWorktreeConfig(rootOverride?.worktree, pkgConfig?.worktree),
     };
 
     const effectiveScript = appOverride.script ?? scriptName;
@@ -4094,7 +4139,11 @@ async function handleDefaultMulti(
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
-    name = applyWorktreePrefix(name, worktree);
+    name = applyWorktreePrefix(
+      name,
+      worktreeFor(appOverride.worktree),
+      appOverride.worktree?.hostnameTemplate
+    );
 
     apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
   }
@@ -4421,8 +4470,14 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const label = parsed.prefix ?? process.env.PORTLESS_PREFIX;
+  const labelSource = parsed.prefix === undefined ? "PORTLESS_PREFIX" : "--prefix flag";
+  const worktree = resolveWorktreeLabel(process.cwd(), appConfig?.worktree, label, labelSource);
+  const effectiveName = applyWorktreePrefix(
+    baseName,
+    worktree,
+    appConfig?.worktree?.hostnameTemplate
+  );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -4437,7 +4492,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     tls,
     tlds,
     parsed.force,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
     lanIp
