@@ -1267,6 +1267,65 @@ describe("createProxyServer", () => {
       expect(connections.size).toBe(1);
     });
 
+    it("finishes an in-flight response when the proxy closes", async () => {
+      let finishResponse: (() => void) | undefined;
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          finishResponse = () => res.end("last");
+          res.write("first");
+        })
+      );
+      await listen(backend);
+      const backendPort = (backend.address() as net.AddressInfo).port;
+
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      let client: http.ClientRequest | undefined;
+      let closePromise: Promise<void> | undefined;
+
+      try {
+        await listen(server);
+        const proxyPort = (server.address() as net.AddressInfo).port;
+
+        let body = "";
+        const response = new Promise<string>((resolve, reject) => {
+          client = http.get(
+            {
+              host: "127.0.0.1",
+              port: proxyPort,
+              headers: { host: "myapp.localhost" },
+              agent: false,
+            },
+            (res) => {
+              res.once("data", () => {
+                closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+                finishResponse?.();
+              });
+              res.on("data", (chunk) => {
+                body += chunk.toString();
+              });
+              res.on("end", () => resolve(body));
+              res.on("error", reject);
+            }
+          );
+          client.on("error", reject);
+        });
+
+        expect(await response).toBe("firstlast");
+        await closePromise;
+      } finally {
+        finishResponse?.();
+        client?.destroy();
+        backend.closeAllConnections();
+        (server as http.Server).closeAllConnections();
+        await closePromise;
+      }
+    });
+
     it("keeps serving requests while many long-lived responses are open", async () => {
       // SSE and streaming responses hold their upstream socket for good, so a
       // cap on open sockets would leave every later request waiting forever

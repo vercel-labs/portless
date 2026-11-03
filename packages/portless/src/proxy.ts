@@ -405,7 +405,6 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       for (const send of state.waiting.splice(0)) send();
     }
     for (const cancel of pendingConnections) cancel();
-    upstreamAgent.destroy();
   };
 
   const refusesPeer = (address: string | undefined) => loopbackOnly && !isLoopbackPeer(address);
@@ -1094,6 +1093,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       closeUpstream();
       h2Server.close();
       plainServer.close();
+      upstreamAgent.destroy();
       return origClose(cb);
     } as typeof wrapper.close;
 
@@ -1105,6 +1105,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
+  httpServer.on("close", () => upstreamAgent.destroy());
   const origClose = httpServer.close.bind(httpServer);
   httpServer.close = function (cb?: (err?: Error) => void) {
     closeUpstream();
