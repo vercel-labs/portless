@@ -149,6 +149,8 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` in `portless.json` to keep the whole branch, and `worktree.hostnameTemplate` to replace the whole hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree. `get --no-worktree` skips the label, style, and template.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -191,6 +193,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | ----------------------- | ------------------------------------------------------------------------------ |
 | `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
 | `PORTLESS_APP_PORT`     | Use a fixed port for the app (skip auto-assignment)                            |
+| `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
 | `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
 | `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
 | `PORTLESS_LAN_IP`       | Pin a specific LAN IP for LAN mode                                             |
@@ -307,9 +310,10 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
+| `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
-| `portless get <name> --no-worktree`               | Print URL without worktree prefix                              |
+| `portless get <name> --no-worktree`               | Print URL without worktree prefix, style, or template          |
 | `portless list`                                   | Show active routes and uptime                                  |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
@@ -363,16 +367,17 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 Optional config file. Portless looks for it in the current directory.
 
-| Field     | Type    | Default                    | Description                                              |
-| --------- | ------- | -------------------------- | -------------------------------------------------------- |
-| `name`    | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
-| `script`  | string  | `"dev"`                    | Name of a package.json script to run                     |
-| `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
-| `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
-| `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
+| Field      | Type    | Default                    | Description                                              |
+| ---------- | ------- | -------------------------- | -------------------------------------------------------- |
+| `name`     | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
+| `script`   | string  | `"dev"`                    | Name of a package.json script to run                     |
+| `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
+| `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
+| `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
+| `worktree` | object  |                            | Worktree label style and hostname template               |
+| `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
 
 ### package.json "portless" key
 
@@ -382,7 +387,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 { "portless": "myapp" }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
 
 ```json
 { "portless": { "name": "myapp", "script": "dev:app" } }

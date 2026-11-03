@@ -2133,6 +2133,43 @@ describe("CLI", () => {
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("composes a whole hostname template with the branch style", () => {
+      const gitdir = path.join(tmpDir, "fake.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/team-a/login\n");
+      fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({
+          name: "myapp",
+          worktree: { prefix: "branch", hostnameTemplate: "tenant.{worktree}-{name}" },
+        })
+      );
+
+      const { status, stdout } = run(["get", "myapp"], { cwd: tmpDir, env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/tenant\.team-a-login-myapp\.localhost(:\d+)?$/);
+    });
+
+    it("uses the template for a nonempty PORTLESS_PREFIX and skips it when empty", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "myapp", worktree: { hostnameTemplate: "tenant.{worktree}-{name}" } })
+      );
+
+      const labelled = run(["get", "myapp"], {
+        cwd: tmpDir,
+        env: { ...getEnv(), PORTLESS_PREFIX: "hotfix" },
+      });
+      expect(labelled.stdout.trim()).toMatch(/^https?:\/\/tenant\.hotfix-myapp\.localhost(:\d+)?$/);
+
+      const unlabelled = run(["get", "myapp"], {
+        cwd: tmpDir,
+        env: { ...getEnv(), PORTLESS_PREFIX: "" },
+      });
+      expect(unlabelled.stdout.trim()).toMatch(/^https?:\/\/myapp\.localhost(:\d+)?$/);
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);
@@ -2488,6 +2525,8 @@ describe("CLI", () => {
       script: string;
       cliArgs: string[];
       lan?: boolean;
+      prefixEnv?: string;
+      worktree?: Record<string, unknown>;
     }): Promise<{
       status: number | null;
       proxyPort: number;
@@ -2509,7 +2548,7 @@ describe("CLI", () => {
           JSON.stringify({
             name: "test-app",
             packageManager: `${options.pm}@1.0.0`,
-            portless: { appPort: 4567 },
+            portless: { appPort: 4567, ...(options.worktree ? { worktree: options.worktree } : {}) },
             scripts: { dev: options.script },
           })
         );
@@ -2572,6 +2611,7 @@ describe("CLI", () => {
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
             PORTLESS_HTTPS: "0",
+            ...(options.prefixEnv === undefined ? {} : { PORTLESS_PREFIX: options.prefixEnv }),
           },
         });
 
@@ -2686,6 +2726,26 @@ describe("CLI", () => {
 
       expect(status).toBe(0);
       expect(capture.args).toEqual(["run", "dev"]);
+    });
+
+    it("run --prefix beats PORTLESS_PREFIX and get agrees on the template", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: ["run", "--prefix", "flag"],
+        prefixEnv: "shell",
+        worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+      });
+
+      expect(status).toBe(0);
+      const launched = capture.env.PORTLESS_URL!;
+      expect(launched).toContain("tenant.flag-test-app.localhost");
+
+      const got = run(["get", "test-app"], {
+        cwd: tmpDir,
+        env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0", PORTLESS_PREFIX: "flag" },
+      });
+      expect(got.stdout.trim()).toBe(launched);
     });
 
     it("portless run (no command) with portless.json resolves dev script", () => {

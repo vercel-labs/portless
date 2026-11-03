@@ -21,11 +21,11 @@ Use a `portless.json` to override defaults. See [Configuration](/configuration).
 ## Run an app
 
 ```bash
-portless run [--name <name>] [cmd] [args...]
+portless run [--name <name>] [--prefix <label>] [cmd] [args...]
 portless <name> <cmd> [args...]
 ```
 
-`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes.
+`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
 `portless <name>` uses an explicit name with no inference or prefixing.
 
@@ -49,6 +49,10 @@ portless docs.myapp next dev
     <tr>
       <td>`--name <name>`</td>
       <td>Override the inferred base name (worktree prefix still applies). Only for `portless run`.</td>
+    </tr>
+    <tr>
+      <td>`--prefix <label>`</td>
+      <td>Set the worktree label (`""` for none). Only for `portless run`.</td>
     </tr>
     <tr>
       <td>`--script <name>`</td>
@@ -99,7 +103,7 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
-Applies worktree prefix detection by default. Use `--no-worktree` to skip it.
+Applies the worktree label, style, and hostname template by default, including `PORTLESS_PREFIX`. Use `--no-worktree` to skip all of it.
 
 ## Alias (static routes)
 

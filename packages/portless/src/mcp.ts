@@ -122,12 +122,13 @@ export const TOOLS: ToolDef[] = [
   tool(
     "get",
     "Get app URL",
-    "Print the URL for an app name, using the same hostname and worktree logic as portless run. The app does not need to be running.",
+    "Print the URL for an app name, using the same hostname and worktree logic as portless run: PORTLESS_PREFIX, the portless.json worktree options, and git worktree detection. The app does not need to be running.",
     {
       name: NAME_PROPERTY,
       noWorktree: {
         type: "boolean",
-        description: "Skip worktree prefix detection.",
+        description:
+          "Skip PORTLESS_PREFIX, portless.json worktree style and template, and git worktree detection, so the URL has no worktree label.",
       },
     },
     ["name"],
@@ -783,6 +784,7 @@ export function printMcpHelp(): void {
       "  PORTLESS_STATE_DIR  Directory for portless state.",
       "  PORTLESS_PORT       Default proxy port.",
       "  PORTLESS_TLD        Default TLD or comma separated TLD list.",
+      "  PORTLESS_PREFIX     Worktree prefix for run and get (empty for none).",
       "",
       "Client config:",
       '  {"mcpServers":{"portless":{"command":"portless","args":["mcp"]}}}',

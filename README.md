@@ -91,14 +91,15 @@ Without an `apps` map, hostnames follow the `<package>.<project>.localhost` conv
 
 ### Config fields
 
-| Field     | Type    | Default  | Description                                               |
-| --------- | ------- | -------- | --------------------------------------------------------- |
-| `name`    | string  | inferred | Base app name. Worktree prefix still applies.             |
-| `script`  | string  | `"dev"`  | Name of a `package.json` script to run.                   |
-| `appPort` | number  | auto     | Fixed port for the child process.                         |
-| `proxy`   | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
-| `apps`    | object  |          | Overrides for workspace packages, keyed by relative path. |
-| `turbo`   | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
+| Field      | Type    | Default  | Description                                               |
+| ---------- | ------- | -------- | --------------------------------------------------------- |
+| `name`     | string  | inferred | Base app name. Worktree prefix still applies.             |
+| `script`   | string  | `"dev"`  | Name of a `package.json` script to run.                   |
+| `appPort`  | number  | auto     | Fixed port for the child process.                         |
+| `proxy`    | boolean | auto     | Whether to route through the proxy. Auto-detected.        |
+| `apps`     | object  |          | Overrides for workspace packages, keyed by relative path. |
+| `worktree` | object  |          | Worktree label style and hostname template.               |
+| `turbo`    | boolean | `true`   | Set `false` to use direct spawning instead of turborepo.  |
 
 ### package.json "portless" key
 
@@ -111,7 +112,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
 
 ```json
 {
@@ -211,7 +212,15 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
-Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` in `portless.json` to keep the whole branch, and `worktree.hostnameTemplate` to replace the whole hostname. The template must contain `{worktree}` and may contain `{name}`:
+
+```json
+{ "worktree": { "prefix": "branch", "hostnameTemplate": "tenant.{worktree}-{name}" } }
+```
+
+The template applies only when a label exists. Choose the label with `--prefix <label>` or `PORTLESS_PREFIX`; both also work outside a worktree. An empty value removes it. `portless get --no-worktree` skips the label, style, and template.
+
+Put `portless run` in `package.json` to apply these naming rules in each checkout.
 
 ## Custom TLD
 
@@ -424,7 +433,7 @@ Set `PORTLESS_CLOUDFLARE=1` to enable it by default. `portless list` shows the C
 ```bash
 portless                        # Run dev script through proxy
 portless                        # From monorepo root: run all workspace packages
-portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
+portless run [--name <name>] [--prefix <label>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
@@ -481,6 +490,7 @@ portless service uninstall       # Remove the startup service
 --cloudflare                     Share the app publicly via a Cloudflare quick tunnel
 --force                          Kill the existing process and take over its route
 --name <name>                    Use <name> as the app name
+--prefix <label>                 Set the worktree prefix ("" for none; portless run only)
 ```
 
 ### Environment variables
@@ -489,6 +499,7 @@ portless service uninstall       # Remove the startup service
 # Configuration
 PORTLESS_PORT=<number>           Override the default proxy port
 PORTLESS_APP_PORT=<number>       Use a fixed port for the app (same as --app-port)
+PORTLESS_PREFIX=<prefix>         Set the worktree prefix ("" for none, same as --prefix)
 PORTLESS_HTTPS=0                 Disable HTTPS (same as --no-tls)
 PORTLESS_LAN=1                   Enable LAN mode when set to 1 (auto-detects LAN IP)
 PORTLESS_LAN_IP=<address>        Pin a specific LAN IP for LAN mode

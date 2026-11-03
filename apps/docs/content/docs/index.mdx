@@ -103,6 +103,8 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
+Use `--prefix <label>` (or `PORTLESS_PREFIX`) to set the label yourself, with `""` for none. See [Configuration](/configuration) to change the label style or the whole hostname.
+
 ## Custom TLD
 
 By default, portless uses `.localhost` which auto-resolves to `127.0.0.1` in most browsers. If you prefer a different TLD (e.g. `.test`), use `--tld`:

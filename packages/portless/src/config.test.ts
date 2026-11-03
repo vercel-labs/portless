@@ -264,6 +264,19 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("rejects invalid worktree options", () => {
+    const cases: [unknown, RegExp][] = [
+      ["branch", /must be an object/],
+      [{ prefix: "full" }, /last-segment/],
+      [{ hostnameTemplate: "tenant.{name}" }, /\{worktree\}/],
+      [{ hostnameTemplate: "" }, /hostnameTemplate/],
+    ];
+    for (const [worktree, message] of cases) {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ worktree }));
+      expect(() => loadConfig(tmpDir)).toThrow(message);
+    }
+  });
+
   it("throws when proxy is not a boolean", () => {
     fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ proxy: "false" }));
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
@@ -358,6 +371,19 @@ describe("resolveAppConfig", () => {
     };
     const result = resolveAppConfig(config, "/repo", "/repo/packages/shared");
     expect(result).toEqual({});
+  });
+
+  it("applies root worktree options and merges app overrides by key", () => {
+    const config = {
+      proxy: false,
+      worktree: { prefix: "branch", hostnameTemplate: "tenant.{worktree}-{name}" },
+      apps: { "apps/api": { worktree: { prefix: "last-segment" } } },
+    } as const;
+    const root = { prefix: "branch", hostnameTemplate: "tenant.{worktree}-{name}" };
+    expect(resolveAppConfig(config, "/repo", "/repo/apps/web")).toEqual({ worktree: root });
+    expect(resolveAppConfig(config, "/repo", "/repo/apps/api")).toEqual({
+      worktree: { ...root, prefix: "last-segment" },
+    });
   });
 
   it("ignores top-level fields when apps is present", () => {

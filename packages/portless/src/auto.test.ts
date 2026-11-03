@@ -255,6 +255,21 @@ describe("detectWorktreePrefix", () => {
     expect(result).toEqual({ prefix: "my-branch", source: "git branch" });
   });
 
+  it("keeps the whole branch name with the branch prefix style", () => {
+    const cases: [string, string][] = [
+      ["team-a/login", "team-a-login"],
+      ["team-b/login", "team-b-login"],
+    ];
+    for (const [branch, expected] of cases) {
+      setupWorktree(tmpDir, branch);
+      expect(detectWorktreePrefix(tmpDir)!.prefix).toBe("login");
+      expect(detectWorktreePrefix(tmpDir, "branch")).toEqual({
+        prefix: expected,
+        source: "git branch",
+      });
+    }
+  });
+
   it("returns null when no .git found at all", () => {
     const result = detectWorktreePrefix(tmpDir);
     expect(result).toBeNull();
