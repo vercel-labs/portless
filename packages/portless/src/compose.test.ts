@@ -2,9 +2,11 @@ import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildUpArgs,
+  explicitProject,
   isDetachedUp,
   parseContainers,
   planCompose,
+  readsComposeFromStdin,
   routePort,
   splitComposeArgs,
   staleAliases,
@@ -67,6 +69,16 @@ describe("buildUpArgs", () => {
     expect(dir([])).toBe("/app");
     expect(dir(["-f", "infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
     expect(dir(["--file=infra/compose.yml", "--project-directory", "/other"])).toBe("/other");
+  });
+
+  it("takes the project directory from COMPOSE_FILE when no -f is given", () => {
+    const args = buildUpArgs({
+      ...base,
+      globals: [],
+      composeFileEnv: "infra/compose.yml|infra/override.yml",
+      pathSeparator: "|",
+    });
+    expect(args[args.indexOf("--project-directory") + 1]).toBe(path.resolve("/app", "infra"));
   });
 });
 
@@ -296,5 +308,46 @@ describe("staleAliases", () => {
       "api.my-shop.localhost",
       "api.my-shop.test",
     ]);
+  });
+});
+
+describe("readsComposeFromStdin and explicitProject", () => {
+  it("detects -f - in any form", () => {
+    expect(readsComposeFromStdin(["-f", "-"])).toBe(true);
+    expect(readsComposeFromStdin(["--file=-"])).toBe(true);
+    expect(readsComposeFromStdin(["-f", "compose.yml"])).toBe(false);
+  });
+
+  it("reads the last -p", () => {
+    expect(explicitProject(["-p", "a", "--project-name=b"])).toBe("b");
+    expect(explicitProject(["-f", "x.yml"])).toBeUndefined();
+  });
+});
+
+describe("fixed ports", () => {
+  it("publishes the fixed host port on loopback and keeps it on the route", () => {
+    const p = planCompose(
+      { name: "shop", services: { web: { ports: [{ target: 80, published: "8080" }] } } },
+      {
+        ...opts,
+        portFor: (service, target) => (service === "web" && target === 80 ? 14001 : undefined),
+      }
+    );
+    expect(p.model.services.web!.ports).toEqual([
+      { target: 80, host_ip: "127.0.0.1", published: "14001" },
+    ]);
+    expect(p.routes[0]!.port).toBe(14001);
+  });
+
+  it("marks dropped duplicate bindings", () => {
+    const p = plan({
+      ext: {
+        ports: [
+          { target: 80, published: "8101", host_ip: "0.0.0.0" },
+          { target: 80, published: "8102", host_ip: "::1" },
+        ],
+      },
+    });
+    expect(p.kept).toEqual([expect.objectContaining({ published: "8102", dropped: true })]);
   });
 });

@@ -93,11 +93,21 @@ function readGlobal(globals: readonly string[], names: readonly string[]): strin
   return values;
 }
 
+/** Whether the compose file is read from stdin (`-f -`). */
+export function readsComposeFromStdin(globals: readonly string[]): boolean {
+  return readGlobal(globals, ["-f", "--file"]).includes("-");
+}
+
+/** Project name passed with -p or --project-name, if any. */
+export function explicitProject(globals: readonly string[]): string | undefined {
+  return readGlobal(globals, ["-p", "--project-name"]).pop();
+}
+
 /**
  * Arguments that run `docker compose up` on the resolved model. The project
  * directory stays where compose would put it (the explicit flag, else the
- * first compose file's directory, else cwd), so `.env` settings such as
- * COMPOSE_PROFILES still apply.
+ * first compose file's directory from -f or COMPOSE_FILE, else cwd), so
+ * `.env` settings such as COMPOSE_PROFILES still apply.
  */
 export function buildUpArgs(opts: {
   globals: readonly string[];
@@ -105,9 +115,16 @@ export function buildUpArgs(opts: {
   project: string;
   modelPath: string;
   cwd: string;
+  /** COMPOSE_FILE from the environment, used when no -f is given. */
+  composeFileEnv?: string;
+  /** COMPOSE_PATH_SEPARATOR, or the platform default. */
+  pathSeparator?: string;
 }): string[] {
   const { globals } = opts;
-  const firstFile = readGlobal(globals, ["-f", "--file"])[0];
+  const firstFile =
+    readGlobal(globals, ["-f", "--file"])[0] ??
+    opts.composeFileEnv?.split(opts.pathSeparator ?? path.delimiter)[0] ??
+    undefined;
   const projectDir =
     readGlobal(globals, ["--project-directory"]).pop() ??
     (firstFile && firstFile !== "-" ? path.dirname(path.resolve(opts.cwd, firstFile)) : opts.cwd);
@@ -165,6 +182,8 @@ export interface ComposeModel {
 export interface ComposeRoute {
   service: string;
   target: number;
+  /** Fixed host port on 127.0.0.1, when the caller pinned one. */
+  port?: number;
   /** Every hostname of the route, one per configured TLD. The first is primary. */
   hostnames: string[];
   url: string;
@@ -175,6 +194,8 @@ export interface KeptPort {
   target: number;
   published: string | undefined;
   reason: string;
+  /** The binding was removed from the model instead of kept. */
+  dropped?: boolean;
 }
 
 export interface ComposePlan {
@@ -192,6 +213,12 @@ export interface PlanOptions {
   urlFor: (hostname: string) => string;
   /** Value for __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS, e.g. ".localhost". */
   viteAllowedHosts: string;
+  /**
+   * Fixed host port for a routed container port. A fixed port survives
+   * container restarts, so routes never drift. Without one, compose assigns an
+   * ephemeral port.
+   */
+  portFor?: (service: string, target: number) => number | undefined;
 }
 
 /** Turn a compose project or service name into a DNS label. */
@@ -300,11 +327,22 @@ export function planCompose(model: ComposeModel, opts: PlanOptions): ComposePlan
         // One loopback binding serves the route. Extra bindings of the same
         // target (0.0.0.0 and :: on one port, or a second host port) are dropped
         // so their fixed host port cannot collide with another project.
-        kept.push({ service, target: p.target, published: p.published, reason: "dropped, routed" });
+        kept.push({
+          service,
+          target: p.target,
+          published: p.published,
+          reason: "the container port is already routed",
+          dropped: true,
+        });
       } else {
         routedTargets.push(p.target);
         const { published: _published, ...rest } = p;
-        nextPorts.push({ ...rest, host_ip: "127.0.0.1" });
+        const port = opts.portFor?.(service, p.target);
+        nextPorts.push({
+          ...rest,
+          host_ip: "127.0.0.1",
+          ...(port === undefined ? {} : { published: String(port) }),
+        });
       }
     }
 
@@ -322,7 +360,14 @@ export function planCompose(model: ComposeModel, opts: PlanOptions): ComposePlan
         }
         seen.set(name, service);
         const hostnames = opts.hostnamesFor(name);
-        routes.push({ service, target, hostnames, url: opts.urlFor(hostnames[0]!) });
+        const port = opts.portFor?.(service, target);
+        routes.push({
+          service,
+          target,
+          ...(port === undefined ? {} : { port }),
+          hostnames,
+          url: opts.urlFor(hostnames[0]!),
+        });
       }
     });
 

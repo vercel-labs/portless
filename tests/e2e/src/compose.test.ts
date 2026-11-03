@@ -73,9 +73,21 @@ describe.skipIf(!hasDocker)("compose", () => {
     expect(await waitFor(`backend.${PROJECT}.localhost`)).toBe(200);
   });
 
-  it("follows a recreated container to its new port", async () => {
+  it("keeps the route after a container is recreated", async () => {
     const recreate = portless("compose", "up", "-d", "--force-recreate", "web");
     expect(recreate.status, recreate.stdout + recreate.stderr).toBe(0);
+    expect(await waitFor(`web.${PROJECT}.localhost`)).toBe(200);
+  });
+
+  it("keeps the route working across restart and stop/start", async () => {
+    for (const args of [
+      ["restart", "web"],
+      ["stop", "web"],
+      ["start", "web"],
+    ]) {
+      const run = portless("compose", ...args);
+      expect(run.status, run.stdout + run.stderr).toBe(0);
+    }
     expect(await waitFor(`web.${PROJECT}.localhost`)).toBe(200);
   });
 
