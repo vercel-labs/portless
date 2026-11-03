@@ -3,13 +3,8 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions } from "./types.js";
-import {
-  createLoopbackConnection,
-  escapeHtml,
-  formatUptime,
-  formatUrl,
-  parsePort,
-} from "./utils.js";
+import { escapeHtml, formatUptime, formatUrl, parsePort } from "./utils.js";
+import { dialLoopback } from "./loopback-dial.js";
 import {
   ARROW_SVG,
   FILTER_CONTROLS,
@@ -55,6 +50,8 @@ const HOP_BY_HOP_HEADERS = new Set([
 const MAX_PENDING_UPSTREAM_DIALS = 16;
 
 const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
+type DialContext = { handle?: ReturnType<typeof dialLoopback>; cancelled?: boolean };
 
 /**
  * Client hop-by-hop headers dropped before forwarding a plain request.
@@ -330,6 +327,21 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const upstreamAgent = new http.Agent({ keepAlive: true });
   const upstream = new Map<number, { dialing: number; waiting: (() => void)[] }>();
+  const pendingDials = new Set<ReturnType<typeof dialLoopback>>();
+  let stopping = false;
+  const startDial = (
+    port: number,
+    context: DialContext,
+    callback: (error: NodeJS.ErrnoException | null, socket?: net.Socket) => void
+  ) => {
+    const handle = dialLoopback(port, (error, socket) => {
+      pendingDials.delete(handle);
+      context.handle = undefined;
+      callback(error, socket);
+    });
+    context.handle = handle;
+    pendingDials.add(handle);
+  };
   const upstreamState = (port: number) => {
     let state = upstream.get(port);
     if (!state) {
@@ -340,39 +352,71 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   };
   const hasIdleSocket = (port: number) =>
     (upstreamAgent.freeSockets[upstreamAgent.getName({ port })]?.length ?? 0) > 0;
+  // Pending dials have not yet been registered in the agent's socket count.
+  const canSendUpstream = (port: number, state: { dialing: number }) =>
+    hasIdleSocket(port) ||
+    (state.dialing < MAX_PENDING_UPSTREAM_DIALS &&
+      (upstreamAgent.sockets[upstreamAgent.getName({ port })]?.length ?? 0) + state.dialing <
+        upstreamAgent.maxSockets);
   // Start waiting requests once a dial settles and a slot or idle socket is free.
   const drainUpstream = (port: number) => {
     const state = upstream.get(port);
-    if (!state) return;
-    while (
-      state.waiting.length > 0 &&
-      (hasIdleSocket(port) || state.dialing < MAX_PENDING_UPSTREAM_DIALS)
-    ) {
+    if (!state || stopping) return;
+    while (state.waiting.length > 0 && canSendUpstream(port, state)) {
       state.waiting.shift()?.();
     }
     if (state.dialing === 0 && state.waiting.length === 0) upstream.delete(port);
   };
   const whenUpstreamReady = (port: number, send: () => void) => {
+    if (stopping) return send();
     const state = upstreamState(port);
-    if (hasIdleSocket(port) || state.dialing < MAX_PENDING_UPSTREAM_DIALS) send();
-    else state.waiting.push(send);
+    if (canSendUpstream(port, state)) {
+      send();
+      return;
+    }
+    state.waiting.push(send);
+    return () => {
+      const index = state.waiting.indexOf(send);
+      if (index < 0) return;
+      state.waiting.splice(index, 1);
+      if (state.dialing === 0 && state.waiting.length === 0) upstream.delete(port);
+    };
   };
-  // Dial via createLoopbackConnection so ::1-only backends work too.
-  upstreamAgent.createConnection = (options) => {
+  upstreamAgent.on("free", (_socket, options) => drainUpstream(Number(options.port)));
+  upstreamAgent.createConnection = (options, callback) => {
     const port = options.port as number;
+    const dialOptions = options as typeof options & { portlessContext?: DialContext };
+    const context = dialOptions.portlessContext!;
+    delete dialOptions.portlessContext;
     const state = upstreamState(port);
     state.dialing++;
-    const socket = createLoopbackConnection(port);
-    let settled = false;
-    const settle = () => {
-      if (settled) return;
-      settled = true;
+    startDial(port, context, (error, socket) => {
       state.dialing--;
-      drainUpstream(port);
+      try {
+        callback!(error, socket!);
+        socket?.once("close", () => drainUpstream(port));
+      } finally {
+        drainUpstream(port);
+      }
+    });
+    return undefined;
+  };
+  const createWebSocketAgent = (port: number, context: DialContext) => {
+    const agent = new http.Agent({ keepAlive: false });
+    agent.createConnection = (_options, callback) => {
+      startDial(port, context, (error, socket) => callback!(error, socket!));
+      return undefined;
     };
-    socket.once("connect", settle);
-    socket.once("close", settle);
-    return socket;
+    return agent;
+  };
+  const stopDials = () => {
+    if (stopping) return;
+    stopping = true;
+    for (const state of upstream.values()) {
+      for (const send of state.waiting.splice(0)) send();
+    }
+    upstream.clear();
+    for (const handle of pendingDials) handle.cancel();
   };
 
   const refusesPeer = (address: string | undefined) => loopbackOnly && !isLoopbackPeer(address);
@@ -536,9 +580,29 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders["transfer-encoding"] = "chunked";
     }
 
+    let outgoing: http.ClientRequest | undefined;
+    let context: DialContext | undefined;
+    const abort = () => {
+      removeWaiting?.();
+      if (context) {
+        context.cancelled = true;
+        context.handle?.cancel();
+      }
+      outgoing?.destroy();
+      if (!res.destroyed) res.destroy();
+    };
+    res.once("close", abort);
+    req.once("error", abort);
+
     const send = () => {
       // The client may have gone away while the request waited for a socket.
+      if (stopping) {
+        res.destroy();
+        return;
+      }
       if (res.destroyed) return;
+      const dialContext: DialContext = {};
+      context = dialContext;
       const proxyReq = http.request(
         {
           agent: upstreamAgent,
@@ -546,7 +610,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           path: req.url,
           method: req.method,
           headers: proxyReqHeaders,
-        },
+          portlessContext: dialContext,
+        } as http.RequestOptions & { portlessContext: DialContext },
         (proxyRes) => {
           const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
           if (reqTls) {
@@ -569,9 +634,15 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           proxyRes.pipe(res);
         }
       );
+      outgoing = proxyReq;
 
       proxyReq.on("error", (err) => {
         const errWithCode = err as NodeJS.ErrnoException;
+        if (res.destroyed || dialContext.cancelled) return;
+        if (stopping && errWithCode.code === "ABORT_ERR") {
+          res.destroy();
+          return;
+        }
         // The backend closed a pooled socket as it was reused: replay once
         // instead of returning a 502.
         if (
@@ -606,31 +677,18 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         }
       });
 
-      // Abort the outgoing request if the client disconnects
-      res.on("close", () => {
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
-        }
-      });
-
-      req.on("error", () => {
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
-        }
-      });
-
       if (isReplay) {
         proxyReq.end();
       } else {
         req.pipe(proxyReq);
       }
     };
-    whenUpstreamReady(route.port, send);
+    const removeWaiting = whenUpstreamReady(route.port, send);
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
     socket.on("error", () => socket.destroy());
-    if (refusesPeer(socket.remoteAddress)) {
+    if (stopping || refusesPeer(socket.remoteAddress)) {
       socket.destroy();
       return;
     }
@@ -679,19 +737,26 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders.host = getRequestHost(req);
     }
 
+    const dialContext: DialContext = {};
     const proxyReq = http.request({
-      // Dial via createLoopbackConnection so ::1-only backends work too.
-      createConnection: () => createLoopbackConnection(route.port),
+      agent: createWebSocketAgent(route.port, dialContext),
       path: req.url,
       method: req.method,
       headers: proxyReqHeaders,
     });
-
     // Whether the backend's handshake answer (101 or a rejection) has been
     // relayed to the client. Gates the error handler below: before relay a
     // proper 502 can still be written; after it the stream may carry
     // WebSocket frames, so the only safe reaction is to drop the socket.
     let handshakeRelayed = false;
+    const abortHandshake = () => {
+      dialContext.cancelled = true;
+      dialContext.handle?.cancel();
+      if (!proxyReq.destroyed) proxyReq.destroy();
+      if (!handshakeRelayed) socket.destroy();
+    };
+    socket.once("close", abortHandshake);
+    socket.once("end", abortHandshake);
 
     proxyReq.on("upgrade", (proxyRes, proxySocket, proxyHead) => {
       handshakeRelayed = true;
@@ -725,6 +790,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
+      if (socket.destroyed || dialContext.cancelled) return;
+      if (stopping && (err as NodeJS.ErrnoException).code === "ABORT_ERR") {
+        socket.destroy();
+        return;
+      }
       onError(`WebSocket proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
       // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
       // dev writes a bare "Unauthorized" with no status line when an Origin
@@ -777,6 +847,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const handleExtendedConnect = (req: http2.Http2ServerRequest, res: http2.Http2ServerResponse) => {
     const compatReq = req as unknown as http.IncomingMessage;
     req.stream.on("error", () => {});
+    if (stopping) {
+      req.stream.destroy();
+      return;
+    }
     res.setHeader(PORTLESS_HEADER, "1");
     if (refusesPeer(compatReq.socket?.remoteAddress)) {
       res.writeHead(403);
@@ -839,9 +913,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders["sec-websocket-version"] = "13";
     }
 
+    const dialContext: DialContext = {};
     const proxyReq = http.request({
-      // Dial via createLoopbackConnection so ::1-only backends work too.
-      createConnection: () => createLoopbackConnection(route.port),
+      agent: createWebSocketAgent(route.port, dialContext),
       path: req.url,
       method: "GET",
       headers: proxyReqHeaders,
@@ -908,6 +982,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
+      if (req.stream.destroyed || dialContext.cancelled) return;
+      if (stopping && (err as NodeJS.ErrnoException).code === "ABORT_ERR") {
+        req.stream.destroy();
+        return;
+      }
       onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${formatProxyError(err)}`);
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "text/plain" });
@@ -919,6 +998,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     // Abort the backend handshake if the client goes away first.
     req.stream.on("close", () => {
+      dialContext.cancelled = true;
+      dialContext.handle?.cancel();
       if (!proxyReq.destroyed) {
         proxyReq.destroy();
       }
@@ -1026,9 +1107,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       });
     });
 
+    wrapper.on("listening", () => {
+      stopping = false;
+    });
     // Proxy close() through to inner servers so tests and cleanup work.
     const origClose = wrapper.close.bind(wrapper);
     wrapper.close = function (cb?: (err?: Error) => void) {
+      stopDials();
       h2Server.close();
       plainServer.close();
       upstreamAgent.destroy();
@@ -1041,8 +1126,17 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
   httpServer.on("close", () => upstreamAgent.destroy());
+  const origClose = httpServer.close.bind(httpServer);
+  httpServer.close = function (cb?: (err?: Error) => void) {
+    stopDials();
+    return origClose(cb);
+  } as typeof httpServer.close;
 
-  return loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
+  const server = loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
+  server.on("listening", () => {
+    stopping = false;
+  });
+  return server;
 }
 
 /**
