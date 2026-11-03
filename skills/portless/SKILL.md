@@ -149,7 +149,7 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
-Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` in `portless.json` to keep the whole branch, and `worktree.hostnameTemplate` to replace the whole hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree. `get --no-worktree` skips the label, style, and template.
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` in `portless.json` to keep the whole branch, and `worktree.hostnameTemplate` to replace the whole hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree. `get --no-worktree` skips the label, style, and template. When a multi-app startup proxies more than one app, each proxied app needs a distinct hostname; include `{name}` in the template or give each app its own template.
 
 ### Bypassing portless
 

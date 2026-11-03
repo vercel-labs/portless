@@ -4164,6 +4164,18 @@ async function handleDefaultMulti(
       ({ dir, port, tls, tlds, lanMode } = await discoverState());
     }
 
+    const seenHostnames = new Set<string>();
+    for (const app of proxiedApps) {
+      for (const hostname of buildHostnames(app.name, tlds)) {
+        if (seenHostnames.has(hostname)) {
+          throw new Error(
+            `Duplicate hostname "${hostname}" for proxied apps. Set worktree.hostnameTemplate with {name} or use unique app names/templates.`
+          );
+        }
+        seenHostnames.add(hostname);
+      }
+    }
+
     if (tls && !isCATrusted(dir)) {
       await handleTrust();
     }
@@ -4618,7 +4630,7 @@ async function main() {
 
     if (mode === "run") {
       index++;
-      const runValueFlags = new Set(["--name", "--app-port"]);
+      const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
       while (index < limit) {
         const next = advancePortlessFlag(index, runValueFlags);
         if (next === null) break;

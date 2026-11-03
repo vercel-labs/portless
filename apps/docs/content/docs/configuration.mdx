@@ -89,7 +89,7 @@ Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `wor
 
 ### Worktree hostnames
 
-In a linked worktree, `worktree.prefix` selects the label: `last-segment` (default) uses the last `/` segment of the branch, and `branch` keeps the whole branch, so `team-a/login` becomes `team-a-login`. `worktree.hostnameTemplate` replaces the whole hostname and must contain `{worktree}`; optional `{name}` holds the base name, for example `tenant.{worktree}-{name}`. The template applies only when a label exists. `portless run --prefix` or `PORTLESS_PREFIX` sets the label directly, overrides `worktree.prefix`, and works outside a worktree; `""` removes the label. `--no-worktree` skips the label, style, and template.
+In a linked worktree, `worktree.prefix` selects the label: `last-segment` (default) uses the last `/` segment of the branch, and `branch` keeps the whole branch, so `team-a/login` becomes `team-a-login`. `worktree.hostnameTemplate` replaces the whole hostname and must contain `{worktree}`; optional `{name}` holds the base name, for example `tenant.{worktree}-{name}`. The template applies only when a label exists. `portless run --prefix` or `PORTLESS_PREFIX` sets the label directly, overrides `worktree.prefix`, and works outside a worktree; `""` removes the label. `--no-worktree` skips the label, style, and template. When a multi-app startup proxies more than one app, each proxied app needs a distinct hostname; include `{name}` in the template or give each app its own template.
 
 ### package.json "portless" key
 

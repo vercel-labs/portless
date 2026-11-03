@@ -2739,7 +2739,7 @@ describe("CLI", () => {
       const { status, capture } = await captureScriptDelegation({
         pm: "bun",
         script: "node server.js",
-        cliArgs: ["run", "--prefix", "flag"],
+        cliArgs: ["run", "--prefix", "flag", "--script", "dev"],
         prefixEnv: "shell",
         worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
       });
@@ -2758,6 +2758,45 @@ describe("CLI", () => {
       });
       expect(got.stdout.trim()).toBe(launched);
     });
+
+    it.skipIf(process.platform === "win32")(
+      "rejects a root template that collides across proxied apps",
+      async () => {
+        const proxy = await startMockProxy(tmpDir);
+        try {
+          fs.writeFileSync(
+            path.join(tmpDir, "package.json"),
+            JSON.stringify({ name: "mono", private: true, workspaces: ["packages/*"] })
+          );
+          fs.writeFileSync(
+            path.join(tmpDir, "portless.json"),
+            JSON.stringify({ worktree: { hostnameTemplate: "tenant.{worktree}" } })
+          );
+          for (const name of ["a", "b"]) {
+            const dir = path.join(tmpDir, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                scripts: { dev: 'node -e "setTimeout(() => {}, 50)"' },
+                portless: { proxy: true },
+              })
+            );
+          }
+          fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+          const { status, stderr } = run([], {
+            cwd: tmpDir,
+            env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0", PORTLESS_PREFIX: "review" },
+          });
+          expect(status).toBe(1);
+          expect(stderr).toContain("hostnameTemplate");
+          expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+        } finally {
+          await stopChild(proxy.child);
+        }
+      }
+    );
 
     it("portless run (no command) with portless.json resolves dev script", () => {
       fs.writeFileSync(
