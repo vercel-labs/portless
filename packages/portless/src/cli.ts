@@ -3914,7 +3914,7 @@ async function spawnProxiedApp(
   tls: boolean,
   tlds: string[],
   lanMode: boolean,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<MultiAppEntry, number | null>
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
@@ -3969,7 +3969,7 @@ async function spawnProxiedApp(
   const capturedStore = store;
   const capturedHostnames = hostnames;
   child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
+    exitCodes.set(app, code);
     if (code !== 0 && code !== null) {
       console.error(colors.red(`[${app.name}] exited with code ${code}`));
     } else if (signal) {
@@ -3986,7 +3986,7 @@ async function spawnProxiedApp(
 
 function spawnTaskApp(
   app: MultiAppEntry,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<MultiAppEntry, number | null>
 ): ReturnType<typeof spawn> {
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -3995,7 +3995,7 @@ function spawnTaskApp(
   pipeOutput(child, chalk.gray(`[${app.name}]`));
 
   child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
+    exitCodes.set(app, code);
     if (code !== 0 && code !== null) {
       console.error(colors.red(`[${app.name}] exited with code ${code}`));
     } else if (signal) {
@@ -4332,7 +4332,7 @@ async function runWithDirectSpawn(
   taskApps: MultiAppEntry[]
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
-  const exitCodes = new Map<string, number | null>();
+  const exitCodes = new Map<MultiAppEntry, number | null>();
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
 
@@ -4409,7 +4409,7 @@ async function runWithDirectSpawn(
   if (failed.length > 0) {
     console.error(
       colors.red(
-        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([name, code]) => `${name} (${code})`).join(", ")}`
+        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([app, code]) => `${app.label} (${code})`).join(", ")}`
       )
     );
     process.exit(1);
