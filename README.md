@@ -274,6 +274,8 @@ flowchart TD
 
 Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
 
+A state directory (`~/.portless`, or `PORTLESS_STATE_DIR`) tracks one proxy. While that proxy runs, `portless proxy start -p <port>` on another port exits with an error. Stop the running proxy first, or give the second proxy its own `PORTLESS_STATE_DIR`.
+
 When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), browsers get a branded HTML page. Any client whose `Accept` header does not include `text/html`, such as curl or `fetch`, gets a small JSON body instead, e.g. `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`. Responses from your own app are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, get 421 Misdirected Request instead of the app list.
 
 ## HTTP/2 + HTTPS
