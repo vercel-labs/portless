@@ -152,7 +152,7 @@ services:
       portless.enable: "false" # leave this service unchanged
 ```
 
-Containers can call each other through portless URLs. Every service resolves the project's hostnames to the Docker host. Routed services get `PORTLESS_URL` and `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev server in a container accepts its portless hostname. With HTTPS, the portless CA is mounted at `/etc/portless/ca.pem` and set as `NODE_EXTRA_CA_CERTS`; other runtimes need their own CA setting. Values your compose file sets take precedence. On Linux the proxy listens only on loopback, so container-to-container URLs do not work yet ([#399](https://github.com/vercel-labs/portless/issues/399)); use compose service names instead.
+Routed services get `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev server in a container accepts its portless hostname. Values your compose file sets take precedence.
 
 ## List routes
 

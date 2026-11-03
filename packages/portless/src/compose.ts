@@ -7,6 +7,7 @@
  * against the resolved model, then read the assigned ports back from
  * `docker compose ps` and register them as portless routes.
  */
+import * as path from "node:path";
 import { truncateLabel } from "./auto.js";
 
 /** Compose global flags that take a value. */
@@ -30,7 +31,7 @@ const REPLACED_FLAGS = new Set(["-f", "--file", "-p", "--project-name", "--proje
  * Container ports of common non-HTTP services. They keep their published port
  * so existing connection strings (DATABASE_URL=...:5432) keep working.
  */
-export const NON_HTTP_PORTS = new Set([
+const NON_HTTP_PORTS = new Set([
   1433, // SQL Server
   1521, // Oracle
   2181, // ZooKeeper
@@ -45,6 +46,10 @@ export const NON_HTTP_PORTS = new Set([
   26257, // CockroachDB
   27017, // MongoDB
 ]);
+
+const LABEL_ENABLE = "portless.enable";
+const LABEL_NAME = "portless.name";
+const LABEL_PORTS = "portless.ports";
 
 export interface ComposeArgs {
   /** Global compose flags, in order, e.g. ["-f", "compose.dev.yml"]. */
@@ -72,8 +77,8 @@ export function splitComposeArgs(args: readonly string[]): ComposeArgs {
   return { globals, subcommand: args[i], rest: args.slice(i + 1) };
 }
 
-/** Read a global flag value (last one wins, as in compose). Handles `--flag=value`. */
-export function readGlobal(globals: readonly string[], names: readonly string[]): string[] {
+/** Values of a global flag, in order. Handles `--flag=value`. */
+function readGlobal(globals: readonly string[], names: readonly string[]): string[] {
   const values: string[] = [];
   for (let i = 0; i < globals.length; i++) {
     const arg = globals[i]!;
@@ -88,9 +93,25 @@ export function readGlobal(globals: readonly string[], names: readonly string[])
   return values;
 }
 
-/** Drop the global flags portless sets itself on the resolved model. */
-export function stripReplacedGlobals(globals: readonly string[]): string[] {
-  const out: string[] = [];
+/**
+ * Arguments that run `docker compose up` on the resolved model. The project
+ * directory stays where compose would put it (the explicit flag, else the
+ * first compose file's directory, else cwd), so `.env` settings such as
+ * COMPOSE_PROFILES still apply.
+ */
+export function buildUpArgs(opts: {
+  globals: readonly string[];
+  rest: readonly string[];
+  project: string;
+  modelPath: string;
+  cwd: string;
+}): string[] {
+  const { globals } = opts;
+  const firstFile = readGlobal(globals, ["-f", "--file"])[0];
+  const projectDir =
+    readGlobal(globals, ["--project-directory"]).pop() ??
+    (firstFile && firstFile !== "-" ? path.dirname(path.resolve(opts.cwd, firstFile)) : opts.cwd);
+  const kept: string[] = [];
   for (let i = 0; i < globals.length; i++) {
     const arg = globals[i]!;
     const eq = arg.indexOf("=");
@@ -99,9 +120,24 @@ export function stripReplacedGlobals(globals: readonly string[]): string[] {
       i++;
       continue;
     }
-    out.push(arg);
+    kept.push(arg);
   }
-  return out;
+  return [
+    "-p",
+    opts.project,
+    "--project-directory",
+    projectDir,
+    "-f",
+    opts.modelPath,
+    ...kept,
+    "up",
+    ...opts.rest,
+  ];
+}
+
+/** Whether `up` arguments leave compose running in the foreground. */
+export function isDetachedUp(rest: readonly string[]): boolean {
+  return rest.some((a) => a === "-d" || a === "--detach" || a === "--wait" || a === "--wait=true");
 }
 
 export interface ComposePort {
@@ -109,7 +145,6 @@ export interface ComposePort {
   published?: string;
   host_ip?: string;
   protocol?: string;
-  mode?: string;
   [key: string]: unknown;
 }
 
@@ -118,8 +153,6 @@ export interface ComposeService {
   network_mode?: string;
   labels?: Record<string, string>;
   environment?: Record<string, string | null>;
-  extra_hosts?: string[];
-  volumes?: unknown[];
   [key: string]: unknown;
 }
 
@@ -129,47 +162,71 @@ export interface ComposeModel {
   [key: string]: unknown;
 }
 
-export interface PlannedRoute {
+export interface ComposeRoute {
   service: string;
   target: number;
-  /** Route name without TLD, e.g. "api.shop". */
-  name: string;
+  /** Every hostname of the route, one per configured TLD. The first is primary. */
+  hostnames: string[];
+  url: string;
 }
 
 export interface KeptPort {
   service: string;
   target: number;
   published: string | undefined;
-  reason: "non-http" | "udp" | "host-network" | "disabled" | "not-listed";
+  reason: string;
 }
 
-/**
- * Per-service settings, read from compose labels. Labels survive
- * `docker compose config --format json`; `x-` extensions inside a service do not.
- */
-export interface ServiceSettings {
+export interface ComposePlan {
+  /** Compose project name, as compose resolved it. */
+  project: string;
+  /** Resolved model to run, with routed ports moved to ephemeral loopback ports. */
+  model: ComposeModel;
+  routes: ComposeRoute[];
+  kept: KeptPort[];
+}
+
+export interface PlanOptions {
+  /** Expand a route name like "api.shop" into its hostnames. Throws on invalid names. */
+  hostnamesFor: (name: string) => string[];
+  urlFor: (hostname: string) => string;
+  /** Value for __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS, e.g. ".localhost". */
+  viteAllowedHosts: string;
+}
+
+/** Turn a compose project or service name into a DNS label. */
+function toLabel(name: string): string {
+  return truncateLabel(
+    name
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, "-")
+      .replace(/^-+|-+$/g, "")
+  );
+}
+
+/** Suffix shared by every route of a project, e.g. "shop" for "api.shop". */
+export function projectLabel(project: string): string {
+  return toLabel(project);
+}
+
+interface ServiceSettings {
   enabled: boolean;
-  /** Replaces the service name in the hostname. */
   name?: string;
-  /** Container ports to route. Replaces the default HTTP port detection. */
   ports?: number[];
 }
 
-export const LABEL_ENABLE = "portless.enable";
-export const LABEL_NAME = "portless.name";
-export const LABEL_PORTS = "portless.ports";
-
-export function readServiceSettings(service: string, svc: ComposeService): ServiceSettings {
+/** Per-service settings from labels. Labels survive `config --format json`; `x-` keys in a service do not. */
+function readServiceSettings(service: string, svc: ComposeService): ServiceSettings {
   const labels = svc.labels ?? {};
   const enable = labels[LABEL_ENABLE]?.trim().toLowerCase();
-  const enabled = enable !== "false" && enable !== "0";
-  const settings: ServiceSettings = { enabled };
+  const settings: ServiceSettings = { enabled: enable !== "false" && enable !== "0" };
 
   const name = labels[LABEL_NAME]?.trim();
   if (name) {
     const label = toLabel(name);
-    if (!label)
+    if (!label) {
       throw new Error(`${service}: ${LABEL_NAME} "${name}" is not a valid hostname label.`);
+    }
     settings.name = label;
   }
 
@@ -186,62 +243,42 @@ export function readServiceSettings(service: string, svc: ComposeService): Servi
   return settings;
 }
 
-export interface ComposePlan {
-  project: string;
-  /** Resolved model with routed ports moved to ephemeral loopback ports. */
-  model: ComposeModel;
-  routes: PlannedRoute[];
-  kept: KeptPort[];
-}
-
-/** Turn a compose project or service name into a DNS label. */
-export function toLabel(name: string): string {
-  return truncateLabel(
-    name
-      .toLowerCase()
-      .replace(/[^a-z0-9-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-  );
-}
-
 /**
- * Plan routes for a resolved compose model. Every published TCP port becomes
- * an ephemeral port on 127.0.0.1 and a route `<service>.<project>`. A service
+ * Plan a resolved compose model. Every published TCP port becomes an
+ * ephemeral port on 127.0.0.1 and a route `<service>.<project>`. A service
  * with several routed ports gets `<service>.<project>` for the first and
- * `<port>.<service>.<project>` for each of them.
+ * `<port>.<service>.<project>` for each of them. Routed services get the Vite
+ * allowed-hosts variable so a dev server in a container accepts its hostname.
  */
-export function planCompose(model: ComposeModel): ComposePlan {
-  const project = toLabel(model.name);
-  const routes: PlannedRoute[] = [];
+export function planCompose(model: ComposeModel, opts: PlanOptions): ComposePlan {
+  const project = projectLabel(model.name);
+  const routes: ComposeRoute[] = [];
   const kept: KeptPort[] = [];
   const services: Record<string, ComposeService> = {};
   const seen = new Map<string, string>();
 
   for (const [service, svc] of Object.entries(model.services ?? {})) {
     const ports = svc.ports ?? [];
+    const keepAll = (reason: string): void => {
+      for (const p of ports)
+        kept.push({ service, target: p.target, published: p.published, reason });
+      services[service] = svc;
+    };
     if (ports.length === 0) {
       services[service] = svc;
       continue;
     }
     if (svc.network_mode === "host") {
-      for (const p of ports) {
-        kept.push({ service, target: p.target, published: p.published, reason: "host-network" });
-      }
-      services[service] = svc;
+      keepAll("host network");
       continue;
     }
-
     const settings = readServiceSettings(service, svc);
     if (!settings.enabled) {
-      for (const p of ports) {
-        kept.push({ service, target: p.target, published: p.published, reason: "disabled" });
-      }
-      services[service] = svc;
+      keepAll(`${LABEL_ENABLE}=false`);
       continue;
     }
     if (settings.ports) {
-      const published = new Set(ports.map((p) => p.target));
-      const missing = settings.ports.filter((p) => !published.has(p));
+      const missing = settings.ports.filter((p) => !ports.some((q) => q.target === p));
       if (missing.length > 0) {
         throw new Error(
           `${service}: ${LABEL_PORTS} lists ${missing.join(", ")}, but the service does not publish ${missing.length > 1 ? "them" : "it"}.`
@@ -249,39 +286,33 @@ export function planCompose(model: ComposeModel): ComposePlan {
       }
     }
 
-    const label = settings.name ?? toLabel(service);
     const routedTargets: number[] = [];
-    const rewritePort = (p: ComposePort): ComposePort | null => {
-      if ((p.protocol ?? "tcp") !== "tcp") {
-        kept.push({ service, target: p.target, published: p.published, reason: "udp" });
-        return p;
-      }
-      if (settings.ports && !settings.ports.includes(p.target)) {
-        kept.push({ service, target: p.target, published: p.published, reason: "not-listed" });
-        return p;
-      }
-      if (!settings.ports && NON_HTTP_PORTS.has(p.target)) {
-        kept.push({ service, target: p.target, published: p.published, reason: "non-http" });
-        return p;
-      }
-      // One loopback binding serves every route for this target. Further
-      // bindings (for example 0.0.0.0 and :: on the same port) are dropped so
-      // their fixed host port cannot collide with another project.
-      if (routedTargets.includes(p.target)) return null;
-      routedTargets.push(p.target);
-      const { published: _published, ...rest } = p;
-      return { ...rest, host_ip: "127.0.0.1" };
-    };
     const nextPorts: ComposePort[] = [];
     for (const p of ports) {
-      const next = rewritePort(p);
-      if (next) nextPorts.push(next);
+      const keep = (reason: string): void => {
+        kept.push({ service, target: p.target, published: p.published, reason });
+        nextPorts.push(p);
+      };
+      if ((p.protocol ?? "tcp") !== "tcp") keep(p.protocol ?? "udp");
+      else if (settings.ports && !settings.ports.includes(p.target)) keep(`not in ${LABEL_PORTS}`);
+      else if (!settings.ports && NON_HTTP_PORTS.has(p.target)) keep("not HTTP");
+      else if (routedTargets.includes(p.target)) {
+        // One loopback binding serves the route. Extra bindings of the same
+        // target (0.0.0.0 and :: on one port, or a second host port) are dropped
+        // so their fixed host port cannot collide with another project.
+        kept.push({ service, target: p.target, published: p.published, reason: "dropped, routed" });
+      } else {
+        routedTargets.push(p.target);
+        const { published: _published, ...rest } = p;
+        nextPorts.push({ ...rest, host_ip: "127.0.0.1" });
+      }
     }
 
+    const label = settings.name ?? toLabel(service);
     routedTargets.forEach((target, index) => {
-      const names = routedTargets.length > 1 ? [`${target}.${label}`] : [];
-      if (index === 0) names.unshift(label);
-      for (const sub of names) {
+      const subs = routedTargets.length > 1 ? [`${target}.${label}`] : [];
+      if (index === 0) subs.unshift(label);
+      for (const sub of subs) {
         const name = `${sub}.${project}`;
         const owner = seen.get(name);
         if (owner && owner !== service) {
@@ -290,148 +321,80 @@ export function planCompose(model: ComposeModel): ComposePlan {
           );
         }
         seen.set(name, service);
-        routes.push({ service, target, name });
+        const hostnames = opts.hostnamesFor(name);
+        routes.push({ service, target, hostnames, url: opts.urlFor(hostnames[0]!) });
       }
     });
 
-    services[service] = { ...svc, ports: nextPorts };
+    const environment = { ...(svc.environment ?? {}) };
+    if (routedTargets.length > 0 && !("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS" in environment)) {
+      environment.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = opts.viteAllowedHosts;
+    }
+    services[service] = { ...svc, ports: nextPorts, environment };
   }
 
-  return { project, model: { ...model, services }, routes, kept };
+  return { project: model.name, model: { ...model, services }, routes, kept };
 }
 
-/** Where the portless CA is mounted inside containers when HTTPS is on. */
-export const CONTAINER_CA_PATH = "/etc/portless/ca.pem";
-
-export interface ContainerAccess {
-  /** Every hostname of a route name, one per configured TLD. */
-  hostnamesFor: (routeName: string) => string[];
-  /** Public URL of a route name. */
-  urlFor: (routeName: string) => string;
-  /** Value for __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS, e.g. ".localhost". */
-  viteAllowedHosts: string;
-  /** Host path of the portless CA. Set only when the proxy uses HTTPS. */
-  caPath?: string;
-}
-
-function hostOf(entry: string): string {
-  return entry.split(/[=:]/)[0]!.trim();
-}
-
-/**
- * Let containers reach portless URLs. Every service resolves the project's
- * hostnames to the Docker host (where the proxy listens) and, with HTTPS,
- * trusts the portless CA through NODE_EXTRA_CA_CERTS. Routed services also
- * get PORTLESS_URL and the Vite allowed-hosts variable, so a dev server in a
- * container accepts requests for its portless hostname. Values the compose
- * file already sets win.
- */
-export function withContainerAccess(plan: ComposePlan, access: ContainerAccess): ComposeModel {
-  const hostnames = [...new Set(plan.routes.flatMap((r) => access.hostnamesFor(r.name)))];
-  const services: Record<string, ComposeService> = {};
-
-  for (const [service, svc] of Object.entries(plan.model.services)) {
-    const next: ComposeService = { ...svc };
-    const env: Record<string, string | null> = { ...(svc.environment ?? {}) };
-    const setEnv = (key: string, value: string): void => {
-      if (!(key in env)) env[key] = value;
-    };
-
-    // extra_hosts conflicts with network_mode host, service:, and container:.
-    if (!svc.network_mode && hostnames.length > 0) {
-      const existing = svc.extra_hosts ?? [];
-      const defined = new Set(existing.map(hostOf));
-      next.extra_hosts = [
-        ...existing,
-        ...hostnames.filter((h) => !defined.has(h)).map((h) => `${h}=host-gateway`),
-      ];
-    }
-
-    const own = plan.routes.find((r) => r.service === service);
-    if (own) {
-      setEnv("PORTLESS_URL", access.urlFor(own.name));
-      setEnv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", access.viteAllowedHosts);
-    }
-
-    if (access.caPath && hostnames.length > 0) {
-      const volumes = svc.volumes ?? [];
-      const mounted = volumes.some(
-        (v) => (v as { target?: string } | null)?.target === CONTAINER_CA_PATH
-      );
-      if (!mounted) {
-        next.volumes = [
-          ...volumes,
-          { type: "bind", source: access.caPath, target: CONTAINER_CA_PATH, read_only: true },
-        ];
-      }
-      setEnv("NODE_EXTRA_CA_CERTS", CONTAINER_CA_PATH);
-    }
-
-    if (Object.keys(env).length > 0) next.environment = env;
-    services[service] = next;
-  }
-
-  return { ...plan.model, services };
-}
-
-export interface Publisher {
-  service: string;
-  target: number;
-  port: number;
+export interface ComposeContainers {
+  /** Compose project names seen, in order. */
+  projects: string[];
+  /** Host ports published by running containers, keyed by "service:target". */
+  ports: Map<string, number>;
 }
 
 /**
  * Parse `docker compose ps --format json`. Compose v2.21+ prints one JSON
  * object per line; older versions print a single array.
  */
-export function parsePublishers(output: string): Publisher[] {
+export function parseContainers(output: string): ComposeContainers {
+  const result: ComposeContainers = { projects: [], ports: new Map() };
   const trimmed = output.trim();
-  if (!trimmed) return [];
-  let rows: unknown[];
-  if (trimmed.startsWith("[")) {
-    rows = JSON.parse(trimmed) as unknown[];
-  } else {
-    rows = trimmed
-      .split("\n")
-      .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as unknown);
-  }
-  const out: Publisher[] = [];
-  for (const row of rows) {
-    const r = row as {
-      Service?: string;
-      State?: string;
-      Publishers?: Array<{ TargetPort?: number; PublishedPort?: number; Protocol?: string }>;
-    };
+  if (!trimmed) return result;
+  const rows = (
+    trimmed.startsWith("[")
+      ? JSON.parse(trimmed)
+      : trimmed
+          .split("\n")
+          .filter((line) => line.trim())
+          .map((line) => JSON.parse(line))
+  ) as Array<{
+    Project?: string;
+    Service?: string;
+    State?: string;
+    Publishers?: Array<{ TargetPort?: number; PublishedPort?: number; Protocol?: string }>;
+  }>;
+  for (const r of rows) {
+    if (r.Project && !result.projects.includes(r.Project)) result.projects.push(r.Project);
     if (!r.Service || (r.State && r.State !== "running")) continue;
     for (const p of r.Publishers ?? []) {
       if (!p.PublishedPort || !p.TargetPort || (p.Protocol ?? "tcp") !== "tcp") continue;
-      if (out.some((o) => o.service === r.Service && o.target === p.TargetPort)) continue;
-      out.push({ service: r.Service, target: p.TargetPort, port: p.PublishedPort });
+      const key = `${r.Service}:${p.TargetPort}`;
+      if (!result.ports.has(key)) result.ports.set(key, p.PublishedPort);
     }
   }
-  return out;
+  return result;
 }
 
-/** Match planned routes to the host ports compose assigned. */
-export function resolveRoutePorts(
-  routes: readonly PlannedRoute[],
-  publishers: readonly Publisher[]
-): Array<PlannedRoute & { port: number }> {
-  const out: Array<PlannedRoute & { port: number }> = [];
-  for (const route of routes) {
-    const pub = publishers.find((p) => p.service === route.service && p.target === route.target);
-    if (pub) out.push({ ...route, port: pub.port });
-  }
-  return out;
+/** Host port of a route, or undefined while its container is not running. */
+export function routePort(route: ComposeRoute, containers: ComposeContainers): number | undefined {
+  return containers.ports.get(`${route.service}:${route.target}`);
 }
 
-/** Whether subcommand arguments ask compose for help instead of running. */
-export function wantsHelp(rest: readonly string[]): boolean {
-  return rest.includes("--help") || rest.includes("-h");
-}
-
-/** Whether `up` arguments leave compose running in the foreground. */
-export function isDetachedUp(rest: readonly string[]): boolean {
-  return rest.some((a) => a === "-d" || a === "--detach" || a === "--wait" || a === "--wait=true");
+/**
+ * Aliases to remove after `docker compose down`: the project's aliases whose
+ * port no longer belongs to a running container. Routes of services that stay
+ * up (unselected services, profiles that were not enabled) are kept.
+ */
+export function staleAliases(
+  aliases: ReadonlyArray<{ hostname: string; port: number }>,
+  project: string,
+  tlds: readonly string[],
+  containers: ComposeContainers
+): string[] {
+  const suffixes = tlds.map((tld) => `.${projectLabel(project)}.${tld}`);
+  const live = new Set(containers.ports.values());
+  return aliases
+    .filter((a) => suffixes.some((s) => a.hostname.endsWith(s)) && !live.has(a.port))
+    .map((a) => a.hostname);
 }
