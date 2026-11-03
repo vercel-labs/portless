@@ -1317,20 +1317,12 @@ export function syncHostsWithWarning(
 /** Check whether any process is listening on the given port on either loopback family. */
 export function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createLoopbackConnection(port);
-    let settled = false;
-
-    const finish = (result: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(result);
-    };
-
-    socket.setTimeout(SOCKET_TIMEOUT_MS);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("timeout", () => finish(false));
+    const cancel = createLoopbackConnection(port, (error, socket) => {
+      clearTimeout(timer);
+      socket?.destroy();
+      resolve(error === null);
+    });
+    const timer = setTimeout(cancel, SOCKET_TIMEOUT_MS);
   });
 }
 

@@ -2134,6 +2134,7 @@ ${colors.bold("Options:")}
   --cert <path>                 Use a custom TLS certificate
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
+                                IPv4 and IPv6 connect in parallel; the first success wins
                                 Connection errors include each loopback address and error code
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
   --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
