@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -200,6 +200,7 @@ describe("detectWorktreePrefix", () => {
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   // These tests exercise the filesystem-based fallback path. The git CLI
@@ -268,6 +269,10 @@ describe("detectWorktreePrefix", () => {
         source: "git branch",
       });
     }
+    vi.stubEnv("PORTLESS_PREFIX", "main");
+    expect(detectWorktreePrefix(tmpDir)).toEqual({ prefix: "main", source: "PORTLESS_PREFIX" });
+    vi.stubEnv("PORTLESS_PREFIX", "");
+    expect(detectWorktreePrefix(tmpDir, "branch")).toBeNull();
   });
 
   it("returns null when no .git found at all", () => {

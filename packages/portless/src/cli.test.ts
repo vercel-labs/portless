@@ -2154,7 +2154,10 @@ describe("CLI", () => {
     it("uses the template for a nonempty PORTLESS_PREFIX and skips it when empty", () => {
       fs.writeFileSync(
         path.join(tmpDir, "portless.json"),
-        JSON.stringify({ name: "myapp", worktree: { hostnameTemplate: "tenant.{worktree}-{name}" } })
+        JSON.stringify({
+          name: "myapp",
+          worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+        })
       );
 
       const labelled = run(["get", "myapp"], {
@@ -2548,7 +2551,10 @@ describe("CLI", () => {
           JSON.stringify({
             name: "test-app",
             packageManager: `${options.pm}@1.0.0`,
-            portless: { appPort: 4567, ...(options.worktree ? { worktree: options.worktree } : {}) },
+            portless: {
+              appPort: 4567,
+              ...(options.worktree ? { worktree: options.worktree } : {}),
+            },
             scripts: { dev: options.script },
           })
         );
@@ -2566,6 +2572,7 @@ describe("CLI", () => {
             "    HOST: process.env.HOST,",
             "    PORTLESS_URL: process.env.PORTLESS_URL,",
             "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
+            "    PORTLESS_PREFIX: process.env.PORTLESS_PREFIX,",
             "  },",
             "};",
             "fs.writeFileSync(capturePath, JSON.stringify(payload));",
@@ -2743,7 +2750,11 @@ describe("CLI", () => {
 
       const got = run(["get", "test-app"], {
         cwd: tmpDir,
-        env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0", PORTLESS_PREFIX: "flag" },
+        env: {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_HTTPS: "0",
+          PORTLESS_PREFIX: capture.env.PORTLESS_PREFIX,
+        },
       });
       expect(got.stdout.trim()).toBe(launched);
     });

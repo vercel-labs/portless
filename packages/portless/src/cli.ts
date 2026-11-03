@@ -1894,7 +1894,7 @@ ${colors.bold("Examples:")}
     } else if (args[i] === "--prefix") {
       i++;
       if (args[i] === undefined || args[i].startsWith("-")) {
-        console.error(colors.red("Error: --prefix requires a value (use \"\" to disable)."));
+        console.error(colors.red('Error: --prefix requires a value (use "" to disable).'));
         console.error(colors.cyan("  portless run --prefix <label> <command...>"));
         process.exit(1);
       }
@@ -2553,7 +2553,7 @@ ${colors.bold("Examples:")}
   const appConfig = skipWorktree ? null : loadAppConfig();
   const worktree = skipWorktree
     ? null
-    : resolveWorktreeLabel(process.cwd(), appConfig?.worktree, process.env.PORTLESS_PREFIX);
+    : detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
   const effectiveName = applyWorktreePrefix(name, worktree, appConfig?.worktree?.hostnameTemplate);
 
   const { port, tls, tlds } = await discoverState();
@@ -3727,17 +3727,6 @@ ${colors.bold("LAN mode (--lan):")}
 
 type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
 
-function resolveWorktreeLabel(
-  cwd: string,
-  worktree?: WorktreeConfig,
-  label?: string,
-  labelSource = "PORTLESS_PREFIX"
-): WorktreePrefix | null {
-  if (label === undefined) return detectWorktreePrefix(cwd, worktree?.prefix);
-  const prefix = sanitizeForHostname(label);
-  return prefix ? { prefix, source: labelSource } : null;
-}
-
 /**
  * Load the effective AppConfig for the current directory from portless.json or
  * the package.json "portless" key, tagged with the file it came from.
@@ -3835,7 +3824,7 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = resolveWorktreeLabel(cwd, appConfig?.worktree, process.env.PORTLESS_PREFIX);
+  const worktree = detectWorktreePrefix(cwd, appConfig?.worktree?.prefix);
   const effectiveName = applyWorktreePrefix(
     baseName,
     worktree,
@@ -4071,14 +4060,8 @@ async function handleDefaultMulti(
 
   const apps: MultiAppEntry[] = [];
 
-  const explicitPrefix = process.env.PORTLESS_PREFIX;
-  const explicitWorktree =
-    explicitPrefix === undefined
-      ? undefined
-      : resolveWorktreeLabel(wsRoot, undefined, explicitPrefix);
   const detectedWorktrees = new Map<WorktreePrefixStyle, WorktreePrefix | null>();
   const worktreeFor = (worktreeConfig: WorktreeConfig | undefined): WorktreePrefix | null => {
-    if (explicitWorktree !== undefined) return explicitWorktree;
     const style = worktreeConfig?.prefix ?? "last-segment";
     if (!detectedWorktrees.has(style)) {
       detectedWorktrees.set(style, detectWorktreePrefix(wsRoot, style));
@@ -4424,6 +4407,8 @@ async function runWithDirectSpawn(
 async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
   const parsed = parseRunArgs(args);
 
+  if (parsed.prefix !== undefined) process.env.PORTLESS_PREFIX = parsed.prefix;
+
   const appConfig = loadAppConfig();
 
   if (parsed.commandArgs.length === 0) {
@@ -4470,9 +4455,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const label = parsed.prefix ?? process.env.PORTLESS_PREFIX;
-  const labelSource = parsed.prefix === undefined ? "PORTLESS_PREFIX" : "--prefix flag";
-  const worktree = resolveWorktreeLabel(process.cwd(), appConfig?.worktree, label, labelSource);
+  const worktree = detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
   const effectiveName = applyWorktreePrefix(
     baseName,
     worktree,

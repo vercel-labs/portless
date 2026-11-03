@@ -206,6 +206,11 @@ export function detectWorktreePrefix(
   cwd: string = process.cwd(),
   style: WorktreePrefixStyle = "last-segment"
 ): WorktreePrefix | null {
+  if (process.env.PORTLESS_PREFIX !== undefined) {
+    const prefix = sanitizeForHostname(process.env.PORTLESS_PREFIX);
+    return prefix ? { prefix, source: "PORTLESS_PREFIX" } : null;
+  }
+
   // Primary: git CLI
   const cliResult = detectWorktreeViaCli(cwd, style);
   if (cliResult !== undefined) return cliResult;

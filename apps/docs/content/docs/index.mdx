@@ -95,7 +95,7 @@ portless run next dev   # -> https://myapp.localhost
 portless run next dev   # -> https://fix-ui.myapp.localhost
 ```
 
-Put `portless run` in your `package.json` once and it works everywhere. The main checkout uses the plain name, each worktree gets a unique subdomain. No collisions, no `--force`.
+Put `portless run` in `package.json` to apply these naming rules in each checkout.
 
 Use `--name` to override the inferred base name while keeping the worktree prefix:
 
