@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   isDetachedUp,
   parsePublishers,
+  readDownServices,
+  wantsHelp,
   planCompose,
   readGlobal,
   resolveRoutePorts,
@@ -313,5 +315,45 @@ describe("withContainerAccess", () => {
   it("changes nothing when the project has no routes", () => {
     const plan = planCompose(model({ worker: { image: "worker" } }));
     expect(withContainerAccess(plan, access).services.worker).toEqual({ image: "worker" });
+  });
+});
+
+describe("duplicate bindings", () => {
+  it("keeps one loopback binding when a port is published on IPv4 and IPv6", () => {
+    const plan = planCompose(
+      model({
+        dual: {
+          ports: [
+            { target: 80, published: "8090", host_ip: "0.0.0.0", protocol: "tcp" },
+            { target: 80, published: "8090", host_ip: "::", protocol: "tcp" },
+          ],
+        },
+      })
+    );
+    expect(plan.model.services.dual!.ports).toEqual([
+      { target: 80, protocol: "tcp", host_ip: "127.0.0.1" },
+    ]);
+    expect(plan.routes).toEqual([{ service: "dual", target: 80, name: "dual.shop" }]);
+  });
+});
+
+describe("readDownServices", () => {
+  it("returns the selected services and skips flag values", () => {
+    expect(readDownServices(["-v", "--rmi", "local", "-t", "5", "web", "api"])).toEqual([
+      "web",
+      "api",
+    ]);
+  });
+
+  it("returns an empty list for the whole project", () => {
+    expect(readDownServices(["--remove-orphans"])).toEqual([]);
+  });
+});
+
+describe("wantsHelp", () => {
+  it("detects help flags", () => {
+    expect(wantsHelp(["--help"])).toBe(true);
+    expect(wantsHelp(["-h"])).toBe(true);
+    expect(wantsHelp(["-d"])).toBe(false);
   });
 });

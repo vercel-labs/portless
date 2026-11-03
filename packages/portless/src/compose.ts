@@ -251,7 +251,7 @@ export function planCompose(model: ComposeModel): ComposePlan {
 
     const label = settings.name ?? toLabel(service);
     const routedTargets: number[] = [];
-    const nextPorts = ports.map((p) => {
+    const rewritePort = (p: ComposePort): ComposePort | null => {
       if ((p.protocol ?? "tcp") !== "tcp") {
         kept.push({ service, target: p.target, published: p.published, reason: "udp" });
         return p;
@@ -264,11 +264,19 @@ export function planCompose(model: ComposeModel): ComposePlan {
         kept.push({ service, target: p.target, published: p.published, reason: "non-http" });
         return p;
       }
-      if (routedTargets.includes(p.target)) return p;
+      // One loopback binding serves every route for this target. Further
+      // bindings (for example 0.0.0.0 and :: on the same port) are dropped so
+      // their fixed host port cannot collide with another project.
+      if (routedTargets.includes(p.target)) return null;
       routedTargets.push(p.target);
       const { published: _published, ...rest } = p;
       return { ...rest, host_ip: "127.0.0.1" };
-    });
+    };
+    const nextPorts: ComposePort[] = [];
+    for (const p of ports) {
+      const next = rewritePort(p);
+      if (next) nextPorts.push(next);
+    }
 
     routedTargets.forEach((target, index) => {
       const names = routedTargets.length > 1 ? [`${target}.${label}`] : [];
@@ -416,6 +424,28 @@ export function resolveRoutePorts(
     if (pub) out.push({ ...route, port: pub.port });
   }
   return out;
+}
+
+/** Value flags of `docker compose down`. */
+const DOWN_VALUE_FLAGS = new Set(["--rmi", "-t", "--timeout"]);
+
+/** Service names passed to `docker compose down`, or an empty list for the whole project. */
+export function readDownServices(rest: readonly string[]): string[] {
+  const services: string[] = [];
+  for (let i = 0; i < rest.length; i++) {
+    const arg = rest[i]!;
+    if (DOWN_VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
+    }
+    if (!arg.startsWith("-")) services.push(arg);
+  }
+  return services;
+}
+
+/** Whether subcommand arguments ask compose for help instead of running. */
+export function wantsHelp(rest: readonly string[]): boolean {
+  return rest.includes("--help") || rest.includes("-h");
 }
 
 /** Whether `up` arguments leave compose running in the foreground. */

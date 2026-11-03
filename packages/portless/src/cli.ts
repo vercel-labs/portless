@@ -14,10 +14,12 @@ import {
   isDetachedUp,
   parsePublishers,
   planCompose,
+  readDownServices,
   readGlobal,
   resolveRoutePorts,
   splitComposeArgs,
   stripReplacedGlobals,
+  wantsHelp,
   withContainerAccess,
 } from "./compose.js";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
@@ -4570,7 +4572,9 @@ function spawnDockerComposeInherit(args: string[]): Promise<number> {
 }
 
 function resolveComposePlan(globals: string[]): ComposePlan {
-  const result = runDockerCompose([...globals, "config", "--format", "json"]);
+  // Include every profile so `up <service>` can start a service from an
+  // inactive profile; compose still applies the user's --profile flags at up.
+  const result = runDockerCompose([...globals, "--profile", "*", "config", "--format", "json"]);
   if (result.error) {
     throw new Error(`could not run docker compose: ${result.error.message}`);
   }
@@ -4625,7 +4629,7 @@ async function handleCompose(args: string[]): Promise<void> {
     process.env.PORTLESS === "0" ||
     process.env.PORTLESS === "false" ||
     process.env.PORTLESS === "skip";
-  if (skip || (subcommand !== "up" && subcommand !== "down")) {
+  if (skip || (subcommand !== "up" && subcommand !== "down") || wantsHelp(rest)) {
     process.exit(await spawnDockerComposeInherit(args.slice(1)));
   }
 
@@ -4639,6 +4643,9 @@ async function handleCompose(args: string[]): Promise<void> {
 
   if (subcommand === "down") {
     const code = await spawnDockerComposeInherit(args.slice(1));
+    // A failed down leaves the containers running, so their routes stay.
+    if (code !== 0) process.exit(code);
+    const selected = readDownServices(rest);
     const { dir, tlds } = await discoverState();
     const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
     const aliases = new Set(
@@ -4648,6 +4655,7 @@ async function handleCompose(args: string[]): Promise<void> {
         .map((r) => r.hostname)
     );
     for (const route of plan.routes) {
+      if (selected.length > 0 && !selected.includes(route.service)) continue;
       const owned = buildHostnames(route.name, tlds).filter((h) => aliases.has(h));
       removeRoutes(store, owned);
     }
