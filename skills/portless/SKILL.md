@@ -167,9 +167,11 @@ period.
 2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `https://<name>.localhost`; the proxy forwards to the app's assigned port
 
-Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
+Outside LAN mode and bind-all mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
 
 With `--unprivileged` (or `PORTLESS_UNPRIVILEGED=1`) the proxy takes a port below 1024 without `sudo`: it binds the wildcard addresses, which macOS allows for non-root processes, and refuses every non-loopback peer itself. It serves plain HTTP on port 80 unless `--https` is given, because installing the CA would be a prompt; with `--https` the CA is generated but not installed, so run `portless trust` once yourself. It never writes the hosts file: automatic hosts sync is off, `PORTLESS_SYNC_HOSTS=1` together with it is refused, and Safari or a custom TLD need `portless hosts sync` run once by you. Linux needs `net.ipv4.ip_unprivileged_port_start` to cover the port; portless checks and prints the sysctl command instead of falling back to another port. The mode is remembered for auto-start and never triggers a sudo prompt, so it suits scripts, agents and managed machines.
+
+With `--bind-all` (or `PORTLESS_BIND_ALL=1`) the proxy and its redirect listener bind `0.0.0.0` and `::` and accept every peer, so a Docker container reaching the host through `host-gateway` can connect. The TLD is unchanged and no mDNS records are published, unlike `--lan`. This makes every route reachable by any machine that can reach the host, with no authentication, so only use it on trusted networks and tell the user before enabling it. The mode is remembered for auto-start, `PORTLESS_BIND_ALL=0` switches back for one start, and a running proxy started without it must be stopped first. With `--unprivileged` it still takes the port without `sudo` but also accepts other peers.
 
 When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), the body depends on the `Accept` header. Browsers (`text/html`) get an HTML page. curl, `fetch`, and other clients get JSON such as `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`, with `error` set to `not_found`, `misdirected_request`, `bad_gateway`, or `loop_detected`. Parse that JSON instead of scraping HTML. Responses from the app itself are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, get 421 Misdirected Request instead of the app list.
 
@@ -197,6 +199,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_TLD`          | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
 | `PORTLESS_WILDCARD`     | Set to `1` to allow unregistered subdomains to fall back to parent             |
 | `PORTLESS_UNPRIVILEGED` | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)   |
+| `PORTLESS_BIND_ALL`     | Set to `1` to listen on all interfaces (same as `--bind-all`)                  |
 | `PORTLESS_SYNC_HOSTS`   | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
 | `PORTLESS_TAILSCALE`    | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
 | `PORTLESS_FUNNEL`       | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
@@ -321,6 +324,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless proxy start --lan`                      | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
 | `portless proxy start -p <number>`                | Start the proxy on a custom port                               |
 | `portless proxy start --unprivileged`             | Plain HTTP on port 80 without sudo, nothing installed          |
+| `portless proxy start --bind-all`                 | Listen on all interfaces so containers can connect, keep TLD   |
 | `portless proxy start --tld test`                 | Use .test instead of .localhost                                |
 | `portless proxy start --tld localhost --tld test` | Serve both TLDs from one proxy                                 |
 | `portless proxy start --tld dev.example.com`      | Use a multi-segment TLD for production-parity URLs             |

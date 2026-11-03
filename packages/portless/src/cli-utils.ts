@@ -216,10 +216,15 @@ function signalTrackedProcesses(
  * LAN mode binds the unspecified addresses so other devices can reach the
  * proxy. Unprivileged mode binds them too, because macOS lets a non-root
  * process take a port below 1024 only on the wildcard address; the proxy
- * then refuses every peer that is not loopback itself.
+ * then refuses every peer that is not loopback itself. Bind-all mode binds
+ * them so containers and other machines can connect, without LAN discovery.
  */
-export function getProxyBindTargets(lanMode: boolean, unprivileged = false): ProxyBindTarget[] {
-  return lanMode || unprivileged
+export function getProxyBindTargets(
+  lanMode: boolean,
+  unprivileged = false,
+  bindAll = false
+): ProxyBindTarget[] {
+  return lanMode || unprivileged || bindAll
     ? [{ host: IPV4_LAN_PROXY_HOST }, { host: IPV6_LAN_PROXY_HOST, ipv6Only: true }]
     : [{ host: IPV4_LOOPBACK_PROXY_HOST }, { host: IPV6_LOOPBACK_PROXY_HOST, ipv6Only: true }];
 }
@@ -539,6 +544,32 @@ export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/** Name of the marker file that remembers bind-all mode across proxy restarts. */
+const BIND_ALL_MARKER_FILE = "proxy.bind-all";
+
+/** Read the bind-all marker from a state directory. */
+export function readBindAllMarker(dir: string): boolean {
+  try {
+    return fs.existsSync(path.join(dir, BIND_ALL_MARKER_FILE));
+  } catch {
+    return false;
+  }
+}
+
+/** Write or remove the bind-all marker in the state directory. */
+export function writeBindAllMarker(dir: string, enabled: boolean): void {
+  const markerPath = path.join(dir, BIND_ALL_MARKER_FILE);
+  if (enabled) {
+    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
 export function readCustomCertMarker(dir: string): boolean {
   try {
     return fs.existsSync(path.join(dir, CUSTOM_CERT_MARKER_FILE));
@@ -818,6 +849,15 @@ export function isUnprivilegedEnvEnabled(): boolean {
 }
 
 /**
+ * Return whether bind-all mode is requested via the PORTLESS_BIND_ALL env
+ * var: listen on every interface and accept peers other than this machine.
+ */
+export function isBindAllEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_BIND_ALL;
+  return val === "1" || val === "true";
+}
+
+/**
  * Read the last-known proxy configuration from the state directory on disk.
  * Unlike {@link discoverState}, this does not check whether the proxy is
  * actually running. It simply reads whatever state files exist so a
@@ -832,6 +872,7 @@ export function readPersistedProxyState(): {
   tlds: string[];
   lanMode: boolean;
   unprivileged: boolean;
+  bindAll: boolean;
 } | null {
   const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
   const port = readPortFromDir(dir);
@@ -841,7 +882,8 @@ export function readPersistedProxyState(): {
     const tld = tlds[0] ?? DEFAULT_TLD;
     const lanIp = readLanMarker(dir);
     const unprivileged = readUnprivilegedMarker(dir);
-    return { port, tls, tld, tlds, lanMode: lanIp !== null, unprivileged };
+    const bindAll = readBindAllMarker(dir);
+    return { port, tls, tld, tlds, lanMode: lanIp !== null, unprivileged, bindAll };
   }
 
   return null;
@@ -858,6 +900,7 @@ export function buildProxyStartConfig(options: {
   tlds?: readonly string[];
   useWildcard?: boolean;
   unprivileged?: boolean;
+  bindAll?: boolean;
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
@@ -907,6 +950,10 @@ export function buildProxyStartConfig(options: {
 
   if (options.unprivileged) {
     args.push("--unprivileged");
+  }
+
+  if (options.bindAll) {
+    args.push("--bind-all");
   }
 
   if (options.skipTrust) {

@@ -250,7 +250,7 @@ portless myapp next dev
 
 Each label must follow DNS rules: lowercase letters, digits, and interior hyphens, with at most 63 characters per label and 253 characters total. The full hostname (`app.TLD`) is also subject to the 253-character DNS limit.
 
-The proxy auto-syncs `/etc/hosts` for registered hostnames, so `myapp.dev.example.com` resolves to `127.0.0.1` on your machine. This is a loopback-only setup: outside LAN mode the proxy binds only to `127.0.0.1` and `::1` (see below), so a custom TLD is reachable only from the machine running the proxy. Reaching the proxy from other devices requires LAN mode (`--lan`), but LAN mode serves apps under the `.local` TLD and ignores a custom `--tld`, so the two cannot be combined today.
+The proxy auto-syncs `/etc/hosts` for registered hostnames, so `myapp.dev.example.com` resolves to `127.0.0.1` on your machine. This is a loopback-only setup: outside LAN mode and bind-all mode the proxy binds only to `127.0.0.1` and `::1` (see below), so a custom TLD is reachable only from the machine running the proxy. Reaching the proxy from other devices requires LAN mode (`--lan`), but LAN mode serves apps under the `.local` TLD and ignores a custom `--tld`. [Bind-all mode](#bind-all-mode) (`--bind-all`) accepts other peers and keeps the TLD, though the other side must resolve the names itself.
 
 Strict OAuth providers (Google, Apple) reject `.localhost` and `.test` redirect URIs but accept a real domain, so `https://myapp.dev.example.com/api/auth/callback/google` works as a redirect URI.
 
@@ -272,7 +272,7 @@ flowchart TD
 2. **Run apps**: `portless <name> <command>` assigns a free port and registers with the proxy
 3. **Access via URL**: `https://<name>.localhost` routes through the proxy to your app
 
-Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
+Outside LAN mode and bind-all mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
 
 When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), browsers get a branded HTML page. Any client whose `Accept` header does not include `text/html`, such as curl or `fetch`, gets a small JSON body instead, e.g. `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`. Responses from your own app are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, get 421 Misdirected Request instead of the app list.
 
@@ -306,6 +306,21 @@ It never writes the hosts file either, since that needs root: automatic hosts sy
 The mode is remembered in the state directory, so auto-start reuses it, and `PORTLESS_UNPRIVILEGED=1` selects it without the flag. It never asks for `sudo`, which also means the no-TTY exit does not apply: a proxy can be auto-started from a script or an agent on a fresh machine. In LAN mode the flag only removes the sudo step, since LAN mode wants remote peers. Under `service install` the service still runs as root, so the flag does not remove a prompt there, but it keeps its other effects: plain HTTP on port 80 unless `--https` is given, hosts sync off, and loopback peers only.
 
 On a Mac with the application firewall turned on, the first wildcard bind shows an "allow incoming connections" prompt for Node. No password, and the proxy still refuses non-loopback peers whatever you answer.
+
+## Bind-all mode
+
+A Docker container on Linux that reaches the host through `host-gateway` connects to a non-loopback address of the host, where the default loopback-only proxy does not listen (`ECONNREFUSED`). `--lan` listens there but forces `.local` and needs mDNS. `--bind-all` listens on every interface and changes nothing else:
+
+```bash
+portless proxy start --bind-all
+docker run --add-host myapp.localhost:host-gateway my-image   # the container reaches https://myapp.localhost
+```
+
+The proxy and its HTTP redirect listener bind `0.0.0.0` and `::` and accept every peer. The TLD stays `.localhost` (or your `--tld`), no mDNS records are published, and hosts sync works as before. HTTPS clients on the other side need the CA at `~/.portless/ca.pem`.
+
+Every route then becomes reachable by any machine that can reach this host, over any interface: Wi-Fi, a VPN, or the Docker bridge, with no authentication in front of your dev servers. Use it on networks you trust, or restrict the port with the host firewall.
+
+The mode is remembered in the state directory, so auto-start reuses it, and `PORTLESS_BIND_ALL=1` selects it without the flag. Use `PORTLESS_BIND_ALL=0` for one start to switch back to loopback only. If a proxy is already running without it, portless asks you to stop it first. Combined with `--unprivileged` it takes the port without `sudo` and also accepts other peers, since the explicit flag wins over the loopback-only rule. `portless service install --bind-all` persists the mode in the startup service.
 
 ```bash
 # Use your own certs (e.g., from mkcert)
@@ -446,6 +461,7 @@ portless proxy start --no-tls    # Start without HTTPS (port 80)
 portless proxy start --lan       # Start in LAN mode (mDNS .local for devices)
 portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --unprivileged  # Plain HTTP on port 80 without sudo (wildcard bind, loopback peers only)
+portless proxy start --bind-all  # Listen on all interfaces for containers and other hosts, keep the TLD
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
 portless proxy stop              # Stop the proxy
@@ -472,6 +488,7 @@ portless service uninstall       # Remove the startup service
 --tld <tld>                      Use a custom TLD instead of .localhost; repeat for more
 --wildcard                       Allow unregistered subdomains to fall back to parent route
 --unprivileged                   Take a port below 1024 without sudo (wildcard bind, loopback peers only, plain HTTP unless --https)
+--bind-all                       Listen on all interfaces and accept any peer, keeping the TLD (routes become reachable from other machines)
 --state-dir <path>               Use a custom state directory with service install
 --script <name>                  Run a specific package.json script (default: dev)
 --app-port <number>              Use a fixed port for the app (skip auto-assignment)
@@ -499,6 +516,7 @@ PORTLESS_TAILSCALE=1             Share apps on your Tailscale network (same as -
 PORTLESS_FUNNEL=1                Share apps publicly via Tailscale Funnel (same as --funnel)
 PORTLESS_NGROK=1                 Share apps publicly via ngrok (same as --ngrok)
 PORTLESS_UNPRIVILEGED=1          Take a port below 1024 without sudo (same as --unprivileged)
+PORTLESS_BIND_ALL=1              Listen on all interfaces and accept any peer (same as --bind-all)
 PORTLESS_CLOUDFLARE=1            Share apps publicly via Cloudflare (same as --cloudflare)
 PORTLESS_STATE_DIR=<path>        Override the state directory
 

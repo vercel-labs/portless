@@ -80,6 +80,8 @@ describe("buildArgv", () => {
       { port: 1355, noTls: true, tld: ["test", "localhost"] },
       ["proxy", "start", "-p", "1355", "--no-tls", "--tld", "test", "--tld", "localhost"],
     ],
+    ["proxy_start", { bindAll: true }, ["proxy", "start", "--bind-all"]],
+    ["proxy_start", { bindAll: false }, ["proxy", "start"]],
     ["version", {}, ["--version"]],
     ["list", { extraArgs: ["--x"], cwd: "/tmp", timeoutMs: 5 }, ["list", "--x"]],
     ["proxy_stop", { port: 1356 }, ["proxy", "stop", "-p", "1356"]],

@@ -190,6 +190,15 @@ portless proxy start
       </td>
     </tr>
     <tr>
+      <td>`--bind-all`</td>
+      <td>
+        Listen on all interfaces (`0.0.0.0` and `::`) and accept peers other than this machine, such
+        as Docker containers. Keeps the TLD and skips mDNS. Every route becomes reachable by any
+        machine that can reach this host. Remembered for auto-start; with `--unprivileged` it still
+        takes the port without sudo but accepts other peers.
+      </td>
+    </tr>
+    <tr>
       <td>`--no-tls`</td>
       <td>Disable HTTPS (use plain HTTP on port 80)</td>
     </tr>
@@ -241,7 +250,7 @@ portless service status
 portless service uninstall
 ```
 
-Installs the proxy as an OS startup service. The default is HTTPS on port 443 with `.localhost` names, but `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+Installs the proxy as an OS startup service. The default is HTTPS on port 443 with `.localhost` names, but `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--bind-all`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
 
 The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLDs, LAN mode, wildcard mode, and state directory. macOS and Linux use a root-owned service so port 443 can bind at boot. Windows uses a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 
@@ -255,7 +264,7 @@ portless proxy start --lan --https
 portless proxy start --lan --ip 192.168.1.42   # manual IP override
 ```
 
-Without LAN mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` and `::1`. LAN mode explicitly binds them to `0.0.0.0` and `::`.
+Without LAN mode or bind-all mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` and `::1`. LAN mode explicitly binds them to `0.0.0.0` and `::`.
 
 Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
 
@@ -280,6 +289,21 @@ Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-u
   }
 }
 ```
+
+### Bind-all mode
+
+Let Docker containers and other machines reach the proxy without LAN mode:
+
+```bash
+portless proxy start --bind-all
+docker run --add-host myapp.localhost:host-gateway my-image
+```
+
+The proxy and HTTP redirect listener bind `0.0.0.0` and `::` and accept every peer. The TLD stays `.localhost` (or your `--tld`) and no mDNS records are published. HTTPS clients on the other side need the CA at `~/.portless/ca.pem`.
+
+Every route becomes reachable by any machine that can reach this host, over any interface, with no authentication in front of your dev servers. Use it on networks you trust, or restrict the port with the host firewall.
+
+Portless remembers the mode via `proxy.bind-all`, so a stopped bind-all proxy starts in bind-all mode again unless you override it with `PORTLESS_BIND_ALL=0` for that start. If a proxy is already running without it, portless asks you to stop it first.
 
 ## Hosts
 

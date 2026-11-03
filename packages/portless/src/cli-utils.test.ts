@@ -27,6 +27,7 @@ import {
   getProxyBindTargets,
   getRiskyTldReason,
   isHttpsEnvDisabled,
+  isBindAllEnvEnabled,
   isUnprivilegedEnvEnabled,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -41,6 +42,7 @@ import {
   parseTldList,
   readLanMarker,
   readPersistedProxyState,
+  readBindAllMarker,
   readUnprivilegedMarker,
   readTldFromDir,
   readTldsFromDir,
@@ -53,6 +55,7 @@ import {
   ownedProcessIds,
   getProcessStartTime,
   killOrphanedProcessGroup,
+  writeBindAllMarker,
   writeUnprivilegedMarker,
 } from "./cli-utils.js";
 describe("proxy listener interface", () => {
@@ -72,6 +75,13 @@ describe("proxy listener interface", () => {
 
   it("uses the unspecified addresses in unprivileged mode outside LAN mode", () => {
     expect(getProxyBindTargets(false, true)).toEqual([
+      { host: "0.0.0.0" },
+      { host: "::", ipv6Only: true },
+    ]);
+  });
+
+  it("uses the unspecified addresses in bind-all mode outside LAN mode", () => {
+    expect(getProxyBindTargets(false, false, true)).toEqual([
       { host: "0.0.0.0" },
       { host: "::", ipv6Only: true },
     ]);
@@ -2014,6 +2024,20 @@ describe("buildProxyStartConfig", () => {
     expect(buildProxyStartConfig(base).args).toEqual(["--no-tls"]);
   });
 
+  it("emits --bind-all only when requested", () => {
+    const base = { useHttps: false, lanMode: false, tld: "localhost" };
+    expect(buildProxyStartConfig({ ...base, bindAll: true }).args).toEqual([
+      "--no-tls",
+      "--bind-all",
+    ]);
+    expect(buildProxyStartConfig({ ...base, bindAll: true, unprivileged: true }).args).toEqual([
+      "--no-tls",
+      "--unprivileged",
+      "--bind-all",
+    ]);
+    expect(buildProxyStartConfig(base).args).toEqual(["--no-tls"]);
+  });
+
   it("passes auto-detected LAN IP through an internal flag", () => {
     expect(
       buildProxyStartConfig({
@@ -2336,6 +2360,7 @@ describe("readPersistedProxyState", () => {
       tlds: ["local"],
       lanMode: true,
       unprivileged: false,
+      bindAll: false,
     });
   });
 
@@ -2731,6 +2756,62 @@ describe("readUnprivilegedMarker / writeUnprivilegedMarker", () => {
       expect(readPersistedProxyState()?.unprivileged).toBe(false);
       writeUnprivilegedMarker(tmpDir, true);
       expect(readPersistedProxyState()?.unprivileged).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+});
+
+describe("isBindAllEnvEnabled", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it.each(["1", "true"])("is on for PORTLESS_BIND_ALL=%s", (value) => {
+    vi.stubEnv("PORTLESS_BIND_ALL", value);
+    expect(isBindAllEnvEnabled()).toBe(true);
+  });
+
+  it.each(["0", "false", "yes", ""])("is off for PORTLESS_BIND_ALL=%s", (value) => {
+    vi.stubEnv("PORTLESS_BIND_ALL", value);
+    expect(isBindAllEnvEnabled()).toBe(false);
+  });
+
+  it("is off when unset", () => {
+    vi.stubEnv("PORTLESS_BIND_ALL", undefined);
+    expect(isBindAllEnvEnabled()).toBe(false);
+  });
+});
+
+describe("readBindAllMarker / writeBindAllMarker", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bind-all-marker-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("is absent by default", () => {
+    expect(readBindAllMarker(tmpDir)).toBe(false);
+  });
+
+  it("round-trips through write and remove", () => {
+    writeBindAllMarker(tmpDir, true);
+    expect(readBindAllMarker(tmpDir)).toBe(true);
+    writeBindAllMarker(tmpDir, false);
+    expect(readBindAllMarker(tmpDir)).toBe(false);
+  });
+
+  it("is part of the persisted proxy state", () => {
+    vi.stubEnv("PORTLESS_STATE_DIR", tmpDir);
+    try {
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "8080");
+      expect(readPersistedProxyState()?.bindAll).toBe(false);
+      writeBindAllMarker(tmpDir, true);
+      expect(readPersistedProxyState()?.bindAll).toBe(true);
     } finally {
       vi.unstubAllEnvs();
     }

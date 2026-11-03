@@ -302,6 +302,41 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain('Environment=PORTLESS_UNPRIVILEGED="1"');
   });
 
+  it("reads bind-all mode from the flag and PORTLESS_BIND_ALL without changing the TLD or HTTPS", () => {
+    expect(parseServiceInstallConfig(["service", "install", "--bind-all"], {})).toMatchObject({
+      bindAll: true,
+      lanMode: false,
+      useHttps: true,
+      proxyPort: 443,
+      tlds: ["localhost"],
+    });
+    expect(
+      parseServiceInstallConfig(["service", "install"], { PORTLESS_BIND_ALL: "1" })
+    ).toMatchObject({ bindAll: true });
+    expect(
+      parseServiceInstallConfig(["service", "install", "--bind-all"], { PORTLESS_BIND_ALL: "0" })
+    ).toMatchObject({ bindAll: true });
+    expect(
+      parseServiceInstallConfig(["service", "install"], { PORTLESS_BIND_ALL: "0" })
+    ).toMatchObject({ bindAll: false });
+  });
+
+  it("persists bind-all mode in a Linux service", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      installConfig: { bindAll: true },
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.execStart).toContain("--bind-all");
+    expect(spec.unit).toContain('Environment=PORTLESS_BIND_ALL="1"');
+  });
+
   it("persists no-TLS, custom TLD, and custom state in a Linux service", () => {
     const spec = buildServiceSpec({
       platform: "linux",

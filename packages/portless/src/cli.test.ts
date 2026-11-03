@@ -1309,6 +1309,61 @@ describe("CLI", () => {
     });
   });
 
+  describe("bind-all mode against a running proxy", () => {
+    let tmpDir: string;
+    let proxyChild: ReturnType<typeof spawn> | undefined;
+    let proxyPort: number;
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-bind-all-mismatch-"));
+      const proxy = await startMockProxy(tmpDir);
+      proxyChild = proxy.child;
+      proxyPort = proxy.port;
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+    });
+
+    afterEach(async () => {
+      if (proxyChild) await stopChild(proxyChild);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("rejects --bind-all when the running proxy was started without it", () => {
+      const { status, stderr } = run(["proxy", "start", "--bind-all"], {
+        env: { PORTLESS_STATE_DIR: tmpDir },
+      });
+
+      expect(status).toBe(1);
+      expect(stderr).toContain("Proxy is already running on port");
+      expect(stderr).toContain("requested bind-all mode");
+      expect(stderr).toContain("portless proxy stop");
+      expect(stderr).toContain("--bind-all");
+    });
+
+    it("rejects PORTLESS_BIND_ALL=0 when the running proxy is in bind-all mode", () => {
+      fs.writeFileSync(path.join(tmpDir, "proxy.bind-all"), "1");
+
+      const { status, stderr } = run(["proxy", "start"], {
+        env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_BIND_ALL: "0" },
+      });
+
+      expect(status).toBe(1);
+      expect(stderr).toContain("requested loopback-only binding");
+      expect(stderr).not.toContain("--bind-all");
+    });
+
+    it("accepts a repeated --bind-all request without a mismatch", () => {
+      fs.writeFileSync(path.join(tmpDir, "proxy.bind-all"), "1");
+
+      const { status, stdout, stderr } = run(["proxy", "start", "--bind-all"], {
+        env: { PORTLESS_STATE_DIR: tmpDir },
+      });
+
+      expect(status).toBe(0);
+      expect(stderr).not.toContain("different config");
+      expect(stdout).toContain("Proxy is already running");
+    });
+  });
+
   describe.skipIf(process.platform === "win32")("privileged proxy startup", () => {
     function writeNonRootPreload(dir: string): string {
       const preloadPath = path.join(dir, "non-root-preload.cjs");
@@ -1419,7 +1474,58 @@ describe("CLI", () => {
     });
   });
 
-  describe.skipIf(process.platform === "win32")("unprivileged proxy peers", () => {
+  // macOS grants a port below 1024 on the wildcard address but not on
+  // loopback, so only a probe of the bind-all targets lets --bind-all skip sudo.
+  describe.skipIf(process.platform !== "darwin")("privileged proxy startup with --bind-all", () => {
+    async function findFreePrivilegedPort(): Promise<number> {
+      for (let port = 733; port < 760; port += 1) {
+        if (await canBindProxyPort(port, getProxyBindTargets(false, false, true))) {
+          const probe = net.createServer();
+          const free = await new Promise<boolean>((resolve) => {
+            probe.once("error", () => resolve(false));
+            probe.listen(port, "0.0.0.0", () => probe.close(() => resolve(true)));
+          });
+          if (free) return port;
+        }
+      }
+      throw new Error("No free privileged port found for the test");
+    }
+
+    it("starts without sudo when only the wildcard bind is granted", async (ctx) => {
+      if ((process.getuid?.() ?? -1) === 0) ctx.skip();
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bind-all-sudo-"));
+      const fakeBinDir = path.join(tmpDir, "bin");
+      fs.mkdirSync(fakeBinDir);
+      const sudoCalledPath = path.join(tmpDir, "sudo-called");
+      const fakeSudoPath = path.join(fakeBinDir, "sudo");
+      fs.writeFileSync(fakeSudoPath, `#!/bin/sh\ntouch "${sudoCalledPath}"\nexit 23\n`);
+      fs.chmodSync(fakeSudoPath, 0o755);
+      const port = await findFreePrivilegedPort();
+      const env = {
+        PATH: `${fakeBinDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        PORTLESS_STATE_DIR: path.join(tmpDir, "state"),
+        PORTLESS_HTTPS: "0",
+      };
+
+      try {
+        // Control: the loopback targets are denied, so the probe asks for sudo.
+        const loopback = run(["proxy", "start", "-p", String(port)], { env });
+        expect(loopback.status).toBe(1);
+        expect(fs.existsSync(sudoCalledPath)).toBe(true);
+        fs.rmSync(sudoCalledPath);
+
+        const bindAll = run(["proxy", "start", "--bind-all", "-p", String(port)], { env });
+        expect(bindAll.status).toBe(0);
+        expect(fs.existsSync(sudoCalledPath)).toBe(false);
+        expect(bindAll.stdout).toContain(`proxy started on port ${port}`);
+      } finally {
+        run(["proxy", "stop", "-p", String(port)], { env });
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe.skipIf(process.platform === "win32")("proxy peers on the wildcard address", () => {
     let tmpDir: string;
 
     beforeEach(() => {
@@ -1488,6 +1594,24 @@ describe("CLI", () => {
       }
     });
 
+    for (const flags of [["--bind-all"], ["--unprivileged", "--bind-all"]]) {
+      it(`accepts non-loopback peers with ${flags.join(" ")}`, async (ctx) => {
+        const lanAddress = await lanAddressOrSkip(ctx);
+        const proxyPort = await getFreePort();
+        const env = { PORTLESS_STATE_DIR: tmpDir };
+        const portArgs = ["-p", proxyPort.toString()];
+
+        try {
+          const start = run(["proxy", "start", ...flags, "--no-tls", ...portArgs], { env });
+          expect(start.status).toBe(0);
+          expect(await requestStatus("127.0.0.1", proxyPort)).toMatch(/^HTTP\/1\.1 \d{3}/);
+          expect(await requestStatus(lanAddress, proxyPort)).toMatch(/^HTTP\/1\.1 \d{3}/);
+        } finally {
+          run(["proxy", "stop", ...portArgs], { env });
+        }
+      });
+    }
+
     it("refuses non-loopback peers on the HTTPS redirect listener", async (ctx) => {
       const lanAddress = await lanAddressOrSkip(ctx);
       // The redirect listener always takes port 80.
@@ -1541,6 +1665,40 @@ describe("CLI", () => {
         const start = run(["proxy", "start"], { env });
         expect(start.status).toBe(0);
         expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(expected);
+      } finally {
+        run(["proxy", "stop", "-p", proxyPort.toString()], { env });
+      }
+    });
+  });
+
+  describe("persisted bind-all marker", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-bind-all-marker-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it.each([
+      ["keeps bind-all mode from the marker after a stop", undefined, true],
+      ["PORTLESS_BIND_ALL=0 overrides the marker", "0", false],
+    ])("%s", async (_name, envValue, expected) => {
+      const proxyPort = await getFreePort();
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: proxyPort.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_BIND_ALL: envValue,
+      };
+      fs.writeFileSync(path.join(tmpDir, "proxy.bind-all"), "1");
+
+      try {
+        const start = run(["proxy", "start"], { env });
+        expect(start.status).toBe(0);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(expected);
       } finally {
         run(["proxy", "stop", "-p", proxyPort.toString()], { env });
       }
@@ -2327,6 +2485,50 @@ describe("CLI", () => {
       await waitForHttpHeader(testPort, "X-Portless", "1");
     });
 
+    it("listens on all interfaces and remembers the mode with --bind-all", async () => {
+      const start = run(["proxy", "start", "--bind-all"], { env: proxyEnv() });
+      expect(start.status).toBe(0);
+      expect(start.stdout).toContain("Listening on all interfaces");
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+
+      expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(true);
+      // Bind-all keeps the TLD and never starts LAN discovery.
+      expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).not.toContain("TLDs");
+      expect(log).not.toContain("LAN mode");
+      expect(log).toContain(`listening on 0.0.0.0:${testPort}`);
+      expect(log).toContain("(all interfaces)");
+      expect(log).not.toContain("loopback peers only");
+
+      const stop = run(["proxy", "stop"], { env: proxyEnv() });
+      expect(stop.status).toBe(0);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(true);
+    });
+
+    it("reads bind-all mode from PORTLESS_BIND_ALL", async () => {
+      const start = run(["proxy", "start"], {
+        env: { ...proxyEnv(), PORTLESS_BIND_ALL: "1" },
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(true);
+    });
+
+    it("lets --bind-all lift the loopback-only peer rule of --unprivileged", async () => {
+      const start = run(["proxy", "start", "--unprivileged", "--bind-all"], {
+        env: proxyEnv(),
+      });
+      expect(start.status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(true);
+      const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+      expect(log).toContain("(unprivileged, all interfaces)");
+      expect(log).not.toContain("loopback peers only");
+    });
+
     it("keeps binding loopback only without the flag", async () => {
       const start = run(["proxy", "start"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -2334,7 +2536,9 @@ describe("CLI", () => {
       const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
       expect(log).toContain(`listening on 127.0.0.1:${testPort}`);
       expect(log).not.toContain("unprivileged");
+      expect(log).not.toContain("all interfaces");
       expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(false);
     });
 
     it("accepts connections on IPv6 loopback when available", async (ctx) => {

@@ -75,6 +75,9 @@ import {
   isUnprivilegedEnvEnabled,
   readUnprivilegedMarker,
   writeUnprivilegedMarker,
+  isBindAllEnvEnabled,
+  readBindAllMarker,
+  writeBindAllMarker,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -172,6 +175,7 @@ type ProxyConfigExplicitness = {
   tlds: boolean;
   useWildcard: boolean;
   unprivileged: boolean;
+  bindAll: boolean;
 };
 
 type ProxyConfig = {
@@ -186,6 +190,8 @@ type ProxyConfig = {
   useWildcard: boolean;
   /** Bind the wildcard address, accept loopback peers only, never elevate. */
   unprivileged: boolean;
+  /** Bind the wildcard address and accept any peer, keeping the TLD and skipping LAN discovery. */
+  bindAll: boolean;
 };
 
 function normalizeTlds(tlds: readonly string[]): string[] {
@@ -217,12 +223,14 @@ function defaultProxyConfig(
     tlds: effectiveTlds,
     useWildcard: false,
     unprivileged: false,
+    bindAll: false,
   };
 }
 
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
   persistedUnprivileged: boolean;
+  persistedBindAll: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -233,6 +241,7 @@ function resolveProxyConfig(options: {
   tlds: string[];
   useWildcard: boolean;
   unprivileged: boolean;
+  bindAll: boolean;
 }): ProxyConfig {
   const config = defaultProxyConfig(
     options.defaultTlds,
@@ -287,6 +296,10 @@ function resolveProxyConfig(options: {
     ? options.unprivileged
     : options.persistedUnprivileged;
 
+  // Bind-all mode is remembered the same way, through proxy.bind-all, unless
+  // PORTLESS_BIND_ALL overrides it.
+  config.bindAll = options.explicit.bindAll ? options.bindAll : options.persistedBindAll;
+
   // Unprivileged mode promises no prompt of any kind, and trusting a
   // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
   if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
@@ -330,6 +343,7 @@ function readCurrentProxyConfig(dir: string): ProxyConfig {
     tlds,
     useWildcard: false,
     unprivileged: readUnprivilegedMarker(dir),
+    bindAll: readBindAllMarker(dir),
   };
 }
 
@@ -370,6 +384,14 @@ function getProxyConfigMismatchMessages(
     );
   }
 
+  if (explicit.bindAll && desiredConfig.bindAll !== actualConfig.bindAll) {
+    messages.push(
+      desiredConfig.bindAll
+        ? "requested bind-all mode, but the running proxy was not started with it"
+        : "requested loopback-only binding, but the running proxy was started with bind-all mode"
+    );
+  }
+
   if (
     explicit.tlds &&
     (desiredConfig.tlds.length !== actualConfig.tlds.length ||
@@ -389,12 +411,16 @@ function getProxyConfigMismatchMessages(
  * Linux `ip_unprivileged_port_start` sysctl or a wildcard bind on macOS skips
  * the prompt.
  */
-async function proxyPortNeedsElevation(port: number, lanMode: boolean): Promise<boolean> {
+async function proxyPortNeedsElevation(
+  port: number,
+  lanMode: boolean,
+  bindAll = false
+): Promise<boolean> {
   if (isWindows || port >= PRIVILEGED_PORT_THRESHOLD || (process.getuid?.() ?? -1) === 0) {
     return false;
   }
   const lanBind = lanMode && isMdnsSupported().supported;
-  return !(await canBindProxyPort(port, getProxyBindTargets(lanBind)));
+  return !(await canBindProxyPort(port, getProxyBindTargets(lanBind, false, bindAll)));
 }
 
 function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string {
@@ -410,6 +436,7 @@ function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string
     tlds: config.tlds,
     useWildcard: config.useWildcard,
     unprivileged: config.unprivileged,
+    bindAll: config.bindAll,
     includePort: proxyPort !== getDefaultPort(config.useHttps),
     proxyPort,
   });
@@ -689,7 +716,8 @@ function startProxyServer(
   lanIp?: string | null,
   strict?: boolean,
   customCert = false,
-  unprivileged = false
+  unprivileged = false,
+  bindAll = false
 ): void {
   store.ensureDir();
 
@@ -697,11 +725,12 @@ function startProxyServer(
   const mdnsSupport = isMdnsSupported();
   let activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
   const lanModeActive = activeLanIp !== null;
-  const bindTargets = getProxyBindTargets(lanModeActive, unprivileged);
+  const bindTargets = getProxyBindTargets(lanModeActive, unprivileged, bindAll);
   const primaryBindTarget = bindTargets[0]!;
-  // LAN mode wants remote peers; unprivileged mode binds the same addresses
-  // only to get the port, so it keeps the proxy loopback-only itself.
-  const loopbackOnly = unprivileged && !lanModeActive;
+  // LAN mode and bind-all mode want remote peers; unprivileged mode binds the
+  // same addresses only to get the port, so it keeps the proxy loopback-only
+  // itself unless one of them asks for more.
+  const loopbackOnly = unprivileged && !lanModeActive && !bindAll;
   const lanIpPinned = !!process.env.PORTLESS_LAN_IP;
   let lanMonitor: ReturnType<typeof startLanIpMonitor> | null = null;
   if (lanIp && !mdnsSupport.supported) {
@@ -890,7 +919,8 @@ function startProxyServer(
 
   const proto = isTls ? "HTTPS/2" : "HTTP";
   const tldLabel = tlds.length > 1 || tld !== DEFAULT_TLD ? ` (TLDs: ${formatTldList(tlds)})` : "";
-  const modeLabel = `${strict === false ? " (wildcard)" : ""}${loopbackOnly ? " (unprivileged, loopback peers only)" : ""}`;
+  const accessLabel = loopbackOnly ? "loopback peers only" : bindAll ? "all interfaces" : null;
+  const modeLabel = `${strict === false ? " (wildcard)" : ""}${accessLabel ? ` (${unprivileged ? "unprivileged, " : ""}${accessLabel})` : ""}`;
 
   for (const bindTarget of bindTargets.slice(1)) {
     const additionalServer = createServer();
@@ -946,6 +976,7 @@ function startProxyServer(
     writeTldsFile(store.dir, tlds);
     writeLanMarker(store.dir, activeLanIp);
     writeUnprivilegedMarker(store.dir, unprivileged);
+    writeBindAllMarker(store.dir, bindAll);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
     console.log(
       colors.green(
@@ -1217,10 +1248,12 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: process.env.PORTLESS_TLD !== undefined,
     useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    bindAll: process.env.PORTLESS_BIND_ALL !== undefined,
   };
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
     persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
+    persistedBindAll: readBindAllMarker(resolveStateDir()),
     explicit,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
@@ -1231,6 +1264,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: envTlds,
     useWildcard: isWildcardEnvEnabled(),
     unprivileged: isUnprivilegedEnvEnabled(),
+    bindAll: isBindAllEnvEnabled(),
   });
   return { explicit, desiredConfig, envTld, envTlds };
 }
@@ -1277,6 +1311,9 @@ async function ensureProxyRunning(
     if (!explicit.unprivileged && persisted.unprivileged !== desiredConfig.unprivileged) {
       startConfig.unprivileged = persisted.unprivileged;
     }
+    if (!explicit.bindAll && persisted.bindAll !== desiredConfig.bindAll) {
+      startConfig.bindAll = persisted.bindAll;
+    }
     const envPort = getDefaultPort(startConfig.useHttps);
     if (persisted.port !== envPort) {
       startPort = persisted.port;
@@ -1286,7 +1323,7 @@ async function ensureProxyRunning(
   const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
   const needsSudo =
     !startConfig.unprivileged &&
-    (await proxyPortNeedsElevation(effectivePort, startConfig.lanMode));
+    (await proxyPortNeedsElevation(effectivePort, startConfig.lanMode, startConfig.bindAll));
   const manualStartCommand = formatProxyStartCommand(effectivePort, startConfig);
   const fallbackStartCommand = formatProxyStartCommand(FALLBACK_PROXY_PORT, startConfig);
 
@@ -1317,6 +1354,7 @@ async function ensureProxyRunning(
     tlds: startConfig.tlds,
     useWildcard: startConfig.useWildcard,
     unprivileged: startConfig.unprivileged,
+    bindAll: startConfig.bindAll,
     includePort: startPort !== undefined,
     proxyPort: startPort,
   });
@@ -2127,6 +2165,11 @@ ${colors.bold("Options:")}
                                 HTTP on port 80 unless --https is also given, and
                                 never writes the hosts file. Remembered after
                                 stop; PORTLESS_UNPRIVILEGED=0 switches back
+  --bind-all                    Listen on every network interface and accept peers
+                                other than this machine, such as Docker containers.
+                                Keeps the TLD and skips mDNS. Routes become reachable
+                                by any machine that can reach this host. Remembered
+                                after stop; PORTLESS_BIND_ALL=0 switches back
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -2155,6 +2198,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
+  PORTLESS_BIND_ALL=1           Listen on all interfaces and accept any peer (same as --bind-all)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
@@ -3163,6 +3207,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
+  ${colors.cyan("portless proxy start --bind-all")}     Listen on all interfaces (containers, other hosts), keep .localhost
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
@@ -3178,6 +3223,15 @@ ${colors.bold("LAN mode (--lan):")}
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+
+${colors.bold("Bind-all mode (--bind-all):")}
+  Listens on 0.0.0.0 and :: and accepts peers that are not this machine,
+  such as Docker containers reaching the host through host-gateway.
+  Keeps the configured TLD and does not publish mDNS records.
+  Every route becomes reachable by any machine that can reach this host,
+  so use it on trusted networks only.
+  Stopped bind-all proxies keep the mode for the next start via proxy.bind-all.
+  Use PORTLESS_BIND_ALL=0 for one start to switch back to loopback only.
 `);
     process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
@@ -3185,6 +3239,7 @@ ${colors.bold("LAN mode (--lan):")}
   const isForeground = args.includes("--foreground");
   const skipTrust = args.includes("--skip-trust");
   const hasUnprivilegedFlag = args.includes("--unprivileged");
+  const hasBindAllFlag = args.includes("--bind-all");
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
   const hasHttpsFlag = args.includes("--https");
@@ -3289,6 +3344,7 @@ ${colors.bold("LAN mode (--lan):")}
     tlds: tldFlagValues.length > 0 || process.env.PORTLESS_TLD !== undefined,
     useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: hasUnprivilegedFlag || process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    bindAll: hasBindAllFlag || process.env.PORTLESS_BIND_ALL !== undefined,
   };
 
   // Resolve state directory based on the port
@@ -3310,6 +3366,7 @@ ${colors.bold("LAN mode (--lan):")}
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
     persistedUnprivileged: readUnprivilegedMarker(stateDir),
+    persistedBindAll: readBindAllMarker(stateDir),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
@@ -3320,6 +3377,7 @@ ${colors.bold("LAN mode (--lan):")}
     tlds,
     useWildcard,
     unprivileged: hasUnprivilegedFlag || isUnprivilegedEnvEnabled(),
+    bindAll: hasBindAllFlag || isBindAllEnvEnabled(),
   });
   const lanMode = desiredConfig.lanMode;
   useHttps = desiredConfig.useHttps;
@@ -3329,6 +3387,7 @@ ${colors.bold("LAN mode (--lan):")}
   tlds = desiredConfig.tlds;
   const desiredWildcard = desiredConfig.useWildcard;
   const desiredUnprivileged = desiredConfig.unprivileged;
+  const desiredBindAll = desiredConfig.bindAll;
   let lanIp: string | null = desiredConfig.lanIpExplicit ? desiredConfig.lanIp : null;
 
   if (!hasExplicitPort && runningPort === null) {
@@ -3457,6 +3516,7 @@ ${colors.bold("LAN mode (--lan):")}
     tlds,
     useWildcard: desiredWildcard,
     unprivileged: desiredUnprivileged,
+    bindAll: desiredBindAll,
   };
 
   const isRoot = (process.getuid?.() ?? -1) === 0;
@@ -3481,7 +3541,7 @@ ${colors.bold("LAN mode (--lan):")}
 
   // Privileged ports require root on Unix unless the platform grants the bind.
   // Auto-elevate with sudo only when a probe bind fails with EACCES.
-  if (!desiredUnprivileged && (await proxyPortNeedsElevation(proxyPort, lanMode))) {
+  if (!desiredUnprivileged && (await proxyPortNeedsElevation(proxyPort, lanMode, desiredBindAll))) {
     const startArgs = [
       process.execPath,
       getEntryScript(),
@@ -3497,6 +3557,7 @@ ${colors.bold("LAN mode (--lan):")}
         tld,
         tlds,
         useWildcard: desiredWildcard,
+        bindAll: desiredBindAll,
         foreground: isForeground,
         includePort: true,
         proxyPort,
@@ -3633,7 +3694,8 @@ ${colors.bold("LAN mode (--lan):")}
       lanIp,
       desiredWildcard ? false : undefined,
       !!(customCertPath && customKeyPath),
-      desiredUnprivileged
+      desiredUnprivileged,
+      desiredBindAll
     );
     return;
   }
@@ -3665,6 +3727,7 @@ ${colors.bold("LAN mode (--lan):")}
         tlds,
         useWildcard: desiredWildcard,
         unprivileged: desiredUnprivileged,
+        bindAll: desiredBindAll,
         foreground: true,
         includePort: true,
         proxyPort,
@@ -3703,6 +3766,12 @@ ${colors.bold("LAN mode (--lan):")}
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
+  } else if (desiredBindAll) {
+    console.log(
+      chalk.yellow(
+        "Listening on all interfaces: every route is reachable by any machine that can reach this host."
+      )
+    );
   }
 }
 
