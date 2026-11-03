@@ -106,14 +106,19 @@ Applies worktree prefix detection by default. Use `--no-worktree` to skip it.
 ```bash
 portless alias <name> <port>
 portless alias <name> <port> --force
+portless alias <name> <port> --tld <tld>
 portless alias --remove <name>
+portless alias --remove <name> --tld <tld>
 ```
 
 Register a route for a service not managed by portless (e.g. a Docker container). Aliases persist across stale-route cleanup.
 
+An alias covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments to cover only selected configured TLDs; repeat the flag or pass a comma-separated list. A value that is missing, empty, or not configured stops the command before any route changes, and `--help` after the arguments prints usage without changing routes.
+
 ```bash
 portless alias my-postgres 5432     # -> https://my-postgres.localhost
 portless alias redis 6379           # -> https://redis.localhost
+portless alias redis 6379 --tld test # -> https://redis.test only
 portless alias --remove my-postgres # remove the alias
 ```
 

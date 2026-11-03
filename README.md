@@ -236,6 +236,15 @@ portless myapp next dev
 
 When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. `PORTLESS_TLD` also accepts a comma separated list, e.g. `PORTLESS_TLD=localhost,test`.
 
+Aliases cover every configured TLD by default. Pass `--tld <tld>` after the alias arguments to register or remove only selected configured TLDs; repeat the flag or pass a comma-separated list:
+
+```bash
+portless alias redis 6379 --tld test        # -> https://redis.test only
+portless alias --remove redis --tld test
+```
+
+A missing, empty, or unconfigured TLD stops the command before any route changes, and `--help` after the arguments prints usage without changing routes.
+
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
 ### Multi-segment TLDs
@@ -428,6 +437,7 @@ portless run [--name <name>] [cmd] [args...]  # Infer name, run through proxy
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
+portless alias <name> <port> --tld <tld>  # Cover selected configured TLDs only
 portless alias --remove <name>   # Remove a static route
 portless list                    # Show active routes and uptime
 portless doctor                  # Check proxy, routes, DNS, and CA trust

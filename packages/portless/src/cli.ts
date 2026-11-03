@@ -533,8 +533,12 @@ function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | n
   return "";
 }
 
-function buildHostnames(name: string, tlds: readonly string[]): string[] {
-  return parseHostnames(name, normalizeTlds(tlds));
+function buildHostnames(
+  name: string,
+  tlds: readonly string[],
+  targetTlds?: readonly string[]
+): string[] {
+  return parseHostnames(name, normalizeTlds(tlds), targetTlds);
 }
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
@@ -2559,36 +2563,74 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless alias --remove <name>")}      Remove a route
   ${colors.cyan("portless alias <name> <port> --force")} Override existing route
 
+${colors.bold("Options:")}
+  --force                Override an existing route
+  --tld <tld>            Only these configured TLDs (repeatable, comma-separated)
+  --help, -h             Show this help
+
 ${colors.bold("Examples:")}
   portless alias my-postgres 5432     # -> https://my-postgres.localhost
   portless alias redis 6379           # -> https://redis.localhost
+  portless alias redis 6379 --tld test # -> https://redis.test only
   portless alias --remove my-postgres # Remove the alias
 `);
     process.exit(0);
   }
 
   const isRemove = args[1] === "--remove";
-  for (const arg of args.slice(isRemove ? 2 : 1)) {
-    if (arg.startsWith("-") && (isRemove || arg !== "--force")) {
+  const tldFlagValues: string[] = [];
+  for (let i = isRemove ? 2 : 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--tld") {
+      const value = args[i + 1];
+      if (!value || value.startsWith("-")) {
+        console.error(colors.red("Error: --tld requires a TLD value."));
+        process.exit(1);
+      }
+      tldFlagValues.push(value);
+      i++;
+    } else if (arg.startsWith("-") && (isRemove || arg !== "--force")) {
       console.error(colors.red(`Error: Unknown flag "${arg}".`));
-      console.error(colors.blue(`Known flags: ${isRemove ? "--help" : "--force, --help"}`));
+      console.error(
+        colors.blue(`Known flags: ${isRemove ? "--tld, --help" : "--force, --tld, --help"}`)
+      );
       process.exit(1);
     }
   }
 
   const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
+  let targetTlds: string[] | undefined;
+  if (tldFlagValues.length > 0) {
+    try {
+      targetTlds = [...new Set(tldFlagValues.flatMap((value) => parseTldList(value)))];
+    } catch (err) {
+      console.error(colors.red(`Error: ${(err as Error).message}`));
+      process.exit(1);
+    }
+    if (targetTlds.length === 0) {
+      console.error(colors.red("Error: --tld requires at least one TLD."));
+      process.exit(1);
+    }
+    const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
+    if (unconfigured) {
+      console.error(
+        colors.red(`Error: TLD "${unconfigured}" is not configured (${tlds.join(", ")}).`)
+      );
+      process.exit(1);
+    }
+  }
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
   if (isRemove) {
     const aliasName = args[2];
-    if (!aliasName) {
+    if (!aliasName || aliasName.startsWith("-")) {
       console.error(colors.red("Error: No alias name provided."));
       console.error(colors.cyan("  portless alias --remove <name>"));
       process.exit(1);
     }
-    const hostnames = buildHostnames(aliasName, tlds);
+    const hostnames = buildHostnames(aliasName, tlds, targetTlds);
     const routes = store.loadRoutes();
     const existing = routes.find((r) => hostnames.includes(r.hostname) && r.pid === 0);
     if (!existing) {
@@ -2602,7 +2644,7 @@ ${colors.bold("Examples:")}
 
   const aliasName = args[1];
   const aliasPort = args[2];
-  if (!aliasName || !aliasPort) {
+  if (!aliasName || !aliasPort || aliasName.startsWith("-") || aliasPort.startsWith("-")) {
     console.error(colors.red("Error: Missing arguments."));
     console.error(colors.blue("Usage:"));
     console.error(colors.cyan("  portless alias <name> <port>"));
@@ -2612,7 +2654,7 @@ ${colors.bold("Examples:")}
     process.exit(1);
   }
 
-  const hostnames = buildHostnames(aliasName, tlds);
+  const hostnames = buildHostnames(aliasName, tlds, targetTlds);
   const port = parsePort(aliasPort);
   if (port === null) {
     console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
@@ -3134,28 +3176,26 @@ ${colors.bold("Options:")}
 
 async function handleProxy(args: string[]): Promise<void> {
   if (args[1] === "stop" && !hasHelpFlag(args)) {
-    for (let i = 2; i < args.length; i++) {
-      if (args[i] === "--port" || args[i] === "-p") {
-        if (args[i + 1] && !args[i + 1].startsWith("-")) i++;
-      } else if (args[i].startsWith("-")) {
-        console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-        console.error(colors.blue("Known flags: --port, -p, --help"));
-        process.exit(1);
-      }
-    }
-
     let explicitPort: number | undefined;
-    const portIdx = args.indexOf("--port") !== -1 ? args.indexOf("--port") : args.indexOf("-p");
-    if (portIdx !== -1) {
-      const portValue = args[portIdx + 1];
-      if (portValue && !portValue.startsWith("-")) {
+    for (let i = 2; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "--port" || arg === "-p") {
+        const portValue = args[++i];
+        if (!portValue || portValue.startsWith("-")) {
+          console.error(colors.red(`Error: ${arg} requires a port number.`));
+          process.exit(1);
+        }
         const parsed = parsePort(portValue);
         if (parsed === null) {
           console.error(colors.red(`Error: Invalid port number: ${portValue}`));
           console.error(colors.blue("Port must be between 1 and 65535."));
           process.exit(1);
         }
-        explicitPort = parsed;
+        explicitPort ??= parsed;
+      } else {
+        console.error(colors.red(`Error: Unknown flag "${arg}".`));
+        console.error(colors.blue("Known flags: --port, -p, --help"));
+        process.exit(1);
       }
     }
 
