@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   buildUpArgs,
@@ -64,7 +65,7 @@ describe("buildUpArgs", () => {
       return args[args.indexOf("--project-directory") + 1];
     };
     expect(dir([])).toBe("/app");
-    expect(dir(["-f", "infra/compose.yml"])).toBe("/app/infra");
+    expect(dir(["-f", "infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
     expect(dir(["--file=infra/compose.yml", "--project-directory", "/other"])).toBe("/other");
   });
 });
