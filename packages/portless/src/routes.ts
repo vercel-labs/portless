@@ -48,6 +48,15 @@ type RouteMetadataPatch = {
   cloudflarePid?: number | null;
 };
 
+/**
+ * Whether a route's registered owner is still running. Static aliases (pid 0)
+ * have no owner, so they are always live; so are routes with no recorded pid.
+ * A process portless may not signal counts as running.
+ */
+export function isRouteOwnerAlive(route: { pid?: number }): boolean {
+  return route.pid === undefined || route.pid === 0 || isPidAlive(route.pid);
+}
+
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
   return (
@@ -197,7 +206,7 @@ export class RouteStore {
       }
       const routes: RouteMapping[] = parsed.filter(isValidRoute);
       // Filter out stale routes whose owning process is no longer alive
-      const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
+      const alive = routes.filter(isRouteOwnerAlive);
       if (persistCleanup && alive.length !== routes.length) {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.
@@ -304,7 +313,7 @@ export class RouteStore {
       const alive: RouteMapping[] = [];
       const stale: RouteMapping[] = [];
       for (const r of all) {
-        if (r.pid === 0 || this.isProcessAlive(r.pid)) {
+        if (isRouteOwnerAlive(r)) {
           alive.push(r);
         } else {
           stale.push(r);

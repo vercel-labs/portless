@@ -1789,6 +1789,180 @@ describe("createProxyServer", () => {
       expect(destroyed).toBe(true);
     });
   });
+
+  describe("route owner liveness", () => {
+    async function startBackend(body: string): Promise<number> {
+      const backend = trackServer(http.createServer((_req, res) => res.end(body)));
+      backend.on("upgrade", (_req, socket) => {
+        socket.write(
+          "HTTP/1.1 101 Switching Protocols\r\n" +
+            "Upgrade: websocket\r\n" +
+            "Connection: Upgrade\r\n" +
+            "\r\n"
+        );
+        socket.end();
+      });
+      await listen(backend);
+      const addr = backend.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+      return addr.port;
+    }
+
+    function upgrade(server: AnyServer, host: string): Promise<boolean> {
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+      return new Promise((resolve) => {
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: addr.port,
+          path: "/",
+          headers: { host, connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("error", () => resolve(false));
+        req.on("close", () => resolve(false));
+        req.on("upgrade", () => resolve(true));
+        req.setTimeout(2000, () => {
+          req.destroy();
+          resolve(false);
+        });
+        req.end();
+      });
+    }
+
+    it("stops serving a route when its owner is gone, without a route table change", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "app.localhost", port: await startBackend("app"), pid: 4001 },
+        { hostname: "other.localhost", port: await startBackend("other"), pid: 4002 },
+      ];
+      const gone = new Set<number>();
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          isRouteLive: (route) => !gone.has(route.pid!),
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      expect((await request(server, { host: "app.localhost" })).body).toBe("app");
+
+      gone.add(4001);
+      const res = await request(server, { host: "app.localhost" });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain("No app registered for <strong>app.localhost</strong>");
+      // The 404 page lists only apps that are still running.
+      expect(res.body).toContain('<span class="name">other.localhost</span>');
+      expect(res.body).not.toContain('<span class="name">app.localhost</span>');
+      expect((await request(server, { host: "other.localhost" })).body).toBe("other");
+    });
+
+    it("answers a dead route with the JSON 404 for non-browser clients", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "app.localhost", port: await startBackend("app"), pid: 4001 },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          isRouteLive: () => false,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "app.localhost", accept: "application/json" });
+      expect(res.status).toBe(404);
+      expect(JSON.parse(res.body)).toMatchObject({ error: "not_found", upstream: "app.localhost" });
+    });
+
+    it("falls through to the next eligible parent when a wildcard match is dead", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "acme.localhost", port: await startBackend("acme"), pid: 4001 },
+        { hostname: "api.acme.localhost", port: await startBackend("api"), pid: 4002 },
+      ];
+      const gone = new Set<number>();
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          isRouteLive: (route) => !gone.has(route.pid!),
+          proxyPort: TEST_PROXY_PORT,
+          strict: false,
+        })
+      );
+      await listen(server);
+
+      expect((await request(server, { host: "v1.api.acme.localhost" })).body).toBe("api");
+
+      gone.add(4002);
+      expect((await request(server, { host: "v1.api.acme.localhost" })).body).toBe("acme");
+      expect((await request(server, { host: "api.acme.localhost" })).body).toBe("acme");
+
+      gone.add(4001);
+      expect((await request(server, { host: "v1.api.acme.localhost" })).status).toBe(404);
+    });
+
+    it("keeps a dead exact match from resolving in strict mode", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "acme.localhost", port: await startBackend("acme"), pid: 4001 },
+        { hostname: "api.acme.localhost", port: await startBackend("api"), pid: 4002 },
+      ];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          isRouteLive: (route) => route.pid !== 4002,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      expect((await request(server, { host: "api.acme.localhost" })).status).toBe(404);
+      expect((await request(server, { host: "acme.localhost" })).body).toBe("acme");
+    });
+
+    it("refuses a WebSocket upgrade for a route whose owner is gone", async () => {
+      const routes: RouteInfo[] = [
+        { hostname: "ws.localhost", port: await startBackend("ws"), pid: 4001 },
+      ];
+      let live = true;
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          isRouteLive: () => live,
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      expect(await upgrade(server, "ws.localhost")).toBe(true);
+      live = false;
+      expect(await upgrade(server, "ws.localhost")).toBe(false);
+    });
+
+    it("checks only the route a request resolves to, however large the table is", async () => {
+      const port = await startBackend("ok");
+      const routes: RouteInfo[] = Array.from({ length: 200 }, (_, i) => ({
+        hostname: `app${i}.localhost`,
+        port,
+        pid: 5000 + i,
+      }));
+      const checked: number[] = [];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          isRouteLive: (route) => {
+            checked.push(route.pid!);
+            return true;
+          },
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+
+      expect((await request(server, { host: "app150.localhost" })).status).toBe(200);
+      expect(checked).toEqual([5150]);
+      expect(await upgrade(server, "app7.localhost")).toBe(true);
+      expect(checked).toEqual([5150, 5007]);
+    });
+  });
 });
 
 describe("createProxyServer with TLS (HTTP/2)", () => {
@@ -2503,6 +2677,46 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
           ":protocol": "websocket",
           ":path": "/",
           ":authority": "unknown.localhost",
+          ":scheme": "https",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          resolve(headers[":status"] as number);
+          req.close();
+        });
+      });
+      expect(status).toBe(404);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("returns 404 for extended CONNECT to a route whose owner is gone", async () => {
+    const backend = trackServer(http.createServer());
+    backend.on("upgrade", (_req, socket) => socket.destroy());
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "ws.localhost", port: backendAddr.port, pid: 4001 }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        isRouteLive: () => false,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+
+    const { client } = await h2Session(server);
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/",
+          ":authority": "ws.localhost",
           ":scheme": "https",
         });
         req.on("error", reject);

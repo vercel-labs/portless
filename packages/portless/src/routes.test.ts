@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { RouteStore, RouteConflictError } from "./routes.js";
+import { RouteStore, RouteConflictError, isRouteOwnerAlive } from "./routes.js";
 
 describe("RouteStore", () => {
   let tmpDir: string;
@@ -575,5 +575,40 @@ describe("RouteStore", () => {
       expect(routes[0].ngrokUrl).toBeUndefined();
       expect(routes[0].ngrokPid).toBeUndefined();
     });
+  });
+});
+
+describe("isRouteOwnerAlive", () => {
+  it("is true for a running process", () => {
+    expect(isRouteOwnerAlive({ pid: process.pid })).toBe(true);
+  });
+
+  it("is false once the process is gone", () => {
+    expect(isRouteOwnerAlive({ pid: 999999 })).toBe(false);
+  });
+
+  it("is true for a static alias, which has no owner", () => {
+    const kill = vi.spyOn(process, "kill");
+    try {
+      expect(isRouteOwnerAlive({ pid: 0 })).toBe(true);
+      expect(kill).not.toHaveBeenCalled();
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it("is true when no pid is recorded", () => {
+    expect(isRouteOwnerAlive({})).toBe(true);
+  });
+
+  it("is true for a process that exists but cannot be signaled (EPERM)", () => {
+    const kill = vi.spyOn(process, "kill").mockImplementation(() => {
+      throw Object.assign(new Error("kill EPERM"), { code: "EPERM" });
+    });
+    try {
+      expect(isRouteOwnerAlive({ pid: 999998 })).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
   });
 });

@@ -7,6 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { canBindProxyPort, getProxyBindTargets } from "./cli-utils.js";
+import { RouteStore } from "./routes.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_PROOF_HEADER,
@@ -303,6 +304,17 @@ async function waitForHttpHeader(
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   throw new Error(`Timed out waiting for ${headerName} on ${hostname}:${port}`);
+}
+
+/** Resolve the status code of a GET to `port` with the given Host header. */
+function getStatus(port: number, host: string): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const req = http.get({ hostname: "127.0.0.1", port, headers: { host } }, (res) => {
+      res.resume();
+      res.on("end", () => resolve(res.statusCode!));
+    });
+    req.on("error", reject);
+  });
 }
 
 async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
@@ -2325,6 +2337,39 @@ describe("CLI", () => {
       expect(start.stdout + start.stderr).toContain("Hosts sync is disabled");
       expect(start.stdout + start.stderr).toContain("portless hosts sync");
       await waitForHttpHeader(testPort, "X-Portless", "1");
+    });
+
+    it("stops serving a route the moment its owner is killed, without touching routes.json", async () => {
+      const backend = http.createServer((_req, res) => res.end("owned"));
+      await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
+      const backendPort = (backend.address() as net.AddressInfo).port;
+      const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+        stdio: "ignore",
+      });
+      try {
+        const start = run(["proxy", "start"], { env: proxyEnv() });
+        expect(start.status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+
+        new RouteStore(tmpDir).addRoute("owned.localhost", backendPort, owner.pid!);
+        // The daemon reloads its route cache when the file changes.
+        for (let i = 0; i < 50 && (await getStatus(testPort, "owned.localhost")) !== 200; i += 1) {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+        expect(await getStatus(testPort, "owned.localhost")).toBe(200);
+
+        // SIGKILL runs no cleanup, so the file and the daemon's cache keep the route.
+        const exited = new Promise((resolve) => owner.once("exit", resolve));
+        owner.kill("SIGKILL");
+        await exited;
+
+        expect(await getStatus(testPort, "owned.localhost")).toBe(404);
+        const routes = new RouteStore(tmpDir).loadRoutesRaw();
+        expect(routes.map((route) => route.hostname)).toEqual(["owned.localhost"]);
+      } finally {
+        owner.kill("SIGKILL");
+        await new Promise<void>((resolve) => backend.close(() => resolve()));
+      }
     });
 
     it("keeps binding loopback only without the flag", async () => {

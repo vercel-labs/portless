@@ -17,6 +17,14 @@ export interface RouteInfo {
 export interface ProxyServerOptions {
   /** Called on each request to get the current route table. */
   getRoutes: () => RouteInfo[];
+  /**
+   * Whether a route's owner is still running. Checked on the route a request
+   * resolves to, not on the whole table, so the cost does not grow with the
+   * number of routes. A route it rejects is skipped: the lookup continues with
+   * the next match, such as a wildcard parent, and the 404 page leaves it out.
+   * Defaults to treating every route as live.
+   */
+  isRouteLive?: (route: RouteInfo) => boolean;
   /** The port the proxy is listening on (used to build correct URLs). */
   proxyPort: number;
   /** TLD suffix used for hostnames (default: "localhost"). */

@@ -234,11 +234,11 @@ function findMostSpecificParent<T extends { hostname: string }>(
  * All comparisons run against the normalized authority so they are
  * case-insensitive and treat an explicit `:443` as the default HTTPS port.
  */
-function findRoute(
-  routes: { hostname: string; port: number; tailscaleUrl?: string }[],
+function findRoute<T extends { hostname: string; port: number; tailscaleUrl?: string }>(
+  routes: T[],
   host: string,
   strict?: boolean
-): { hostname: string; port: number } | undefined {
+): T | undefined {
   const authority = normalizeAuthority(host);
   const hostname = authority.split(":")[0];
   return (
@@ -247,6 +247,26 @@ function findRoute(
     routes.find((r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname) ||
     (strict ? undefined : findMostSpecificParent(routes, hostname))
   );
+}
+
+/**
+ * {@link findRoute} restricted to routes whose owner is still running. Only the
+ * route a lookup picks is checked; one whose owner is gone is dropped and the
+ * lookup repeats, so a wildcard request falls through to the next eligible
+ * parent exactly as if the dead route were not in the table.
+ */
+function findLiveRoute<T extends { hostname: string; port: number; tailscaleUrl?: string }>(
+  routes: T[],
+  host: string,
+  strict: boolean | undefined,
+  isLive: ((route: T) => boolean) | undefined
+): T | undefined {
+  let candidates = routes;
+  for (;;) {
+    const route = findRoute(candidates, host, strict);
+    if (!route || !isLive || isLive(route)) return route;
+    candidates = candidates.filter((r) => r !== route);
+  }
 }
 
 /**
@@ -291,6 +311,7 @@ export type ProxyServer = http.Server | net.Server;
 export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const {
     getRoutes,
+    isRouteLive,
     proxyPort,
     tld = "localhost",
     tlds = [tld],
@@ -381,7 +402,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(routes, rawHost, strict);
+    const route = findLiveRoute(routes, rawHost, strict, isRouteLive);
 
     if (!route) {
       const lowerHost = host.toLowerCase();
@@ -412,8 +433,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           : host;
       const safeSuggestion = escapeHtml(strippedHost);
       const now = Date.now();
-      const filterable = routes.length > FILTER_THRESHOLD;
-      const items = routes
+      const activeRoutes = isRouteLive ? routes.filter(isRouteLive) : routes;
+      const filterable = activeRoutes.length > FILTER_THRESHOLD;
+      const items = activeRoutes
         .map((r) => {
           const age = formatUptime(r.registeredAt, now);
           const label = r.pid === 0 ? "alias" : age && `up ${age}`;
@@ -422,7 +444,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         })
         .join("");
       const routesList =
-        routes.length > 0
+        activeRoutes.length > 0
           ? `<div class="section"><p class="label">Active apps</p>${filterable ? FILTER_CONTROLS : ""}<ul class="card">${items}</ul>${filterable ? FILTER_NO_MATCH : ""}</div>${filterable ? `<script>${FILTER_SCRIPT}</script>` : ""}`
           : '<p class="empty">No apps running.</p>';
       sendProxyError(req, res, 404, "not_found", `No app registered for ${host}`, host, () =>
@@ -556,8 +578,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const routes = getRoutes();
-    const route = findRoute(routes, getRequestHost(req), strict);
+    const route = findLiveRoute(getRoutes(), getRequestHost(req), strict, isRouteLive);
 
     if (!route) {
       socket.destroy();
@@ -711,7 +732,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const route = findRoute(getRoutes(), getRequestHost(compatReq), strict);
+    const route = findLiveRoute(getRoutes(), getRequestHost(compatReq), strict, isRouteLive);
     if (!route) {
       res.writeHead(404, { "content-type": "text/plain" });
       res.end(`No app registered for ${getRequestHost(compatReq)}\n`);

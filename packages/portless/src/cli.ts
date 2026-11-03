@@ -31,7 +31,13 @@ import {
   cleanHostsFile,
   shouldAutoSyncHosts,
 } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore, type RouteMapping } from "./routes.js";
+import {
+  FILE_MODE,
+  RouteConflictError,
+  RouteStore,
+  isRouteOwnerAlive,
+  type RouteMapping,
+} from "./routes.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
@@ -842,6 +848,9 @@ function startProxyServer(
   const createServer = () =>
     createProxyServer({
       getRoutes: () => cachedRoutes,
+      // cachedRoutes only refreshes when the routes file changes, and an owner
+      // that is killed leaves it untouched, so check the owner per lookup.
+      isRouteLive: isRouteOwnerAlive,
       proxyPort,
       tld,
       tlds,
