@@ -232,6 +232,19 @@ export const TOOLS: ToolDef[] = [
     }
   ),
   tool(
+    "proxy_status",
+    "Proxy status",
+    "Report whether the shared portless proxy is running and its pid, port, HTTPS, TLDs, LAN mode, unprivileged mode, and state directory. Pass json for one line of JSON.",
+    { json: { type: "boolean", description: "Print JSON instead of text." } },
+    [],
+    {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    }
+  ),
+  tool(
     "doctor",
     "Run doctor",
     "Check local portless health, including the proxy, certificates, and routes.",
@@ -277,8 +290,8 @@ export const PROFILES: Record<string, { description: string; tools: string[] | "
     tools: ["list", "get", "alias_add", "alias_remove", "tools_profiles"],
   },
   proxy: {
-    description: "Start and stop the shared portless proxy.",
-    tools: ["proxy_start", "proxy_stop"],
+    description: "Start, stop, and inspect the shared portless proxy.",
+    tools: ["proxy_start", "proxy_stop", "proxy_status"],
   },
   diagnostics: {
     description: "Health checks, cleanup, and version information.",
@@ -448,6 +461,11 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       const port = readPort(args, "port", false);
       argv.push("proxy", "stop");
       if (port !== undefined) argv.push("-p", String(port));
+      break;
+    }
+    case "proxy_status": {
+      argv.push("proxy", "status");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     }
     case "doctor":

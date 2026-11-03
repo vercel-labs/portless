@@ -1283,6 +1283,101 @@ describe("CLI", () => {
       expect(status).toBe(1);
     });
 
+    describe("status", () => {
+      let tmpDir: string;
+
+      beforeEach(() => {
+        tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-proxy-status-"));
+      });
+
+      afterEach(() => {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      });
+
+      it("lists proxy status in the usage", () => {
+        expect(run(["proxy", "--help"]).stdout).toContain("portless proxy status --json");
+        expect(run(["--help"]).stdout).toContain("portless proxy status [--json]");
+      });
+
+      it("prints help with --help", () => {
+        const { status, stdout } = run(["proxy", "status", "--help"]);
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless proxy status");
+        expect(stdout).toContain("--json");
+        expect(stdout).toContain("stateDir");
+      });
+
+      it("rejects unknown arguments", () => {
+        const { status, stderr } = run(["proxy", "status", "--typo"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain('Unknown argument "--typo"');
+      });
+
+      it("reports a stopped proxy as one line of JSON and exits 0", () => {
+        const { status, stdout } = run(["proxy", "status", "--json"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(0);
+        expect(stdout.trimEnd().split("\n")).toHaveLength(1);
+        expect(JSON.parse(stdout)).toEqual({
+          running: false,
+          pid: null,
+          port: null,
+          tls: null,
+          tlds: null,
+          lan: null,
+          unprivileged: null,
+          stateDir: tmpDir,
+        });
+      });
+
+      it("prints a text summary of a stopped proxy by default and exits 0", () => {
+        const { status, stdout } = run(["proxy", "status"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(0);
+        expect(stdout).toContain("Running: no");
+        expect(stdout).toContain(`State directory: ${tmpDir}`);
+        expect(stdout).not.toContain("Port:");
+      });
+
+      it("reports a running proxy from its state files", async () => {
+        const proxy = await startMockProxy(tmpDir);
+        try {
+          fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+          fs.writeFileSync(path.join(tmpDir, "proxy.pid"), proxy.child.pid!.toString());
+          fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+          fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+          fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+          const env = { PORTLESS_STATE_DIR: tmpDir };
+
+          expect(JSON.parse(run(["proxy", "status", "--json"], { env }).stdout)).toEqual({
+            running: true,
+            pid: proxy.child.pid,
+            port: proxy.port,
+            tls: true,
+            tlds: ["localhost", "test"],
+            lan: false,
+            unprivileged: true,
+            stateDir: tmpDir,
+          });
+
+          const text = run(["proxy", "status"], { env }).stdout;
+          expect(text).toContain("Running: yes");
+          expect(text).toContain(`PID: ${proxy.child.pid}`);
+          expect(text).toContain(`Port: ${proxy.port}`);
+          expect(text).toContain("HTTPS: yes");
+          expect(text).toContain("TLDs: .localhost, .test");
+          expect(text).toContain("LAN mode: no");
+          expect(text).toContain("Unprivileged: yes");
+        } finally {
+          await stopChild(proxy.child);
+        }
+      });
+    });
+
     it("warns when a running proxy uses a different explicit config", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-running-proxy-"));
       let proxyChild: ReturnType<typeof spawn> | undefined;
@@ -2325,6 +2420,28 @@ describe("CLI", () => {
       expect(start.stdout + start.stderr).toContain("Hosts sync is disabled");
       expect(start.stdout + start.stderr).toContain("portless hosts sync");
       await waitForHttpHeader(testPort, "X-Portless", "1");
+    });
+
+    it("reports the proxy it started, then a stopped proxy, through proxy status --json", async () => {
+      const status = () =>
+        JSON.parse(run(["proxy", "status", "--json"], { env: proxyEnv() }).stdout);
+
+      expect(run(["proxy", "start", "--unprivileged"], { env: proxyEnv() }).status).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const pid = Number.parseInt(fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8"), 10);
+      expect(status()).toEqual({
+        running: true,
+        pid,
+        port: testPort,
+        tls: false,
+        tlds: ["localhost"],
+        lan: false,
+        unprivileged: true,
+        stateDir: tmpDir,
+      });
+
+      expect(run(["proxy", "stop"], { env: proxyEnv() }).status).toBe(0);
+      expect(status()).toMatchObject({ running: false, pid: null, port: null, stateDir: tmpDir });
     });
 
     it("keeps binding loopback only without the flag", async () => {

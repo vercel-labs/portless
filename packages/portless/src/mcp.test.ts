@@ -83,6 +83,8 @@ describe("buildArgv", () => {
     ["version", {}, ["--version"]],
     ["list", { extraArgs: ["--x"], cwd: "/tmp", timeoutMs: 5 }, ["list", "--x"]],
     ["proxy_stop", { port: 1356 }, ["proxy", "stop", "-p", "1356"]],
+    ["proxy_status", {}, ["proxy", "status"]],
+    ["proxy_status", { json: true }, ["proxy", "status", "--json"]],
     ["prune", { force: true }, ["prune", "--force"]],
   ] as const)(
     "builds %s argv without cwd or timeoutMs and appends extraArgs last",

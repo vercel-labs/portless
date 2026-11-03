@@ -224,6 +224,30 @@ portless proxy start
   </tbody>
 </table>
 
+### Status
+
+```bash
+portless proxy status
+portless proxy status --json
+```
+
+Reports whether the proxy is running and how it is configured, without changing anything. A script or launcher that shares a proxy can read `--json` instead of the files in the state directory:
+
+```json
+{
+  "running": true,
+  "pid": 1841,
+  "port": 443,
+  "tls": true,
+  "tlds": ["localhost"],
+  "lan": false,
+  "unprivileged": false,
+  "stateDir": "/Users/me/.portless"
+}
+```
+
+`--json` prints this object on one line. Every field is always present. `pid`, `port`, `tls`, `tlds`, `lan`, and `unprivileged` are `null` while the proxy is not running, and `pid` is also `null` when the pid file cannot be read. `stateDir` holds `ca.pem` when HTTPS is on. The command exits 0 whether or not the proxy is running, so read `running`.
+
 ### Stop
 
 ```bash
@@ -298,7 +322,7 @@ Manual sync reconciles portless-managed entries with current routes and removes 
 portless mcp [--tools <profiles>]
 ```
 
-Starts a stdio MCP server using line-delimited JSON-RPC. The default `core` profile includes route listing, URL lookup, static alias management, and profile discovery. Use comma-separated profiles: `proxy` adds proxy start and stop tools, `diagnostics` adds doctor, prune, and version tools, and `all` enables every tool. `default` aliases `core`; `full` aliases `all`.
+Starts a stdio MCP server using line-delimited JSON-RPC. The default `core` profile includes route listing, URL lookup, static alias management, and profile discovery. Use comma-separated profiles: `proxy` adds proxy start, stop, and status tools, `diagnostics` adds doctor, prune, and version tools, and `all` enables every tool. `default` aliases `core`; `full` aliases `all`.
 
 Tools accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments, except `tools_profiles`. Bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. The server does not run dev servers; use `portless run <cmd>` in a shell.
 

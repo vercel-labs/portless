@@ -448,6 +448,8 @@ portless proxy start -p 1355     # Start on a custom port (no sudo)
 portless proxy start --unprivileged  # Plain HTTP on port 80 without sudo (wildcard bind, loopback peers only)
 portless proxy start --foreground  # Start in foreground (for debugging)
 portless proxy start --wildcard  # Allow unregistered subdomains to fall back to parent
+portless proxy status            # Show whether the proxy is running and its settings
+portless proxy status --json     # The same as one line of JSON, for scripts and launchers
 portless proxy stop              # Stop the proxy
 
 # OS startup service
@@ -457,6 +459,17 @@ portless service install --wildcard  # Persist wildcard routing in the service
 portless service status          # Show service and proxy status
 portless service uninstall       # Remove the startup service
 ```
+
+### Proxy status
+
+`portless proxy status` reports whether the proxy is running and how it is configured, without changing anything. A script or launcher that shares a proxy can read `--json` instead of the files in the state directory:
+
+```bash
+portless proxy status --json
+# {"running":true,"pid":1841,"port":443,"tls":true,"tlds":["localhost"],"lan":false,"unprivileged":false,"stateDir":"/Users/me/.portless"}
+```
+
+Every field is always present. `pid`, `port`, `tls`, `tlds`, `lan`, and `unprivileged` are `null` while the proxy is not running (`pid` is also `null` when the pid file cannot be read). `stateDir` holds `ca.pem` when HTTPS is on. The command exits 0 whether or not the proxy is running; read `running`.
 
 ### Options
 
@@ -523,7 +536,7 @@ portless mcp [--tools <profiles>]
 Starts a stdio MCP server that exchanges line-delimited JSON-RPC messages over standard input and output. `--tools` accepts comma-separated profiles. The default is `core`; `default` aliases `core`, and `full` aliases `all`.
 
 - `core`: `list`, `get`, `alias_add`, `alias_remove`, `tools_profiles`
-- `proxy`: `proxy_start`, `proxy_stop`
+- `proxy`: `proxy_start`, `proxy_stop`, `proxy_status`
 - `diagnostics`: `doctor`, `prune`, `version`
 - `all`: every tool in the profiles above
 

@@ -10,7 +10,7 @@ import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
-import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
+import { createLoopbackConnection, isProcessAlive, parsePort, resolveUserHome } from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -1044,6 +1044,64 @@ export async function discoverState(): Promise<{
     tlds,
     lanMode: readLanMarker(dir) !== null,
     lanIp: null,
+  };
+}
+
+/** Read the proxy pid from a given state directory. Returns null if unreadable. */
+export function readPidFromDir(dir: string): number | null {
+  try {
+    const raw = fs.readFileSync(path.join(dir, "proxy.pid"), "utf-8").trim();
+    const pid = parseInt(raw, 10);
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Proxy state printed by `portless proxy status --json`. Every key is always
+ * present; all but `running` and `stateDir` are null while the proxy is not
+ * running.
+ */
+export interface ProxyStatus {
+  running: boolean;
+  /** Process id of the running proxy, or null when it cannot be read. */
+  pid: number | null;
+  port: number | null;
+  tls: boolean | null;
+  tlds: string[] | null;
+  /** Whether the proxy is in LAN mode (mDNS, `.local`). */
+  lan: boolean | null;
+  /** Whether the proxy was started with `--unprivileged`. */
+  unprivileged: boolean | null;
+  stateDir: string;
+}
+
+/** Describe the proxy `portless` would talk to, without changing anything. */
+export async function getProxyStatus(): Promise<ProxyStatus> {
+  const state = await discoverState();
+  if (!(await isProxyRunning(state.port))) {
+    return {
+      running: false,
+      pid: null,
+      port: null,
+      tls: null,
+      tlds: null,
+      lan: null,
+      unprivileged: null,
+      stateDir: state.dir,
+    };
+  }
+  const pid = readPidFromDir(state.dir);
+  return {
+    running: true,
+    pid: pid !== null && isProcessAlive(pid) ? pid : null,
+    port: state.port,
+    tls: state.tls,
+    tlds: state.tlds,
+    lan: state.lanMode,
+    unprivileged: readUnprivilegedMarker(state.dir),
+    stateDir: state.dir,
   };
 }
 

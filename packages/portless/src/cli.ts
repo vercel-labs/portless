@@ -55,6 +55,7 @@ import {
   canBindProxyPort,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
+  getProxyStatus,
   INTERNAL_LAN_IP_ENV,
   INTERNAL_LAN_IP_FLAG,
   PRIVILEGED_PORT_THRESHOLD,
@@ -1997,6 +1998,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
   ${colors.cyan("portless proxy stop")}              Stop the proxy
+  ${colors.cyan("portless proxy status [--json]")}   Show whether the proxy is running and its settings
   ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
@@ -3118,7 +3120,68 @@ ${colors.bold("Options:")}
   console.log(colors.green(`Summary: 0 failures, ${pluralize(warnings, "warning")}.`));
 }
 
+/** `portless proxy status [--json]`: report the running proxy without changing anything. */
+async function handleProxyStatus(args: string[]): Promise<void> {
+  if (args.includes("--help") || args.includes("-h")) {
+    console.log(`
+${colors.bold("portless proxy status")} - Show whether the proxy is running and how it is configured.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless proxy status")}           Human-readable summary
+  ${colors.cyan("portless proxy status --json")}    One line of JSON for scripts and launchers
+
+${colors.bold("JSON fields:")}
+  running        true when a portless proxy answers on its port
+  pid            Proxy process id, or null when unreadable
+  port           Proxy port
+  tls            true when the proxy serves HTTPS
+  tlds           TLDs the proxy serves, e.g. ["localhost"]
+  lan            true in LAN mode
+  unprivileged   true when started with --unprivileged
+  stateDir       State directory (holds ca.pem when HTTPS is on)
+
+Every field is always present. While the proxy is not running, everything
+except running and stateDir is null.
+
+${colors.bold("Options:")}
+  --json                 Print JSON instead of text
+  --help, -h             Show this help
+`);
+    process.exit(0);
+  }
+
+  const unknown = args.slice(2).find((arg) => arg !== "--json");
+  if (unknown !== undefined) {
+    console.error(colors.red(`Error: Unknown argument "${unknown}".`));
+    console.error(colors.cyan("  portless proxy status --help"));
+    process.exit(1);
+  }
+
+  const status = await getProxyStatus();
+  if (args.includes("--json")) {
+    console.log(JSON.stringify(status));
+    return;
+  }
+
+  console.log(colors.bold("portless proxy"));
+  console.log(`  Running: ${status.running ? "yes" : "no"}`);
+  if (status.running) {
+    if (status.pid !== null) console.log(`  PID: ${status.pid}`);
+    console.log(`  Port: ${status.port}`);
+    console.log(`  HTTPS: ${status.tls ? "yes" : "no"}`);
+    console.log(`  TLDs: ${formatTldList(status.tlds ?? [])}`);
+    console.log(`  LAN mode: ${status.lan ? "yes" : "no"}`);
+    console.log(`  Unprivileged: ${status.unprivileged ? "yes" : "no"}`);
+  }
+  console.log(`  State directory: ${status.stateDir}`);
+}
+
 async function handleProxy(args: string[]): Promise<void> {
+  if (args[1] === "status") {
+    await handleProxyStatus(args);
+    return;
+  }
+
   if (args[1] === "stop") {
     let explicitPort: number | undefined;
     const portIdx = args.indexOf("--port") !== -1 ? args.indexOf("--port") : args.indexOf("-p");
@@ -3167,6 +3230,8 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy status")}               Show whether the proxy is running and its settings
+  ${colors.cyan("portless proxy status --json")}        The same as one line of JSON, for scripts
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("LAN mode (--lan):")}
