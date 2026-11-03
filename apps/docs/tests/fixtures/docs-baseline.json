@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "329307cbf347066d415e3043b6d47596f0de2ffe7f1cda8ad33795aadf9daf93",
-      "markdownBodySha256": "329307cbf347066d415e3043b6d47596f0de2ffe7f1cda8ad33795aadf9daf93",
+      "mdxSha256": "0b518d1e6b4832f1c4f5d0e838c8dcfd3bf3732f79ac007b0991d471e32456f0",
+      "markdownBodySha256": "0b518d1e6b4832f1c4f5d0e838c8dcfd3bf3732f79ac007b0991d471e32456f0",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -68,6 +68,7 @@
         [2, "Run an app", "run-an-app"],
         [2, "Get a service URL", "get-a-service-url"],
         [2, "Alias (static routes)", "alias-static-routes"],
+        [2, "Docker Compose", "docker-compose"],
         [2, "List routes", "list-routes"],
         [2, "Doctor", "doctor"],
         [2, "Trust the CA", "trust-the-ca"],

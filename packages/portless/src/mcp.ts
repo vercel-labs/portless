@@ -3,7 +3,8 @@
  * for each tool call.
  *
  * Intentionally omitted: run, <name> <cmd>, --name, and zero-arg mode
- * (foreground dev servers with no detached form), proxy start --foreground
+ * (foreground dev servers with no detached form), compose (runs Docker
+ * Compose, often in the foreground), proxy start --foreground
  * (blocks), trust, clean, hosts sync, hosts clean, and service (may prompt for
  * sudo or need a TTY), plus mcp and --help (the server itself and human help).
  */
