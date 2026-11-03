@@ -73,12 +73,18 @@ function loopbackLookup(
  * instead of hardcoding IPv4. Uses Node's Happy Eyeballs implementation
  * (`autoSelectFamily`) with a fixed address list, so no DNS lookup happens:
  * 127.0.0.1 is attempted first and `::1` is tried when it fails (issue #320).
+ * A longer attempt timeout reduces false failures when the event loop stalls
+ * after connecting (issue #488). Short-lived probes can keep Node's default.
  */
-export function createLoopbackConnection(port: number): net.Socket {
+export function createLoopbackConnection(
+  port: number,
+  autoSelectFamilyAttemptTimeout = Math.max(2000, net.getDefaultAutoSelectFamilyAttemptTimeout())
+): net.Socket {
   return net.connect({
     host: "localhost",
     port,
     autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout,
     lookup: loopbackLookup as net.LookupFunction,
   });
 }

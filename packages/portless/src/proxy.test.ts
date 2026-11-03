@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, vi } from "vitest";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -17,8 +17,65 @@ import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_PROOF_HEADER } from "./hosts-sy
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
 import { ensureCerts } from "./certs.js";
+import * as utils from "./utils.js";
 
 const TEST_PROXY_PORT = 1355;
+
+function connectionError(code: string, address: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`connect ${code} ${address}:4000`), { code, address, port: 4000 });
+}
+
+function loopbackAggregateError(): AggregateError & NodeJS.ErrnoException {
+  return Object.assign(
+    new AggregateError(
+      [connectionError("ETIMEDOUT", "127.0.0.1"), connectionError("ECONNREFUSED", "::1")],
+      ""
+    ),
+    { code: "ETIMEDOUT" }
+  );
+}
+
+const errorLogScenarios = [
+  {
+    name: "a mixed AggregateError",
+    error: loopbackAggregateError,
+    diagnostic: "ETIMEDOUT: connect ETIMEDOUT 127.0.0.1:4000; connect ECONNREFUSED ::1:4000",
+    detail: "The target app may not be running.",
+  },
+  {
+    name: "an all-refused AggregateError",
+    error: () =>
+      Object.assign(
+        new AggregateError([
+          connectionError("ECONNREFUSED", "127.0.0.1"),
+          connectionError("ECONNREFUSED", "::1"),
+        ]),
+        { code: "ECONNREFUSED" }
+      ),
+    diagnostic: "ECONNREFUSED: connect ECONNREFUSED 127.0.0.1:4000; connect ECONNREFUSED ::1:4000",
+    detail: "The target app is not responding. It may have crashed.",
+  },
+  {
+    name: "an AggregateError with an unprintable cause",
+    error: () => new AggregateError([Object.create(null)]),
+    diagnostic: "AggregateError: [unprintable]",
+    detail: "The target app may not be running.",
+  },
+  {
+    name: "an ordinary error",
+    error: () => new Error("ordinary failure"),
+    diagnostic: "ordinary failure",
+    detail: "The target app may not be running.",
+  },
+];
+
+function failLoopbackWith(error: Error) {
+  return vi.spyOn(utils, "createLoopbackConnection").mockImplementation(() => {
+    const socket = Object.assign(new net.Socket(), { connecting: true });
+    setImmediate(() => socket.destroy(error));
+    return socket;
+  });
+}
 
 /** Helper type covering both http.Server and http2.Http2SecureServer */
 type AnyServer = http.Server | ProxyServer;
@@ -32,6 +89,8 @@ function request(
     method?: string;
     headers?: http.OutgoingHttpHeaders;
     accept?: string | null;
+    signal?: AbortSignal;
+    onRequest?: (req: http.ClientRequest) => void;
   }
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: string }> {
   return new Promise((resolve, reject) => {
@@ -46,6 +105,7 @@ function request(
         port: addr.port,
         path: options.path || "/",
         method: options.method || "GET",
+        signal: options.signal,
         headers: {
           host: options.host || "",
           ...(accept === null ? {} : { accept }),
@@ -55,10 +115,12 @@ function request(
       (res) => {
         let body = "";
         res.on("data", (chunk) => (body += chunk));
+        res.on("error", reject);
         res.on("end", () => resolve({ status: res.statusCode!, headers: res.headers, body }));
       }
     );
     req.on("error", reject);
+    options.onRequest?.(req);
     req.end();
   });
 }
@@ -67,6 +129,56 @@ function listen(server: AnyServer): Promise<void> {
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve());
   });
+}
+
+function trackConnections(server: AnyServer): () => void {
+  const sockets = new Set<net.Socket>();
+  const track = (socket: net.Socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  };
+  server.on("connection", track);
+  return () => {
+    server.off("connection", track);
+    for (const socket of sockets) socket.destroy();
+  };
+}
+
+async function withDeadline<T>(operation: Promise<T>, cleanup: () => void, ms = 2000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error("Timed out waiting for proxy test response"));
+      cleanup();
+    }, ms);
+  });
+  try {
+    return await Promise.race([operation, deadline]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function boundedRequest(
+  server: AnyServer,
+  options: Parameters<typeof request>[1],
+  ms = 2000
+): ReturnType<typeof request> {
+  const controller = new AbortController();
+  const closeConnections = trackConnections(server);
+  const cleanup = () => {
+    controller.abort();
+    closeConnections();
+  };
+  try {
+    return await withDeadline(
+      request(server, { ...options, signal: controller.signal }),
+      cleanup,
+      ms
+    );
+  } finally {
+    cleanup();
+  }
 }
 
 function makeRoutes(count: number): RouteInfo[] {
@@ -944,6 +1056,115 @@ describe("createProxyServer", () => {
   });
 
   describe("error handling", () => {
+    it("bounds an unanswered upgrade and destroys its server socket", async () => {
+      const server = trackServer(http.createServer());
+      let peer: net.Socket | undefined;
+      let outgoing: http.ClientRequest | undefined;
+      server.on("connection", (socket) => (peer = socket));
+      server.on("upgrade", () => {});
+      await listen(server);
+
+      await expect(
+        boundedRequest(
+          server,
+          {
+            host: "ws.localhost",
+            headers: { connection: "Upgrade", upgrade: "websocket" },
+            onRequest: (req) => (outgoing = req),
+          },
+          500
+        )
+      ).rejects.toThrow("Timed out waiting for proxy test response");
+      expect(outgoing?.destroyed).toBe(true);
+      expect(peer?.destroyed).toBe(true);
+    });
+
+    it.each([
+      ...errorLogScenarios,
+      {
+        name: "an AggregateError with non-stringifiable causes",
+        error: () =>
+          new AggregateError(
+            [
+              new Error("first address"),
+              "second address",
+              Object.create(null),
+              Object.assign(new Error(), { message: Object.create(null) }),
+            ],
+            "failed"
+          ),
+        diagnostic: "failed: first address; second address; [unprintable]; [unprintable]",
+        detail: "The target app may not be running.",
+      },
+      {
+        name: "an AggregateError with both a message and code",
+        error: () =>
+          Object.assign(new AggregateError([new Error("first address")], "failed"), {
+            code: "ETIMEDOUT",
+          }),
+        diagnostic: "failed ETIMEDOUT: first address",
+        detail: "The target app may not be running.",
+      },
+      {
+        name: "an empty AggregateError",
+        error: () => new AggregateError([]),
+        diagnostic: "AggregateError",
+        detail: "The target app may not be running.",
+      },
+      {
+        name: "an ordinary error with an empty message",
+        error: () => new Error(""),
+        diagnostic: "",
+        detail: "The target app may not be running.",
+      },
+    ])("logs $name without changing the 502 response or error", async (scenario) => {
+      const error = scenario.error();
+      const originalMessage = error.message;
+      const originalCode = (error as NodeJS.ErrnoException).code;
+      const originalErrors = error instanceof AggregateError ? error.errors : undefined;
+      const originalCauses = originalErrors ? [...originalErrors] : undefined;
+      const originalCauseMessages = originalCauses?.map((cause: unknown) =>
+        cause instanceof Error ? cause.message : undefined
+      );
+      const mock = failLoopbackWith(error);
+      const errors: string[] = [];
+      try {
+        const server = trackServer(
+          createProxyServer({
+            getRoutes: () => [{ hostname: "dead.localhost", port: 4000 }],
+            proxyPort: TEST_PROXY_PORT,
+            onError: (msg) => errors.push(msg),
+          })
+        );
+        await listen(server);
+
+        const res = await boundedRequest(server, {
+          host: "dead.localhost",
+          accept: "application/json",
+        });
+        expect(res.status).toBe(502);
+        expect(JSON.parse(res.body)).toEqual({
+          error: "bad_gateway",
+          upstream: "dead.localhost",
+          message: scenario.detail,
+        });
+        expect(errors).toEqual([`Proxy error for dead.localhost: ${scenario.diagnostic}`]);
+        expect(error.message).toBe(originalMessage);
+        expect((error as NodeJS.ErrnoException).code).toBe(originalCode);
+        if (error instanceof AggregateError) {
+          expect(error.errors).toBe(originalErrors);
+          expect(error.errors).toEqual(originalCauses);
+          expect(
+            error.errors.map((cause: unknown) =>
+              cause instanceof Error ? cause.message : undefined
+            )
+          ).toEqual(originalCauseMessages);
+        }
+      } finally {
+        mock.mockRestore();
+      }
+    });
+
     it("returns 502 when backend is not running", async () => {
       const errors: string[] = [];
       const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: 59999 }];
@@ -1591,6 +1812,36 @@ describe("createProxyServer", () => {
   });
 
   describe("WebSocket upgrade", () => {
+    it.each(errorLogScenarios)("logs $name when an HTTP/1 handshake fails", async (scenario) => {
+      const error = scenario.error();
+      const mock = failLoopbackWith(error);
+      const errors: string[] = [];
+      try {
+        const server = trackServer(
+          createProxyServer({
+            getRoutes: () => [{ hostname: "ws.localhost", port: 4000 }],
+            proxyPort: TEST_PROXY_PORT,
+            onError: (msg) => errors.push(msg),
+          })
+        );
+        await listen(server);
+        const res = await boundedRequest(server, {
+          host: "ws.localhost",
+          accept: null,
+          headers: { connection: "Upgrade", upgrade: "websocket" },
+        });
+
+        expect(res.status).toBe(502);
+        expect(res.body).toBe(
+          "Bad Gateway: the target app is not responding or sent an invalid response to the WebSocket handshake.\n"
+        );
+        expect(errors).toEqual([`WebSocket proxy error for ws.localhost: ${scenario.diagnostic}`]);
+        expect(error.message).toBe(error instanceof AggregateError ? "" : "ordinary failure");
+      } finally {
+        mock.mockRestore();
+      }
+    });
+
     it("proxies WebSocket upgrade to matching route", async () => {
       // Create a backend that accepts WebSocket upgrades
       const backend = trackServer(http.createServer());
@@ -2174,6 +2425,134 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       client.on("remoteSettings", (settings) => resolve({ client, settings }));
     });
   }
+
+  it("bounds an unanswered HTTP/2 WebSocket handshake", async () => {
+    let upstream: net.Socket | undefined;
+    let notifyDial: () => void = () => {};
+    const dialed = new Promise<void>((resolve) => (notifyDial = resolve));
+    const mock = vi.spyOn(utils, "createLoopbackConnection").mockImplementation(() => {
+      upstream = Object.assign(new net.Socket(), { connecting: true });
+      notifyDial();
+      return upstream;
+    });
+    let client: http2.ClientHttp2Session | undefined;
+    let stream: http2.ClientHttp2Stream | undefined;
+    let peer: net.Socket | undefined;
+    let closeConnections = () => {};
+    const cleanup = () => {
+      stream?.destroy();
+      client?.destroy();
+      closeConnections();
+    };
+    try {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "ws.localhost", port: 4000 }],
+          proxyPort: TEST_PROXY_PORT,
+          tls: { cert: tlsCert, key: tlsKey },
+          onError: () => {},
+        })
+      );
+      server.on("connection", (socket) => (peer = socket));
+      await listen(server);
+      closeConnections = trackConnections(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+      client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+      await withDeadline(
+        new Promise<void>((resolve, reject) => {
+          client!.once("error", reject);
+          client!.once("remoteSettings", () => resolve());
+        }),
+        cleanup
+      );
+      stream = client.request({
+        ":method": "CONNECT",
+        ":protocol": "websocket",
+        ":path": "/ws",
+        ":authority": "ws.localhost",
+        ":scheme": "https",
+      });
+      const response = new Promise<void>((resolve, reject) => {
+        stream!.on("response", () => resolve());
+        stream!.on("error", reject);
+      });
+      await withDeadline(dialed, cleanup);
+      await expect(withDeadline(response, cleanup, 100)).rejects.toThrow(
+        "Timed out waiting for proxy test response"
+      );
+      expect(stream.destroyed).toBe(true);
+      expect(client.destroyed).toBe(true);
+      expect(peer?.destroyed).toBe(true);
+    } finally {
+      cleanup();
+      upstream?.destroy();
+      mock.mockRestore();
+    }
+  });
+
+  it.each(errorLogScenarios)("logs $name for HTTP/2 WebSocket failures", async (scenario) => {
+    const error = scenario.error();
+    const mock = failLoopbackWith(error);
+    const errors: string[] = [];
+    let client: http2.ClientHttp2Session | undefined;
+    let stream: http2.ClientHttp2Stream | undefined;
+    let closeConnections = () => {};
+    const cleanup = () => {
+      stream?.destroy();
+      client?.destroy();
+      closeConnections();
+    };
+    try {
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "ws.localhost", port: 4000 }],
+          proxyPort: TEST_PROXY_PORT,
+          tls: { cert: tlsCert, key: tlsKey },
+          onError: (msg) => errors.push(msg),
+        })
+      );
+      await listen(server);
+      closeConnections = trackConnections(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+      client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+      await withDeadline(
+        new Promise<void>((resolve, reject) => {
+          client!.once("error", reject);
+          client!.once("remoteSettings", () => resolve());
+        }),
+        cleanup
+      );
+      const response = new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = client!.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/ws",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+        });
+        stream = req;
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          let body = "";
+          req.on("data", (chunk: Buffer) => (body += chunk.toString()));
+          req.on("end", () => resolve({ status: headers[":status"] as number, body }));
+        });
+      });
+      const result = await withDeadline(response, cleanup);
+
+      expect(result).toEqual({
+        status: 502,
+        body: "Bad Gateway: the target app is not responding\n",
+      });
+      expect(errors).toEqual([`WebSocket proxy error for ws.localhost: ${scenario.diagnostic}`]);
+      expect(error.message).toBe(error instanceof AggregateError ? "" : "ordinary failure");
+    } finally {
+      cleanup();
+      mock.mockRestore();
+    }
+  });
 
   it("proxies WebSocket over HTTP/2 extended CONNECT (RFC 8441)", async () => {
     const received: http.IncomingHttpHeaders = {};

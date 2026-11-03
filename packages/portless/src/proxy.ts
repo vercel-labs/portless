@@ -67,6 +67,22 @@ function getRequestHost(req: http.IncomingMessage): string {
   return req.headers.host || "";
 }
 
+function formatProxyError(err: Error): string {
+  if (!(err instanceof AggregateError)) return err.message;
+  const code = (err as NodeJS.ErrnoException).code;
+  const summary = [err.message, code].filter(Boolean).join(" ") || err.name;
+  const details = err.errors
+    .map((inner: unknown) => {
+      try {
+        return String(inner instanceof Error ? inner.message : inner);
+      } catch {
+        return "[unprintable]";
+      }
+    })
+    .filter(Boolean);
+  return details.length > 0 ? `${summary}: ${details.join("; ")}` : summary;
+}
+
 /**
  * Detect whether a request arrived over an encrypted (TLS) connection.
  * Works for both native TLS sockets and HTTP/2 streams.
@@ -491,7 +507,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     proxyReq.on("error", (err) => {
       req.unpipe(proxyReq);
       req.resume();
-      onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
+      onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
       if (!res.headersSent) {
         const errWithCode = err as NodeJS.ErrnoException;
         const detail =
@@ -621,7 +637,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
+      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
       // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
       // dev writes a bare "Unauthorized" with no status line when an Origin
       // is not allow-listed, which surfaces here as a parse error) would
@@ -804,7 +820,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${err.message}`);
+      onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${formatProxyError(err)}`);
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "text/plain" });
         res.end("Bad Gateway: the target app is not responding\n");

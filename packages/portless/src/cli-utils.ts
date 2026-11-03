@@ -1317,7 +1317,8 @@ export function syncHostsWithWarning(
 /** Check whether any process is listening on the given port on either loopback family. */
 export function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createLoopbackConnection(port);
+    // Preserve Node's fallback timing for this short-lived probe.
+    const socket = createLoopbackConnection(port, net.getDefaultAutoSelectFamilyAttemptTimeout());
     let settled = false;
 
     const finish = (result: boolean) => {
