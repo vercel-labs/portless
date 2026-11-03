@@ -1128,6 +1128,12 @@ describe("CLI", () => {
         const remove = run(["alias", "--remove", "mydb", "--tld", "test"], { env });
         expect(remove.status).toBe(0);
         expect(hostnames()).toEqual(["mydb.localhost"]);
+
+        for (const args of [["--tld", "test", "--tld", " "], ["--tld", "unknown"], ["--tld"]]) {
+          const invalid = run(["alias", "mydb", "5432", ...args], { env });
+          expect(invalid.status).toBe(1);
+          expect(hostnames()).toEqual(["mydb.localhost"]);
+        }
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }

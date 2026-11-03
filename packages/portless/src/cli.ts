@@ -2583,7 +2583,7 @@ ${colors.bold("Examples:")}
     const arg = args[i];
     if (arg === "--tld") {
       const value = args[i + 1];
-      if (!value || value.startsWith("-")) {
+      if (!value?.trim() || value.startsWith("-")) {
         console.error(colors.red("Error: --tld requires a TLD value."));
         process.exit(1);
       }
@@ -3176,7 +3176,8 @@ ${colors.bold("Options:")}
 
 async function handleProxy(args: string[]): Promise<void> {
   if (args[1] === "stop" && !hasHelpFlag(args)) {
-    let explicitPort: number | undefined;
+    let longPort: number | undefined;
+    let shortPort: number | undefined;
     for (let i = 2; i < args.length; i++) {
       const arg = args[i];
       if (arg === "--port" || arg === "-p") {
@@ -3191,13 +3192,15 @@ async function handleProxy(args: string[]): Promise<void> {
           console.error(colors.blue("Port must be between 1 and 65535."));
           process.exit(1);
         }
-        explicitPort ??= parsed;
+        if (arg === "--port") longPort ??= parsed;
+        else shortPort ??= parsed;
       } else {
         console.error(colors.red(`Error: Unknown flag "${arg}".`));
         console.error(colors.blue("Known flags: --port, -p, --help"));
         process.exit(1);
       }
     }
+    const explicitPort = longPort ?? shortPort;
 
     if (explicitPort !== undefined) {
       const dir = resolveStateDir(explicitPort);

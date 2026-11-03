@@ -107,7 +107,7 @@ const TLD_PROPERTY = {
   type: "array",
   items: { type: "string" },
   minItems: 1,
-  description: "One or more TLDs to serve. Defaults to every configured TLD.",
+  description: "One or more TLDs to serve.",
 };
 
 /** Every tool, in tools/list order. */

@@ -276,7 +276,7 @@ export function parseHostnames(
       skipped.push(`"${tld}": ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  if (hostnames.length === 0) throw firstError;
+  if (hostnames.length === 0) throw firstError ?? new Error("No usable TLD remains");
   for (const detail of skipped) {
     console.warn(`Warning: skipping TLD ${detail}`);
   }

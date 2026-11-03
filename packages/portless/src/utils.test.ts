@@ -360,6 +360,7 @@ describe("parseHostnames", () => {
     expect(parseHostnames("api.myapp.test", ["localhost", "test"], ["localhost"])).toEqual([
       "api.myapp.localhost",
     ]);
+    expect(() => parseHostnames("api.myapp.test", ["localhost", "test"], ["dev"])).toThrow(Error);
   });
 
   it("strips the longest matching TLD when configured TLDs overlap", () => {
