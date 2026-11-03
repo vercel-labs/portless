@@ -4702,7 +4702,14 @@ function assertUniqueProjectLabel(stateDir: string, project: string): void {
   if (!fs.existsSync(dir)) return;
   for (const file of fs.readdirSync(dir)) {
     if (!file.endsWith(".json") || file.endsWith(".ports.json")) continue;
-    const other = file.slice(0, -".json".length);
+    // Compare the project name stored in the model, not the file name: older
+    // versions named the file after the hostname label (my-app.json for my_app).
+    let other: string;
+    try {
+      other = (JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")) as ComposeModel).name;
+    } catch {
+      continue;
+    }
     if (other !== project && projectLabel(other) === projectLabel(project)) {
       throw new Error(
         `Projects "${other}" and "${project}" share the hostname suffix ${projectLabel(project)}. Run portless compose -p ${other} down, or rename one project.`
