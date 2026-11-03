@@ -1,5 +1,7 @@
+import * as net from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  createLoopbackConnection,
   escapeHtml,
   formatUptime,
   formatUrl,
@@ -413,6 +415,35 @@ describe("parsePort", () => {
       "-1",
     ]) {
       expect(parsePort(value)).toBeNull();
+    }
+  });
+});
+
+describe("createLoopbackConnection", () => {
+  it("keeps a successful IPv4 dial through a brief event-loop stall", async () => {
+    const server = net.createServer((socket) => socket.on("error", () => {}));
+    await new Promise<void>((resolve, reject) => {
+      server.once("error", reject);
+      server.listen(0, "127.0.0.1", resolve);
+    });
+
+    const address = server.address();
+    if (!address || typeof address === "string") {
+      throw new Error("Expected an IPv4 TCP address");
+    }
+
+    const socket = createLoopbackConnection(address.port);
+    const connected = new Promise<void>((resolve, reject) => {
+      socket.once("connect", resolve);
+      socket.once("error", reject);
+    });
+
+    try {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 320);
+      await expect(connected).resolves.toBeUndefined();
+    } finally {
+      socket.destroy();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 });
