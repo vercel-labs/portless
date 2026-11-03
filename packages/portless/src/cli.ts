@@ -4584,13 +4584,14 @@ function resolveComposePlan(globals: string[]): ComposePlan {
   return planCompose(JSON.parse(String(result.stdout)) as ComposeModel);
 }
 
-function readComposePublishers(project: string): Publisher[] {
+/** Published ports of the project's running containers, or null when `ps` fails. */
+function readComposePublishers(project: string): Publisher[] | null {
   const result = runDockerCompose(["-p", project, "ps", "--format", "json"]);
-  if (result.status !== 0) return [];
+  if (result.error || result.status !== 0) return null;
   try {
     return parsePublishers(String(result.stdout));
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -4647,7 +4648,14 @@ async function handleCompose(args: string[]): Promise<void> {
     // down can leave services running (unselected services, or profiles that
     // were not enabled), so only drop routes whose container is gone.
     const projectName = readGlobal(globals, ["-p", "--project-name"]).pop() ?? plan.model.name;
-    const alive = resolveRoutePorts(plan.routes, readComposePublishers(projectName));
+    const publishers = readComposePublishers(projectName);
+    if (!publishers) {
+      console.warn(
+        colors.yellow("Could not read the project's containers. Routes were left in place.")
+      );
+      process.exit(code);
+    }
+    const alive = resolveRoutePorts(plan.routes, publishers);
     const { dir, tlds } = await discoverState();
     const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
     const aliases = new Set(
@@ -4741,7 +4749,7 @@ async function handleCompose(args: string[]): Promise<void> {
   const registered = new Map<string, number>();
 
   const sync = (): void => {
-    const resolved = resolveRoutePorts(plan.routes, readComposePublishers(projectName));
+    const resolved = resolveRoutePorts(plan.routes, readComposePublishers(projectName) ?? []);
     for (const route of resolved) {
       const hostnames = buildHostnames(route.name, tlds);
       const primary = hostnames[0]!;
