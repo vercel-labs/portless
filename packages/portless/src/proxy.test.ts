@@ -963,6 +963,9 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("Bad Gateway");
       expect(errors.length).toBeGreaterThan(0);
       expect(errors[0]).toContain("dead.localhost");
+      expect(errors[0]).toContain("ECONNREFUSED");
+      expect(errors[0]).toContain("127.0.0.1:59999");
+      expect(errors[0]).toContain("::1:59999");
     });
 
     const errorScenarios = [

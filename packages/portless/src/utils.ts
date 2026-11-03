@@ -69,16 +69,15 @@ function loopbackLookup(
 }
 
 /**
- * Open a TCP connection to a local app port, trying both loopback families
- * instead of hardcoding IPv4. Uses Node's Happy Eyeballs implementation
- * (`autoSelectFamily`) with a fixed address list, so no DNS lookup happens:
- * 127.0.0.1 is attempted first and `::1` is tried when it fails (issue #320).
+ * Connect to a local app over IPv4, falling back to IPv6 on failure without DNS.
+ * The maximum family timeout tolerates event-loop stalls but delays IPv6 while IPv4 is pending.
  */
 export function createLoopbackConnection(port: number): net.Socket {
   return net.connect({
     host: "localhost",
     port,
     autoSelectFamily: true,
+    autoSelectFamilyAttemptTimeout: 2_147_483_647,
     lookup: loopbackLookup as net.LookupFunction,
   });
 }

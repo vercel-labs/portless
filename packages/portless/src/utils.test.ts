@@ -1,5 +1,7 @@
+import * as net from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  createLoopbackConnection,
   escapeHtml,
   formatUptime,
   formatUrl,
@@ -415,4 +417,39 @@ describe("parsePort", () => {
       expect(parsePort(value)).toBeNull();
     }
   });
+});
+
+describe("createLoopbackConnection", () => {
+  it.for(["127.0.0.1", "::1"])(
+    "connects to %s despite a 2.6-second event-loop stall",
+    async (host, ctx) => {
+      const server = net.createServer((socket) => {
+        socket.on("error", () => {});
+        socket.end("connected");
+      });
+      const listening = await new Promise<boolean>((resolve, reject) => {
+        server.once("error", (error) => (host === "::1" ? resolve(false) : reject(error)));
+        server.listen(0, host, () => resolve(true));
+      });
+      if (!listening) {
+        ctx.skip();
+        return;
+      }
+      const port = (server.address() as net.AddressInfo).port;
+      const socket = createLoopbackConnection(port);
+      try {
+        const result = new Promise<string>((resolve, reject) => {
+          let data = "";
+          socket.on("data", (chunk) => (data += chunk));
+          socket.once("end", () => resolve(data));
+          socket.once("error", reject);
+        });
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2600);
+        await expect(result).resolves.toBe("connected");
+      } finally {
+        socket.destroy();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  );
 });

@@ -572,6 +572,8 @@ Manual sync reconciles portless-managed entries with current routes and removes 
 
 Run `portless doctor` to inspect local health without changing state. It checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
 
+For upstream 502 errors, run `portless proxy start --foreground` to see connection failures for each loopback address, including the error code. Stop an existing proxy first with `portless proxy stop`.
+
 ## Proxying Between Portless Apps
 
 If your frontend dev server (e.g. Vite, webpack) proxies API requests to another portless app, make sure the proxy rewrites the `Host` header. Without this, portless routes the request back to the frontend in an infinite loop.

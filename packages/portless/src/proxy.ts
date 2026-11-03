@@ -54,6 +54,12 @@ const HOP_BY_HOP_HEADERS = new Set([
 // limited, so long-lived responses such as SSE never starve other requests.
 const MAX_PENDING_UPSTREAM_DIALS = 16;
 
+function formatProxyError(error: Error): string {
+  return error instanceof AggregateError
+    ? [error.message, ...error.errors.map(String)].filter(Boolean).join("; ")
+    : error.message;
+}
+
 const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
@@ -574,7 +580,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         }
         req.unpipe(proxyReq);
         req.resume();
-        onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
+        onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
         if (!res.headersSent) {
           const detail =
             errWithCode.code === "ECONNREFUSED"
@@ -709,7 +715,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
+      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
       // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
       // dev writes a bare "Unauthorized" with no status line when an Origin
       // is not allow-listed, which surfaces here as a parse error) would
@@ -892,7 +898,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${err.message}`);
+      onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${formatProxyError(err)}`);
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "text/plain" });
         res.end("Bad Gateway: the target app is not responding\n");

@@ -396,6 +396,8 @@ Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.
 
 Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites.
 
+For upstream 502 errors, run `portless proxy start --foreground` to see connection failures for each loopback address, including the error code. Stop an existing proxy first with `portless proxy stop`.
+
 ### Proxy not running
 
 The proxy auto-starts when you run an app with `portless <name> <cmd>`. If it doesn't start (e.g. port conflict), start it manually:
