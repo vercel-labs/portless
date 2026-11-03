@@ -7,6 +7,18 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import {
+  type ComposeContainers,
+  type ComposeModel,
+  buildUpArgs,
+  isDetachedUp,
+  parseContainers,
+  planCompose,
+  projectLabel,
+  routePort,
+  splitComposeArgs,
+  staleAliases,
+} from "./compose.js";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
@@ -2002,6 +2014,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
   ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
+  ${colors.cyan("portless compose up [args...]")}    Run a Docker Compose project with a route per service
   ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
@@ -2191,7 +2204,7 @@ ${colors.bold("Skip portless:")}
   PORTLESS=0 pnpm dev           # Runs command directly without proxy
 
 ${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, doctor, trust, clean, prune, proxy, service, mcp are subcommands and
+  run, get, alias, compose, hosts, list, doctor, trust, clean, prune, proxy, service, mcp are subcommands and
   cannot be used as app names directly. Use "portless run" to infer the name,
   or "portless --name <name>" to force any name including reserved ones.
 `);
@@ -4491,6 +4504,285 @@ async function handleNamedMode(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Docker Compose
+// ---------------------------------------------------------------------------
+
+function printComposeHelp(): void {
+  console.log(`
+${colors.bold("portless compose")} - Run a Docker Compose project behind portless.
+
+Each published HTTP port moves to a free loopback port and gets a route
+${colors.cyan("<service>.<project>.localhost")}. Common database and cache ports (5432, 3306,
+6379, 27017, and others) keep their published port.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless compose up [args...]")}       Start the project and register routes
+  ${colors.cyan("portless compose up -d [args...]")}    Start detached; routes stay until down
+  ${colors.cyan("portless compose down [args...]")}     Stop the project and remove its routes
+  ${colors.cyan("portless compose <command> [args]")}   Any other compose command, unchanged
+
+Global compose flags (-f, -p, --profile, --env-file, --project-directory) go
+before the command, as with docker compose.
+
+${colors.bold("Examples:")}
+  portless compose up                  # -> https://web.myapp.localhost
+  portless compose -f compose.dev.yml up -d
+  portless compose down
+
+${colors.bold("Service labels:")}
+  portless.enable: "false"     Leave the service and its ports unchanged
+  portless.name: <name>        Use <name> instead of the service name
+  portless.ports: 3000,9229    Route only these container ports
+
+${colors.bold("Notes:")}
+  Start the project with portless compose up, not docker compose up: a plain
+  docker compose up recreates the containers with their original ports.
+  A service with several HTTP ports also gets <port>.<service>.<project>.
+  Routed services get __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS, so a Vite dev
+  server in a container accepts its portless hostname.
+  With up -d, run portless compose up -d again after recreating a container
+  so its route follows the new port.
+`);
+}
+
+/** Run docker compose and capture its output. */
+function dockerCompose(args: string[]): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync("docker", ["compose", ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+  });
+  if (result.error) throw new Error(`could not run docker compose: ${result.error.message}`);
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** Run docker compose attached to this terminal. */
+function spawnDockerCompose(args: string[]): {
+  child: ReturnType<typeof spawn>;
+  exited: Promise<number>;
+} {
+  const child = spawn("docker", ["compose", ...args], { stdio: "inherit" });
+  const exited = new Promise<number>((resolve) => {
+    child.on("error", (err) => {
+      console.error(colors.red(`Error: could not run docker compose: ${err.message}`));
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
+  return { child, exited };
+}
+
+/** Running containers of a compose invocation, or null when `ps` fails. */
+function readComposeContainers(globals: string[], all = false): ComposeContainers | null {
+  const result = dockerCompose([...globals, "ps", "--format", "json", ...(all ? ["--all"] : [])]);
+  if (result.status !== 0) return null;
+  try {
+    return parseContainers(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+/** Project name from the compose file, or undefined when there is none to read. */
+function readComposeProjectName(globals: string[]): string | undefined {
+  const config = dockerCompose([...globals, "config", "--format", "json"]);
+  if (config.status !== 0) return undefined;
+  try {
+    return (JSON.parse(config.stdout) as ComposeModel).name;
+  } catch {
+    return undefined;
+  }
+}
+
+async function composeDown(args: string[], globals: string[]): Promise<never> {
+  // Prefer the project from its containers, so down works without the compose
+  // file and after services were renamed. Fall back to the file when no
+  // container is left (removed outside compose), so stale aliases still go.
+  const project =
+    readComposeContainers(globals, true)?.projects[0] ?? readComposeProjectName(globals);
+  const code = await spawnDockerCompose(args).exited;
+  // A failed down leaves the containers running, so their routes stay.
+  if (code !== 0 || !project) process.exit(code);
+  const after = readComposeContainers(["-p", project]);
+  if (!after) {
+    console.warn(
+      colors.yellow("Could not read the project's containers. Routes were left in place.")
+    );
+    process.exit(code);
+  }
+  const { dir, tlds } = await discoverState();
+  const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+  const aliases = store.loadRoutes().filter((r) => r.pid === 0);
+  removeRoutes(store, staleAliases(aliases, project, tlds, after));
+  if (after.ports.size === 0) {
+    // The resolved model can hold env_file values; drop it with the project.
+    fs.rmSync(composeModelPath(dir, project), { force: true });
+  }
+  process.exit(code);
+}
+
+async function handleCompose(args: string[]): Promise<void> {
+  const composeArgs = args.slice(1);
+  const { globals, subcommand, rest } = splitComposeArgs(composeArgs);
+  if (!subcommand) {
+    printComposeHelp();
+    process.exit(0);
+  }
+
+  const skip =
+    process.env.PORTLESS === "0" ||
+    process.env.PORTLESS === "false" ||
+    process.env.PORTLESS === "skip";
+  const help = rest.includes("--help") || rest.includes("-h");
+  if (skip || help || (subcommand !== "up" && subcommand !== "down")) {
+    process.exit(await spawnDockerCompose(composeArgs).exited);
+  }
+
+  try {
+    if (subcommand === "down") await composeDown(composeArgs, globals);
+
+    // Include every profile so `up <service>` can start a service from an
+    // inactive profile; compose still applies the user's --profile flags at up.
+    const config = dockerCompose([...globals, "--profile", "*", "config", "--format", "json"]);
+    if (config.status !== 0) {
+      process.stderr.write(config.stderr);
+      throw new Error("docker compose config failed.");
+    }
+    await composeUp(JSON.parse(config.stdout) as ComposeModel, globals, rest);
+  } catch (err) {
+    console.error(colors.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
+}
+
+async function composeUp(source: ComposeModel, globals: string[], rest: string[]): Promise<never> {
+  let state = await discoverState();
+  const ensured = await ensureProxyRunning(
+    state.port,
+    state.tls,
+    resolveProxyDesiredState(state.lanMode)
+  );
+  if (ensured.started) {
+    state = ensured.state;
+    if (state.tls && !isCATrusted(state.dir)) await handleTrust();
+  } else {
+    const running = readCurrentProxyConfig(state.dir);
+    state = { ...state, tlds: running.tlds, lanMode: running.lanMode, lanIp: running.lanIp };
+  }
+  const { dir, port: proxyPort, tls, tlds, lanMode } = state;
+  const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+
+  const plan = planCompose(source, {
+    hostnamesFor: (name) => buildHostnames(name, tlds),
+    urlFor: (hostname) => formatUrl(hostname, proxyPort, tls),
+    viteAllowedHosts: formatViteAllowedHosts(tlds),
+  });
+
+  const modelPath = composeModelPath(dir, plan.project);
+  const modelDir = path.dirname(modelPath);
+  fs.mkdirSync(modelDir, { recursive: true });
+  fs.writeFileSync(modelPath, JSON.stringify(plan.model, null, 2), { mode: 0o600 });
+  fixOwnership(modelDir, modelPath);
+
+  console.log(colors.bold(`\nportless compose ${plan.project}\n`));
+  for (const route of plan.routes) {
+    console.log(colors.gray(`-- ${route.service}:${route.target} -> ${route.hostnames[0]}`));
+  }
+  for (const k of plan.kept) {
+    const where = k.published ? `host port ${k.published}` : "an ephemeral port";
+    console.log(colors.gray(`-- ${k.service}:${k.target} keeps ${where} (${k.reason})`));
+  }
+  if (plan.routes.length === 0) {
+    console.log(colors.yellow("No published HTTP ports found. Nothing to route."));
+  }
+
+  const upArgs = buildUpArgs({
+    globals,
+    rest,
+    project: plan.project,
+    modelPath,
+    cwd: process.cwd(),
+  });
+  const detached = isDetachedUp(rest);
+  const ownerPid = detached ? 0 : process.pid;
+  const registered = new Map<string, number>();
+  // Conflicts are retried on every sync (the owner may exit) but reported once.
+  const conflicts = new Set<string>();
+
+  const sync = (): boolean => {
+    const containers = readComposeContainers(["-p", plan.project]);
+    if (!containers) return false;
+    for (const route of plan.routes) {
+      const port = routePort(route, containers);
+      const primary = route.hostnames[0]!;
+      if (port === undefined || registered.get(primary) === port) continue;
+      try {
+        // Aliases from an earlier up -d are ours to replace; a live process is not.
+        addRoutes(store, route.hostnames, port, ownerPid, isAliasConflict(store, primary));
+      } catch (err) {
+        if (!(err instanceof RouteConflictError)) throw err;
+        if (!conflicts.has(primary)) console.error(colors.red(`Error: ${err.message}`));
+        conflicts.add(primary);
+        continue;
+      }
+      conflicts.delete(primary);
+      const first = !registered.has(primary);
+      registered.set(primary, port);
+      console.log(
+        first
+          ? colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`)
+          : colors.gray(`-- ${route.url} now on 127.0.0.1:${port}`)
+      );
+    }
+    return true;
+  };
+
+  if (detached) {
+    const code = await spawnDockerCompose(upArgs).exited;
+    if (code === 0) {
+      console.log("");
+      if (!sync()) {
+        console.warn(
+          colors.yellow(
+            "Could not read the project's containers, so no routes were registered. Run portless compose up -d again."
+          )
+        );
+      }
+      if (registered.size > 0)
+        await reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+    }
+    process.exit(code);
+  }
+
+  // Foreground: compose owns the terminal. portless follows port changes from
+  // container recreates until compose exits, then drops its routes.
+  const { child, exited } = spawnDockerCompose(upArgs);
+  let reported = false;
+  const timer = setInterval(() => {
+    sync();
+    if (!reported && registered.size > 0) {
+      reported = true;
+      void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+    }
+  }, 1000);
+  // Ctrl+C reaches compose through the process group; wait for it to stop.
+  process.on("SIGINT", () => {});
+  process.on("SIGTERM", () => child.kill("SIGTERM"));
+  const code = await exited;
+  clearInterval(timer);
+  for (const route of plan.routes) removeRoutes(store, route.hostnames, process.pid);
+  fs.rmSync(modelPath, { force: true });
+  process.exit(code);
+}
+
+function composeModelPath(stateDir: string, project: string): string {
+  return path.join(stateDir, "compose", `${projectLabel(project)}.json`);
+}
+
+function isAliasConflict(store: RouteStore, hostname: string): boolean {
+  return store.loadRoutes().some((r) => r.hostname === hostname && r.pid === 0);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
@@ -4546,6 +4838,7 @@ async function main() {
     "doctor",
     "get",
     "alias",
+    "compose",
     "hosts",
     "proxy",
     "service",
@@ -4707,6 +5000,7 @@ async function main() {
       args.length === 0 ||
       (args.length >= 2 &&
         args[0] !== "proxy" &&
+        args[0] !== "compose" &&
         args[0] !== "clean" &&
         args[0] !== "doctor" &&
         args[0] !== "service"))
@@ -4772,6 +5066,10 @@ async function main() {
     }
     if (args[0] === "alias") {
       await handleAlias(args);
+      return;
+    }
+    if (args[0] === "compose") {
+      await handleCompose(args);
       return;
     }
     if (args[0] === "hosts") {
