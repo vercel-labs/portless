@@ -4582,10 +4582,23 @@ function readComposeContainers(globals: string[], all = false): ComposeContainer
   }
 }
 
+/** Project name from the compose file, or undefined when there is none to read. */
+function readComposeProjectName(globals: string[]): string | undefined {
+  const config = dockerCompose([...globals, "config", "--format", "json"]);
+  if (config.status !== 0) return undefined;
+  try {
+    return (JSON.parse(config.stdout) as ComposeModel).name;
+  } catch {
+    return undefined;
+  }
+}
+
 async function composeDown(args: string[], globals: string[]): Promise<never> {
-  // Read the project from its containers, not the compose file, so down also
-  // works without the file and after services were renamed.
-  const project = readComposeContainers(globals, true)?.projects[0];
+  // Prefer the project from its containers, so down works without the compose
+  // file and after services were renamed. Fall back to the file when no
+  // container is left (removed outside compose), so stale aliases still go.
+  const project =
+    readComposeContainers(globals, true)?.projects[0] ?? readComposeProjectName(globals);
   const code = await spawnDockerCompose(args).exited;
   // A failed down leaves the containers running, so their routes stay.
   if (code !== 0 || !project) process.exit(code);
@@ -4600,6 +4613,10 @@ async function composeDown(args: string[], globals: string[]): Promise<never> {
   const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
   const aliases = store.loadRoutes().filter((r) => r.pid === 0);
   removeRoutes(store, staleAliases(aliases, project, tlds, after));
+  if (after.ports.size === 0) {
+    // The resolved model can hold env_file values; drop it with the project.
+    fs.rmSync(composeModelPath(dir, project), { force: true });
+  }
   process.exit(code);
 }
 
@@ -4660,9 +4677,9 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
     viteAllowedHosts: formatViteAllowedHosts(tlds),
   });
 
-  const modelDir = path.join(dir, "compose");
+  const modelPath = composeModelPath(dir, plan.project);
+  const modelDir = path.dirname(modelPath);
   fs.mkdirSync(modelDir, { recursive: true });
-  const modelPath = path.join(modelDir, `${projectLabel(plan.project)}.json`);
   fs.writeFileSync(modelPath, JSON.stringify(plan.model, null, 2), { mode: 0o600 });
   fixOwnership(modelDir, modelPath);
 
@@ -4688,24 +4705,26 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   const detached = isDetachedUp(rest);
   const ownerPid = detached ? 0 : process.pid;
   const registered = new Map<string, number>();
-  const refused = new Set<string>();
+  // Conflicts are retried on every sync (the owner may exit) but reported once.
+  const conflicts = new Set<string>();
 
-  const sync = (): void => {
+  const sync = (): boolean => {
     const containers = readComposeContainers(["-p", plan.project]);
-    if (!containers) return;
+    if (!containers) return false;
     for (const route of plan.routes) {
       const port = routePort(route, containers);
       const primary = route.hostnames[0]!;
-      if (port === undefined || registered.get(primary) === port || refused.has(primary)) continue;
+      if (port === undefined || registered.get(primary) === port) continue;
       try {
         // Aliases from an earlier up -d are ours to replace; a live process is not.
         addRoutes(store, route.hostnames, port, ownerPid, isAliasConflict(store, primary));
       } catch (err) {
         if (!(err instanceof RouteConflictError)) throw err;
-        console.error(colors.red(`Error: ${err.message}`));
-        refused.add(primary);
+        if (!conflicts.has(primary)) console.error(colors.red(`Error: ${err.message}`));
+        conflicts.add(primary);
         continue;
       }
+      conflicts.delete(primary);
       const first = !registered.has(primary);
       registered.set(primary, port);
       console.log(
@@ -4714,13 +4733,20 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
           : colors.gray(`-- ${route.url} now on 127.0.0.1:${port}`)
       );
     }
+    return true;
   };
 
   if (detached) {
     const code = await spawnDockerCompose(upArgs).exited;
     if (code === 0) {
       console.log("");
-      sync();
+      if (!sync()) {
+        console.warn(
+          colors.yellow(
+            "Could not read the project's containers, so no routes were registered. Run portless compose up -d again."
+          )
+        );
+      }
       if (registered.size > 0)
         await reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
     }
@@ -4744,7 +4770,12 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   const code = await exited;
   clearInterval(timer);
   for (const route of plan.routes) removeRoutes(store, route.hostnames, process.pid);
+  fs.rmSync(modelPath, { force: true });
   process.exit(code);
+}
+
+function composeModelPath(stateDir: string, project: string): string {
+  return path.join(stateDir, "compose", `${projectLabel(project)}.json`);
 }
 
 function isAliasConflict(store: RouteStore, hostname: string): boolean {
