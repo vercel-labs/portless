@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 import {
   isDetachedUp,
   parsePublishers,
-  readDownServices,
   wantsHelp,
   planCompose,
   readGlobal,
@@ -334,19 +333,6 @@ describe("duplicate bindings", () => {
       { target: 80, protocol: "tcp", host_ip: "127.0.0.1" },
     ]);
     expect(plan.routes).toEqual([{ service: "dual", target: 80, name: "dual.shop" }]);
-  });
-});
-
-describe("readDownServices", () => {
-  it("returns the selected services and skips flag values", () => {
-    expect(readDownServices(["-v", "--rmi", "local", "-t", "5", "web", "api"])).toEqual([
-      "web",
-      "api",
-    ]);
-  });
-
-  it("returns an empty list for the whole project", () => {
-    expect(readDownServices(["--remove-orphans"])).toEqual([]);
   });
 });
 

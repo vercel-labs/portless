@@ -14,7 +14,6 @@ import {
   isDetachedUp,
   parsePublishers,
   planCompose,
-  readDownServices,
   readGlobal,
   resolveRoutePorts,
   splitComposeArgs,
@@ -4645,7 +4644,10 @@ async function handleCompose(args: string[]): Promise<void> {
     const code = await spawnDockerComposeInherit(args.slice(1));
     // A failed down leaves the containers running, so their routes stay.
     if (code !== 0) process.exit(code);
-    const selected = readDownServices(rest);
+    // down can leave services running (unselected services, or profiles that
+    // were not enabled), so only drop routes whose container is gone.
+    const projectName = readGlobal(globals, ["-p", "--project-name"]).pop() ?? plan.model.name;
+    const alive = resolveRoutePorts(plan.routes, readComposePublishers(projectName));
     const { dir, tlds } = await discoverState();
     const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
     const aliases = new Set(
@@ -4655,7 +4657,7 @@ async function handleCompose(args: string[]): Promise<void> {
         .map((r) => r.hostname)
     );
     for (const route of plan.routes) {
-      if (selected.length > 0 && !selected.includes(route.service)) continue;
+      if (alive.some((a) => a.name === route.name)) continue;
       const owned = buildHostnames(route.name, tlds).filter((h) => aliases.has(h));
       removeRoutes(store, owned);
     }

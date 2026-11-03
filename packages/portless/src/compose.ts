@@ -426,23 +426,6 @@ export function resolveRoutePorts(
   return out;
 }
 
-/** Value flags of `docker compose down`. */
-const DOWN_VALUE_FLAGS = new Set(["--rmi", "-t", "--timeout"]);
-
-/** Service names passed to `docker compose down`, or an empty list for the whole project. */
-export function readDownServices(rest: readonly string[]): string[] {
-  const services: string[] = [];
-  for (let i = 0; i < rest.length; i++) {
-    const arg = rest[i]!;
-    if (DOWN_VALUE_FLAGS.has(arg)) {
-      i++;
-      continue;
-    }
-    if (!arg.startsWith("-")) services.push(arg);
-  }
-  return services;
-}
-
 /** Whether subcommand arguments ask compose for help instead of running. */
 export function wantsHelp(rest: readonly string[]): boolean {
   return rest.includes("--help") || rest.includes("-h");
