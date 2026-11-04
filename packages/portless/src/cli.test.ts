@@ -1061,16 +1061,131 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("proxy stop exits 1 for a port with trailing text", () => {
+    it("exits 1 for invalid proxy stop arguments", () => {
       const { status, stderr } = run(["proxy", "stop", "-p", "8123abc"]);
       expect(status).toBe(1);
       expect(stderr).toContain("Invalid port number: 8123abc");
+
+      for (const args of [["-p"], ["--port"], ["--port", ""], ["extra"]]) {
+        const invalid = run(["proxy", "stop", ...args]);
+        expect(invalid.status).toBe(1);
+        expect(invalid.stderr).toContain("Error:");
+        expect(invalid.stderr).not.toContain("Proxy is not running");
+      }
     });
 
     it("exits 1 when --remove has no name", () => {
       const { status, stderr } = run(["alias", "--remove"]);
       expect(status).toBe(1);
       expect(stderr).toContain("No alias name");
+    });
+
+    it("prints help without registering a route when --help follows the arguments", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-help-"));
+      try {
+        const { status, stdout } = run(["alias", "mydb", "5432", "--help"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless alias");
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("exits 1 on unknown flags without registering a route", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-flag-"));
+      try {
+        for (const flag of ["--frce", "--remove"]) {
+          const { status, stderr } = run(["alias", "mydb", "5432", flag], {
+            env: { PORTLESS_STATE_DIR: tmpDir },
+          });
+          expect(status).toBe(1);
+          expect(stderr).toContain(`Unknown flag "${flag}"`);
+        }
+        expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("registers and removes only the selected configured TLDs", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-tld-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const env = { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" };
+      const hostnames = () =>
+        (JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{ hostname: string }>).map(
+          (route) => route.hostname
+        );
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\ndev\n");
+        const add = run(["alias", "mydb", "5432", "--tld", "localhost,test", "--tld", "test"], {
+          env,
+        });
+        expect(add.status).toBe(0);
+        expect(hostnames().sort()).toEqual(["mydb.localhost", "mydb.test"]);
+        const remove = run(["alias", "--remove", "mydb", "--tld", "test"], { env });
+        expect(remove.status).toBe(0);
+        expect(hostnames()).toEqual(["mydb.localhost"]);
+
+        const invalidTlds: Array<[string[], string]> = [
+          [["--tld", "test", "--tld", " "], "--tld requires a TLD value"],
+          [["--tld", "unknown"], 'TLD "unknown" is not configured (localhost, test, dev).'],
+          [["--tld"], "--tld requires a TLD value"],
+        ];
+        for (const [args, message] of invalidTlds) {
+          const invalid = run(["alias", "mydb", "5432", ...args], { env });
+          expect(invalid.status).toBe(1);
+          expect(invalid.stderr).toContain(message);
+          expect(hostnames()).toEqual(["mydb.localhost"]);
+        }
+
+        const forceRemove = run(["alias", "--remove", "mydb", "--force"], { env });
+        expect(forceRemove.status).toBe(1);
+        expect(forceRemove.stderr).toContain('Unknown flag "--force"');
+        expect(hostnames()).toEqual(["mydb.localhost"]);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps live app routes when removing an alias across TLDs", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-remove-live-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const env = { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" };
+      const routes = () =>
+        JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+          hostname: string;
+          pid: number;
+        }>;
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+        fs.writeFileSync(
+          routesPath,
+          JSON.stringify([
+            { hostname: "mydb.localhost", port: 4101, pid: process.pid },
+            { hostname: "mydb.test", port: 4102, pid: 0 },
+          ])
+        );
+
+        const removed = run(["alias", "--remove", "mydb"], { env });
+        expect(removed.status).toBe(0);
+        expect(removed.stdout).toContain("mydb.test");
+        expect(removed.stdout).not.toContain("mydb.localhost");
+        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+
+        const repeated = run(["alias", "--remove", "mydb"], { env });
+        expect(repeated.status).toBe(1);
+        expect(repeated.stderr).toContain("No alias found");
+
+        const liveTld = run(["alias", "--remove", "mydb", "--tld", "localhost"], { env });
+        expect(liveTld.status).toBe(1);
+        expect(liveTld.stderr).toContain('No alias found for "mydb.localhost"');
+        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -1281,6 +1396,12 @@ describe("CLI", { timeout: 15_000 }, () => {
     it("exits 1 for unknown proxy subcommand", () => {
       const { status } = run(["proxy", "typo"]);
       expect(status).toBe(1);
+    });
+
+    it("prints help instead of stopping when stop is given --help", () => {
+      const { status, stdout } = run(["proxy", "stop", "-p", "59999", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless proxy stop");
     });
 
     it("warns when a running proxy uses a different explicit config", async () => {

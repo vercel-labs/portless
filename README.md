@@ -247,6 +247,17 @@ portless myapp next dev
 
 When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. `PORTLESS_TLD` also accepts a comma separated list, e.g. `PORTLESS_TLD=localhost,test`.
 
+Aliases cover every configured TLD by default. Pass `--tld <tld>` after the alias arguments to register or remove only selected configured TLDs; repeat the flag or pass a comma-separated list, and the selected TLD replaces any configured TLD suffix on the name:
+
+```bash
+portless alias redis 6379 --tld test        # -> https://redis.test only
+portless alias --remove redis --tld test
+```
+
+A missing, empty, or unconfigured TLD stops the command before any route changes, and `--help` after the arguments prints usage without changing routes.
+
+`portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
+
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 
 ### Multi-segment TLDs
@@ -439,7 +450,8 @@ portless run [--name <name>] [--prefix <label>] [cmd] [args...]  # Infer name, r
 portless <name> <cmd> [args...]  # Run app at https://<name>.localhost
 portless alias <name> <port>     # Register a static route (e.g. for Docker)
 portless alias <name> <port> --force  # Overwrite an existing route
-portless alias --remove <name>   # Remove a static route
+portless alias <name> <port> --tld <tld>  # Cover selected configured TLDs only
+portless alias --remove <name>   # Remove PID 0 routes
 portless compose up [args...]    # Run a Docker Compose project, one route per service
 portless compose down            # Stop the project and remove its routes
 portless list                    # Show active routes and uptime

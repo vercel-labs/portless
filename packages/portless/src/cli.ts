@@ -560,8 +560,12 @@ function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | n
   return "";
 }
 
-function buildHostnames(name: string, tlds: readonly string[]): string[] {
-  return parseHostnames(name, normalizeTlds(tlds));
+function buildHostnames(
+  name: string,
+  tlds: readonly string[],
+  targetTlds?: readonly string[]
+): string[] {
+  return parseHostnames(name, normalizeTlds(tlds), targetTlds);
 }
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
@@ -2595,8 +2599,13 @@ async function handleList(): Promise<void> {
   listRoutes(store, port, tls);
 }
 
+/** True when --help or -h appears anywhere after the command name. */
+function hasHelpFlag(args: string[]): boolean {
+  return args.slice(1).some((arg) => arg === "--help" || arg === "-h");
+}
+
 async function handleGet(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
+  if (hasHelpFlag(args)) {
     console.log(`
 ${colors.bold("portless get")} - Print the URL for a service.
 
@@ -2661,50 +2670,96 @@ ${colors.bold("Examples:")}
 }
 
 async function handleAlias(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
+  if (hasHelpFlag(args)) {
     console.log(`
 ${colors.bold("portless alias")} - Register a static route for services not managed by portless.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless alias <name> <port>")}        Register a route
-  ${colors.cyan("portless alias --remove <name>")}      Remove a route
-  ${colors.cyan("portless alias <name> <port> --force")} Override existing route
+  ${colors.cyan("portless alias --remove <name>")}      Remove static routes, preserve process-owned routes
+  ${colors.cyan("portless alias <name> <port> --force")} Override an existing route
+
+${colors.bold("Options:")}
+  --force                Override a route; stop a conflicting app if any
+  --tld <tld>            Only these configured TLDs (repeatable, comma-separated)
+  --help, -h             Show this help
 
 ${colors.bold("Examples:")}
   portless alias my-postgres 5432     # -> https://my-postgres.localhost
   portless alias redis 6379           # -> https://redis.localhost
+  portless alias redis 6379 --tld test # -> https://redis.test only
   portless alias --remove my-postgres # Remove the alias
 `);
     process.exit(0);
   }
 
+  const isRemove = args[1] === "--remove";
+  const tldFlagValues: string[] = [];
+  for (let i = isRemove ? 2 : 1; i < args.length; i++) {
+    const arg = args[i];
+    if (arg === "--tld") {
+      const value = args[i + 1];
+      if (!value?.trim() || value.startsWith("-")) {
+        console.error(colors.red("Error: --tld requires a TLD value."));
+        process.exit(1);
+      }
+      tldFlagValues.push(value);
+      i++;
+    } else if (arg.startsWith("-") && (isRemove || arg !== "--force")) {
+      console.error(colors.red(`Error: Unknown flag "${arg}".`));
+      console.error(
+        colors.blue(`Known flags: ${isRemove ? "--tld, --help" : "--force, --tld, --help"}`)
+      );
+      process.exit(1);
+    }
+  }
+
   const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
+  let targetTlds: string[] | undefined;
+  if (tldFlagValues.length > 0) {
+    try {
+      targetTlds = [...new Set(tldFlagValues.flatMap((value) => parseTldList(value)))];
+    } catch (err) {
+      console.error(colors.red(`Error: ${(err as Error).message}`));
+      process.exit(1);
+    }
+    const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
+    if (unconfigured) {
+      console.error(
+        colors.red(`Error: TLD "${unconfigured}" is not configured (${tlds.join(", ")}).`)
+      );
+      process.exit(1);
+    }
+  }
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  if (args[1] === "--remove") {
+  if (isRemove) {
     const aliasName = args[2];
-    if (!aliasName) {
+    if (!aliasName || aliasName.startsWith("-")) {
       console.error(colors.red("Error: No alias name provided."));
       console.error(colors.cyan("  portless alias --remove <name>"));
       process.exit(1);
     }
-    const hostnames = buildHostnames(aliasName, tlds);
+    const hostnames = buildHostnames(aliasName, tlds, targetTlds);
     const routes = store.loadRoutes();
-    const existing = routes.find((r) => hostnames.includes(r.hostname) && r.pid === 0);
-    if (!existing) {
+    const aliases = hostnames.filter((hostname) =>
+      routes.some((route) => route.hostname === hostname && route.pid === 0)
+    );
+    if (aliases.length === 0) {
       console.error(colors.red(`Error: No alias found for "${hostnames.join(", ")}".`));
       process.exit(1);
     }
-    removeRoutes(store, hostnames);
-    console.log(colors.green(`Removed alias: ${hostnames.join(", ")}`));
+    // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
+    removeRoutes(store, aliases, 0);
+    console.log(colors.green(`Removed alias: ${aliases.join(", ")}`));
     return;
   }
 
   const aliasName = args[1];
   const aliasPort = args[2];
-  if (!aliasName || !aliasPort) {
+  if (!aliasName || !aliasPort || aliasName.startsWith("-") || aliasPort.startsWith("-")) {
     console.error(colors.red("Error: Missing arguments."));
     console.error(colors.blue("Usage:"));
     console.error(colors.cyan("  portless alias <name> <port>"));
@@ -2714,7 +2769,7 @@ ${colors.bold("Examples:")}
     process.exit(1);
   }
 
-  const hostnames = buildHostnames(aliasName, tlds);
+  const hostnames = buildHostnames(aliasName, tlds, targetTlds);
   const port = parsePort(aliasPort);
   if (port === null) {
     console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
@@ -3235,21 +3290,32 @@ ${colors.bold("Options:")}
 }
 
 async function handleProxy(args: string[]): Promise<void> {
-  if (args[1] === "stop") {
-    let explicitPort: number | undefined;
-    const portIdx = args.indexOf("--port") !== -1 ? args.indexOf("--port") : args.indexOf("-p");
-    if (portIdx !== -1) {
-      const portValue = args[portIdx + 1];
-      if (portValue && !portValue.startsWith("-")) {
+  if (args[1] === "stop" && !hasHelpFlag(args)) {
+    let longPort: number | undefined;
+    let shortPort: number | undefined;
+    for (let i = 2; i < args.length; i++) {
+      const arg = args[i];
+      if (arg === "--port" || arg === "-p") {
+        const portValue = args[++i];
+        if (!portValue || portValue.startsWith("-")) {
+          console.error(colors.red(`Error: ${arg} requires a port number.`));
+          process.exit(1);
+        }
         const parsed = parsePort(portValue);
         if (parsed === null) {
           console.error(colors.red(`Error: Invalid port number: ${portValue}`));
           console.error(colors.blue("Port must be between 1 and 65535."));
           process.exit(1);
         }
-        explicitPort = parsed;
+        if (arg === "--port") longPort ??= parsed;
+        else shortPort ??= parsed;
+      } else {
+        console.error(colors.red(`Error: Unknown flag "${arg}".`));
+        console.error(colors.blue("Known flags: --port, -p, --help"));
+        process.exit(1);
       }
     }
+    const explicitPort = longPort ?? shortPort;
 
     if (explicitPort !== undefined) {
       const dir = resolveStateDir(explicitPort);
@@ -3267,7 +3333,7 @@ async function handleProxy(args: string[]): Promise<void> {
     return;
   }
 
-  const isProxyHelp = args[1] === "--help" || args[1] === "-h";
+  const isProxyHelp = args[1] === "--help" || args[1] === "-h" || args[1] === "stop";
   if (isProxyHelp || args[1] !== "start") {
     console.log(`
 ${colors.bold("portless proxy")} - Manage the portless proxy server.
