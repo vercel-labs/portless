@@ -10,6 +10,7 @@ import { StringDecoder } from "node:string_decoder";
 import {
   type ComposeContainers,
   type ComposeModel,
+  allocatePorts,
   buildUpArgs,
   explicitProject,
   isDetachedUp,
@@ -4725,36 +4726,47 @@ function isPortFree(port: number): Promise<boolean> {
   );
 }
 
-/**
- * Fixed host ports for the project's routed container ports. A stored port is
- * reused while it is free or held by this project's own containers.
- */
+/** Ports saved by every other compose project in the state dir. */
+function reservedComposePorts(stateDir: string, project: string): Set<number> {
+  const dir = path.join(stateDir, "compose");
+  const reserved = new Set<number>();
+  if (!fs.existsSync(dir)) return reserved;
+  const own = path.basename(composeStatePaths(stateDir, project).ports);
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith(".ports.json") || file === own) continue;
+    try {
+      const ports = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")) as Record<
+        string,
+        number
+      >;
+      for (const port of Object.values(ports)) if (typeof port === "number") reserved.add(port);
+    } catch {
+      // Unreadable file: nothing to reserve.
+    }
+  }
+  return reserved;
+}
+
+/** Fixed host ports for the project's routed container ports, saved for the next up. */
 async function allocateComposePorts(
-  portsPath: string,
+  stateDir: string,
   project: string,
   keys: string[]
 ): Promise<Map<string, number>> {
+  const portsPath = composeStatePaths(stateDir, project).ports;
   let stored: Record<string, number> = {};
   try {
     stored = JSON.parse(fs.readFileSync(portsPath, "utf8")) as Record<string, number>;
   } catch {
     // First run, or an unreadable file: allocate fresh ports.
   }
-  const ours = new Set(readComposeContainers(["-p", project])?.ports.values() ?? []);
-  const ports = new Map<string, number>();
-  const taken = new Set<number>();
-  for (const key of keys) {
-    const previous = stored[key];
-    if (previous && !taken.has(previous) && (ours.has(previous) || (await isPortFree(previous)))) {
-      ports.set(key, previous);
-      taken.add(previous);
-      continue;
-    }
-    let port = await findFreePort(COMPOSE_MIN_PORT, COMPOSE_MAX_PORT);
-    while (taken.has(port)) port = await findFreePort(COMPOSE_MIN_PORT, COMPOSE_MAX_PORT);
-    ports.set(key, port);
-    taken.add(port);
-  }
+  const ports = await allocatePorts(keys, stored, {
+    min: COMPOSE_MIN_PORT,
+    max: COMPOSE_MAX_PORT,
+    ours: new Set(readComposeContainers(["-p", project])?.ports.values() ?? []),
+    reserved: reservedComposePorts(stateDir, project),
+    isFree: isPortFree,
+  });
   fs.writeFileSync(portsPath, JSON.stringify(Object.fromEntries(ports), null, 2), { mode: 0o600 });
   return ports;
 }
@@ -4792,7 +4804,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   const keys = [
     ...new Set(planCompose(source, planOpts).routes.map((r) => keyOf(r.service, r.target))),
   ];
-  const ports = await allocateComposePorts(files.ports, project, keys);
+  const ports = await allocateComposePorts(dir, project, keys);
   const plan = planCompose(source, {
     ...planOpts,
     portFor: (service, target) => ports.get(keyOf(service, target)),

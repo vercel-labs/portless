@@ -3,9 +3,9 @@
  *
  * The approach: resolve the project with `docker compose config --format json`
  * (compose does interpolation, `extends`, `include`, and multi-file merges),
- * move each published HTTP port to an ephemeral loopback port, run compose
- * against the resolved model, then read the assigned ports back from
- * `docker compose ps` and register them as portless routes.
+ * move each published HTTP port to a fixed loopback port kept per project,
+ * run compose against the resolved model, then read the published ports back
+ * from `docker compose ps` and register them as portless routes.
  */
 import * as path from "node:path";
 import { truncateLabel } from "./auto.js";
@@ -182,8 +182,6 @@ export interface ComposeModel {
 export interface ComposeRoute {
   service: string;
   target: number;
-  /** Fixed host port on 127.0.0.1, when the caller pinned one. */
-  port?: number;
   /** Every hostname of the route, one per configured TLD. The first is primary. */
   hostnames: string[];
   url: string;
@@ -201,7 +199,7 @@ export interface KeptPort {
 export interface ComposePlan {
   /** Compose project name, as compose resolved it. */
   project: string;
-  /** Resolved model to run, with routed ports moved to ephemeral loopback ports. */
+  /** Resolved model to run, with routed ports moved to loopback ports from `portFor`. */
   model: ComposeModel;
   routes: ComposeRoute[];
   kept: KeptPort[];
@@ -271,8 +269,8 @@ function readServiceSettings(service: string, svc: ComposeService): ServiceSetti
 }
 
 /**
- * Plan a resolved compose model. Every published TCP port becomes an
- * ephemeral port on 127.0.0.1 and a route `<service>.<project>`. A service
+ * Plan a resolved compose model. Every published TCP port moves to 127.0.0.1,
+ * on the port from `portFor` (ephemeral without one), and gets a route `<service>.<project>`. A service
  * with several routed ports gets `<service>.<project>` for the first and
  * `<port>.<service>.<project>` for each of them. Routed services get the Vite
  * allowed-hosts variable so a dev server in a container accepts its hostname.
@@ -360,11 +358,9 @@ export function planCompose(model: ComposeModel, opts: PlanOptions): ComposePlan
         }
         seen.set(name, service);
         const hostnames = opts.hostnamesFor(name);
-        const port = opts.portFor?.(service, target);
         routes.push({
           service,
           target,
-          ...(port === undefined ? {} : { port }),
           hostnames,
           url: opts.urlFor(hostnames[0]!),
         });
@@ -442,4 +438,56 @@ export function staleAliases(
   return aliases
     .filter((a) => suffixes.some((s) => a.hostname.endsWith(s)) && !live.has(a.port))
     .map((a) => a.hostname);
+}
+
+export interface PortAllocation {
+  /** Lowest and highest port to hand out. */
+  min: number;
+  max: number;
+  /** Ports this project's running containers publish. A stored port among them is still ours. */
+  ours: ReadonlySet<number>;
+  /** Ports saved by other projects. A stopped project's port is free on the host but not ours to take. */
+  reserved: ReadonlySet<number>;
+  isFree: (port: number) => Promise<boolean>;
+  /** Start offset into the range, in [0, 1). Random by default. */
+  random?: () => number;
+}
+
+/**
+ * Fixed host ports for routed container ports, keyed like "service:target".
+ * A stored port is reused while it is ours or free; new ports skip ports that
+ * other projects saved.
+ */
+export async function allocatePorts(
+  keys: readonly string[],
+  stored: Readonly<Record<string, number>>,
+  opts: PortAllocation
+): Promise<Map<string, number>> {
+  const ports = new Map<string, number>();
+  const taken = new Set<number>();
+  const size = opts.max - opts.min + 1;
+  for (const key of keys) {
+    const previous = stored[key];
+    if (
+      previous !== undefined &&
+      !taken.has(previous) &&
+      !opts.reserved.has(previous) &&
+      (opts.ours.has(previous) || (await opts.isFree(previous)))
+    ) {
+      ports.set(key, previous);
+      taken.add(previous);
+      continue;
+    }
+    const start = Math.floor((opts.random ?? Math.random)() * size);
+    let port: number | undefined;
+    for (let i = 0; i < size && port === undefined; i++) {
+      const candidate = opts.min + ((start + i) % size);
+      if (taken.has(candidate) || opts.reserved.has(candidate)) continue;
+      if (await opts.isFree(candidate)) port = candidate;
+    }
+    if (port === undefined) throw new Error(`No free port found in range ${opts.min}-${opts.max}.`);
+    ports.set(key, port);
+    taken.add(port);
+  }
+  return ports;
 }

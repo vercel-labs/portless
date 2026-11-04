@@ -55,6 +55,12 @@ describe.skipIf(!hasDocker)("compose", () => {
     return last;
   }
 
+  // Host port compose published for web:80, like "127.0.0.1:14123".
+  const webPort = () =>
+    spawnSync("docker", ["compose", "-p", PROJECT, "port", "web", "80"], {
+      encoding: "utf8",
+    }).stdout.trim();
+
   beforeAll(() => {
     const up = portless("compose", "up", "-d");
     expect(up.status, up.stdout + up.stderr).toBe(0);
@@ -73,13 +79,17 @@ describe.skipIf(!hasDocker)("compose", () => {
     expect(await waitFor(`backend.${PROJECT}.localhost`)).toBe(200);
   });
 
-  it("keeps the route after a container is recreated", async () => {
+  it("keeps the published port and the route after a container is recreated", async () => {
+    const before = webPort();
+    expect(before).toMatch(/^127\.0\.0\.1:\d+$/);
     const recreate = portless("compose", "up", "-d", "--force-recreate", "web");
     expect(recreate.status, recreate.stdout + recreate.stderr).toBe(0);
+    expect(webPort()).toBe(before);
     expect(await waitFor(`web.${PROJECT}.localhost`)).toBe(200);
   });
 
-  it("keeps the route working across restart and stop/start", async () => {
+  it("keeps the published port and the route across restart and stop/start", async () => {
+    const before = webPort();
     for (const args of [
       ["restart", "web"],
       ["stop", "web"],
@@ -88,6 +98,7 @@ describe.skipIf(!hasDocker)("compose", () => {
       const run = portless("compose", ...args);
       expect(run.status, run.stdout + run.stderr).toBe(0);
     }
+    expect(webPort()).toBe(before);
     expect(await waitFor(`web.${PROJECT}.localhost`)).toBe(200);
   });
 
