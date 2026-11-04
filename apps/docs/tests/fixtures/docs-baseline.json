@@ -91,8 +91,8 @@
       "title": "HTTPS | portless",
       "markdownTitle": "HTTPS",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "48fd5c2b5b74a059f6eacb615bae65ffb931d7727c130d5757af8b103c8f43e5",
-      "markdownBodySha256": "48fd5c2b5b74a059f6eacb615bae65ffb931d7727c130d5757af8b103c8f43e5",
+      "mdxSha256": "ce4d82272378ff53c8ed7a2e40269b0c711ff26a073b7a87aa488fe9dd957dd2",
+      "markdownBodySha256": "ce4d82272378ff53c8ed7a2e40269b0c711ff26a073b7a87aa488fe9dd957dd2",
       "ssr": [
         "HTTP/2 + TLS is enabled by default for faster dev server page loads.",
         "portless proxy start --cert ./cert.pem --key ./key.pem",
