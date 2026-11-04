@@ -349,6 +349,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("--cloudflare");
       expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
+      expect(stdout).toContain("Programmatic API:");
+      expect(stdout).toContain("getUrl");
     });
 
     it("prints help and exits 0 with -h", () => {
