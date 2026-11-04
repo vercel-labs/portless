@@ -2184,6 +2184,11 @@ ${colors.bold("ngrok sharing:")}
   Requires the ngrok CLI to be installed and authenticated.
   ${colors.cyan("portless myapp --ngrok next dev")}
 
+${colors.bold("Proxy connections:")}
+  IPv4 and IPv6 loopback connect in parallel; the first success wins.
+  Apps listening on both may see an extra connection close without a request.
+  Connection errors include each loopback address and error code.
+
 ${colors.bold("Options:")}
   run [--name <name>] <cmd>      Infer project name (or override with --name)
                                 Adds worktree prefix in git worktrees

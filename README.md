@@ -576,6 +576,10 @@ Manual sync reconciles portless-managed entries with current routes and removes 
 
 Run `portless doctor` to inspect local health without changing state. It checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
 
+The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection, without a timer that abandons either family. A backend listening on both families may accept an extra connection that closes without an HTTP request. Later requests reuse the winning connection when possible.
+
+For upstream 502 errors, stop an existing proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
+
 ## Proxying Between Portless Apps
 
 If your frontend dev server (e.g. Vite, webpack) proxies API requests to another portless app, make sure the proxy rewrites the `Host` header. Without this, portless routes the request back to the frontend in an infinite loop.
@@ -625,6 +629,8 @@ pnpm lint             # Lint all packages
 pnpm type-check       # Type-check all packages
 pnpm format           # Format all files with Prettier
 ```
+
+Library callers of `createLoopbackConnection` now pass a callback: `createLoopbackConnection(port, (error, socket) => { ... })`. The function returns a cancellation function instead of a socket; the callback receives the connected socket or an error.
 
 ## Requirements
 

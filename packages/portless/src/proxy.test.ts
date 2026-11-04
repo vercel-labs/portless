@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, vi } from "vitest";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -963,6 +963,9 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("Bad Gateway");
       expect(errors.length).toBeGreaterThan(0);
       expect(errors[0]).toContain("dead.localhost");
+      expect(errors[0]).toContain("ECONNREFUSED");
+      expect(errors[0]).toContain("127.0.0.1:59999");
+      expect(errors[0]).toContain("::1:59999");
     });
 
     const errorScenarios = [
@@ -1113,6 +1116,137 @@ describe("createProxyServer", () => {
   });
 
   describe("upstream connections", () => {
+    it("serves an IPv6 backend while the IPv4 connection stays pending", async (ctx) => {
+      const backend = http.createServer((_req, res) => res.end("ipv6"));
+      const ipv6Available = await new Promise<boolean>((resolve) => {
+        backend.once("error", () => resolve(false));
+        backend.listen(0, "::1", () => resolve(true));
+      });
+      if (!ipv6Available) return ctx.skip();
+      trackServer(backend);
+      const backendPort = (backend.address() as net.AddressInfo).port;
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+      const connect = net.Socket.prototype.connect;
+      const pending: net.Socket[] = [];
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (
+          options &&
+          "port" in options &&
+          options.port === backendPort &&
+          (options.host === "127.0.0.1" || options.host === "localhost")
+        ) {
+          Reflect.set(this, "connecting", true);
+          pending.push(this);
+          return this;
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const res = await Promise.race([
+          request(server, { host: "myapp.localhost" }),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => reject(new Error("IPv4 blocked the IPv6 backend")), 1000);
+          }),
+        ]);
+        expect(res.status).toBe(200);
+        expect(res.body).toBe("ipv6");
+        expect(pending).toHaveLength(1);
+        expect(pending[0].destroyed).toBe(true);
+      } finally {
+        clearTimeout(timeout);
+        for (const socket of pending) socket.destroy();
+        spy.mockRestore();
+      }
+    });
+
+    it("streams a POST after IPv6 refuses while IPv4 is still pending", async () => {
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          req.on("data", (chunk) => res.write(chunk));
+          req.on("end", () => res.end());
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address() as net.AddressInfo;
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendAddr.port }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+      const connect = net.Socket.prototype.connect;
+      let ipv4Pending = false;
+      let releaseIpv4: (() => void) | undefined;
+      let refusedWhilePending = false;
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (options && "port" in options && options.port === backendAddr.port) {
+          if (options.host === "127.0.0.1") {
+            ipv4Pending = true;
+            releaseIpv4 = () => {
+              ipv4Pending = false;
+              if (!this.destroyed) Reflect.apply(connect, this, args);
+            };
+            return this;
+          }
+          if (options.host === "::1") {
+            this.once("error", () => {
+              refusedWhilePending = ipv4Pending;
+              setImmediate(() => releaseIpv4?.());
+            });
+          }
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      let client: http.ClientRequest | undefined;
+      try {
+        const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+          client = http.request(
+            {
+              host: "127.0.0.1",
+              port: (server.address() as net.AddressInfo).port,
+              method: "POST",
+              headers: { host: "myapp.localhost" },
+              agent: false,
+            },
+            (res) => {
+              let body = "";
+              res.on("error", reject);
+              res.once("data", () => client!.end("-last"));
+              res.on("data", (chunk) => (body += chunk));
+              res.on("end", () => resolve({ status: res.statusCode!, body }));
+            }
+          );
+          client.on("error", reject);
+          client.write("first");
+        });
+        expect(refusedWhilePending).toBe(true);
+        expect(result).toEqual({ status: 200, body: "first-last" });
+      } finally {
+        client?.destroy();
+        spy.mockRestore();
+      }
+    });
+
     it("reuses one upstream connection across requests (issue #370)", async () => {
       const connections = new Set<net.Socket>();
       const backend = trackServer(http.createServer((_req, res) => res.end("ok")));
@@ -1131,6 +1265,65 @@ describe("createProxyServer", () => {
         expect((await request(server, { host: "myapp.localhost" })).status).toBe(200);
       }
       expect(connections.size).toBe(1);
+    });
+
+    it("finishes an in-flight response when the proxy closes", async () => {
+      let finishResponse: (() => void) | undefined;
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          finishResponse = () => res.end("last");
+          res.write("first");
+        })
+      );
+      await listen(backend);
+      const backendPort = (backend.address() as net.AddressInfo).port;
+
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      let client: http.ClientRequest | undefined;
+      let closePromise: Promise<void> | undefined;
+
+      try {
+        await listen(server);
+        const proxyPort = (server.address() as net.AddressInfo).port;
+
+        let body = "";
+        const response = new Promise<string>((resolve, reject) => {
+          client = http.get(
+            {
+              host: "127.0.0.1",
+              port: proxyPort,
+              headers: { host: "myapp.localhost" },
+              agent: false,
+            },
+            (res) => {
+              res.once("data", () => {
+                closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+                finishResponse?.();
+              });
+              res.on("data", (chunk) => {
+                body += chunk.toString();
+              });
+              res.on("end", () => resolve(body));
+              res.on("error", reject);
+            }
+          );
+          client.on("error", reject);
+        });
+
+        expect(await response).toBe("firstlast");
+        await closePromise;
+      } finally {
+        finishResponse?.();
+        client?.destroy();
+        backend.closeAllConnections();
+        (server as http.Server).closeAllConnections();
+        await closePromise;
+      }
     });
 
     it("keeps serving requests while many long-lived responses are open", async () => {
@@ -1806,6 +1999,65 @@ describe("createProxyServer", () => {
       expect(result.status).toBe(502);
     });
 
+    it("does not report an error when shutdown aborts a pending WebSocket upgrade", async () => {
+      const backendPort = TEST_PROXY_PORT + 1;
+      const pending: net.Socket[] = [];
+      let resolvePending!: () => void;
+      const pendingStarted = new Promise<void>((resolve) => (resolvePending = resolve));
+      const connect = net.Socket.prototype.connect;
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (options && "port" in options && options.port === backendPort) {
+          Reflect.set(this, "connecting", true);
+          pending.push(this);
+          if (pending.length === 2) resolvePending();
+          return this;
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      const onError = vi.fn();
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "ws.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+          onError,
+        })
+      );
+      await listen(server);
+      const resultPromise = new Promise<{ status?: number; closed: boolean }>((resolve, reject) => {
+        let status: number | undefined;
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: (server.address() as net.AddressInfo).port,
+          headers: { host: "ws.localhost", connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("socket", (socket) => socket.once("close", () => resolve({ status, closed: true })));
+        req.on("response", (res) => {
+          status = res.statusCode;
+          res.resume();
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      try {
+        await pendingStarted;
+        expect(pending.every((socket) => !socket.destroyed)).toBe(true);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        expect(await resultPromise).toEqual({ status: 502, closed: true });
+        expect(pending.every((socket) => socket.destroyed)).toBe(true);
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+        for (const socket of pending) socket.destroy();
+      }
+    });
+
     it("forwards backend Sec-WebSocket-Accept and custom headers", async () => {
       const testAcceptValue = "dGhlIHNhbXBsZSBub25jZQ==";
       const testProtocol = "graphql-ws";
@@ -2477,6 +2729,47 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       expect(received["x-forwarded-proto"]).toBe("https");
     } finally {
       client.close();
+    }
+  });
+
+  it("opens no upstream sockets when shutdown starts during extended CONNECT routing", async () => {
+    let closed: Promise<void> | undefined;
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => {
+          closed = new Promise<void>((resolve) => server.close(() => resolve()));
+          return [{ hostname: "ws.localhost", port: 12345 }];
+        },
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const { client } = await h2Session(server);
+    const connect = vi.spyOn(net.Socket.prototype, "connect");
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/ws",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          req.resume();
+          req.on("end", () => resolve(headers[":status"] as number));
+        });
+        req.end();
+      });
+      expect(status).toBe(502);
+      expect(connect).not.toHaveBeenCalled();
+      client.destroy();
+      await closed;
+    } finally {
+      connect.mockRestore();
+      client.destroy();
     }
   });
 
