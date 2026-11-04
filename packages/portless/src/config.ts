@@ -461,6 +461,18 @@ function validateWorktreeConfig(value: unknown, prefix: string, configPath: stri
     );
   }
 
+  if (typeof obj.hostnameTemplate === "string") {
+    const labels = obj.hostnameTemplate
+      .replaceAll("{worktree}", "worktree")
+      .replaceAll("{name}", "name")
+      .split(".");
+    if (!labels.every((label) => /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(label))) {
+      throw new ConfigValidationError(
+        `"${prefix}.hostnameTemplate" in ${configPath} must render to valid hostname labels: "${obj.hostnameTemplate}".`
+      );
+    }
+  }
+
   warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, prefix);
 }
 

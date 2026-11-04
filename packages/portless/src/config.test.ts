@@ -277,6 +277,55 @@ describe("loadConfig validation", () => {
     }
   });
 
+  it("validates rendered hostnameTemplate labels in every config location", () => {
+    const valid = [
+      "tenant.{worktree}",
+      "{worktree}-{name}",
+      "a.b.{worktree}",
+      "UPPER-CASE.{worktree}",
+      `${"a".repeat(70)}.{worktree}`,
+    ];
+    const invalid = [
+      ".{worktree}",
+      "tenant_{worktree}",
+      "tenant.-{worktree}",
+      "{worktree}.{tenant}",
+      "a..{worktree}",
+      "{worktree}.",
+    ];
+    const places: [string, (t: string) => unknown, string][] = [
+      [
+        "portless.json",
+        (t) => ({ worktree: { hostnameTemplate: t } }),
+        '"worktree.hostnameTemplate"',
+      ],
+      [
+        "portless.json",
+        (t) => ({ apps: { "apps/web": { worktree: { hostnameTemplate: t } } } }),
+        '"apps.apps/web.worktree.hostnameTemplate"',
+      ],
+      [
+        "package.json",
+        (t) => ({ portless: { worktree: { hostnameTemplate: t } } }),
+        '"worktree.hostnameTemplate"',
+      ],
+    ];
+
+    for (const [file, wrap, key] of places) {
+      const write = (t: string) =>
+        fs.writeFileSync(path.join(tmpDir, file), JSON.stringify(wrap(t)));
+      for (const t of valid) {
+        write(t);
+        expect(() => loadConfig(tmpDir), t).not.toThrow();
+      }
+      for (const t of invalid) {
+        write(t);
+        expect(() => loadConfig(tmpDir), t).toThrow(`${key} in ${path.join(tmpDir, file)}`);
+      }
+      fs.rmSync(path.join(tmpDir, file), { force: true });
+    }
+  });
+
   it("throws when proxy is not a boolean", () => {
     fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ proxy: "false" }));
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);

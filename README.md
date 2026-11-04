@@ -212,13 +212,13 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
-Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` in `portless.json` to keep the whole branch, and `worktree.hostnameTemplate` to replace the whole hostname. The template must contain `{worktree}` and may contain `{name}`:
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` in `portless.json` to keep the whole branch, and `worktree.hostnameTemplate` to replace the whole hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`:
 
 ```json
 { "worktree": { "prefix": "branch", "hostnameTemplate": "tenant.{worktree}-{name}" } }
 ```
 
-The template applies only when a label exists. Choose the label with `--prefix <label>` or `PORTLESS_PREFIX`; both also work outside a worktree. An empty value removes it. `portless get --no-worktree` skips the label, style, and template. When a multi-app startup proxies more than one app, each proxied app needs a distinct hostname; include `{name}` in the template or give each app its own template. Worktree options inherit from the workspace root into package directories, and local worktree fields override inherited values. Template labels over 63 characters are shortened with a stable hash suffix.
+Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash at runtime, and a template applies only when a label exists. Choose the label with `--prefix <label>` or `PORTLESS_PREFIX`; both also work outside a worktree, and an empty value removes it. `portless get` reads worktree config from the current directory, not the named service's package, so `cd` into a package to use its per-app options; `--no-worktree` skips worktree config and naming, and without it an invalid config in the current directory or workspace fails instead of printing a guessed URL. Worktree options inherit from the workspace root into package directories, and a package's own `portless.json` applies in a root multi-app startup; for worktree options, the `package.json` `"portless"` key is used only when the package has no `portless.json`, while `name`, `script`, `appPort`, and `proxy` keep their existing precedence. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
 
 Put `portless run` in `package.json` to apply these naming rules in each checkout.
 

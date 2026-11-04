@@ -541,6 +541,15 @@ function isEnabledEnv(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+/**
+ * Whether the proxy should be accepted as already running. Shared with the
+ * multi-app collision preflight so both agree on which TLDs are in effect.
+ */
+async function isProxyUp(proxyPort: number, tls: boolean): Promise<boolean> {
+  if (await isProxyRunning(proxyPort, tls)) return true;
+  return !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
+}
+
 function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | null): string {
   if (signal) return ` (signal ${signal})`;
   if (code !== null) return ` (exit ${code})`;
@@ -1250,25 +1259,15 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
 }
 
 /**
- * Check if the proxy is running and auto-start it if needed.
- * Returns the discovered state after start, or `{ started: false }` when
- * the proxy was already up.
+ * Resolve the config and port a stopped proxy starts with, applying persisted
+ * overrides unless the environment is explicit. Shared by the starter and the
+ * multi-app collision preflight so both read the same effective TLDs.
  */
-async function ensureProxyRunning(
-  proxyPort: number,
-  tls: boolean,
-  desired: ProxyDesiredState
-): Promise<EnsureProxyResult> {
+function resolveProxyStart(desired: ProxyDesiredState): {
+  startConfig: ReturnType<typeof resolveProxyConfig>;
+  startPort: number | undefined;
+} {
   const { explicit, desiredConfig } = desired;
-
-  const proxyResponsive = await isProxyRunning(proxyPort, tls);
-  const proxyListeningFromStateDir =
-    !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
-
-  if (proxyResponsive || proxyListeningFromStateDir) {
-    return { started: false };
-  }
-
   const persisted = readPersistedProxyState();
   const startConfig = { ...desiredConfig };
   let startPort: number | undefined;
@@ -1296,6 +1295,25 @@ async function ensureProxyRunning(
       startPort = persisted.port;
     }
   }
+
+  return { startConfig, startPort };
+}
+
+/**
+ * Check if the proxy is running and auto-start it if needed.
+ * Returns the discovered state after start, or `{ started: false }` when
+ * the proxy was already up.
+ */
+async function ensureProxyRunning(
+  proxyPort: number,
+  tls: boolean,
+  desired: ProxyDesiredState
+): Promise<EnsureProxyResult> {
+  if (await isProxyUp(proxyPort, tls)) {
+    return { started: false };
+  }
+
+  const { startConfig, startPort } = resolveProxyStart(desired);
 
   const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
   const needsSudo =
@@ -1878,9 +1896,10 @@ ${colors.bold("Name inference (in order):")}
   In git worktrees the branch becomes a subdomain prefix (e.g.
   feature-auth.myapp.localhost); the default label is its last segment. Set
   "worktree.prefix" to "branch" for the whole branch, or
-  "worktree.hostnameTemplate" with {worktree} and optional {name}. --prefix
-  and PORTLESS_PREFIX override detection; empty disables it. Generated template
-  labels are hash-truncated for the 63-character DNS limit.
+  "worktree.hostnameTemplate" with {worktree} and optional {name}. Templates
+  must render valid DNS labels. --prefix and PORTLESS_PREFIX override detection;
+  empty disables it. Template labels over 63 characters are hash-truncated.
+  Duplicate proxied hostnames fail before apps start.
 
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
@@ -2522,14 +2541,15 @@ ${colors.bold("portless get")} - Print the URL for a service.
 ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}
 
-Constructs the URL using the same hostname and worktree logic as "portless run".
-PORTLESS_PREFIX and config worktree options apply; PORTLESS_PREFIX="" skips worktree naming.
-Workspace packages inherit worktree defaults from the workspace root.
+Uses the worktree config in the current directory, including workspace defaults,
+not the named app's package. Run from the target package for its per-app options.
+Invalid config fails instead of printing a guessed URL.
+PORTLESS_PREFIX="" skips worktree naming.
 
   BACKEND_URL=$(portless get backend)
 
 ${colors.bold("Options:")}
-  --no-worktree          Skip worktree naming (detection, PORTLESS_PREFIX, and config)
+  --no-worktree          Skip config loading and worktree naming
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -4103,8 +4123,15 @@ async function handleDefaultMulti(
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
     let pkgConfig: AppConfig | null;
+    // Worktree config matches default mode: the leaf portless.json (or its
+    // package.json "portless" fallback) wins over the workspace root config.
+    let leafWorktree: WorktreeConfig | undefined;
     try {
       pkgConfig = loadPackagePortlessConfig(pkg.dir);
+      const leaf = loadConfig(pkg.dir);
+      leafWorktree = leaf
+        ? resolveAppConfig(leaf.config, leaf.configDir, pkg.dir).worktree
+        : undefined;
     } catch (err) {
       if (err instanceof ConfigValidationError) {
         console.error(colors.red(`Error: ${err.message}`));
@@ -4113,11 +4140,10 @@ async function handleDefaultMulti(
       throw err;
     }
 
-    // Merge (closest wins): package.json "portless" > portless.json app entry > defaults
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
       ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
-      worktree: mergeWorktreeConfig(rootOverride?.worktree, pkgConfig?.worktree),
+      worktree: mergeWorktreeConfig(rootOverride?.worktree, leafWorktree),
     };
 
     const effectiveScript = appOverride.script ?? scriptName;
@@ -4182,6 +4208,35 @@ async function handleDefaultMulti(
       console.error(colors.red(`Error: ${(err as Error).message}`));
       process.exit(1);
     }
+
+    // Check hostname collisions before starting the proxy so a config mistake
+    // cannot leave a proxy or app children behind. A running proxy keeps its
+    // own TLDs; otherwise an explicit env override decides a fresh start.
+    const where = (app: MultiAppEntry) =>
+      `"${app.label}" (${path.relative(wsRoot, app.pkg.dir).replace(/\\/g, "/") || "."})`;
+    const checkHostnameCollisions = (tldsForCheck: readonly string[]) => {
+      const seen = new Map<string, MultiAppEntry>();
+      for (const app of proxiedApps) {
+        for (const hostname of buildHostnames(app.name, tldsForCheck)) {
+          const existing = seen.get(hostname);
+          if (existing) {
+            throw new Error(
+              `Duplicate hostname "${hostname}" for ${where(existing)} and ${where(app)}. Set unique "name" overrides; if using worktree.hostnameTemplate, include {name}.`
+            );
+          }
+          seen.set(hostname, app);
+        }
+      }
+    };
+    // A running proxy keeps its own TLDs; a stopped one starts with the same
+    // persisted/env merge ensureProxyRunning uses, with LAN normalized to .local.
+    let preflightTlds = tlds;
+    if (!(await isProxyUp(port, tls))) {
+      const { startConfig } = resolveProxyStart(multiDesired);
+      preflightTlds = startConfig.lanMode ? ["local"] : startConfig.tlds;
+    }
+    checkHostnameCollisions(preflightTlds);
+
     const ensureResult = await ensureProxyRunning(port, tls, multiDesired);
     if (ensureResult.started) {
       dir = ensureResult.state.dir;
@@ -4194,16 +4249,9 @@ async function handleDefaultMulti(
       ({ dir, port, tls, tlds, lanMode } = await discoverState());
     }
 
-    const seenHostnames = new Set<string>();
-    for (const app of proxiedApps) {
-      for (const hostname of buildHostnames(app.name, tlds)) {
-        if (seenHostnames.has(hostname)) {
-          throw new Error(
-            `Duplicate hostname "${hostname}" for proxied apps. Set worktree.hostnameTemplate with {name} or use unique app names/templates.`
-          );
-        }
-        seenHostnames.add(hostname);
-      }
+    // Recheck if the proxy settled on different TLDs than the preflight read.
+    if (tlds.join("\u0000") !== preflightTlds.join("\u0000")) {
+      checkHostnameCollisions(tlds);
     }
 
     if (tls && !isCATrusted(dir)) {

@@ -196,6 +196,7 @@ describe("detectWorktreePrefix", () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-test-"));
+    vi.stubEnv("PORTLESS_PREFIX", undefined);
   });
 
   afterEach(() => {
@@ -395,10 +396,12 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-git-test-"));
+    vi.stubEnv("PORTLESS_PREFIX", undefined);
   });
 
   afterEach(() => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
+    vi.unstubAllEnvs();
   });
 
   it("returns null for a single worktree (no linked worktrees)", () => {

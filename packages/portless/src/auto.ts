@@ -207,6 +207,9 @@ function branchToPrefix(branch: string, style: WorktreePrefixStyle): string | nu
  *   4. Otherwise, its sanitized label is the prefix, using the requested style.
  *
  * Falls back to parsing `.git` file + HEAD when git CLI is unavailable.
+ *
+ * `PORTLESS_PREFIX` overrides detection when set: its sanitized value becomes
+ * the prefix, and an empty value suppresses the prefix entirely.
  */
 export function detectWorktreePrefix(
   cwd: string = process.cwd(),

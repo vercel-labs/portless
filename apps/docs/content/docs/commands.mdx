@@ -103,7 +103,7 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
-Applies the worktree label, style, and hostname template by default, including `PORTLESS_PREFIX`. Use `--no-worktree` to skip all of it.
+Worktree config is read from the current directory, including workspace root defaults, not from the named service's package; `cd` into a package to use its per-app options. Use `--no-worktree` to skip worktree config and all worktree naming. Without it, an invalid config in the current directory or workspace fails instead of printing a guessed URL.
 
 ## Alias (static routes)
 
