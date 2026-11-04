@@ -1,8 +1,27 @@
 # Changelog
 
-## 0.15.13
+## 0.16.0
 
 <!-- release:start -->
+
+### New Features
+
+- **Docker Compose**: Added `portless compose` to run a Compose project with named URLs. Each published HTTP port moves to a fixed port on 127.0.0.1 and gets a `<service>.<project>.localhost` route, so two projects can publish the same host port. Database, cache, and UDP ports keep their published port. Configure services with the `portless.enable`, `portless.name`, and `portless.ports` labels. (#543, #547)
+
+### Bug Fixes
+
+- **Upstream connections**: Pool connections to the dev server and limit concurrent dials per backend, so a cold HTTP/2 page load no longer overflows the server's accept backlog. Long-lived responses like SSE don't block other requests. (#477)
+- **HTTP/2 request bodies**: Send HTTP/2 request bodies that have no `content-length` with chunked encoding, so GET, DELETE, and OPTIONS requests with a body no longer get a 400. (#478)
+
+### Contributors
+
+- @Railly
+- @Umbranoxio
+- @ctate
+
+<!-- release:end -->
+
+## 0.15.13
 
 ### New Features
 
@@ -21,8 +40,6 @@
 - @Railly
 - @ctate
 - @bensabic
-
-<!-- release:end -->
 
 ## 0.15.12
 
