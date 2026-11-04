@@ -129,19 +129,21 @@ portless compose up -d [args...]
 portless compose down [args...]
 ```
 
-Run a Docker Compose project behind portless. Each published HTTP port moves to a free port on 127.0.0.1, and its service gets `https://<service>.<project>.localhost`. Two projects that both publish port 8080 can run at the same time.
+Run a Docker Compose project behind portless. Each service that publishes an HTTP port gets `https://<service>.<project>.localhost`, so two projects that both publish port 8080 can run at the same time.
 
 ```bash
 portless compose up -d   # -> https://web.shop.localhost, https://api.shop.localhost
 portless compose down
 ```
 
-- Global compose flags such as `-f`, `-p`, `--profile`, and `--env-file` go before the command, as with `docker compose`.
-- Common database and cache ports (5432, 3306, 6379, 27017, and others) keep their published port, so existing connection strings keep working. UDP ports and `network_mode: host` services are not changed.
+Put global compose flags such as `-f`, `-p`, `--profile`, and `--env-file` before the command, as with `docker compose`. Other compose commands, such as `logs` or `ps`, run unchanged.
+
+The first time a project starts, portless picks a free port on 127.0.0.1 for each published HTTP port and reuses it on later runs. Because the port does not change, routes keep working after `restart`, after `stop` and `start`, and when Docker restarts the container. A routed service can't scale past one container, because the replicas would need the same host port.
+
+- Database and cache ports such as 5432, 3306, 6379, and 27017 keep their published port, so existing connection strings keep working. UDP ports and `network_mode: host` services are not changed.
 - A service with several HTTP ports gets `<service>.<project>` for the first port and `<port>.<service>.<project>` for each port.
-- In the foreground, portless follows port changes when a container is recreated and removes the routes when compose exits. With `-d`, routes stay until `portless compose down`; run `portless compose up -d` again after recreating a container.
-- Start the project with `portless compose up`. A plain `docker compose up` recreates the containers with their original ports.
-- Any other compose command, such as `logs` or `ps`, runs unchanged.
+
+In the foreground, portless removes the routes when compose exits. With `-d`, routes stay until you run `portless compose down`, which removes the routes of containers that stopped and keeps the ones still running. Pass `-p` to run `down` from a directory without the compose file. Start the project with `portless compose up`, because a plain `docker compose up` recreates the containers with their original ports.
 
 Configure a service with labels:
 
@@ -156,7 +158,7 @@ services:
       portless.enable: "false" # leave this service unchanged
 ```
 
-Routed services get `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev server in a container accepts its portless hostname. Values your compose file sets take precedence.
+Each routed service gets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev server in a container accepts its portless hostname. If the service already sets that variable, portless keeps its value.
 
 ## List routes
 

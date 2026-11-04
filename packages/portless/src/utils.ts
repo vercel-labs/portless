@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import * as net from "node:net";
+import net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -50,37 +50,74 @@ export function resolveUserHome(options: UserHomeOptions = {}): string {
 }
 
 /**
- * Both loopback families, tried in order. Dev servers that bind `localhost`
- * on Node 17+ resolve it verbatim and may listen on IPv6 `::1` only (Vite's
- * default host does this), while most others bind IPv4 `127.0.0.1` only.
+ * Race both literal loopback addresses and hand off the first connected socket synchronously.
+ * Return a cancel function that aborts pending attempts with ABORT_ERR.
  */
-function loopbackLookup(
-  _hostname: string,
-  _options: unknown,
-  callback: (
-    err: NodeJS.ErrnoException | null,
-    addresses: { address: string; family: number }[]
-  ) => void
-): void {
-  callback(null, [
-    { address: "127.0.0.1", family: 4 },
-    { address: "::1", family: 6 },
-  ]);
-}
+export function createLoopbackConnection(
+  port: number,
+  callback: (error: NodeJS.ErrnoException | null, socket?: net.Socket) => void
+): () => void {
+  let settled = false;
+  const errors: NodeJS.ErrnoException[] = [];
+  const cleanup: ((winner?: net.Socket) => void)[] = [];
+  const finish = (error: NodeJS.ErrnoException | null, socket?: net.Socket) => {
+    if (settled) return;
+    settled = true;
+    for (const dispose of cleanup) dispose(socket);
+    callback(error, socket);
+  };
 
-/**
- * Open a TCP connection to a local app port, trying both loopback families
- * instead of hardcoding IPv4. Uses Node's Happy Eyeballs implementation
- * (`autoSelectFamily`) with a fixed address list, so no DNS lookup happens:
- * 127.0.0.1 is attempted first and `::1` is tried when it fails (issue #320).
- */
-export function createLoopbackConnection(port: number): net.Socket {
-  return net.connect({
-    host: "localhost",
-    port,
-    autoSelectFamily: true,
-    lookup: loopbackLookup as net.LookupFunction,
+  queueMicrotask(() => {
+    if (settled) return;
+    for (const [index, host] of ["127.0.0.1", "::1"].entries()) {
+      const onError = (error: NodeJS.ErrnoException) => {
+        if (settled || errors[index]) return;
+        errors[index] = error;
+        if (errors[0] && errors[1]) {
+          finish(
+            Object.assign(new AggregateError(errors, "Both loopback connections failed"), {
+              code: errors[0].code,
+            })
+          );
+        }
+      };
+      try {
+        const socket = net.connect({ host, port, family: index === 0 ? 4 : 6 });
+        const onConnect = () => finish(null, socket);
+        const onClose = () => {
+          socket.removeListener("connect", onConnect);
+          socket.removeListener("error", onError);
+          onError(
+            Object.assign(new Error("Connection closed before connecting"), {
+              code: "ECONNRESET",
+              address: host,
+              port,
+              syscall: "connect",
+            })
+          );
+        };
+        cleanup.push((winner) => {
+          socket.removeListener("connect", onConnect);
+          if (socket === winner) {
+            socket.removeListener("error", onError);
+            socket.removeListener("close", onClose);
+          } else {
+            socket.destroy();
+          }
+        });
+        socket.on("error", onError);
+        socket.once("connect", onConnect);
+        socket.once("close", onClose);
+      } catch (error) {
+        onError(error as NodeJS.ErrnoException);
+      }
+    }
   });
+
+  return () => {
+    if (settled) return;
+    finish(Object.assign(new Error("The operation was aborted"), { code: "ABORT_ERR" }));
+  };
 }
 
 /**

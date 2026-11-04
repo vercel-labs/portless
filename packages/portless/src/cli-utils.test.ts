@@ -4,6 +4,7 @@ import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as utils from "./utils.js";
 import { execFileSync } from "node:child_process";
 import {
   augmentedPath,
@@ -314,6 +315,29 @@ describe("isPortListening", () => {
     if (!addr || typeof addr === "string") throw new Error("no addr");
 
     expect(await isPortListening(addr.port)).toBe(true);
+  });
+
+  it("cancels an unfinished probe after its short deadline", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const connect = vi
+      .spyOn(utils, "createLoopbackConnection")
+      .mockImplementation((_port, callback) => {
+        cancel.mockImplementation(() =>
+          callback(Object.assign(new Error("Cancelled"), { code: "ABORT_ERR" }))
+        );
+        return cancel;
+      });
+    try {
+      const result = isPortListening(19877);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await result).toBe(false);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      connect.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
