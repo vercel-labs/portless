@@ -91,6 +91,63 @@ portless myapp --funnel next dev
 portless myapp --ngrok next dev
 ```
 
+When you press Ctrl+C, portless forwards the interrupt and waits for the command's process tree to exit. Press Ctrl+C again to forward another interrupt. Any remaining descendants are terminated after a short grace period.
+
+If a wrapped command self-daemonizes, exiting while its server keeps listening on the assigned port, portless keeps the route pointed at that server and prints its PID. The route goes away when the server stops.
+
+In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners such as Turborepo and CI scripts fail early with a clear message.
+
+`run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
+
+### Share on Tailscale
+
+Share your dev server with teammates on your [Tailscale](https://tailscale.com) network:
+
+```bash
+portless myapp --tailscale next dev
+# -> https://myapp.localhost           (local)
+# -> https://devbox.yourteam.ts.net    (tailnet)
+```
+
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no framework `basePath` configuration is needed. The first app gets port 443, and later apps get 8443, 8444, and so on:
+
+```bash
+portless myapp --tailscale next dev     # -> https://devbox.ts.net
+portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
+```
+
+Use `--funnel` to expose your dev server to the public internet through [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
+
+```bash
+portless myapp --funnel next dev
+# -> https://devbox.yourteam.ts.net    (public)
+```
+
+The Tailscale CLI must be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled. `--funnel` also needs Funnel enabled for the tailnet and node. If a setting is missing, portless exits before starting the child process. Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs, and the Tailscale serve registrations are removed when the app exits.
+
+### Share with ngrok
+
+Expose your dev server to the public internet with [ngrok](https://ngrok.com):
+
+```bash
+portless myapp --ngrok next dev
+# -> https://myapp.localhost           (local)
+# -> https://abc123.ngrok.app          (public)
+```
+
+The ngrok CLI must be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again. Set `PORTLESS_NGROK=1` to enable ngrok by default. `portless list` shows both local and ngrok URLs, and the tunnel closes when the app exits.
+
+### Share with Cloudflare
+
+Expose your dev server to the public internet with a Cloudflare quick tunnel. No Cloudflare account is needed:
+
+```bash
+portless myapp --cloudflare next dev
+# -> https://<random>.trycloudflare.com (public)
+```
+
+Set `PORTLESS_CLOUDFLARE=1` to enable it by default. `portless list` shows the Cloudflare URL, and the app gets it as `PORTLESS_CLOUDFLARE_URL`. You can combine it with `--ngrok`, `--tailscale`, or `--funnel`. The tunnel stops when the app exits. Quick tunnels do not support Server-Sent Events, allow at most 200 in-flight requests, and get a new URL on every run. Requires the [`cloudflared`](https://developers.cloudflare.com/tunnel/downloads/) CLI on your `PATH`.
+
 ## Get a service URL
 
 ```bash
@@ -183,6 +240,10 @@ portless doctor
 
 Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
 
+For upstream 502 errors, stop the running proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
+
+The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection, without a timer that abandons either family. A backend listening on both families may accept an extra connection that closes without an HTTP request. Later requests reuse the winning connection when possible.
+
 ## Trust the CA
 
 ```bash
@@ -197,7 +258,7 @@ Adds the portless certificate authority to your system trust store. Required onc
 portless clean
 ```
 
-Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed.
+Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed. If trust-store removal fails, portless keeps its CA certificate and key so a later `portless clean` can retry.
 
 ## Prune orphans
 
@@ -271,8 +332,37 @@ portless proxy start
       <td>`--foreground`</td>
       <td>Run in foreground instead of daemon mode</td>
     </tr>
+    <tr>
+      <td>`--wildcard`</td>
+      <td>Let any subdomain of a registered route fall back to that app, so `tenant1.myapp.localhost` routes to `myapp`. When several registered routes are parents of the host, the most specific one wins.</td>
+    </tr>
   </tbody>
 </table>
+
+When auto-starting, portless reuses the configuration (port, TLS, TLDs, LAN mode) from the most recent proxy run, so a restart or reboot does not revert to defaults. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority.
+
+### Unprivileged mode
+
+Ports below 1024 normally need root, so portless elevates with `sudo` to bind 443 or 80. On a machine where that is not an option, such as a managed laptop, a CI runner, or an agent session with no terminal to type a password into, start the proxy with `--unprivileged`:
+
+```bash
+portless proxy start --unprivileged
+# -> http://myapp.localhost, no sudo prompt, nothing installed
+```
+
+macOS lets a non-root process bind a port below 1024 only on the wildcard address, so the proxy binds `0.0.0.0` and `::` instead of the loopback addresses and then refuses every connection whose peer is not loopback, at accept time and again per request and per upgrade. The result is the same loopback-only proxy, obtained without root. Windows has no privileged-port rule, so the flag only changes the bind address there. Linux moves the boundary with a sysctl. Portless checks it and stops with the exact command when the port is still out of reach, rather than falling back to another port:
+
+```bash
+sudo sysctl -w net.ipv4.ip_unprivileged_port_start=80   # once per machine
+```
+
+The mode promises no prompt of any kind, so it serves plain HTTP on port 80 by default, because installing the generated CA into the trust store would be a prompt. `*.localhost` is a secure context either way, so `Secure` cookies and service workers work over HTTP. Pass `--https` to keep HTTPS on 443. The CA is generated but never installed by this mode, so browsers warn until you run `portless trust` once yourself.
+
+It never writes the hosts file either, since that needs root. Automatic hosts sync is off in this mode, and `PORTLESS_SYNC_HOSTS=1` together with it is refused. `.localhost` names resolve in browsers without it. For Safari or a custom TLD, run `portless hosts sync` once yourself; a custom TLD says so when the proxy starts.
+
+The mode is remembered in the state directory, so auto-start reuses it, and `PORTLESS_UNPRIVILEGED=1` selects it without the flag. It never asks for `sudo`, which also means the no-TTY exit does not apply: a proxy can be auto-started from a script or an agent on a fresh machine. In LAN mode the flag only removes the sudo step, since LAN mode wants remote peers. Under `service install` the service still runs as root, so the flag does not remove a prompt there, but it keeps its other effects: plain HTTP on port 80 unless `--https` is given, hosts sync off, and loopback peers only.
+
+On a Mac with the application firewall turned on, the first wildcard bind shows an "allow incoming connections" prompt for Node. It asks for no password, and the proxy still refuses non-loopback peers whatever you answer.
 
 ### Stop
 
@@ -315,7 +405,7 @@ Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-u
 
 - **Next.js**: Add `allowedDevOrigins: ['myapp.local', '*.myapp.local']` to `next.config.js` so LAN mode requests still work when portless adds a git worktree prefix.
 - **Vite / React Router / SvelteKit / Astro**: Handled automatically via `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`.
-- **Expo / React Native**: Add `NSAllowsLocalNetworking` to your `app.json` for iOS ATS (see [Getting Started](/) for the `.localhost` equivalent using `NSExceptionDomains`):
+- **Expo / React Native**: portless always injects `--port`. React Native also gets `--host 127.0.0.1`. Expo gets `--host localhost` outside LAN mode, but in LAN mode portless leaves Metro on its default LAN host behavior instead of forcing `--host` or `HOST`. Add `NSAllowsLocalNetworking` to your `app.json` for iOS ATS (see [Getting Started](/) for the `.localhost` equivalent using `NSExceptionDomains`):
 
 ```json
 {
@@ -341,6 +431,8 @@ portless hosts clean    # remove portless entries from /etc/hosts
 Auto-sync is on by default. Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
 Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
+
+`.localhost` subdomains resolve to `127.0.0.1` in Chrome, Firefox, and Edge without a hosts entry. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on every configuration. If Safari can't find a `.localhost` URL, run `portless hosts sync`.
 
 ## MCP server
 
