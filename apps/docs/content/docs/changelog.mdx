@@ -10,6 +10,7 @@ title: "Changelog"
 
 ### Bug Fixes
 
+- **Self-daemonizing commands**: Keep the route when a command starts a server in the background and exits, as Astro 7 does in agentic environments. The route moves to the server's PID, `portless list` shows it, and it drops once the server stops. (#444)
 - **Upstream connections**: Pool connections to the dev server and limit concurrent dials per backend, so a cold HTTP/2 page load no longer overflows the server's accept backlog. Long-lived responses like SSE don't block other requests. (#477)
 - **HTTP/2 request bodies**: Send HTTP/2 request bodies that have no `content-length` with chunked encoding, so GET, DELETE, and OPTIONS requests with a body no longer get a 400. (#478)
 
