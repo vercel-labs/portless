@@ -1129,11 +1129,60 @@ describe("CLI", () => {
         expect(remove.status).toBe(0);
         expect(hostnames()).toEqual(["mydb.localhost"]);
 
-        for (const args of [["--tld", "test", "--tld", " "], ["--tld", "unknown"], ["--tld"]]) {
+        const invalidTlds: Array<[string[], string]> = [
+          [["--tld", "test", "--tld", " "], "--tld requires a TLD value"],
+          [["--tld", "unknown"], 'TLD "unknown" is not configured (localhost, test, dev).'],
+          [["--tld"], "--tld requires a TLD value"],
+        ];
+        for (const [args, message] of invalidTlds) {
           const invalid = run(["alias", "mydb", "5432", ...args], { env });
           expect(invalid.status).toBe(1);
+          expect(invalid.stderr).toContain(message);
           expect(hostnames()).toEqual(["mydb.localhost"]);
         }
+
+        const forceRemove = run(["alias", "--remove", "mydb", "--force"], { env });
+        expect(forceRemove.status).toBe(1);
+        expect(forceRemove.stderr).toContain('Unknown flag "--force"');
+        expect(hostnames()).toEqual(["mydb.localhost"]);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps live app routes when removing an alias across TLDs", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-remove-live-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const env = { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" };
+      const routes = () =>
+        JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+          hostname: string;
+          pid: number;
+        }>;
+      try {
+        fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+        fs.writeFileSync(
+          routesPath,
+          JSON.stringify([
+            { hostname: "mydb.localhost", port: 4101, pid: process.pid },
+            { hostname: "mydb.test", port: 4102, pid: 0 },
+          ])
+        );
+
+        const removed = run(["alias", "--remove", "mydb"], { env });
+        expect(removed.status).toBe(0);
+        expect(removed.stdout).toContain("mydb.test");
+        expect(removed.stdout).not.toContain("mydb.localhost");
+        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+
+        const repeated = run(["alias", "--remove", "mydb"], { env });
+        expect(repeated.status).toBe(1);
+        expect(repeated.stderr).toContain("No alias found");
+
+        const liveTld = run(["alias", "--remove", "mydb", "--tld", "localhost"], { env });
+        expect(liveTld.status).toBe(1);
+        expect(liveTld.stderr).toContain('No alias found for "mydb.localhost"');
+        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }

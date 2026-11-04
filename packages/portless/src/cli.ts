@@ -2573,11 +2573,11 @@ ${colors.bold("portless alias")} - Register a static route for services not mana
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless alias <name> <port>")}        Register a route
-  ${colors.cyan("portless alias --remove <name>")}      Remove a route
-  ${colors.cyan("portless alias <name> <port> --force")} Override existing route
+  ${colors.cyan("portless alias --remove <name>")}      Remove static routes, preserve process-owned routes
+  ${colors.cyan("portless alias <name> <port> --force")} Override an existing route
 
 ${colors.bold("Options:")}
-  --force                Override an existing route
+  --force                Override a route; stop a conflicting app if any
   --tld <tld>            Only these configured TLDs (repeatable, comma-separated)
   --help, -h             Show this help
 
@@ -2620,10 +2620,6 @@ ${colors.bold("Examples:")}
       console.error(colors.red(`Error: ${(err as Error).message}`));
       process.exit(1);
     }
-    if (targetTlds.length === 0) {
-      console.error(colors.red("Error: --tld requires at least one TLD."));
-      process.exit(1);
-    }
     const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
     if (unconfigured) {
       console.error(
@@ -2645,13 +2641,16 @@ ${colors.bold("Examples:")}
     }
     const hostnames = buildHostnames(aliasName, tlds, targetTlds);
     const routes = store.loadRoutes();
-    const existing = routes.find((r) => hostnames.includes(r.hostname) && r.pid === 0);
-    if (!existing) {
+    const aliases = hostnames.filter((hostname) =>
+      routes.some((route) => route.hostname === hostname && route.pid === 0)
+    );
+    if (aliases.length === 0) {
       console.error(colors.red(`Error: No alias found for "${hostnames.join(", ")}".`));
       process.exit(1);
     }
-    removeRoutes(store, hostnames);
-    console.log(colors.green(`Removed alias: ${hostnames.join(", ")}`));
+    // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
+    removeRoutes(store, aliases, 0);
+    console.log(colors.green(`Removed alias: ${aliases.join(", ")}`));
     return;
   }
 

@@ -177,7 +177,7 @@ When portless itself returns an error (404 for an unknown host, 421 for a misdir
 
 Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. When configured TLDs overlap (e.g. `example.com` and `dev.example.com`), hostnames are matched against the longest TLD first, regardless of configuration order. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
-`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected configured TLDs; a missing, empty, or unconfigured value fails before any route changes, and `--help` after the arguments prints usage without changing routes.
+`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected configured TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing, empty, or unconfigured value fails before any route changes, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
 TLDs can be multi-segment DNS names such as `dev.example.com`, so local URLs can mirror production structure (`myapp.dev.example.com`). Each label follows DNS rules: lowercase letters, digits, interior hyphens, 63 characters per label, 253 total. Strict OAuth providers that reject `.localhost` redirect URIs accept a real domain like `https://myapp.dev.example.com/api/auth/callback/google`.
 
@@ -335,10 +335,10 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless service status`                         | Show service and proxy status                                  |
 | `portless service uninstall`                      | Remove the startup service                                     |
 | `portless alias <name> <port>`                    | Register a static route (e.g. for Docker containers)           |
-| `portless alias <name> <port> --force`            | Overwrite an existing route                                    |
-| `portless alias --remove <name>`                  | Remove a static route                                          |
+| `portless alias <name> <port> --force`            | Stop the conflicting app and overwrite its route               |
+| `portless alias --remove <name>`                  | Remove PID 0 routes                                            |
 | `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                      |
-| `portless alias --remove <name> --tld test`       | Remove the route for selected configured TLDs                  |
+| `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected configured TLDs               |
 | `portless compose up [args...]`                   | Run a Docker Compose project with a route per service          |
 | `portless compose down [args...]`                 | Stop the compose project and remove its routes                 |
 | `portless.enable` / `.name` / `.ports` labels     | Skip a compose service, rename its route, or pick its ports    |

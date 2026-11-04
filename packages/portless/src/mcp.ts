@@ -110,6 +110,10 @@ const TLD_PROPERTY = {
   minItems: 1,
   description: "One or more TLDs to serve.",
 };
+const ALIAS_TLD_PROPERTY = {
+  ...TLD_PROPERTY,
+  description: "TLDs must already be configured; omit for all configured TLDs.",
+};
 
 /** Every tool, in tools/list order. */
 export const TOOLS: ToolDef[] = [
@@ -152,11 +156,11 @@ export const TOOLS: ToolDef[] = [
     {
       name: NAME_PROPERTY,
       port: PORT_PROPERTY,
-      tld: TLD_PROPERTY,
+      tld: ALIAS_TLD_PROPERTY,
       force: {
         type: "boolean",
         description:
-          "Replace an existing route with the same name. If a running app owns it, that app is stopped.",
+          "Stop a conflicting app, if any, and replace its route; replacing a static alias stops nothing, and the stopped app's routes on other TLDs can also disappear.",
       },
     },
     ["name", "port"],
@@ -170,8 +174,8 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_remove",
     "Remove alias",
-    "Remove a static route registered with alias add. Removes it from every configured TLD unless tld selects specific ones.",
-    { name: NAME_PROPERTY, tld: TLD_PROPERTY },
+    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD unless tld selects specific ones.",
+    { name: NAME_PROPERTY, tld: ALIAS_TLD_PROPERTY },
     ["name"],
     {
       readOnlyHint: false,
