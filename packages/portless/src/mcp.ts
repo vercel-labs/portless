@@ -104,6 +104,16 @@ const PORT_PROPERTY = {
   maximum: 65535,
   description: "Port number.",
 };
+const TLD_PROPERTY = {
+  type: "array",
+  items: { type: "string" },
+  minItems: 1,
+  description: "One or more TLDs to serve.",
+};
+const ALIAS_TLD_PROPERTY = {
+  ...TLD_PROPERTY,
+  description: "TLDs must already be configured; omit for all configured TLDs.",
+};
 
 /** Every tool, in tools/list order. */
 export const TOOLS: ToolDef[] = [
@@ -142,14 +152,15 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_add",
     "Add alias",
-    "Register a static route for a service portless does not run, such as a database.",
+    "Register a static route for a service portless does not run, such as a database. Registers it for every configured TLD unless tld selects specific ones.",
     {
       name: NAME_PROPERTY,
       port: PORT_PROPERTY,
+      tld: ALIAS_TLD_PROPERTY,
       force: {
         type: "boolean",
         description:
-          "Replace an existing route with the same name. If a running app owns it, that app is stopped.",
+          "Stop a conflicting app, if any, and replace its route; replacing a static alias stops nothing, and the stopped app's routes on other TLDs can also disappear.",
       },
     },
     ["name", "port"],
@@ -163,8 +174,8 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_remove",
     "Remove alias",
-    "Remove a static route registered with alias add.",
-    { name: NAME_PROPERTY },
+    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD unless tld selects specific ones.",
+    { name: NAME_PROPERTY, tld: ALIAS_TLD_PROPERTY },
     ["name"],
     {
       readOnlyHint: false,
@@ -195,12 +206,7 @@ export const TOOLS: ToolDef[] = [
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },
       lan: { type: "boolean", description: "Expose the proxy on the local network." },
-      tld: {
-        type: "array",
-        items: { type: "string" },
-        minItems: 1,
-        description: "One or more TLDs to serve.",
-      },
+      tld: TLD_PROPERTY,
       wildcard: {
         type: "boolean",
         description: "Allow unregistered subdomains to fall back to their parent route.",
@@ -419,12 +425,14 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       const name = readRequiredName(args, "name");
       const port = readPort(args, "port", true);
       argv.push("alias", name, String(port));
+      for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "force") === true) argv.push("--force");
       break;
     }
     case "alias_remove": {
       const name = readRequiredName(args, "name");
       argv.push("alias", "--remove", name);
+      for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       break;
     }
     case "tools_profiles":
