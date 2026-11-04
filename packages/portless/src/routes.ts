@@ -398,6 +398,8 @@ export class RouteStore {
       // Tunnels and Serve config stop with the previous owner.
       delete route.ngrokUrl;
       delete route.ngrokPid;
+      delete route.cloudflareUrl;
+      delete route.cloudflarePid;
       delete route.tailscaleUrl;
       delete route.tailscaleHttpsPort;
       delete route.tailscaleFunnel;

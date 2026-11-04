@@ -376,6 +376,8 @@ describe("RouteStore", () => {
       store.updateRoute("myapp.localhost", {
         ngrokUrl: "https://abc.ngrok.app",
         ngrokPid: 123,
+        cloudflareUrl: "https://abc.trycloudflare.com",
+        cloudflarePid: 456,
         tailscaleUrl: "https://dev.tail1234.ts.net",
         tailscaleHttpsPort: 8443,
         tailscaleFunnel: true,
@@ -384,6 +386,8 @@ describe("RouteStore", () => {
       const route = store.loadRoutes()[0];
       expect(route.ngrokUrl).toBeUndefined();
       expect(route.ngrokPid).toBeUndefined();
+      expect(route.cloudflareUrl).toBeUndefined();
+      expect(route.cloudflarePid).toBeUndefined();
       expect(route.tailscaleUrl).toBeUndefined();
       expect(route.tailscaleHttpsPort).toBeUndefined();
       expect(route.tailscaleFunnel).toBeUndefined();
