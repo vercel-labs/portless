@@ -123,7 +123,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "get",
     "Get app URL",
-    "Print the URL for an app name, using the same hostname and worktree logic as portless run: PORTLESS_PREFIX, the portless.json worktree options, and git worktree detection. The app does not need to be running.",
+    "Print the URL for an app name, using the same hostname and worktree logic as portless run: PORTLESS_PREFIX, worktree options inherited from the workspace root with local overrides, and git worktree detection. Template labels over 63 characters are shortened with a stable hash suffix. The app does not need to be running.",
     {
       name: NAME_PROPERTY,
       noWorktree: {
@@ -776,6 +776,9 @@ export function printMcpHelp(): void {
       "  get             Print an app URL.",
       "  alias_add       Register a static route.",
       "  tools_profiles  Show active and available profiles.",
+      "",
+      "Worktree options inherit from the workspace root into package directories.",
+      "Local values override. Template labels over 63 characters are shortened with a stable hash suffix.",
       "",
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",

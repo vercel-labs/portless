@@ -164,7 +164,8 @@ export type WorktreePrefixStyle = "last-segment" | "branch";
 
 /**
  * Compose a worktree label with a base hostname, using the configured template
- * when present. No label returns the base name.
+ * when present. No label returns the base name. Templated output is lowercased
+ * and each label is truncated to the DNS label limit.
  */
 export function applyWorktreePrefix(
   baseName: string,
@@ -173,7 +174,12 @@ export function applyWorktreePrefix(
 ): string {
   if (!worktree) return baseName;
   if (template) {
-    return template.replaceAll("{worktree}", worktree.prefix).replaceAll("{name}", baseName);
+    return template
+      .replaceAll("{worktree}", worktree.prefix)
+      .replaceAll("{name}", baseName)
+      .split(".")
+      .map((label) => truncateLabel(label.toLowerCase()))
+      .join(".");
   }
   return `${worktree.prefix}.${baseName}`;
 }

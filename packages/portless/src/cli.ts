@@ -1879,7 +1879,8 @@ ${colors.bold("Name inference (in order):")}
   feature-auth.myapp.localhost); the default label is its last segment. Set
   "worktree.prefix" to "branch" for the whole branch, or
   "worktree.hostnameTemplate" with {worktree} and optional {name}. --prefix
-  and PORTLESS_PREFIX override detection; empty disables it.
+  and PORTLESS_PREFIX override detection; empty disables it. Generated template
+  labels are hash-truncated for the 63-character DNS limit.
 
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
@@ -2523,6 +2524,7 @@ ${colors.bold("Usage:")}
 
 Constructs the URL using the same hostname and worktree logic as "portless run".
 PORTLESS_PREFIX and config worktree options apply; PORTLESS_PREFIX="" skips worktree naming.
+Workspace packages inherit worktree defaults from the workspace root.
 
   BACKEND_URL=$(portless get backend)
 
@@ -3748,8 +3750,23 @@ type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
 function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null {
   try {
     const loaded = loadConfig(cwd);
-    if (!loaded) return null;
-    return { ...resolveAppConfig(loaded.config, loaded.configDir, cwd), source: loaded.source };
+    const root = findWorkspaceRoot(cwd);
+    const rootConfig = root && root !== cwd ? loadConfig(root) : null;
+    const rootWorktree = mergeWorktreeConfig(
+      rootConfig
+        ? resolveAppConfig(rootConfig.config, rootConfig.configDir, cwd).worktree
+        : undefined
+    );
+    if (!loaded) {
+      return rootConfig && rootWorktree
+        ? { worktree: rootWorktree, source: rootConfig.source }
+        : null;
+    }
+    const local = resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    const worktree = mergeWorktreeConfig(rootWorktree, local.worktree);
+    return worktree
+      ? { ...local, worktree, source: loaded.source }
+      : { ...local, source: loaded.source };
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));

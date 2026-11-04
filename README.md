@@ -218,7 +218,7 @@ Only the last `/` segment of the branch is used by default. Set `worktree.prefix
 { "worktree": { "prefix": "branch", "hostnameTemplate": "tenant.{worktree}-{name}" } }
 ```
 
-The template applies only when a label exists. Choose the label with `--prefix <label>` or `PORTLESS_PREFIX`; both also work outside a worktree. An empty value removes it. `portless get --no-worktree` skips the label, style, and template. When a multi-app startup proxies more than one app, each proxied app needs a distinct hostname; include `{name}` in the template or give each app its own template.
+The template applies only when a label exists. Choose the label with `--prefix <label>` or `PORTLESS_PREFIX`; both also work outside a worktree. An empty value removes it. `portless get --no-worktree` skips the label, style, and template. When a multi-app startup proxies more than one app, each proxied app needs a distinct hostname; include `{name}` in the template or give each app its own template. Worktree options inherit from the workspace root into package directories, and local worktree fields override inherited values. Template labels over 63 characters are shortened with a stable hash suffix.
 
 Put `portless run` in `package.json` to apply these naming rules in each checkout.
 

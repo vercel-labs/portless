@@ -500,4 +500,15 @@ describe("applyWorktreePrefix", () => {
       "feature-x.api"
     );
   });
+
+  it("truncates over-long template labels per app and normalizes case", () => {
+    const worktree = { prefix: "a".repeat(63), source: "git branch" };
+    const web = applyWorktreePrefix("web", worktree, "{worktree}-{name}");
+    const api = applyWorktreePrefix("api", worktree, "{worktree}-{name}");
+
+    expect(web).toHaveLength(63);
+    expect(api).toHaveLength(63);
+    expect(web).not.toBe(api);
+    expect(applyWorktreePrefix("WEB", worktree, "{worktree}-{name}")).toBe(web);
+  });
 });

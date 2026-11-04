@@ -2173,6 +2173,47 @@ describe("CLI", () => {
       expect(unlabelled.stdout.trim()).toMatch(/^https?:\/\/myapp\.localhost(:\d+)?$/);
     });
 
+    it("inherits workspace root worktree options in a package", () => {
+      const root = path.join(tmpDir, "mono");
+      const leaf = path.join(root, "packages", "web");
+      fs.mkdirSync(leaf, { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "package.json"),
+        JSON.stringify({ name: "mono", private: true, workspaces: ["packages/*"] })
+      );
+      fs.writeFileSync(
+        path.join(root, "portless.json"),
+        JSON.stringify({
+          worktree: { prefix: "branch" },
+          apps: {
+            "packages/web": { worktree: { hostnameTemplate: "tenant.{worktree}-{name}" } },
+          },
+        })
+      );
+      fs.writeFileSync(path.join(leaf, "package.json"), JSON.stringify({ name: "web" }));
+
+      const gitdir = path.join(root, "fake.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/team-a/login\n");
+      fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
+
+      const rootOnly = run(["get", "web"], { cwd: leaf, env: getEnv() });
+      expect(rootOnly.status).toBe(0);
+      expect(rootOnly.stdout.trim()).toMatch(
+        /^https?:\/\/tenant\.team-a-login-web\.localhost(:\d+)?$/
+      );
+
+      fs.writeFileSync(
+        path.join(leaf, "portless.json"),
+        JSON.stringify({ worktree: { prefix: "last-segment" } })
+      );
+      const localOverride = run(["get", "web"], { cwd: leaf, env: getEnv() });
+      expect(localOverride.status).toBe(0);
+      expect(localOverride.stdout.trim()).toMatch(
+        /^https?:\/\/tenant\.login-web\.localhost(:\d+)?$/
+      );
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);
