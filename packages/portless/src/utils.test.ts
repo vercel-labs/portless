@@ -1,5 +1,7 @@
+import net from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  createLoopbackConnection,
   escapeHtml,
   formatUptime,
   formatUrl,
@@ -422,4 +424,177 @@ describe("parsePort", () => {
       expect(parsePort(value)).toBeNull();
     }
   });
+});
+
+describe("createLoopbackConnection", () => {
+  afterEach(() => vi.useRealTimers());
+
+  function mockAttempts() {
+    const sockets = [new net.Socket(), new net.Socket()];
+    const connect = vi
+      .spyOn(net, "connect")
+      .mockReturnValueOnce(sockets[0])
+      .mockReturnValueOnce(sockets[1]);
+    return { sockets, connect };
+  }
+
+  it("waits for pending IPv4 despite refused IPv6 and elapsed time", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    const { sockets, connect } = mockAttempts();
+    const callback = vi.fn();
+    const cancel = createLoopbackConnection(1234, callback);
+    expect(connect).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(connect.mock.calls).toEqual([
+      [{ host: "127.0.0.1", port: 1234, family: 4 }],
+      [{ host: "::1", port: 1234, family: 6 }],
+    ]);
+    sockets[1].emit("error", Object.assign(new Error("refused"), { code: "ECONNREFUSED" }));
+    vi.advanceTimersByTime(2_147_483_647);
+    expect(callback).not.toHaveBeenCalled();
+    expect(sockets[0].destroyed).toBe(false);
+    sockets[0].emit("connect");
+    expect(callback).toHaveBeenCalledExactlyOnceWith(null, sockets[0]);
+    expect(sockets[1].destroyed).toBe(true);
+    cancel();
+    expect(sockets[0].destroyed).toBe(false);
+    sockets[0].destroy();
+  });
+
+  it("preserves both family failures in an AggregateError", async () => {
+    const { sockets } = mockAttempts();
+    const callback = vi.fn();
+    createLoopbackConnection(1234, callback);
+    await Promise.resolve();
+    const errors = ["127.0.0.1", "::1"].map((address) =>
+      Object.assign(new Error("refused"), {
+        code: "ECONNREFUSED",
+        address,
+        port: 1234,
+        syscall: "connect",
+      })
+    );
+    sockets[1].emit("error", errors[1]);
+    expect(callback).not.toHaveBeenCalled();
+    sockets[0].emit("error", errors[0]);
+    expect(callback).toHaveBeenCalledTimes(1);
+    const error = callback.mock.calls[0][0];
+    expect(error).toBeInstanceOf(AggregateError);
+    expect(error.errors).toEqual(errors);
+    expect(error.code).toBe("ECONNREFUSED");
+    expect(sockets.every((socket) => socket.destroyed)).toBe(true);
+    sockets[0].emit("error", errors[0]);
+    expect(callback).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([0, 1])(
+    "hands off winner %s synchronously and ignores late loser events",
+    async (winner) => {
+      const { sockets } = mockAttempts();
+      const callback = vi.fn();
+      createLoopbackConnection(1234, callback);
+      await Promise.resolve();
+      const loser = sockets[1 - winner];
+      sockets[winner].emit("connect");
+      expect(callback).toHaveBeenCalledExactlyOnceWith(null, sockets[winner]);
+      expect(loser.destroyed).toBe(true);
+      expect(loser.listenerCount("connect")).toBe(0);
+      expect(sockets[winner].listenerCount("error")).toBe(0);
+      loser.emit("connect");
+      loser.emit("error", new Error("late failure"));
+      expect(callback).toHaveBeenCalledTimes(1);
+      await new Promise<void>((resolve) => loser.once("close", resolve));
+      expect(loser.listenerCount("error")).toBe(0);
+      sockets[winner].destroy();
+    }
+  );
+
+  it("counts a close before connect as a family failure", async () => {
+    const { sockets } = mockAttempts();
+    const callback = vi.fn();
+    createLoopbackConnection(1234, callback);
+    await Promise.resolve();
+    sockets[0].emit("close");
+    expect(callback).not.toHaveBeenCalled();
+    expect(sockets[0].listenerCount("error")).toBe(0);
+    const refused = Object.assign(new Error("refused"), { code: "ECONNREFUSED" });
+    sockets[1].emit("error", refused);
+    expect(callback).toHaveBeenCalledTimes(1);
+    expect(callback.mock.calls[0][0].errors).toEqual([
+      expect.objectContaining({ code: "ECONNRESET", address: "127.0.0.1", port: 1234 }),
+      refused,
+    ]);
+  });
+
+  it("cancels before startup without launching sockets", async () => {
+    const { connect } = mockAttempts();
+    const callback = vi.fn();
+    const cancel = createLoopbackConnection(1234, callback);
+    cancel();
+    cancel();
+    await Promise.resolve();
+    expect(connect).not.toHaveBeenCalled();
+    expect(callback).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ code: "ABORT_ERR" }),
+      undefined
+    );
+  });
+
+  it("cancels both pending attempts and ignores late events", async () => {
+    const { sockets } = mockAttempts();
+    const callback = vi.fn();
+    const cancel = createLoopbackConnection(1234, callback);
+    await Promise.resolve();
+    cancel();
+    cancel();
+    expect(sockets.every((socket) => socket.destroyed)).toBe(true);
+    for (const socket of sockets) {
+      socket.emit("error", new Error("late failure"));
+      socket.emit("connect");
+    }
+    expect(callback).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ code: "ABORT_ERR" }),
+      undefined
+    );
+  });
+
+  it.for(["127.0.0.1", "::1"])(
+    "connects to %s despite a 2.6-second event-loop stall",
+    async (host, ctx) => {
+      const server = net.createServer((socket) => {
+        socket.on("error", () => {});
+        socket.end("connected");
+      });
+      const listening = await new Promise<boolean>((resolve, reject) => {
+        server.once("error", (error) => (host === "::1" ? resolve(false) : reject(error)));
+        server.listen(0, host, () => resolve(true));
+      });
+      if (!listening) {
+        ctx.skip();
+        return;
+      }
+      const port = (server.address() as net.AddressInfo).port;
+      let socket: net.Socket | undefined;
+      let cancel = () => {};
+      try {
+        const result = new Promise<string>((resolve, reject) => {
+          cancel = createLoopbackConnection(port, (error, connected) => {
+            if (error) return reject(error);
+            socket = connected!;
+            let data = "";
+            socket.on("data", (chunk) => (data += chunk));
+            socket.once("end", () => resolve(data));
+            socket.once("error", reject);
+          });
+        });
+        await Promise.resolve();
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 2600);
+        await expect(result).resolves.toBe("connected");
+      } finally {
+        cancel();
+        socket?.destroy();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    }
+  );
 });
