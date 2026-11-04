@@ -1999,6 +1999,65 @@ describe("createProxyServer", () => {
       expect(result.status).toBe(502);
     });
 
+    it("does not report an error when shutdown aborts a pending WebSocket upgrade", async () => {
+      const backendPort = TEST_PROXY_PORT + 1;
+      const pending: net.Socket[] = [];
+      let resolvePending!: () => void;
+      const pendingStarted = new Promise<void>((resolve) => (resolvePending = resolve));
+      const connect = net.Socket.prototype.connect;
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (options && "port" in options && options.port === backendPort) {
+          Reflect.set(this, "connecting", true);
+          pending.push(this);
+          if (pending.length === 2) resolvePending();
+          return this;
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      const onError = vi.fn();
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "ws.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+          onError,
+        })
+      );
+      await listen(server);
+      const resultPromise = new Promise<{ status?: number; closed: boolean }>((resolve, reject) => {
+        let status: number | undefined;
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: (server.address() as net.AddressInfo).port,
+          headers: { host: "ws.localhost", connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("socket", (socket) => socket.once("close", () => resolve({ status, closed: true })));
+        req.on("response", (res) => {
+          status = res.statusCode;
+          res.resume();
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      try {
+        await pendingStarted;
+        expect(pending.every((socket) => !socket.destroyed)).toBe(true);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        expect(await resultPromise).toEqual({ status: 502, closed: true });
+        expect(pending.every((socket) => socket.destroyed)).toBe(true);
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+        for (const socket of pending) socket.destroy();
+      }
+    });
+
     it("forwards backend Sec-WebSocket-Accept and custom headers", async () => {
       const testAcceptValue = "dGhlIHNhbXBsZSBub25jZQ==";
       const testProtocol = "graphql-ws";

@@ -189,7 +189,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_start",
     "Start proxy",
-    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. Connection failures in the proxy log include each loopback address and error code.',
+    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code.',
     {
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },

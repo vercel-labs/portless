@@ -778,7 +778,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     proxyReq.on("error", (err) => {
       if (socket.destroyed) return;
-      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
+      if ((err as NodeJS.ErrnoException).code !== "ABORT_ERR") {
+        onError(`WebSocket proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
+      }
       // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
       // dev writes a bare "Unauthorized" with no status line when an Origin
       // is not allow-listed, which surfaces here as a parse error) would
