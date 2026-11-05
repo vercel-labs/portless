@@ -136,7 +136,8 @@ export class RouteStore {
         fs.mkdirSync(this.lockPath);
         return true;
       } catch (err: unknown) {
-        if (isErrnoException(err) && err.code === "EEXIST") {
+        if (!isErrnoException(err)) return false;
+        if (err.code === "EEXIST") {
           try {
             const stat = fs.statSync(this.lockPath);
             if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
@@ -146,12 +147,12 @@ export class RouteStore {
           } catch {
             continue;
           }
-          const jitter = Math.floor(Math.random() * delay);
-          this.syncSleep(delay + jitter);
-          delay = Math.min(delay * 2, LOCK_RETRY_CAP_MS);
-        } else {
+        } else if (process.platform !== "win32" || err.code !== "EPERM") {
           return false;
         }
+        const jitter = Math.floor(Math.random() * delay);
+        this.syncSleep(delay + jitter);
+        delay = Math.min(delay * 2, LOCK_RETRY_CAP_MS);
       }
     }
     return false;
