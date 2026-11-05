@@ -121,7 +121,7 @@ export const TOOLS: ToolDef[] = [
     "list",
     "List routes",
     "List active routes with their URLs, ports, PIDs, and uptime.",
-    {},
+    { json: { type: "boolean", description: "Return routes as JSON." } },
     [],
     {
       readOnlyHint: true,
@@ -141,6 +141,7 @@ export const TOOLS: ToolDef[] = [
         description:
           "Skip worktree config and naming: PORTLESS_PREFIX, portless.json worktree style and template, and git worktree detection, so the URL has no worktree label.",
       },
+      json: { type: "boolean", description: "Return the name, hostname, and URL as JSON." },
     },
     ["name"],
     {
@@ -248,7 +249,7 @@ export const TOOLS: ToolDef[] = [
     "doctor",
     "Run doctor",
     "Check local portless health, including the proxy, certificates, and routes.",
-    {},
+    { json: { type: "boolean", description: "Return the report as JSON." } },
     [],
     {
       readOnlyHint: true,
@@ -420,11 +421,13 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
   switch (toolName) {
     case "list":
       argv.push("list");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     case "get": {
       const name = readRequiredName(args, "name");
       argv.push("get", name);
       if (readBoolean(args, "noWorktree") === true) argv.push("--no-worktree");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     }
     case "alias_add": {
@@ -470,6 +473,7 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
     }
     case "doctor":
       argv.push("doctor");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     case "prune":
       argv.push("prune");
@@ -788,8 +792,8 @@ export function printMcpHelp(): void {
       ),
       "",
       "Common tools:",
-      "  list            List active routes.",
-      "  get             Print an app URL.",
+      "  list            List active routes (json: true for JSON).",
+      "  get             Print an app URL (json: true for JSON).",
       "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
       "",
