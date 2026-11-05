@@ -78,18 +78,22 @@ export function attemptCATrustRemovalForCleanup(
 export function removePortlessStateFiles(
   dir: string,
   options: RemovePortlessStateFilesOptions = {}
-): void {
+): string[] {
+  const failures: string[] = [];
   for (const f of PORTLESS_STATE_FILES) {
     if (options.preserveCAIdentity && CA_IDENTITY_FILES.has(f)) continue;
+    const file = path.join(dir, f);
     try {
-      fs.unlinkSync(path.join(dir, f));
-    } catch {
-      // ENOENT or permission; non-fatal
+      fs.unlinkSync(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(file);
     }
   }
+  const hostCerts = path.join(dir, HOST_CERTS_DIR);
   try {
-    fs.rmSync(path.join(dir, HOST_CERTS_DIR), { recursive: true, force: true });
+    fs.rmSync(hostCerts, { recursive: true, force: true });
   } catch {
-    // non-fatal
+    failures.push(hostCerts);
   }
+  return failures;
 }
