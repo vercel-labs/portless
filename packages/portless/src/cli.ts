@@ -2164,7 +2164,8 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
-Every command also accepts --help or -h, which only prints help.
+Every command accepts --help or -h, which only prints help. After run <cmd>,
+compose <subcommand>, or --, they belong to the wrapped command.
 
 ${colors.bold("Examples:")}
   portless                            # Run dev script through proxy
@@ -2323,7 +2324,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
   PORTLESS_CLOUDFLARE=1         Share apps publicly via Cloudflare (same as --cloudflare)
   PORTLESS_STATE_DIR=<path>     Override the state directory
-  PORTLESS=0                    Run command directly without proxy
+  PORTLESS=0                    Run app commands directly without proxy
 
 ${colors.bold("Child process environment:")}
   PORT                          Ephemeral port the child should listen on
@@ -5359,11 +5360,6 @@ async function main() {
     process.exit(1);
   }
 
-  if (args[0] === "mcp") {
-    await runMcp(args.slice(1));
-    return;
-  }
-
   const globalBooleanFlags = new Set([
     "--lan",
     "--tailscale",
@@ -5398,6 +5394,7 @@ async function main() {
 
     if (index >= limit) return limit;
     const mode = args[index];
+    if (mode === "mcp") return index;
     if (mode === "run") {
       index++;
       const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
