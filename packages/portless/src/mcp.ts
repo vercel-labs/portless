@@ -133,12 +133,13 @@ export const TOOLS: ToolDef[] = [
   tool(
     "get",
     "Get app URL",
-    "Print the URL for an app name, using the same hostname and worktree logic as portless run. The app does not need to be running.",
+    "Print the URL for an app name, using the same hostname and worktree logic as portless run: PORTLESS_PREFIX, worktree config, and git worktree detection. Worktree config comes from the current directory, including workspace root defaults, not the named app, so cd into a package to use its per-app options; invalid config fails instead of returning a guessed URL. Template labels over 63 characters are shortened with a stable hash suffix. The app does not need to be running.",
     {
       name: NAME_PROPERTY,
       noWorktree: {
         type: "boolean",
-        description: "Skip worktree prefix detection.",
+        description:
+          "Skip worktree config and naming: PORTLESS_PREFIX, portless.json worktree style and template, and git worktree detection, so the URL has no worktree label.",
       },
     },
     ["name"],
@@ -784,6 +785,9 @@ export function printMcpHelp(): void {
       "  alias_add       Register a static route.",
       "  tools_profiles  Show active and available profiles.",
       "",
+      "Worktree options inherit from the workspace root into package directories.",
+      "Local values override. Templates must render valid DNS labels; labels over 63 characters are shortened with a stable hash suffix.",
+      "",
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",
       "to append CLI flags that are not typed into the tool schema.",
@@ -792,6 +796,7 @@ export function printMcpHelp(): void {
       "  PORTLESS_STATE_DIR  Directory for portless state.",
       "  PORTLESS_PORT       Default proxy port.",
       "  PORTLESS_TLD        Default TLD or comma separated TLD list.",
+      "  PORTLESS_PREFIX     Override the worktree label (empty disables it).",
       "",
       "Client config:",
       '  {"mcpServers":{"portless":{"command":"portless","args":["mcp"]}}}',

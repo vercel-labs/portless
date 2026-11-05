@@ -39,11 +39,10 @@ VeuruL5f30jD8PbGa2A91T5e1oaoL5ap6bdl
 
 /** Run the CLI with the given args and optional env/cwd overrides. */
 function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
-  const env: Record<string, string | undefined> = {
-    ...process.env,
-    ...options?.env,
-    NO_COLOR: "1",
-  };
+  const env: Record<string, string | undefined> = { ...process.env };
+  delete env.PORTLESS_PREFIX;
+  Object.assign(env, options?.env);
+  env.NO_COLOR = "1";
   // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
   delete env.PNPM_SCRIPT_SRC_DIR;
   if (env.npm_command === "exec") {
@@ -2255,10 +2254,134 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("composes a whole hostname template with the branch style", () => {
+      const gitdir = path.join(tmpDir, "fake.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/team-a/login\n");
+      fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({
+          name: "myapp",
+          worktree: { prefix: "branch", hostnameTemplate: "tenant.{worktree}-{name}" },
+        })
+      );
+
+      const { status, stdout } = run(["get", "myapp"], { cwd: tmpDir, env: getEnv() });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toMatch(/^https?:\/\/tenant\.team-a-login-myapp\.localhost(:\d+)?$/);
+    });
+
+    it("uses the template for a nonempty PORTLESS_PREFIX and skips it when empty", () => {
+      const gitdir = path.join(tmpDir, "fake.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/team-a/login\n");
+      fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({
+          name: "myapp",
+          worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+        })
+      );
+
+      const labelled = run(["get", "myapp"], {
+        cwd: tmpDir,
+        env: { ...getEnv(), PORTLESS_PREFIX: "hotfix" },
+      });
+      expect(labelled.stdout.trim()).toMatch(/^https?:\/\/tenant\.hotfix-myapp\.localhost(:\d+)?$/);
+
+      const unlabelled = run(["get", "myapp"], {
+        cwd: tmpDir,
+        env: { ...getEnv(), PORTLESS_PREFIX: "" },
+      });
+      expect(unlabelled.stdout.trim()).toMatch(/^https?:\/\/myapp\.localhost(:\d+)?$/);
+    });
+
+    it("inherits workspace root worktree options in a package", () => {
+      const root = path.join(tmpDir, "mono");
+      const leaf = path.join(root, "packages", "web");
+      fs.mkdirSync(leaf, { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "package.json"),
+        JSON.stringify({ name: "mono", private: true, workspaces: ["packages/*"] })
+      );
+      fs.writeFileSync(
+        path.join(root, "portless.json"),
+        JSON.stringify({
+          worktree: { prefix: "branch" },
+          apps: {
+            "packages/web": { worktree: { hostnameTemplate: "tenant.{worktree}-{name}" } },
+          },
+        })
+      );
+      fs.writeFileSync(path.join(leaf, "package.json"), JSON.stringify({ name: "web" }));
+
+      const gitdir = path.join(root, "fake.git", "worktrees", "wt");
+      fs.mkdirSync(gitdir, { recursive: true });
+      fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/team-a/login\n");
+      fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
+
+      const rootOnly = run(["get", "web"], { cwd: leaf, env: getEnv() });
+      expect(rootOnly.status).toBe(0);
+      expect(rootOnly.stdout.trim()).toMatch(
+        /^https?:\/\/tenant\.team-a-login-web\.localhost(:\d+)?$/
+      );
+
+      fs.writeFileSync(
+        path.join(leaf, "portless.json"),
+        JSON.stringify({ worktree: { prefix: "last-segment" } })
+      );
+      const localOverride = run(["get", "web"], { cwd: leaf, env: getEnv() });
+      expect(localOverride.status).toBe(0);
+      expect(localOverride.stdout.trim()).toMatch(
+        /^https?:\/\/tenant\.login-web\.localhost(:\d+)?$/
+      );
+    });
+
     it("exits 1 for invalid hostname", () => {
       const { status, stderr } = run(["get", "my@app"]);
       expect(status).toBe(1);
       expect(stderr).toContain("Invalid hostname");
+    });
+
+    it.each([
+      {
+        scenario: "workspace root config",
+        file: "root",
+        cwd: "leaf",
+        flags: [] as string[],
+        status: 1,
+      },
+      { scenario: "package config", file: "leaf", cwd: "leaf", flags: [], status: 1 },
+      {
+        scenario: "package config with --no-worktree",
+        file: "leaf",
+        cwd: "leaf",
+        flags: ["--no-worktree"],
+        status: 0,
+      },
+    ])("handles malformed $scenario", ({ file, cwd, flags, status }) => {
+      const root = path.join(tmpDir, "mono");
+      const leaf = path.join(root, "packages", "web");
+      fs.mkdirSync(leaf, { recursive: true });
+      fs.writeFileSync(
+        path.join(root, "package.json"),
+        JSON.stringify({ name: "mono", private: true, workspaces: ["packages/*"] })
+      );
+      fs.writeFileSync(path.join(leaf, "package.json"), JSON.stringify({ name: "web" }));
+      fs.writeFileSync(path.join(file === "root" ? root : leaf, "portless.json"), "{ invalid");
+
+      const result = run(["get", ...flags, "web"], {
+        cwd: cwd === "root" ? root : leaf,
+        env: getEnv(),
+      });
+      expect(result.status).toBe(status);
+      if (status === 0) {
+        expect(result.stdout).toContain("web.localhost");
+      } else {
+        expect(result.stderr).toContain("Invalid JSON");
+      }
     });
   });
 
@@ -2610,6 +2733,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       script: string;
       cliArgs: string[];
       lan?: boolean;
+      prefixEnv?: string;
+      worktree?: Record<string, unknown>;
     }): Promise<{
       status: number | null;
       proxyPort: number;
@@ -2631,7 +2756,10 @@ describe("CLI", { timeout: 15_000 }, () => {
           JSON.stringify({
             name: "test-app",
             packageManager: `${options.pm}@1.0.0`,
-            portless: { appPort: 4567 },
+            portless: {
+              appPort: 4567,
+              ...(options.worktree ? { worktree: options.worktree } : {}),
+            },
             scripts: { dev: options.script },
           })
         );
@@ -2649,6 +2777,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             "    HOST: process.env.HOST,",
             "    PORTLESS_URL: process.env.PORTLESS_URL,",
             "    PORTLESS_LAN: process.env.PORTLESS_LAN,",
+            "    PORTLESS_PREFIX: process.env.PORTLESS_PREFIX,",
             "  },",
             "};",
             "fs.writeFileSync(capturePath, JSON.stringify(payload));",
@@ -2694,6 +2823,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_TEST_CAPTURE_FILE: capturePath,
             PORTLESS_HTTPS: "0",
+            ...(options.prefixEnv === undefined ? {} : { PORTLESS_PREFIX: options.prefixEnv }),
           },
         });
 
@@ -2809,6 +2939,130 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(capture.args).toEqual(["run", "dev"]);
     });
+
+    it("run --prefix beats PORTLESS_PREFIX and get agrees on the template", async () => {
+      const { status, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: ["run", "--prefix", "flag", "--script", "dev"],
+        prefixEnv: "shell",
+        worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+      });
+
+      expect(status).toBe(0);
+      const launched = capture.env.PORTLESS_URL!;
+      expect(launched).toContain("tenant.flag-test-app.localhost");
+
+      const got = run(["get", "test-app"], {
+        cwd: tmpDir,
+        env: {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_HTTPS: "0",
+          PORTLESS_PREFIX: capture.env.PORTLESS_PREFIX,
+        },
+      });
+      expect(got.stdout.trim()).toBe(launched);
+    });
+
+    it.skipIf(process.platform === "win32").each([
+      { proxyA: true, error: "Duplicate hostname" },
+      { proxyA: false, error: "2 apps exited with errors:" },
+    ])("handles shared template names (proxyA=$proxyA)", async ({ proxyA, error }) => {
+      const proxy = await startMockProxy(tmpDir);
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "package.json"),
+          JSON.stringify({ name: "mono", private: true, workspaces: ["packages/*"] })
+        );
+        fs.writeFileSync(
+          path.join(tmpDir, "portless.json"),
+          JSON.stringify({ worktree: { hostnameTemplate: "tenant.{worktree}" } })
+        );
+        for (const name of ["a", "b"]) {
+          const dir = path.join(tmpDir, "packages", name);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({
+              name,
+              scripts: { dev: `node -e "process.exit(${name === "a" ? 7 : 3})"` },
+              portless: { proxy: name !== "a" || proxyA },
+            })
+          );
+        }
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+        const { status, stderr } = run([], {
+          cwd: tmpDir,
+          env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0", PORTLESS_PREFIX: "review" },
+        });
+        expect(status).toBe(1);
+        expect(stderr).toContain(error);
+        if (proxyA) {
+          expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+        }
+      } finally {
+        await stopChild(proxy.child);
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "rejects canonical hostname collisions before starting the proxy or apps",
+      async () => {
+        const stateDir = path.join(tmpDir, "state");
+        const ranFile = path.join(stateDir, "app-ran.txt");
+        const proxyPort = await getFreePort();
+        fs.mkdirSync(stateDir);
+        try {
+          fs.writeFileSync(
+            path.join(tmpDir, "package.json"),
+            JSON.stringify({ name: "dup", private: true, workspaces: ["packages/*"] })
+          );
+          // "api" and "api.localhost" both canonicalize to api.localhost.
+          fs.writeFileSync(
+            path.join(tmpDir, "portless.json"),
+            JSON.stringify({
+              apps: {
+                "packages/api": { name: "api", proxy: true },
+                "packages/api.localhost": { name: "api.localhost", proxy: true },
+              },
+            })
+          );
+          for (const name of ["api", "api.localhost"]) {
+            const dir = path.join(tmpDir, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                scripts: {
+                  dev: `node -e "require('node:fs').appendFileSync(process.env.RAN_FILE, 'ran')"`,
+                },
+              })
+            );
+          }
+
+          const { status, stderr } = run([], {
+            cwd: tmpDir,
+            env: {
+              PORTLESS_STATE_DIR: stateDir,
+              PORTLESS_PORT: String(proxyPort),
+              PORTLESS_HTTPS: "0",
+              RAN_FILE: ranFile,
+            },
+          });
+
+          expect(status).toBe(1);
+          expect(stderr).toContain('Duplicate hostname "api.localhost"');
+          expect(stderr).toContain('"api"');
+          expect(stderr).toContain('"api.localhost"');
+          expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(false);
+          expect(fs.existsSync(ranFile)).toBe(false);
+        } finally {
+          run(["proxy", "stop"], { env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" } });
+        }
+      },
+      30_000
+    );
 
     it("portless run (no command) with portless.json resolves dev script", () => {
       fs.writeFileSync(
@@ -3063,7 +3317,7 @@ describe("CLI", { timeout: 15_000 }, () => {
     // logic under test here, which is platform-agnostic and covered
     // cross-platform by the detectWorktreePrefix unit tests. Runs on macOS/Linux.
     it.skipIf(process.platform === "win32")(
-      "prefixes every app hostname with the worktree branch",
+      "applies root and package worktree config to every app hostname",
       async () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-wt-"));
         const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-state-"));
@@ -3089,11 +3343,17 @@ describe("CLI", { timeout: 15_000 }, () => {
             })
           );
 
-          // Fake a git worktree on branch feature-x via the filesystem fallback
-          // (a .git file pointing at a gitdir whose HEAD is the branch ref).
+          // Root uses branch style; the leaf overrides it with last-segment.
+          fs.writeFileSync(
+            path.join(root, "portless.json"),
+            JSON.stringify({ worktree: { prefix: "branch" } })
+          );
+
+          // Fake a git worktree on branch team-a/login via the filesystem
+          // fallback (a .git file pointing at a gitdir whose HEAD is the branch).
           const gitdir = path.join(root, "fake-bare.git", "worktrees", "wt");
           fs.mkdirSync(gitdir, { recursive: true });
-          fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-x\n");
+          fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/team-a/login\n");
           fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
 
           // Each app's dev command records the URL portless assigned it via
@@ -3112,10 +3372,14 @@ describe("CLI", { timeout: 15_000 }, () => {
                 name,
                 version: "0.0.0",
                 scripts: { dev: "node capture.cjs" },
-                portless: { proxy: true },
+                portless: { proxy: true, worktree: { prefix: "branch" } },
               })
             );
           }
+          fs.writeFileSync(
+            path.join(root, "packages", "web", "portless.json"),
+            JSON.stringify({ worktree: { prefix: "last-segment" } })
+          );
 
           // Strip parent-only npm/pnpm vars so the spawned `npm run dev` is real
           // npm, not the vitest runner's pnpm (npm_execpath).
@@ -3127,6 +3391,7 @@ describe("CLI", { timeout: 15_000 }, () => {
           childEnv.PORTLESS_PORT = proxyPort.toString();
           childEnv.PORTLESS_HTTPS = "0";
           childEnv.NO_COLOR = "1";
+          delete childEnv.PORTLESS_PREFIX;
 
           let output = "";
           cli = spawn(process.execPath, [CLI_PATH], {
@@ -3151,10 +3416,20 @@ describe("CLI", { timeout: 15_000 }, () => {
               `capture incomplete (web=${JSON.stringify(webUrl)}, api=${JSON.stringify(apiUrl)}). CLI output:\n${output}`
             );
           }
-          // Routed URL must carry the worktree prefix, in the full multi-app
-          // form <branch>.<pkg>.<project>.<tld>.
-          expect(webUrl).toContain("feature-x.web.myrepo.localhost");
-          expect(apiUrl).toContain("feature-x.api.myrepo.localhost");
+          // web carries the leaf last-segment label, api the root branch label.
+          expect(webUrl).toContain("login.web.myrepo.localhost");
+          expect(apiUrl).toContain("team-a-login.api.myrepo.localhost");
+
+          const got = run(["get", "web.myrepo"], {
+            cwd: path.join(root, "packages", "web"),
+            env: {
+              PORTLESS_STATE_DIR: stateDir,
+              PORTLESS_PORT: proxyPort.toString(),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+          expect(got.status).toBe(0);
+          expect(got.stdout.trim()).toBe(webUrl);
         } finally {
           if (cli) await stopChild(cli);
           run(["proxy", "stop"], {

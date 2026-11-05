@@ -20,7 +20,7 @@ Use an optional `portless.json` to override defaults:
 portless        # runs "dev" script, https://myapp.localhost
 ```
 
-The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`.
+The name is inferred from `package.json` if not set in config. The script defaults to `"dev"`. Only `worktree` options inherit from the workspace root into package directories; `name`, `script`, `appPort`, and `proxy` remain cwd-only.
 
 ### Fields
 
@@ -68,6 +68,15 @@ The name is inferred from `package.json` if not set in config. The script defaul
       <td>Overrides for workspace packages, keyed by relative path.</td>
     </tr>
     <tr>
+      <td>`worktree`</td>
+      <td>object</td>
+      <td></td>
+      <td>
+        Worktree label style and hostname template. Root values are defaults for every app; `apps`
+        entries override them by key.
+      </td>
+    </tr>
+    <tr>
       <td>`turbo`</td>
       <td>boolean</td>
       <td>`true`</td>
@@ -76,7 +85,15 @@ The name is inferred from `package.json` if not set in config. The script defaul
   </tbody>
 </table>
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode, except `worktree`, which sets defaults for every app that `apps` entries override by key.
+
+### Worktree hostnames
+
+In a linked worktree, `worktree.prefix` selects the label: `last-segment` (default) uses the last `/` segment of the branch, and `branch` keeps the whole branch, so `team-a/login` becomes `team-a-login`. `worktree.hostnameTemplate` replaces the whole hostname and must contain `{worktree}`; optional `{name}` holds the base name, for example `tenant.{worktree}-{name}`. Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash at runtime, and a template applies only when a label exists. `portless run --prefix` or `PORTLESS_PREFIX` sets the label directly, overrides `worktree.prefix`, and works outside a worktree; `""` removes the label. `--no-worktree` skips worktree config and naming; without it, an invalid config in the current directory or workspace fails instead of printing a guessed URL. `portless get` reads worktree config from the current directory, not the named service's package, so `cd` into a package to use its per-app options. Worktree options inherit from the workspace root into package directories, and a package's own `portless.json` applies in a root multi-app startup; for worktree options, the `package.json` `"portless"` key is used only when the package has no `portless.json`, while `name`, `script`, `appPort`, and `proxy` keep their existing precedence. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
+
+```json
+{ "worktree": { "prefix": "branch", "hostnameTemplate": "tenant.{worktree}-{name}" } }
+```
 
 ### package.json "portless" key
 
@@ -89,7 +106,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
 
 ```json
 {
@@ -153,6 +170,8 @@ For `script`: CLI `--script` flag > `package.json` `"portless"` key > `portless.
 
 For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.json` `"portless"` key > `portless.json` app entry > auto-assigned.
 
+For the worktree label: CLI `--prefix` flag (`portless run`) > `PORTLESS_PREFIX` env var > branch of a linked worktree.
+
 ## Environment variables
 
 <table>
@@ -188,6 +207,11 @@ For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.js
       <td>`PORTLESS_APP_PORT`</td>
       <td>Use a fixed port for the app (skip auto-assignment)</td>
       <td>random 4000 to 4999</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_PREFIX`</td>
+      <td>Set the worktree label (`""` for no label, same as `--prefix`)</td>
+      <td>detected branch</td>
     </tr>
     <tr>
       <td>`PORTLESS_SYNC_HOSTS`</td>

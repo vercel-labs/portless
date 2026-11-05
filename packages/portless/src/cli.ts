@@ -65,6 +65,7 @@ import {
   truncateLabel,
   sanitizeForHostname,
 } from "./auto.js";
+import type { WorktreePrefix, WorktreePrefixStyle } from "./auto.js";
 import {
   buildProxyStartConfig,
   canBindProxyPort,
@@ -143,9 +144,10 @@ import {
   splitCommand,
   detectPackageManager,
   loadPackagePortlessConfig,
+  mergeWorktreeConfig,
   ConfigValidationError,
 } from "./config.js";
-import type { AppConfig, LoadedConfig } from "./config.js";
+import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -541,6 +543,15 @@ function runServiceUninstallWithSudo(reason: string): boolean {
 
 function isEnabledEnv(value: string | undefined): boolean {
   return value === "1" || value === "true";
+}
+
+/**
+ * Whether the proxy should be accepted as already running. Shared with the
+ * multi-app collision preflight so both agree on which TLDs are in effect.
+ */
+async function isProxyUp(proxyPort: number, tls: boolean): Promise<boolean> {
+  if (await isProxyRunning(proxyPort, tls)) return true;
+  return !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
 }
 
 function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | null): string {
@@ -1305,25 +1316,15 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
 }
 
 /**
- * Check if the proxy is running and auto-start it if needed.
- * Returns the discovered state after start, or `{ started: false }` when
- * the proxy was already up.
+ * Resolve the config and port a stopped proxy starts with, applying persisted
+ * overrides unless the environment is explicit. Shared by the starter and the
+ * multi-app collision preflight so both read the same effective TLDs.
  */
-async function ensureProxyRunning(
-  proxyPort: number,
-  tls: boolean,
-  desired: ProxyDesiredState
-): Promise<EnsureProxyResult> {
+function resolveProxyStart(desired: ProxyDesiredState): {
+  startConfig: ReturnType<typeof resolveProxyConfig>;
+  startPort: number | undefined;
+} {
   const { explicit, desiredConfig } = desired;
-
-  const proxyResponsive = await isProxyRunning(proxyPort, tls);
-  const proxyListeningFromStateDir =
-    !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
-
-  if (proxyResponsive || proxyListeningFromStateDir) {
-    return { started: false };
-  }
-
   const persisted = readPersistedProxyState();
   const startConfig = { ...desiredConfig };
   let startPort: number | undefined;
@@ -1351,6 +1352,25 @@ async function ensureProxyRunning(
       startPort = persisted.port;
     }
   }
+
+  return { startConfig, startPort };
+}
+
+/**
+ * Check if the proxy is running and auto-start it if needed.
+ * Returns the discovered state after start, or `{ started: false }` when
+ * the proxy was already up.
+ */
+async function ensureProxyRunning(
+  proxyPort: number,
+  tls: boolean,
+  desired: ProxyDesiredState
+): Promise<EnsureProxyResult> {
+  if (await isProxyUp(proxyPort, tls)) {
+    return { started: false };
+  }
+
+  const { startConfig, startPort } = resolveProxyStart(desired);
 
   const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
   const needsSudo =
@@ -1433,7 +1453,7 @@ async function runApp(
   tls: boolean,
   tlds: string[],
   force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
@@ -1544,8 +1564,7 @@ async function runApp(
     console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
-    console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
+    console.log(chalk.gray(`-- Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
@@ -1831,6 +1850,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** Override the worktree label (from --prefix flag). Empty disables it. */
+  prefix?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -1886,16 +1907,17 @@ function applySharingFlag(flag: string): boolean {
 }
 
 /**
- * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
+ * Parse `run` subcommand arguments: `[--name <name>] [--prefix <label>] [--force] [--] <command...>`
  *
- * `--name`, `--force`, and `--app-port` are recognized. `--` stops flag
- * parsing. Everything after the flag region is the child command, passed
- * through untouched.
+ * `--name`, `--prefix`, `--force`, and `--app-port` are recognized. `--`
+ * stops flag parsing. Everything after the flag region is the child command,
+ * passed through untouched.
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
   let name: string | undefined;
+  let prefix: string | undefined;
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
@@ -1917,6 +1939,7 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
+  --prefix <label>       Override the worktree label (an empty value disables it)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -1931,14 +1954,19 @@ ${colors.bold("Name inference (in order):")}
   3. Git repo root directory name
   4. Current directory basename
 
-  Use --name to override the inferred name while keeping worktree prefixes.
-  In git worktrees, the branch name is prepended as a subdomain prefix
-  (e.g. feature-auth.myapp.localhost).
+  In git worktrees the branch becomes a subdomain prefix (e.g.
+  feature-auth.myapp.localhost); the default label is its last segment. Set
+  "worktree.prefix" to "branch" for the whole branch, or
+  "worktree.hostnameTemplate" with {worktree} and optional {name}. Templates
+  must render valid DNS labels. --prefix and PORTLESS_PREFIX override detection;
+  empty disables it. Template labels over 63 characters are hash-truncated.
+  Duplicate proxied hostnames fail before apps start.
 
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
+  portless run --prefix pr-42 next dev  # -> https://pr-42.<project>.localhost
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
 `);
@@ -1956,13 +1984,21 @@ ${colors.bold("Examples:")}
         process.exit(1);
       }
       name = args[i];
+    } else if (args[i] === "--prefix") {
+      i++;
+      if (args[i] === undefined || args[i].startsWith("-")) {
+        console.error(colors.red('Error: --prefix requires a value (use "" to disable).'));
+        console.error(colors.cyan("  portless run --prefix <label> <command...>"));
+        process.exit(1);
+      }
+      prefix = args[i];
     } else if (applySharingFlag(args[i])) {
       // handled
     } else {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
+          "Known flags: --name, --prefix, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
         )
       );
       process.exit(1);
@@ -1972,7 +2008,7 @@ ${colors.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return { force, appPort, name, prefix, commandArgs: args.slice(i) };
 }
 
 /**
@@ -2194,8 +2230,8 @@ ${colors.bold("Proxy connections:")}
   Connection errors include each loopback address and error code.
 
 ${colors.bold("Options:")}
-  run [--name <name>] <cmd>      Infer project name (or override with --name)
-                                Adds worktree prefix in git worktrees
+  run [--name <name>] [--prefix <label>] <cmd>
+                                Infer project name and add a worktree prefix
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo when the bind needs root
@@ -2232,6 +2268,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
   PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
+  PORTLESS_PREFIX=<label>       Override the worktree label; an empty value disables it
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
@@ -2575,14 +2612,15 @@ ${colors.bold("portless get")} - Print the URL for a service.
 ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}
 
-Constructs the URL using the same hostname and worktree logic as
-"portless run", then prints it to stdout. Useful for wiring services
-together:
+Uses the worktree config in the current directory, including workspace defaults,
+not the named app's package. Run from the target package for its per-app options.
+Invalid config fails instead of printing a guessed URL.
+PORTLESS_PREFIX="" skips worktree naming.
 
   BACKEND_URL=$(portless get backend)
 
 ${colors.bold("Options:")}
-  --no-worktree          Skip worktree prefix detection
+  --no-worktree          Skip config loading and worktree naming
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2618,8 +2656,11 @@ ${colors.bold("Examples:")}
   }
 
   const name = positional[0];
-  const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const appConfig = skipWorktree ? null : loadAppConfig();
+  const worktree = skipWorktree
+    ? null
+    : detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
+  const effectiveName = applyWorktreePrefix(name, worktree, appConfig?.worktree?.hostnameTemplate);
 
   const { port, tls, tlds } = await discoverState();
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
@@ -3857,8 +3898,23 @@ type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
 function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null {
   try {
     const loaded = loadConfig(cwd);
-    if (!loaded) return null;
-    return { ...resolveAppConfig(loaded.config, loaded.configDir, cwd), source: loaded.source };
+    const root = findWorkspaceRoot(cwd);
+    const rootConfig = root && root !== cwd ? loadConfig(root) : null;
+    const rootWorktree = mergeWorktreeConfig(
+      rootConfig
+        ? resolveAppConfig(rootConfig.config, rootConfig.configDir, cwd).worktree
+        : undefined
+    );
+    if (!loaded) {
+      return rootConfig && rootWorktree
+        ? { worktree: rootWorktree, source: rootConfig.source }
+        : null;
+    }
+    const local = resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    const worktree = mergeWorktreeConfig(rootWorktree, local.worktree);
+    return worktree
+      ? { ...local, worktree, source: loaded.source }
+      : { ...local, source: loaded.source };
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -3946,8 +4002,12 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = detectWorktreePrefix(cwd);
-  const effectiveName = applyWorktreePrefix(baseName, worktree);
+  const worktree = detectWorktreePrefix(cwd, appConfig?.worktree?.prefix);
+  const effectiveName = applyWorktreePrefix(
+    baseName,
+    worktree,
+    appConfig?.worktree?.hostnameTemplate
+  );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3962,7 +4022,7 @@ async function handleDefaultSingle(
     tls,
     tlds,
     false,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
     lanMode,
     lanIp
@@ -4032,7 +4092,7 @@ async function spawnProxiedApp(
   tls: boolean,
   tlds: string[],
   lanMode: boolean,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<MultiAppEntry, number | null>
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
@@ -4092,7 +4152,7 @@ async function spawnProxiedApp(
   const capturedPort = appPort;
   const settled = new Promise<void>((resolve) => {
     child.on("exit", (code, signal) => {
-      exitCodes.set(app.name, code);
+      exitCodes.set(app, code);
       if (code !== 0 && code !== null) {
         console.error(colors.red(`[${app.name}] exited with code ${code}`));
       } else if (signal) {
@@ -4129,7 +4189,7 @@ async function spawnProxiedApp(
 
 function spawnTaskApp(
   app: MultiAppEntry,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<MultiAppEntry, number | null>
 ): ReturnType<typeof spawn> {
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -4138,7 +4198,7 @@ function spawnTaskApp(
   pipeOutput(child, chalk.gray(`[${app.name}]`));
 
   child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
+    exitCodes.set(app, code);
     if (code !== 0 && code !== null) {
       console.error(colors.red(`[${app.name}] exited with code ${code}`));
     } else if (signal) {
@@ -4203,17 +4263,28 @@ async function handleDefaultMulti(
 
   const apps: MultiAppEntry[] = [];
 
-  // In a git worktree, prefix every app's hostname with the branch name so
-  // parallel worktrees of the same monorepo don't collide on <name>.localhost.
-  // Mirrors handleDefaultSingle; single-app mode already does this.
-  const worktree = detectWorktreePrefix(wsRoot);
+  const detectedWorktrees = new Map<WorktreePrefixStyle, WorktreePrefix | null>();
+  const worktreeFor = (worktreeConfig: WorktreeConfig | undefined): WorktreePrefix | null => {
+    const style = worktreeConfig?.prefix ?? "last-segment";
+    if (!detectedWorktrees.has(style)) {
+      detectedWorktrees.set(style, detectWorktreePrefix(wsRoot, style));
+    }
+    return detectedWorktrees.get(style)!;
+  };
 
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
     let pkgConfig: AppConfig | null;
+    // Worktree config matches default mode: the leaf portless.json (or its
+    // package.json "portless" fallback) wins over the workspace root config.
+    let leafWorktree: WorktreeConfig | undefined;
     try {
       pkgConfig = loadPackagePortlessConfig(pkg.dir);
+      const leaf = loadConfig(pkg.dir);
+      leafWorktree = leaf
+        ? resolveAppConfig(leaf.config, leaf.configDir, pkg.dir).worktree
+        : undefined;
     } catch (err) {
       if (err instanceof ConfigValidationError) {
         console.error(colors.red(`Error: ${err.message}`));
@@ -4222,10 +4293,10 @@ async function handleDefaultMulti(
       throw err;
     }
 
-    // Merge (closest wins): package.json "portless" > portless.json app entry > defaults
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
       ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
+      worktree: mergeWorktreeConfig(rootOverride?.worktree, leafWorktree),
     };
 
     const effectiveScript = appOverride.script ?? scriptName;
@@ -4260,7 +4331,11 @@ async function handleDefaultMulti(
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
-    name = applyWorktreePrefix(name, worktree);
+    name = applyWorktreePrefix(
+      name,
+      worktreeFor(appOverride.worktree),
+      appOverride.worktree?.hostnameTemplate
+    );
 
     apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
   }
@@ -4286,6 +4361,35 @@ async function handleDefaultMulti(
       console.error(colors.red(`Error: ${(err as Error).message}`));
       process.exit(1);
     }
+
+    // Check hostname collisions before starting the proxy so a config mistake
+    // cannot leave a proxy or app children behind. A running proxy keeps its
+    // own TLDs; otherwise an explicit env override decides a fresh start.
+    const where = (app: MultiAppEntry) =>
+      `"${app.label}" (${path.relative(wsRoot, app.pkg.dir).replace(/\\/g, "/") || "."})`;
+    const checkHostnameCollisions = (tldsForCheck: readonly string[]) => {
+      const seen = new Map<string, MultiAppEntry>();
+      for (const app of proxiedApps) {
+        for (const hostname of buildHostnames(app.name, tldsForCheck)) {
+          const existing = seen.get(hostname);
+          if (existing) {
+            throw new Error(
+              `Duplicate hostname "${hostname}" for ${where(existing)} and ${where(app)}. Set unique "name" overrides; if using worktree.hostnameTemplate, include {name}.`
+            );
+          }
+          seen.set(hostname, app);
+        }
+      }
+    };
+    // A running proxy keeps its own TLDs; a stopped one starts with the same
+    // persisted/env merge ensureProxyRunning uses, with LAN normalized to .local.
+    let preflightTlds = tlds;
+    if (!(await isProxyUp(port, tls))) {
+      const { startConfig } = resolveProxyStart(multiDesired);
+      preflightTlds = startConfig.lanMode ? ["local"] : startConfig.tlds;
+    }
+    checkHostnameCollisions(preflightTlds);
+
     const ensureResult = await ensureProxyRunning(port, tls, multiDesired);
     if (ensureResult.started) {
       dir = ensureResult.state.dir;
@@ -4296,6 +4400,11 @@ async function handleDefaultMulti(
     } else {
       // Proxy was already running; re-discover to pick up current state.
       ({ dir, port, tls, tlds, lanMode } = await discoverState());
+    }
+
+    // Recheck if the proxy settled on different TLDs than the preflight read.
+    if (tlds.join("\u0000") !== preflightTlds.join("\u0000")) {
+      checkHostnameCollisions(tlds);
     }
 
     if (tls && !isCATrusted(dir)) {
@@ -4454,7 +4563,7 @@ async function runWithDirectSpawn(
   taskApps: MultiAppEntry[]
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
-  const exitCodes = new Map<string, number | null>();
+  const exitCodes = new Map<MultiAppEntry, number | null>();
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
   const routeSettlements: Promise<void>[] = [];
@@ -4534,7 +4643,7 @@ async function runWithDirectSpawn(
   if (failed.length > 0) {
     console.error(
       colors.red(
-        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([name, code]) => `${name} (${code})`).join(", ")}`
+        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([app, code]) => `${app.label} (${code})`).join(", ")}`
       )
     );
     process.exit(1);
@@ -4543,6 +4652,8 @@ async function runWithDirectSpawn(
 
 async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
   const parsed = parseRunArgs(args);
+
+  if (parsed.prefix !== undefined) process.env.PORTLESS_PREFIX = parsed.prefix;
 
   const appConfig = loadAppConfig();
 
@@ -4590,8 +4701,12 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const worktree = detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
+  const effectiveName = applyWorktreePrefix(
+    baseName,
+    worktree,
+    appConfig?.worktree?.hostnameTemplate
+  );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -4606,7 +4721,7 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     tls,
     tlds,
     parsed.force,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
     lanIp
@@ -5155,7 +5270,7 @@ async function main() {
 
     if (mode === "run") {
       index++;
-      const runValueFlags = new Set(["--name", "--app-port"]);
+      const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
       while (index < limit) {
         const next = advancePortlessFlag(index, runValueFlags);
         if (next === null) break;
