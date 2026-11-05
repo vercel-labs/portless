@@ -263,6 +263,7 @@ const OMITTED_COMMANDS: Record<string, string> = {
   "portless run": "runs a foreground dev server",
   "portless compose up": "runs Docker Compose, often in the foreground",
   "portless mcp": "the MCP server itself",
+  "portless help": "only prints help text",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",
   "portless clean": "may prompt for sudo",

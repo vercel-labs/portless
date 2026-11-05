@@ -369,6 +369,55 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("command help", () => {
+    it.each([
+      [["trust", "--help"], "trust"],
+      [["trust", "-h"], "trust"],
+      [["list", "--help"], "list"],
+      [["proxy", "start", "--help"], "proxy"],
+      [["proxy", "stop", "--help"], "proxy"],
+      [["prune", "--force", "--help"], "prune"],
+      [["hosts", "sync", "--help"], "hosts"],
+      [["service", "install", "--help"], "service"],
+      [["alias", "foo", "3000", "--help"], "alias"],
+      [["clean", "--help"], "clean"],
+      [["help", "trust"], "trust"],
+      [["help", "run"], "run"],
+      [["help", "compose"], "compose"],
+    ])("prints help for %j without running the command", (args, command) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
+      try {
+        const bin = path.join(tmpDir, "bin");
+        const home = path.join(tmpDir, "home");
+        const state = path.join(tmpDir, "state");
+        fs.mkdirSync(bin);
+        fs.mkdirSync(home);
+        fs.mkdirSync(state);
+        const { status, stdout } = run(args, {
+          cwd: tmpDir,
+          env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
+        });
+        expect(status).toBe(0);
+        expect(stdout.trimStart()).toMatch(new RegExp(`^portless ${command} - `));
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("reports an unknown help command", () => {
+      const { status, stderr } = run(["help", "nope"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown command");
+    });
+
+    it("suggests a command for a misspelled help topic", () => {
+      const { status, stderr } = run(["help", "lsit"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Unknown command");
+      expect(stderr).toContain("portless help list");
+    });
+  });
+
   describe("--version", () => {
     it("prints version and exits 0 with --version", () => {
       const { status, stdout } = run(["--version"]);
@@ -764,9 +813,29 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(1);
       expect(stderr).toContain("No command provided");
     });
+
+    it("suggests a command when the name is misspelled", () => {
+      const { status, stderr } = run(["lsit"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+      expect(stderr).toContain("portless list");
+    });
   });
 
   describe("PORTLESS=0 bypass", () => {
+    it("runs reserved commands instead of spawning them", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-get-"));
+      try {
+        const { status, stdout } = run(["get", "backend"], {
+          env: { PORTLESS: "0", PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(0);
+        expect(stdout).toContain("backend.localhost");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("runs command directly when PORTLESS=0 is set", () => {
       const { status, stdout } = run(["myapp", "echo", "hello"], {
         env: { PORTLESS: "0" },

@@ -165,8 +165,14 @@ import {
   hasTurboConfig,
 } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
-import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
-import { runMcp } from "./mcp.js";
+import {
+  buildServiceUninstallSudoArgs,
+  handleService,
+  printServiceHelp,
+  tryUninstallService,
+} from "./service.js";
+import { printMcpHelp, runMcp } from "./mcp.js";
+import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
 
 const chalk = colors;
 
@@ -1940,26 +1946,8 @@ function applySharingFlag(flag: string): boolean {
   return false;
 }
 
-/**
- * Parse `run` subcommand arguments: `[--name <name>] [--prefix <label>] [--force] [--] <command...>`
- *
- * `--name`, `--prefix`, `--force`, and `--app-port` are recognized. `--`
- * stops flag parsing. Everything after the flag region is the child command,
- * passed through untouched.
- */
-function parseRunArgs(args: string[]): ParsedRunArgs {
-  let force = false;
-  let appPort: number | undefined;
-  let name: string | undefined;
-  let prefix: string | undefined;
-  let i = 0;
-
-  while (i < args.length && args[i].startsWith("-")) {
-    if (args[i] === "--") {
-      i++;
-      break;
-    } else if (args[i] === "--help" || args[i] === "-h") {
-      console.log(`
+function printRunHelp(): void {
+  console.log(`
 ${colors.bold("portless run")} - Infer project name and run through the proxy.
 
 ${colors.bold("Usage:")}
@@ -2004,6 +1992,28 @@ ${colors.bold("Examples:")}
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
 `);
+}
+
+/**
+ * Parse `run` subcommand arguments: `[--name <name>] [--prefix <label>] [--force] [--] <command...>`
+ *
+ * `--name`, `--prefix`, `--force`, and `--app-port` are recognized. `--`
+ * stops flag parsing. Everything after the flag region is the child command,
+ * passed through untouched.
+ */
+function parseRunArgs(args: string[]): ParsedRunArgs {
+  let force = false;
+  let appPort: number | undefined;
+  let name: string | undefined;
+  let prefix: string | undefined;
+  let i = 0;
+
+  while (i < args.length && args[i].startsWith("-")) {
+    if (args[i] === "--") {
+      i++;
+      break;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      printRunHelp();
       process.exit(0);
     } else if (args[i] === "--force") {
       force = true;
@@ -2153,6 +2163,9 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("portless help [command]")}          Show help for portless or one command
+
+Every command also accepts --help or -h, which only prints help.
 
 ${colors.bold("Examples:")}
   portless                            # Run dev script through proxy
@@ -2353,6 +2366,22 @@ function printVersion(): void {
   process.exit(0);
 }
 
+function printTrustHelp(): void {
+  console.log(`
+${colors.bold("portless trust")} - Add the local CA to the system trust store.
+
+Generates the local CA first if it does not exist yet. Browsers and other
+clients then accept portless HTTPS certificates. The OS may ask for
+authorization or sudo.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless trust")}
+
+${colors.bold("Options:")}
+  --help, -h             Show this help
+`);
+}
+
 async function handleTrust(): Promise<void> {
   const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) {
@@ -2409,9 +2438,8 @@ async function handleTrust(): Promise<void> {
   process.exit(1);
 }
 
-async function handleClean(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printCleanHelp(): void {
+  console.log(`
 ${colors.bold("portless clean")} - Remove portless artifacts from this machine.
 
 Stops the proxy if it is running, uninstalls the startup service if installed,
@@ -2433,9 +2461,9 @@ ${colors.bold("Usage:")}
 ${colors.bold("Options:")}
   --help, -h             Show this help
 `);
-    process.exit(0);
-  }
+}
 
+async function handleClean(args: string[]): Promise<void> {
   if (args.length > 1) {
     console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
     console.error(colors.cyan("  portless clean --help"));
@@ -2532,9 +2560,8 @@ ${colors.bold("Options:")}
   console.log(colors.green("Clean finished."));
 }
 
-async function handlePrune(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printPruneHelp(): void {
+  console.log(`
 ${colors.bold("portless prune")} - Kill orphaned dev servers left behind by crashed portless sessions.
 
 When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
@@ -2550,9 +2577,9 @@ ${colors.bold("Options:")}
   --force                Send SIGKILL instead of SIGTERM
   --help, -h             Show this help
 `);
-    process.exit(0);
-  }
+}
 
+async function handlePrune(args: string[]): Promise<void> {
   const forceKill = args.includes("--force");
 
   const { dir } = await discoverState();
@@ -2633,14 +2660,20 @@ async function handleList(): Promise<void> {
   listRoutes(store, port, tls);
 }
 
-/** True when --help or -h appears anywhere after the command name. */
-function hasHelpFlag(args: string[]): boolean {
-  return args.slice(1).some((arg) => arg === "--help" || arg === "-h");
+function printListHelp(): void {
+  console.log(`
+${colors.bold("portless list")} - Show active routes and their uptime.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless list")}
+
+${colors.bold("Options:")}
+  --help, -h             Show this help
+`);
 }
 
-async function handleGet(args: string[]): Promise<void> {
-  if (hasHelpFlag(args)) {
-    console.log(`
+function printGetHelp(): void {
+  console.log(`
 ${colors.bold("portless get")} - Print the URL for a service.
 
 ${colors.bold("Usage:")}
@@ -2662,9 +2695,9 @@ ${colors.bold("Examples:")}
   portless get backend                  # in worktree -> https://auth.backend.localhost
   portless get backend --no-worktree    # -> https://backend.localhost (skip worktree)
 `);
-    process.exit(0);
-  }
+}
 
+async function handleGet(args: string[]): Promise<void> {
   let skipWorktree = false;
   const positional: string[] = [];
 
@@ -2703,12 +2736,8 @@ ${colors.bold("Examples:")}
   process.stdout.write(url + "\n");
 }
 
-async function handleAlias(args: string[]): Promise<void> {
-  const helpIsUpstreamValue = args.some(
-    (arg, index) => arg === "--upstream" && ["--help", "-h"].includes(args[index + 1] ?? "")
-  );
-  if (hasHelpFlag(args) && !helpIsUpstreamValue) {
-    console.log(`
+function printAliasHelp(): void {
+  console.log(`
 ${colors.bold("portless alias")} - Register a static route for services not managed by portless.
 
 ${colors.bold("Usage:")}
@@ -2741,7 +2770,15 @@ ${colors.bold("Examples:")}
   portless alias api 8080 --upstream https://api.internal
   portless alias --remove my-postgres  # Remove the alias
 `);
-    process.exit(0);
+}
+
+async function handleAlias(args: string[]): Promise<void> {
+  const helpIsUpstreamValue = args.some(
+    (arg, index) => arg === "--upstream" && ["--help", "-h"].includes(args[index + 1] ?? "")
+  );
+  if (hasHelpFlag(args) && !helpIsUpstreamValue) {
+    printAliasHelp();
+    return;
   }
 
   const isRemove = args[1] === "--remove";
@@ -2863,9 +2900,8 @@ ${colors.bold("Examples:")}
   await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 }
 
-async function handleHosts(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printHostsHelp(): void {
+  console.log(`
 ${colors.bold("portless hosts")} - Manage ${HOSTS_DISPLAY} entries for .localhost subdomains.
 
 Safari relies on the system DNS resolver, which may not handle .localhost
@@ -2885,7 +2921,12 @@ ${colors.bold("Safety:")}
   hosts-file read before writing and verifies every write. Read or verification
   failures use the normal elevated privileges or error path.
 `);
-    process.exit(0);
+}
+
+async function handleHosts(args: string[]): Promise<void> {
+  if (!args[1]) {
+    printHostsHelp();
+    return;
   }
 
   if (args[1] === "clean") {
@@ -2916,16 +2957,6 @@ ${colors.bold("Safety:")}
     );
     process.exit(1);
     return;
-  }
-
-  if (!args[1]) {
-    console.log(`
-${colors.bold("Usage: portless hosts <command>")}
-
-  ${colors.cyan("portless hosts sync")}    Reconcile current routes with ${HOSTS_DISPLAY}
-  ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
-`);
-    process.exit(0);
   }
 
   if (args[1] !== "sync") {
@@ -3047,9 +3078,8 @@ function doctorProxyStartHint(proxyPort: number, tls: boolean): string {
   return `Run: portless proxy start${portArgs}${tlsArgs}`;
 }
 
-async function handleDoctor(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printDoctorHelp(): void {
+  console.log(`
 ${colors.bold("portless doctor")} - Check local portless health and print suggested fixes.
 
 ${colors.bold("Usage:")}
@@ -3062,9 +3092,9 @@ stop, clean, prune, trust, or modify portless state.
 ${colors.bold("Options:")}
   --help, -h             Show this help
 `);
-    process.exit(0);
-  }
+}
 
+async function handleDoctor(args: string[]): Promise<void> {
   if (args.length > 1) {
     console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
     console.error(colors.cyan("  portless doctor --help"));
@@ -3369,8 +3399,42 @@ ${colors.bold("Options:")}
   console.log(colors.green(`Summary: 0 failures, ${pluralize(warnings, "warning")}.`));
 }
 
+function printProxyHelp(): void {
+  console.log(`
+${colors.bold("portless proxy")} - Manage the portless proxy server.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless proxy start")}                Start the HTTPS proxy on port 443 (daemon)
+  ${colors.cyan("portless proxy start --no-tls")}       Start without HTTPS (port 80)
+  ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
+  ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
+  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
+  ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
+  ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
+  ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
+  ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
+  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy stop")}                 Stop the proxy
+
+${colors.bold("LAN mode (--lan):")}
+  Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
+  LAN mode explicitly binds the proxy to 0.0.0.0 and ::.
+  Makes services accessible from other devices on the same WiFi network
+  via mDNS (.local domains). Useful for testing on real mobile devices.
+  Auto-detects your LAN IP and follows changes automatically, or use
+  --ip to pin one.
+  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
+  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+`);
+}
+
 async function handleProxy(args: string[]): Promise<void> {
-  if (args[1] === "stop" && !hasHelpFlag(args)) {
+  if (args[1] !== "start" && args[1] !== "stop") {
+    printProxyHelp();
+    process.exit(args[1] ? 1 : 0);
+  }
+
+  if (args[1] === "stop") {
     let longPort: number | undefined;
     let shortPort: number | undefined;
     for (let i = 2; i < args.length; i++) {
@@ -3411,37 +3475,6 @@ async function handleProxy(args: string[]): Promise<void> {
       await stopProxy(store, port, tls);
     }
     return;
-  }
-
-  const isProxyHelp = args[1] === "--help" || args[1] === "-h" || args[1] === "stop";
-  if (isProxyHelp || args[1] !== "start") {
-    console.log(`
-${colors.bold("portless proxy")} - Manage the portless proxy server.
-
-${colors.bold("Usage:")}
-  ${colors.cyan("portless proxy start")}                Start the HTTPS proxy on port 443 (daemon)
-  ${colors.cyan("portless proxy start --no-tls")}       Start without HTTPS (port 80)
-  ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
-  ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
-  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
-  ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
-  ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
-  ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
-  ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
-  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
-  ${colors.cyan("portless proxy stop")}                 Stop the proxy
-
-${colors.bold("LAN mode (--lan):")}
-  Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
-  LAN mode explicitly binds the proxy to 0.0.0.0 and ::.
-  Makes services accessible from other devices on the same WiFi network
-  via mDNS (.local domains). Useful for testing on real mobile devices.
-  Auto-detects your LAN IP and follows changes automatically, or use
-  --ip to pin one.
-  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
-`);
-    process.exit(isProxyHelp || !args[1] ? 0 : 1);
   }
 
   const isForeground = args.includes("--foreground");
@@ -4813,6 +4846,11 @@ async function handleNamedMode(args: string[]): Promise<void> {
 
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
+    const suggestion = suggestCommand(parsed.name);
+    if (suggestion) {
+      console.error(colors.blue(`"${parsed.name}" is not a portless command. Did you mean:`));
+      console.error(colors.cyan(`  portless ${suggestion}`));
+    }
     console.error(colors.blue("Usage:"));
     console.error(colors.cyan("  portless <name> <command...>"));
     console.error(colors.blue("Example:"));
@@ -5014,12 +5052,8 @@ async function handleCompose(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  const skip =
-    process.env.PORTLESS === "0" ||
-    process.env.PORTLESS === "false" ||
-    process.env.PORTLESS === "skip";
   const help = rest.includes("--help") || rest.includes("-h");
-  if (skip || help || (subcommand !== "up" && subcommand !== "down")) {
+  if (isPortlessSkipped() || help || (subcommand !== "up" && subcommand !== "down")) {
     process.exit(await spawnDockerCompose(composeArgs).exited);
   }
 
@@ -5263,6 +5297,64 @@ function isAliasConflict(store: RouteStore, hostname: string): boolean {
 // Main
 // ---------------------------------------------------------------------------
 
+/** True when PORTLESS=0 (or false/skip) asks portless to run commands directly. */
+function isPortlessSkipped(): boolean {
+  const value = process.env.PORTLESS;
+  return value === "0" || value === "false" || value === "skip";
+}
+
+interface CommandEntry {
+  run: (args: string[], context: { globalScript?: string }) => Promise<void>;
+  help: () => void;
+  /** Parses --help itself because it may belong to a wrapped command. */
+  ownsHelp?: boolean;
+}
+
+const COMMANDS: Record<CommandName, CommandEntry> = {
+  run: {
+    run: (args, { globalScript }) => handleRunMode(args.slice(1), globalScript),
+    help: printRunHelp,
+    ownsHelp: true,
+  },
+  get: { run: handleGet, help: printGetHelp },
+  list: { run: handleList, help: printListHelp },
+  alias: { run: handleAlias, help: printAliasHelp, ownsHelp: true },
+  compose: { run: handleCompose, help: printComposeHelp, ownsHelp: true },
+  proxy: { run: handleProxy, help: printProxyHelp },
+  service: {
+    run: (args) => handleService(args, { entryScript: getEntryScript() }),
+    help: printServiceHelp,
+  },
+  hosts: { run: handleHosts, help: printHostsHelp },
+  doctor: { run: handleDoctor, help: printDoctorHelp },
+  trust: { run: handleTrust, help: printTrustHelp },
+  clean: { run: handleClean, help: printCleanHelp },
+  prune: { run: handlePrune, help: printPruneHelp },
+  mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp, ownsHelp: true },
+  help: { run: handleHelp, help: printHelp },
+};
+
+async function handleHelp(args: string[]): Promise<void> {
+  const name = args[1];
+  if (!name) {
+    printHelp();
+    return;
+  }
+  if (isCommandName(name)) {
+    COMMANDS[name].help();
+    return;
+  }
+  console.error(colors.red(`Error: Unknown command "${name}".`));
+  const suggestion = suggestCommand(name);
+  if (suggestion) {
+    console.error(colors.blue("Did you mean:"));
+    console.error(colors.cyan(`  portless help ${suggestion}`));
+  }
+  console.error(colors.blue("See all commands:"));
+  console.error(colors.cyan("  portless --help"));
+  process.exit(1);
+}
+
 async function main() {
   if (process.stdin.isTTY) {
     process.on("exit", () => {
@@ -5303,23 +5395,6 @@ async function main() {
     "--cloudflare",
   ]);
   const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
-  const childlessCommands = new Set([
-    "--help",
-    "-h",
-    "--version",
-    "-v",
-    "trust",
-    "clean",
-    "prune",
-    "list",
-    "doctor",
-    "get",
-    "alias",
-    "compose",
-    "hosts",
-    "proxy",
-    "service",
-  ]);
 
   const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
     const arg = args[index];
@@ -5346,8 +5421,6 @@ async function main() {
 
     if (index >= limit) return limit;
     const mode = args[index];
-    if (childlessCommands.has(mode)) return limit;
-
     if (mode === "run") {
       index++;
       const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
@@ -5358,6 +5431,7 @@ async function main() {
       }
       return index;
     }
+    if (isCommandName(mode) || mode === "--version" || mode === "-v") return limit;
 
     if (mode === "--name") {
       index += 2;
@@ -5436,53 +5510,24 @@ async function main() {
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, doctor, trust, clean, prune, proxy, service, mcp).
-  if (args[0] === "--name") {
+  // subcommand (see COMMAND_NAMES).
+  const explicitName = args[0] === "--name";
+  if (explicitName) {
     args.shift();
     if (!args[0]) {
       console.error(colors.red("Error: --name requires an app name."));
       console.error(colors.cyan("  portless --name <name> <command...>"));
       process.exit(1);
     }
-    const skipPortless =
-      process.env.PORTLESS === "0" ||
-      process.env.PORTLESS === "false" ||
-      process.env.PORTLESS === "skip";
-    if (skipPortless) {
-      const { commandArgs } = parseAppArgs(args);
-      if (commandArgs.length === 0) {
-        console.error(colors.red("Error: No command provided."));
-        process.exit(1);
-      }
-      spawnCommand(commandArgs);
-      return;
-    }
-    await handleNamedMode(args);
-    return;
   }
+  const command = explicitName || !isCommandName(args[0]) ? undefined : COMMANDS[args[0]];
+  const isRunCommand = command === COMMANDS.run;
 
-  // `run` subcommand: strip it, rest is parsed as run-mode args
-  const isRunCommand = args[0] === "run";
-  if (isRunCommand) {
-    args.shift();
-  }
-
-  const skipPortless =
-    process.env.PORTLESS === "0" ||
-    process.env.PORTLESS === "false" ||
-    process.env.PORTLESS === "skip";
   if (
-    skipPortless &&
-    (isRunCommand ||
-      args.length === 0 ||
-      (args.length >= 2 &&
-        args[0] !== "proxy" &&
-        args[0] !== "compose" &&
-        args[0] !== "clean" &&
-        args[0] !== "doctor" &&
-        args[0] !== "service"))
+    isPortlessSkipped() &&
+    (isRunCommand || args.length === 0 || (args.length >= 2 && !command))
   ) {
-    const parsed = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    const parsed = isRunCommand ? parseRunArgs(args.slice(1)) : parseAppArgs(args);
     let commandArgs = parsed.commandArgs;
     if (commandArgs.length === 0 && (isRunCommand || args.length === 0)) {
       const appConfig = loadAppConfig();
@@ -5498,10 +5543,15 @@ async function main() {
     return;
   }
 
-  // Global dispatch: help, version, trust, clean, prune, list, doctor, alias, hosts, proxy, service
-  // When `run` is used, skip these so args like "list" or "--help" are treated
-  // as child-command tokens, not portless subcommands.
-  if (!isRunCommand) {
+  if (command) {
+    if (!command.ownsHelp && hasHelpFlag(args)) {
+      command.help();
+      return;
+    }
+    await command.run(args, { globalScript });
+    return;
+  }
+  if (!explicitName) {
     if (args[0] === "--help" || args[0] === "-h") {
       printHelp();
       return;
@@ -5517,58 +5567,9 @@ async function main() {
       printVersion();
       return;
     }
-    if (args[0] === "trust") {
-      await handleTrust();
-      return;
-    }
-    if (args[0] === "clean") {
-      await handleClean(args);
-      return;
-    }
-    if (args[0] === "prune") {
-      await handlePrune(args);
-      return;
-    }
-    if (args[0] === "list") {
-      await handleList();
-      return;
-    }
-    if (args[0] === "doctor") {
-      await handleDoctor(args);
-      return;
-    }
-    if (args[0] === "get") {
-      await handleGet(args);
-      return;
-    }
-    if (args[0] === "alias") {
-      await handleAlias(args);
-      return;
-    }
-    if (args[0] === "compose") {
-      await handleCompose(args);
-      return;
-    }
-    if (args[0] === "hosts") {
-      await handleHosts(args);
-      return;
-    }
-    if (args[0] === "proxy") {
-      await handleProxy(args);
-      return;
-    }
-    if (args[0] === "service") {
-      await handleService(args, { entryScript: getEntryScript() });
-      return;
-    }
   }
 
-  // Run app (either `portless run <cmd>` or `portless <name> <cmd>`)
-  if (isRunCommand) {
-    await handleRunMode(args, globalScript);
-  } else {
-    await handleNamedMode(args);
-  }
+  await handleNamedMode(args);
 }
 
 main().catch((err: unknown) => {
