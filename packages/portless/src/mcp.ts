@@ -6,7 +6,8 @@
  * (foreground dev servers with no detached form), compose (runs Docker
  * Compose, often in the foreground), proxy start --foreground
  * (blocks), trust, clean, hosts sync, hosts clean, and service (may prompt for
- * sudo or need a TTY), plus mcp and --help (the server itself and human help).
+ * sudo or need a TTY), plus mcp, help, and --help (the server itself and human
+ * help).
  */
 
 declare const __VERSION__: string;
