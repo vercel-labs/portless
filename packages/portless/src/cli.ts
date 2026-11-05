@@ -2163,7 +2163,6 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
-  ${colors.cyan("portless help [command]")}          Show help for portless or one command
 
 Every command also accepts --help or -h, which only prints help.
 
@@ -5331,29 +5330,7 @@ const COMMANDS: Record<CommandName, CommandEntry> = {
   clean: { run: handleClean, help: printCleanHelp },
   prune: { run: handlePrune, help: printPruneHelp },
   mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp, ownsHelp: true },
-  help: { run: handleHelp, help: printHelp },
 };
-
-async function handleHelp(args: string[]): Promise<void> {
-  const name = args[1];
-  if (!name) {
-    printHelp();
-    return;
-  }
-  if (isCommandName(name)) {
-    COMMANDS[name].help();
-    return;
-  }
-  console.error(colors.red(`Error: Unknown command "${name}".`));
-  const suggestion = suggestCommand(name);
-  if (suggestion) {
-    console.error(colors.blue("Did you mean:"));
-    console.error(colors.cyan(`  portless help ${suggestion}`));
-  }
-  console.error(colors.blue("See all commands:"));
-  console.error(colors.cyan("  portless --help"));
-  process.exit(1);
-}
 
 async function main() {
   if (process.stdin.isTTY) {
