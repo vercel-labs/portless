@@ -635,6 +635,46 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("prune", () => {
+    it("keeps an unrelated listener route until its port is free", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-safe-"));
+      const listener = net.createServer();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          listener.once("error", reject);
+          listener.listen(0, "127.0.0.1", resolve);
+        });
+        const address = listener.address();
+        if (!address || typeof address === "string")
+          throw new Error("Listener address unavailable");
+        const route = {
+          hostname: "stale.localhost",
+          port: address.port,
+          pid: 999999,
+          registeredAt: Date.now() - 60_000,
+        };
+        const routesPath = path.join(tmpDir, "routes.json");
+        fs.writeFileSync(routesPath, JSON.stringify([route]));
+
+        const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+        expect(first.status).toBe(0);
+        expect(first.stdout).toContain(`PID ${process.pid} holds the port`);
+        expect(listener.listening).toBe(true);
+        expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([route]);
+
+        await new Promise<void>((resolve) => listener.close(() => resolve()));
+        const second = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+        expect(second.status).toBe(0);
+        expect(second.stdout).toContain("Pruned 1 stale route");
+        expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
+      } finally {
+        if (listener.listening)
+          await new Promise<void>((resolve) => listener.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("doctor", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["doctor", "--help"]);
@@ -2153,6 +2193,22 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("clean subcommand", () => {
+    it("refuses non-interactive cleanup without confirmation", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-confirm-"));
+      try {
+        const routes = path.join(tmpDir, "routes.json");
+        fs.writeFileSync(routes, "[]");
+        const { status, stderr } = run(["clean"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, HOME: tmpDir, USERPROFILE: tmpDir },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("portless clean --yes");
+        expect(fs.readFileSync(routes, "utf-8")).toBe("[]");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("prints help with --help", () => {
       const { status, stdout } = run(["clean", "--help"]);
       expect(status).toBe(0);

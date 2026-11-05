@@ -474,6 +474,23 @@ describe("tryUninstallService", () => {
     expect(result.installed).toBe(true);
     expect(result.needsElevation).toBe(true);
   });
+
+  it("reports a failed launchctl bootout instead of claiming removal", () => {
+    setPlatform("darwin");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Boot-out failed: 1: Operation not permitted",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.installed).toBe(true);
+    expect(result.error).toContain("Operation not permitted");
+    expect(result.needsElevation).toBe(true);
+  });
 });
 
 describe("handleService", () => {
@@ -925,6 +942,29 @@ describe("handleService", () => {
 
     expect(exitSpy).not.toHaveBeenCalled();
     expect(runner).toHaveBeenCalledWith("systemctl", ["disable", "--now", "portless.service"]);
+  });
+
+  it("fails the uninstall when the Linux service still cannot be disabled", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Access denied",
+    }));
+
+    await expect(
+      handleService(["service", "uninstall"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      })
+    ).rejects.toThrow("process.exit");
+
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(rmSync).not.toHaveBeenCalled();
+    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
+    expect(output).toContain("Access denied");
+    expect(logSpy.mock.calls.flat().join(" ")).not.toContain("uninstalled");
   });
 
   it("normalizes relative install paths before writing the Linux service", async () => {

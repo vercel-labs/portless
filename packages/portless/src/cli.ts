@@ -114,6 +114,7 @@ import {
   killTree,
   listenOnProxyInterface,
   parseTldList,
+  prompt,
   readLanMarker,
   readCustomCertMarker,
   readPersistedProxyState,
@@ -527,23 +528,15 @@ function sudoStop(port: number): boolean {
   return result.status === 0;
 }
 
-function runCleanWithSudo(reason: string): boolean {
-  console.log(colors.yellow(`${reason} Requesting sudo...`));
-  const home = process.env.HOME;
+/** Re-run `portless hosts clean` under sudo and report whether it succeeded. */
+function runHostsCleanWithSudo(): boolean {
+  console.log(
+    colors.yellow(`Writing to ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
+  );
   const result = spawnSync(
     "sudo",
-    [
-      "env",
-      ...collectPortlessEnvArgs(),
-      ...(home ? [`HOME=${home}`] : []),
-      process.execPath,
-      getEntryScript(),
-      "clean",
-    ],
-    {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    }
+    ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
+    { stdio: "inherit", timeout: SUDO_SPAWN_TIMEOUT_MS }
   );
   return result.status === 0;
 }
@@ -2440,13 +2433,41 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless clean")}
 
 ${colors.bold("Options:")}
+  --yes, -y              Confirm cleanup without prompting
   --help, -h             Show this help
 `);
 }
 
 async function handleClean(args: string[]): Promise<void> {
-  parseCommandArgs("clean", args.slice(1), {}, 0);
+  const parsed = parseCommandArgs(
+    "clean",
+    args.slice(1),
+    { "--yes": "boolean", "-y": "boolean" },
+    0
+  );
 
+  const stateDirs = collectStateDirsForCleanup();
+  console.error("Clean will:");
+  console.error("  Stop the proxy");
+  console.error("  Remove the startup service if installed");
+  console.error("  Remove the CA from the trust store");
+  console.error(
+    `  Delete known state files in: ${stateDirs.join(", ") || "no existing state directories"}`
+  );
+  console.error(`  Remove the portless block from ${HOSTS_DISPLAY}`);
+
+  if (!parsed.has("--yes") && !parsed.has("-y")) {
+    if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.CI !== undefined) {
+      throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
+    }
+    const answer = await prompt("Continue? [y/N] ");
+    if (answer !== "y" && answer !== "yes") {
+      console.error("Clean canceled.");
+      process.exit(1);
+    }
+  }
+
+  let problems = 0;
   const serviceResult = tryUninstallService(getEntryScript());
   if (serviceResult.removed) {
     console.log(colors.green("Removed startup service."));
@@ -2465,12 +2486,16 @@ async function handleClean(args: string[]): Promise<void> {
       process.exit(1);
     }
     console.warn(colors.yellow(message));
+    problems++;
   }
 
   console.log(colors.cyan("Stopping proxy if it is running..."));
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
+    onWarning: (msg) => {
+      console.warn(colors.yellow(msg));
+      problems++;
+    },
   });
   await stopProxy(store, port, tls);
 
@@ -2490,7 +2515,6 @@ async function handleClean(args: string[]): Promise<void> {
     }
   }
 
-  const stateDirs = collectStateDirsForCleanup();
   const failedCAStateDirs = new Set<string>();
   const caRemovalResults = attemptCATrustRemovalForCleanup(stateDirs, untrustCA);
   for (const [stateDir, untrustResult] of caRemovalResults) {
@@ -2498,6 +2522,7 @@ async function handleClean(args: string[]): Promise<void> {
       console.log(colors.green("Removed local CA from the system trust store."));
     } else {
       failedCAStateDirs.add(stateDir);
+      problems++;
       console.warn(
         colors.yellow(
           `Could not remove CA from trust store: ${untrustResult.error ?? "unknown error"}\n` +
@@ -2507,12 +2532,16 @@ async function handleClean(args: string[]): Promise<void> {
     }
   }
 
-  for (const stateDir of stateDirs) {
-    removePortlessStateFiles(stateDir, {
-      preserveCAIdentity: failedCAStateDirs.has(stateDir),
-    });
+  const stateFailures = stateDirs.flatMap((stateDir) =>
+    removePortlessStateFiles(stateDir, { preserveCAIdentity: failedCAStateDirs.has(stateDir) })
+  );
+  for (const file of stateFailures) {
+    console.warn(colors.yellow(`Could not remove state file: ${file}`));
   }
-  console.log(colors.green("Removed portless state files from known state directories."));
+  problems += stateFailures.length;
+  if (stateFailures.length === 0) {
+    console.log(colors.green("Removed portless state files from known state directories."));
+  }
   if (failedCAStateDirs.size > 0) {
     console.warn(
       colors.yellow("Retained CA identity files so trust removal can be retried safely.")
@@ -2522,9 +2551,11 @@ async function handleClean(args: string[]): Promise<void> {
   if (cleanHostsFile()) {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
   } else if (!isWindows && process.getuid?.() !== 0) {
-    if (!runCleanWithSudo(`Updating ${HOSTS_DISPLAY} requires elevated privileges.`)) {
-      console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
-      process.exit(1);
+    if (!runHostsCleanWithSudo()) {
+      console.error(
+        colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless hosts clean`)
+      );
+      problems++;
     }
   } else {
     console.warn(
@@ -2532,9 +2563,15 @@ async function handleClean(args: string[]): Promise<void> {
         `Could not remove portless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
       )
     );
+    problems++;
   }
 
-  console.log(colors.green("Clean finished."));
+  if (problems > 0) {
+    console.error(`Clean finished with ${problems} problem(s).`);
+    process.exitCode = 1;
+  } else {
+    console.log(colors.green("Clean finished."));
+  }
 }
 
 function printPruneHelp(): void {
@@ -2566,29 +2603,15 @@ async function handlePrune(args: string[]): Promise<void> {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  const stale = store.pruneStaleRoutes();
+  const stale = store.findStaleRoutes();
   if (stale.length === 0) {
     console.log("No orphaned routes found.");
     return;
   }
 
-  for (const route of stale) {
-    if (route.tailscaleHttpsPort) {
-      try {
-        unregisterTailscale(route);
-        console.log(
-          `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
-        );
-      } catch {
-        // Tailscale CLI may not be installed; non-fatal during prune
-      }
-    }
-    for (const t of stopRecordedTunnels(route)) {
-      console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
-    }
-  }
-
   let killed = 0;
+  let pruned = 0;
+  let skipped = 0;
   const signal = forceKill ? "SIGKILL" : "SIGTERM";
   const killedGroups = new Set<number>();
   for (const route of stale) {
@@ -2605,28 +2628,58 @@ async function handlePrune(args: string[]): Promise<void> {
   }
 
   for (const route of stale) {
-    if (route.childPgid && killedGroups.has(route.childPgid)) continue;
+    if (route.childPgid && killedGroups.has(route.childPgid)) {
+      for (let i = 0; i < 20 && (await isPortListening(route.port)); i++) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
     const pids = findPidsOnPort(route.port);
-    if (pids.length === 0) {
-      console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
+    if (pids.length > 0 || (await isPortListening(route.port))) {
+      if (pids.length === 0) {
+        console.log(`  ${route.hostname} :${route.port} - listener PID unknown; route kept`);
+      } else {
+        for (const pid of pids) {
+          console.log(
+            `  ${route.hostname} :${route.port} - PID ${pid} holds the port and could not be tied to this route; route kept`
+          );
+        }
+      }
+      skipped++;
       continue;
     }
-    for (const pid of pids) {
+
+    if (!store.removeStaleRoute(route.hostname, route.pid)) {
+      console.log(
+        `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
+      );
+      skipped++;
+      continue;
+    }
+
+    pruned++;
+    console.log(`  ${route.hostname} :${route.port} - route removed (port free)`);
+    if (route.tailscaleHttpsPort) {
       try {
-        process.kill(pid, signal);
-        killed++;
-        console.log(`  ${route.hostname} :${route.port} - killed PID ${pid} (${signal})`);
+        unregisterTailscale(route);
+        console.log(
+          `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
+        );
       } catch {
-        console.log(`  ${route.hostname} :${route.port} - PID ${pid} already exited`);
+        console.warn(colors.yellow(`  ${route.hostname} - could not remove tailscale serve`));
       }
+    }
+    for (const t of stopRecordedTunnels(route)) {
+      console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
   }
 
-  const routeWord = stale.length === 1 ? "route" : "routes";
+  const routeWord = pruned === 1 ? "route" : "routes";
   const procWord = killed === 1 ? "process" : "processes";
+  const skippedSummary =
+    skipped === 0 ? "" : `, skipped ${skipped} ${skipped === 1 ? "route" : "routes"}`;
   console.log(
     colors.green(
-      `\nPruned ${stale.length} stale ${routeWord}, killed ${killed} orphaned ${procWord}.`
+      `\nPruned ${pruned} stale ${routeWord}, killed ${killed} orphaned ${procWord}${skippedSummary}.`
     )
   );
 }
@@ -2904,22 +2957,7 @@ async function handleHosts(args: string[]): Promise<void> {
       return;
     }
 
-    if (!isWindows && process.getuid?.() !== 0) {
-      console.log(
-        colors.yellow(
-          `Writing to ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`
-        )
-      );
-      const result = spawnSync(
-        "sudo",
-        ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
-        {
-          stdio: "inherit",
-          timeout: SUDO_SPAWN_TIMEOUT_MS,
-        }
-      );
-      if (result.status === 0) return;
-    }
+    if (!isWindows && process.getuid?.() !== 0 && runHostsCleanWithSudo()) return;
 
     console.error(
       colors.red(`Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`)
