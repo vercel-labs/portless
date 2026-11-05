@@ -506,19 +506,38 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
-      expect(stdout).toContain("run [--name <name>]");
+      expect(stdout).toContain("--prefix <label>");
       expect(stdout).toContain("portless doctor");
-      expect(stdout).toContain("--port");
-      expect(stdout).toContain("-p");
-      expect(stdout).toContain("--foreground");
-      expect(stdout).toContain("PORTLESS_STATE_DIR");
-      expect(stdout).toContain("PORTLESS_URL");
+      expect(stdout).not.toContain("--port");
+      expect(stdout).not.toContain("-p, --port");
+      expect(stdout).not.toContain("--foreground");
+      expect(stdout).toContain("Proxy options: portless proxy --help");
+      expect(stdout).toContain("PORTLESS_APP_PORT");
+      expect(stdout).toContain("PORTLESS_LAN");
+      expect(stdout).toContain("PORTLESS_PREFIX");
       expect(stdout).toContain("--ngrok");
-      expect(stdout).toContain("PORTLESS_NGROK");
-      expect(stdout).toContain("PORTLESS_NGROK_URL");
       expect(stdout).toContain("--cloudflare");
-      expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
+    });
+
+    it("keeps proxy startup options in proxy help", () => {
+      const { status, stdout } = run(["proxy", "--help"]);
+      expect(status).toBe(0);
+      for (const flag of [
+        "-p",
+        "--port",
+        "--https",
+        "--no-tls",
+        "--cert",
+        "--key",
+        "--foreground",
+        "--tld",
+        "--wildcard",
+        "--unprivileged",
+        "--skip-trust",
+      ]) {
+        expect(stdout).toContain(flag);
+      }
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -5473,7 +5492,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("--tailscale");
       expect(stdout).toContain("--funnel");
-      expect(stdout).toContain("PORTLESS_TAILSCALE");
     });
 
     it("fails with actionable message when tailscale is not installed", () => {
@@ -5529,8 +5547,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
       expect(stdout).toContain("--ngrok");
-      expect(stdout).toContain("PORTLESS_NGROK");
-      expect(stdout).toContain("PORTLESS_NGROK_URL");
     });
 
     it("fails with actionable message when ngrok is not installed", () => {

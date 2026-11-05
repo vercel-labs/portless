@@ -383,7 +383,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> --force <cmd>`                   | Kill the existing process and take over its route              |
 | `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child    |
-| `portless --help` / `-h`                          | Show help                                                      |
+| `portless --help` / `-h`                          | Show commands and common app options                           |
+| `portless proxy --help`                           | Show proxy startup options                                     |
 | `portless <command> --help` / `-h`                | Print command help without running it                          |
 | `portless --version` / `-v`                       | Show version                                                   |
 
