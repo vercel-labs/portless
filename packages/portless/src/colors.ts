@@ -1,10 +1,11 @@
-function supportsColor(): boolean {
-  if ("NO_COLOR" in process.env) return false;
-  if ("FORCE_COLOR" in process.env) return true;
-  return !!(process.stdout.isTTY || process.stderr.isTTY);
+/** NO_COLOR set to a non-empty value disables color. FORCE_COLOR "0" or "false" disables it, any other set value forces it. */
+export function supportsColor(env: NodeJS.ProcessEnv, isTTY: boolean): boolean {
+  if (env.NO_COLOR) return false;
+  if (env.FORCE_COLOR !== undefined) return env.FORCE_COLOR !== "0" && env.FORCE_COLOR !== "false";
+  return isTTY;
 }
 
-const enabled = supportsColor();
+const enabled = supportsColor(process.env, !!(process.stdout.isTTY || process.stderr.isTTY));
 
 const wrap = (open: string, close: string) => {
   if (!enabled) return (s: string) => s;
