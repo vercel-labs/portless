@@ -26,10 +26,10 @@
     "win32"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsc -p tsconfig.build.json",
     "dev": "tsup --watch",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint src/ --fix",
     "prepublishOnly": "cp ../../README.md . && pnpm build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
@@ -55,9 +55,9 @@
   "devDependencies": {
     "@types/node": "^24.12.4",
     "@vitest/coverage-v8": "^4.0.18",
-    "eslint": "^9.39.2",
+    "oxlint": "^1.91.0",
     "tsup": "^8.0.1",
-    "typescript": "^5.3.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.0.18"
   }
 }

@@ -22,18 +22,15 @@
     "prepare": "husky"
   },
   "devDependencies": {
-    "@eslint/js": "^9.39.2",
-    "eslint": "^9.39.2",
-    "eslint-config-prettier": "^10.1.8",
     "husky": "^9.1.7",
     "lint-staged": "^16.2.7",
+    "oxlint": "^1.91.0",
     "prettier": "^3.8.1",
-    "turbo": "^2.9.7",
-    "typescript-eslint": "^8.55.0"
+    "turbo": "^2.9.7"
   },
   "lint-staged": {
     "*.{ts,js}": [
-      "eslint --fix",
+      "oxlint --fix",
       "prettier --write"
     ],
     "*.{json,md,yml,yaml}": "prettier --write"
