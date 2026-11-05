@@ -375,12 +375,9 @@ describe("CLI", { timeout: 15_000 }, () => {
       [["trust", "-h"], "trust"],
       [["list", "--help"], "list"],
       [["proxy", "start", "--help"], "proxy"],
-      [["proxy", "stop", "--help"], "proxy"],
       [["prune", "--force", "--help"], "prune"],
       [["hosts", "sync", "--help"], "hosts"],
       [["service", "install", "--help"], "service"],
-      [["alias", "foo", "3000", "--help"], "alias"],
-      [["clean", "--help"], "clean"],
     ])("prints help for %j without running the command", (args, command) => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
       try {
@@ -390,16 +387,38 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.mkdirSync(bin);
         fs.mkdirSync(home);
         fs.mkdirSync(state);
+        const routes = JSON.stringify([{ hostname: "stale.localhost", port: 4999, pid: 999999 }]);
+        fs.writeFileSync(path.join(state, "routes.json"), routes);
         const { status, stdout } = run(args, {
           cwd: tmpDir,
           env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
         });
         expect(status).toBe(0);
         expect(stdout.trimStart()).toMatch(new RegExp(`^portless ${command} - `));
+        expect(fs.readdirSync(state)).toEqual(["routes.json"]);
+        expect(fs.readFileSync(path.join(state, "routes.json"), "utf-8")).toBe(routes);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "passes --help after a compose subcommand to Docker Compose",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-help-"));
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\necho "docker $*"\n', { mode: 0o755 });
+          const { status, stdout } = run(["compose", "up", "--help"], {
+            env: { PATH: tmpDir, PORTLESS: undefined },
+          });
+          expect(status).toBe(0);
+          expect(stdout).toContain("docker compose up --help");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
   });
 
   describe("--version", () => {

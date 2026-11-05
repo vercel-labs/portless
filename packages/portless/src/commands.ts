@@ -50,7 +50,8 @@ function editDistance(a: string, b: string): number {
 }
 
 /** The command one edit away from `word`, if exactly one is, for "did you mean" hints. */
-export function suggestCommand(word: string): CommandName | undefined {
+export function suggestCommand(word: string | undefined): CommandName | undefined {
+  if (!word) return undefined;
   const matches = COMMAND_NAMES.filter((name) => editDistance(word, name) === 1);
   return matches.length === 1 ? matches[0] : undefined;
 }
