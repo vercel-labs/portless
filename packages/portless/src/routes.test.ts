@@ -431,7 +431,12 @@ describe("RouteStore", () => {
       );
 
       const children: ReturnType<typeof spawn>[] = [];
-      const ready: Promise<{ code: number | null; stdout: string }>[] = [];
+      const ready: Promise<{
+        code: number | null;
+        stdout: string;
+        stderr: string;
+        signal?: NodeJS.Signals | null;
+      }>[] = [];
       for (let i = 0; i < count; i++) {
         const child = spawn(
           process.execPath,
@@ -442,13 +447,22 @@ describe("RouteStore", () => {
         ready.push(
           new Promise((resolve) => {
             let stdout = "";
+            let stderr = "";
+            child.stderr!.on("data", (d: Buffer) => {
+              stderr += d.toString();
+            });
             child.stdout!.on("data", (d: Buffer) => {
               stdout += d.toString();
-              if (stdout.includes("ok") || stdout.includes("error:")) {
-                resolve({ code: null, stdout: stdout.trim() });
+              if (stdout.trim() === "ok") {
+                resolve({ code: null, stdout: stdout.trim(), stderr: stderr.trim() });
               }
             });
-            child.on("close", (code) => resolve({ code, stdout: stdout.trim() }));
+            child.on("error", (error) => {
+              resolve({ code: null, stdout: stdout.trim(), stderr: error.message });
+            });
+            child.on("close", (code, signal) =>
+              resolve({ code, signal, stdout: stdout.trim(), stderr: stderr.trim() })
+            );
           })
         );
       }
@@ -460,7 +474,7 @@ describe("RouteStore", () => {
         child.stdin!.end();
       }
 
-      expect(failures).toHaveLength(0);
+      expect(failures).toEqual([]);
 
       const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(raw).toHaveLength(count);
