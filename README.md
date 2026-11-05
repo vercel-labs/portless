@@ -44,7 +44,7 @@ portless myapp next dev
 - The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)).
 - `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, or [configure the label style and hostname template](https://portless.sh/configuration#worktree-hostnames).
 - A name with dots is a subdomain: `portless api.myapp pnpm start` serves `https://api.myapp.localhost`.
-- `PORTLESS=0 pnpm dev` runs the command directly, without the proxy.
+- `PORTLESS=0 pnpm dev` runs the command directly, without the proxy. Commands such as `portless get` and `portless list` still run normally.
 
 The full walkthrough is in [Getting started](https://portless.sh).
 
@@ -111,7 +111,7 @@ The server does not start dev servers. Agents run `portless run <cmd>` in a shel
 
 ## Commands
 
-Run `portless --help` for the full list, or `portless <command> --help` for one command.
+Run `portless --help` for the full list, or `portless help <command>` for one command. `--help` and `-h` only print help; they never run the command.
 
 | Group                | Commands                                                                              | Docs                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -121,6 +121,7 @@ Run `portless --help` for the full list, or `portless <command> --help` for one 
 | HTTPS and DNS        | `trust`, `hosts sync`, `hosts clean`                                                  | [HTTPS](https://portless.sh/https), [Hosts](https://portless.sh/commands#hosts)                                                                               |
 | Inspect and clean up | `list`, `doctor`, `prune`, `clean`                                                    | [Doctor](https://portless.sh/commands#doctor), [Prune orphans](https://portless.sh/commands#prune-orphans), [Clean up](https://portless.sh/commands#clean-up) |
 | Agents               | `mcp`                                                                                 | [MCP server](https://portless.sh/commands#mcp-server)                                                                                                         |
+| Help                 | `help [command]`                                                                      | [Command help](https://portless.sh/commands#help-and-version)                                                                                                 |
 
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes.
 
