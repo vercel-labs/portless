@@ -2633,21 +2633,6 @@ async function handlePrune(args: string[]): Promise<void> {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
-    const pids = findPidsOnPort(route.port);
-    if (pids.length > 0 || (await isPortListening(route.port))) {
-      if (pids.length === 0) {
-        console.log(`  ${route.hostname} :${route.port} - listener PID unknown; route kept`);
-      } else {
-        for (const pid of pids) {
-          console.log(
-            `  ${route.hostname} :${route.port} - PID ${pid} holds the port and could not be tied to this route; route kept`
-          );
-        }
-      }
-      skipped++;
-      continue;
-    }
-
     if (!store.removeStaleRoute(route.hostname, route.pid)) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
@@ -2657,7 +2642,12 @@ async function handlePrune(args: string[]): Promise<void> {
     }
 
     pruned++;
-    console.log(`  ${route.hostname} :${route.port} - route removed (port free)`);
+    const holders = findPidsOnPort(route.port);
+    const held = holders.length > 0 || (await isPortListening(route.port));
+    const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
+    console.log(
+      `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
+    );
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
