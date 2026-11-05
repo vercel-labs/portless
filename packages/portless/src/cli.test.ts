@@ -456,8 +456,8 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(human.stdout).toContain(listed[0].url);
         expect(human.stdout).toContain("localhost:5432");
         const invalid = run(["list", "--bogus"], options);
-        expect(invalid.status).toBe(1);
-        expect(invalid.stderr).toContain('Error: Unknown flag "--bogus".');
+        expect(invalid.status).toBe(2);
+        expect(invalid.stderr).toContain('Error: Unknown flag "--bogus" for portless list.');
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
