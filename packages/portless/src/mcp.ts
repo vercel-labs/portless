@@ -820,7 +820,7 @@ export async function runMcp(args: string[]): Promise<void> {
   const usageError = (message: string): void => {
     console.error(colors.red(`Error: ${message}`));
     console.error("Usage: portless mcp [--tools <profiles>]");
-    process.exit(1);
+    process.exit(2);
   };
 
   for (let index = 0; index < args.length; index += 1) {

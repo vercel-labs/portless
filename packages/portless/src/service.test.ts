@@ -430,14 +430,12 @@ describe("handleService", () => {
     expect(output).toContain("service status");
   });
 
-  it("exits 1 for unknown subcommand", async () => {
+  it("throws a usage error for an unknown subcommand", async () => {
     const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
     await expect(
       handleService(["service", "bogus"], { entryScript: "/fake/cli.js", runner })
-    ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
-    expect(output).toContain("bogus");
+    ).rejects.toThrow('Unknown service command "bogus".');
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported LAN service installs before writing a Windows task", async () => {
