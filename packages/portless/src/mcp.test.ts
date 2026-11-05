@@ -171,7 +171,7 @@ describe("tools/call validation", () => {
 
     const malformed = await createServer(["core"]).handleLine("not json");
     expect(malformed?.id).toBeNull();
-    expect((malformed?.error as { code: number }).code).toBe(-32700);
+    expect((malformed?.error as { code: number } | undefined)?.code).toBe(-32700);
   });
 
   it("returns an error result when the child cannot spawn", async () => {
