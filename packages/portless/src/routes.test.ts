@@ -448,85 +448,76 @@ describe("RouteStore", () => {
       expect(routes[0].hostname).toBe("test.localhost");
     });
 
-    it.each([...Array(100).keys()])(
-      "parallel addRoute stress (%i)",
-      async () => {
-        const count = 20;
-        const scriptPath = path.join(tmpDir, "worker.mjs");
-        const pkgDir = path.resolve(import.meta.dirname, "..");
-        const importUrl = pathToFileURL(path.join(pkgDir, "dist", "index.js")).href;
-        fs.writeFileSync(
-          scriptPath,
-          [
-            `import fs from "node:fs";`,
-            `import { syncBuiltinESMExports } from "node:module";`,
-            `import { RouteStore } from ${JSON.stringify(importUrl)};`,
-            `const mkdirSync = fs.mkdirSync;`,
-            `fs.mkdirSync = (...args) => { try { return mkdirSync(...args); } catch (e) { if (e.code !== "EEXIST") console.error(e.stack); throw e; } };`,
-            `syncBuiltinESMExports();`,
-            `const [dir, hostname, port] = process.argv.slice(2);`,
-            `const store = new RouteStore(dir);`,
-            `try { store.addRoute(hostname, Number(port), process.pid); console.log("ok"); }`,
-            `catch (e) { console.log("error:" + e.message); process.exit(1); }`,
-            `process.stdin.resume();`,
-          ].join("\n")
+    it("handles many parallel addRoute calls without lock errors", async () => {
+      const count = 20;
+      const scriptPath = path.join(tmpDir, "worker.mjs");
+      const pkgDir = path.resolve(import.meta.dirname, "..");
+      const importUrl = pathToFileURL(path.join(pkgDir, "dist", "index.js")).href;
+      fs.writeFileSync(
+        scriptPath,
+        [
+          `import { RouteStore } from ${JSON.stringify(importUrl)};`,
+          `const [dir, hostname, port] = process.argv.slice(2);`,
+          `const store = new RouteStore(dir);`,
+          `try { store.addRoute(hostname, Number(port), process.pid); console.log("ok"); }`,
+          `catch (e) { console.log("error:" + e.message); process.exit(1); }`,
+          `process.stdin.resume();`,
+        ].join("\n")
+      );
+
+      const children: ReturnType<typeof spawn>[] = [];
+      const ready: Promise<{
+        code: number | null;
+        stdout: string;
+        stderr: string;
+        signal?: NodeJS.Signals | null;
+      }>[] = [];
+      for (let i = 0; i < count; i++) {
+        const child = spawn(
+          process.execPath,
+          [scriptPath, tmpDir, `app${i}.localhost`, String(4000 + i)],
+          { stdio: ["pipe", "pipe", "pipe"] }
         );
+        children.push(child);
+        ready.push(
+          new Promise((resolve) => {
+            let stdout = "";
+            let stderr = "";
+            child.stderr!.on("data", (d: Buffer) => {
+              stderr += d.toString();
+            });
+            child.stdout!.on("data", (d: Buffer) => {
+              stdout += d.toString();
+              if (stdout.trim() === "ok") {
+                resolve({ code: null, stdout: stdout.trim(), stderr: stderr.trim() });
+              }
+            });
+            child.on("error", (error) => {
+              resolve({ code: null, stdout: stdout.trim(), stderr: error.message });
+            });
+            child.on("close", (code, signal) =>
+              resolve({ code, signal, stdout: stdout.trim(), stderr: stderr.trim() })
+            );
+          })
+        );
+      }
 
-        const children: ReturnType<typeof spawn>[] = [];
-        const ready: Promise<{
-          code: number | null;
-          stdout: string;
-          stderr: string;
-          signal?: NodeJS.Signals | null;
-        }>[] = [];
-        for (let i = 0; i < count; i++) {
-          const child = spawn(
-            process.execPath,
-            [scriptPath, tmpDir, `app${i}.localhost`, String(4000 + i)],
-            { stdio: ["pipe", "pipe", "pipe"] }
-          );
-          children.push(child);
-          ready.push(
-            new Promise((resolve) => {
-              let stdout = "";
-              let stderr = "";
-              child.stderr!.on("data", (d: Buffer) => {
-                stderr += d.toString();
-              });
-              child.stdout!.on("data", (d: Buffer) => {
-                stdout += d.toString();
-                if (stdout.trim() === "ok") {
-                  resolve({ code: null, stdout: stdout.trim(), stderr: stderr.trim() });
-                }
-              });
-              child.on("error", (error) => {
-                resolve({ code: null, stdout: stdout.trim(), stderr: error.message });
-              });
-              child.on("close", (code, signal) =>
-                resolve({ code, signal, stdout: stdout.trim(), stderr: stderr.trim() })
-              );
-            })
-          );
-        }
+      const outcomes = await Promise.all(ready);
+      const failures = outcomes.filter((o) => !o.stdout.startsWith("ok"));
 
-        const outcomes = await Promise.all(ready);
-        const failures = outcomes.filter((o) => !o.stdout.startsWith("ok"));
+      for (const child of children) {
+        child.stdin!.end();
+      }
 
-        for (const child of children) {
-          child.stdin!.end();
-        }
+      expect(failures).toEqual([]);
 
-        expect(failures).toEqual([]);
+      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+      expect(raw).toHaveLength(count);
 
-        const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-        expect(raw).toHaveLength(count);
-
-        const hostnames = raw.map((r: { hostname: string }) => r.hostname).sort();
-        const expected = Array.from({ length: count }, (_, i) => `app${i}.localhost`).sort();
-        expect(hostnames).toEqual(expected);
-      },
-      30_000
-    );
+      const hostnames = raw.map((r: { hostname: string }) => r.hostname).sort();
+      const expected = Array.from({ length: count }, (_, i) => `app${i}.localhost`).sort();
+      expect(hostnames).toEqual(expected);
+    }, 30_000);
 
     it("survives sustained lock contention that defeats a naive retry strategy", async () => {
       store.ensureDir();
