@@ -638,7 +638,7 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("prune", () => {
-    it("keeps an unrelated listener route until its port is free", async () => {
+    it("removes a stale route without killing an unrelated process on its port", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-safe-"));
       const listener = net.createServer();
       try {
@@ -660,14 +660,8 @@ describe("CLI", { timeout: 15_000 }, () => {
 
         const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
         expect(first.status).toBe(0);
-        expect(first.stdout).toContain(`PID ${process.pid} holds the port`);
+        expect(first.stdout).toContain("still holds the port and was not killed");
         expect(listener.listening).toBe(true);
-        expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([route]);
-
-        await new Promise<void>((resolve) => listener.close(() => resolve()));
-        const second = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
-        expect(second.status).toBe(0);
-        expect(second.stdout).toContain("Pruned 1 stale route");
         expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
       } finally {
         if (listener.listening)
