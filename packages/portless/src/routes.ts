@@ -138,7 +138,8 @@ export class RouteStore {
         fs.mkdirSync(this.lockPath);
         return true;
       } catch (err: unknown) {
-        if (isErrnoException(err) && err.code === "EEXIST") {
+        if (!isErrnoException(err)) return false;
+        if (err.code === "EEXIST") {
           try {
             const stat = fs.statSync(this.lockPath);
             if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
@@ -148,12 +149,12 @@ export class RouteStore {
           } catch {
             continue;
           }
-          const jitter = Math.floor(Math.random() * delay);
-          this.syncSleep(delay + jitter);
-          delay = Math.min(delay * 2, LOCK_RETRY_CAP_MS);
-        } else {
+        } else if (process.platform !== "win32" || err.code !== "EPERM") {
           return false;
         }
+        const jitter = Math.floor(Math.random() * delay);
+        this.syncSleep(delay + jitter);
+        delay = Math.min(delay * 2, LOCK_RETRY_CAP_MS);
       }
     }
     return false;
@@ -169,6 +170,11 @@ export class RouteStore {
 
   // Route I/O
   // ---------------------------------------------------------------------------
+
+  /** Whether the process that owns `route` is still running. */
+  isRouteOwnerAlive(route: RouteMapping): boolean {
+    return route.pid === 0 || this.isProcessAlive(route.pid);
+  }
 
   private isProcessAlive(pid: number): boolean {
     return pid === 0 || isPidAlive(pid);
@@ -377,6 +383,35 @@ export class RouteStore {
         else if (fields.cloudflarePid !== undefined) route.cloudflarePid = fields.cloudflarePid;
       }
       this.saveRoutes(routes);
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /**
+   * Hand a route over to another process. Only applies while the route is
+   * still owned by `fromPid`, so a `--force` takeover is never overwritten.
+   */
+  transferRoute(hostname: string, fromPid: number, toPid: number): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const routes = this.loadRoutes(true);
+      const route = routes.find((r) => r.hostname === hostname && r.pid === fromPid);
+      if (!route) return false;
+      route.pid = toPid;
+      // Tunnels and Serve config stop with the previous owner.
+      delete route.ngrokUrl;
+      delete route.ngrokPid;
+      delete route.cloudflareUrl;
+      delete route.cloudflarePid;
+      delete route.tailscaleUrl;
+      delete route.tailscaleHttpsPort;
+      delete route.tailscaleFunnel;
+      this.saveRoutes(routes);
+      return true;
     } finally {
       this.releaseLock();
     }

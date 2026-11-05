@@ -3,7 +3,8 @@
  * for each tool call.
  *
  * Intentionally omitted: run, <name> <cmd>, --name, and zero-arg mode
- * (foreground dev servers with no detached form), proxy start --foreground
+ * (foreground dev servers with no detached form), compose (runs Docker
+ * Compose, often in the foreground), proxy start --foreground
  * (blocks), trust, clean, hosts sync, hosts clean, and service (may prompt for
  * sudo or need a TTY), plus mcp and --help (the server itself and human help).
  */
@@ -103,6 +104,16 @@ const PORT_PROPERTY = {
   maximum: 65535,
   description: "Port number.",
 };
+const TLD_PROPERTY = {
+  type: "array",
+  items: { type: "string" },
+  minItems: 1,
+  description: "One or more TLDs to serve.",
+};
+const ALIAS_TLD_PROPERTY = {
+  ...TLD_PROPERTY,
+  description: "TLDs must already be configured; omit for all configured TLDs.",
+};
 
 /** Every tool, in tools/list order. */
 export const TOOLS: ToolDef[] = [
@@ -122,12 +133,13 @@ export const TOOLS: ToolDef[] = [
   tool(
     "get",
     "Get app URL",
-    "Print the URL for an app name, using the same hostname and worktree logic as portless run. The app does not need to be running.",
+    "Print the URL for an app name, using the same hostname and worktree logic as portless run: PORTLESS_PREFIX, worktree config, and git worktree detection. Worktree config comes from the current directory, including workspace root defaults, not the named app, so cd into a package to use its per-app options; invalid config fails instead of returning a guessed URL. Template labels over 63 characters are shortened with a stable hash suffix. The app does not need to be running.",
     {
       name: NAME_PROPERTY,
       noWorktree: {
         type: "boolean",
-        description: "Skip worktree prefix detection.",
+        description:
+          "Skip worktree config and naming: PORTLESS_PREFIX, portless.json worktree style and template, and git worktree detection, so the URL has no worktree label.",
       },
     },
     ["name"],
@@ -141,14 +153,15 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_add",
     "Add alias",
-    "Register a static route for a service portless does not run, such as a database.",
+    "Register a static route for a service portless does not run, such as a database. Registers it for every configured TLD unless tld selects specific ones.",
     {
       name: NAME_PROPERTY,
       port: PORT_PROPERTY,
+      tld: ALIAS_TLD_PROPERTY,
       force: {
         type: "boolean",
         description:
-          "Replace an existing route with the same name. If a running app owns it, that app is stopped.",
+          "Stop a conflicting app, if any, and replace its route; replacing a static alias stops nothing, and the stopped app's routes on other TLDs can also disappear.",
       },
     },
     ["name", "port"],
@@ -162,8 +175,8 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_remove",
     "Remove alias",
-    "Remove a static route registered with alias add.",
-    { name: NAME_PROPERTY },
+    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD unless tld selects specific ones.",
+    { name: NAME_PROPERTY, tld: ALIAS_TLD_PROPERTY },
     ["name"],
     {
       readOnlyHint: false,
@@ -189,17 +202,12 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_start",
     "Start proxy",
-    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it.',
+    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code.',
     {
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },
       lan: { type: "boolean", description: "Expose the proxy on the local network." },
-      tld: {
-        type: "array",
-        items: { type: "string" },
-        minItems: 1,
-        description: "One or more TLDs to serve.",
-      },
+      tld: TLD_PROPERTY,
       wildcard: {
         type: "boolean",
         description: "Allow unregistered subdomains to fall back to their parent route.",
@@ -418,12 +426,14 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       const name = readRequiredName(args, "name");
       const port = readPort(args, "port", true);
       argv.push("alias", name, String(port));
+      for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "force") === true) argv.push("--force");
       break;
     }
     case "alias_remove": {
       const name = readRequiredName(args, "name");
       argv.push("alias", "--remove", name);
+      for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       break;
     }
     case "tools_profiles":
@@ -775,6 +785,9 @@ export function printMcpHelp(): void {
       "  alias_add       Register a static route.",
       "  tools_profiles  Show active and available profiles.",
       "",
+      "Worktree options inherit from the workspace root into package directories.",
+      "Local values override. Templates must render valid DNS labels; labels over 63 characters are shortened with a stable hash suffix.",
+      "",
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",
       "to append CLI flags that are not typed into the tool schema.",
@@ -783,6 +796,7 @@ export function printMcpHelp(): void {
       "  PORTLESS_STATE_DIR  Directory for portless state.",
       "  PORTLESS_PORT       Default proxy port.",
       "  PORTLESS_TLD        Default TLD or comma separated TLD list.",
+      "  PORTLESS_PREFIX     Override the worktree label (empty disables it).",
       "",
       "Client config:",
       '  {"mcpServers":{"portless":{"command":"portless","args":["mcp"]}}}',

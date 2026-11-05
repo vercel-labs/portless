@@ -4,6 +4,7 @@ import * as http from "node:http";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as utils from "./utils.js";
 import { execFileSync } from "node:child_process";
 import {
   augmentedPath,
@@ -15,6 +16,7 @@ import {
   INTERNAL_LAN_IP_FLAG,
   LEGACY_SYSTEM_STATE_DIR,
   PRIVILEGED_PORT_THRESHOLD,
+  canBindProxyPort,
   RISKY_TLDS,
   USER_STATE_DIR,
   discoverState,
@@ -313,6 +315,29 @@ describe("isPortListening", () => {
     if (!addr || typeof addr === "string") throw new Error("no addr");
 
     expect(await isPortListening(addr.port)).toBe(true);
+  });
+
+  it("cancels an unfinished probe after its short deadline", async () => {
+    vi.useFakeTimers();
+    const cancel = vi.fn();
+    const connect = vi
+      .spyOn(utils, "createLoopbackConnection")
+      .mockImplementation((_port, callback) => {
+        cancel.mockImplementation(() =>
+          callback(Object.assign(new Error("Cancelled"), { code: "ABORT_ERR" }))
+        );
+        return cancel;
+      });
+    try {
+      const result = isPortListening(19877);
+      await vi.advanceTimersByTimeAsync(500);
+      expect(await result).toBe(false);
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      connect.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -2613,6 +2638,32 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
     }
     expect(isAlive(orphanPid)).toBe(false);
   });
+});
+
+describe("canBindProxyPort", () => {
+  it("returns true for a free unprivileged port", async () => {
+    const port = await findFreePort();
+    await expect(canBindProxyPort(port, getProxyBindTargets(false))).resolves.toBe(true);
+  });
+
+  it("leaves EADDRINUSE to the real listen", async () => {
+    const server = net.createServer();
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as net.AddressInfo;
+    try {
+      await expect(canBindProxyPort(port, [{ host: "127.0.0.1" }])).resolves.toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it.runIf(process.platform === "darwin" && process.getuid?.() !== 0)(
+    "reports EACCES for a privileged loopback bind and allows the wildcard on macOS",
+    async () => {
+      await expect(canBindProxyPort(81, getProxyBindTargets(false))).resolves.toBe(false);
+      await expect(canBindProxyPort(81, getProxyBindTargets(true))).resolves.toBe(true);
+    }
+  );
 });
 
 describe("canBindWithoutRoot", () => {

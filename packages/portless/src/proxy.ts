@@ -48,6 +48,20 @@ const HOP_BY_HOP_HEADERS = new Set([
   "upgrade",
 ]);
 
+// HTTP/2 multiplexes a whole cold page load onto one client connection, so
+// without a limit the proxy dials the backend once per request at the same
+// instant and overflows its accept backlog. Only dials in progress are
+// limited, so long-lived responses such as SSE never starve other requests.
+const MAX_PENDING_UPSTREAM_DIALS = 8;
+
+function formatProxyError(error: Error): string {
+  return error instanceof AggregateError
+    ? [error.message, ...error.errors.map(String)].filter(Boolean).join("; ")
+    : error.message;
+}
+
+const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
+
 /**
  * Client hop-by-hop headers dropped before forwarding a plain request.
  * Forwarding `Connection: keep-alive` leaves the backend socket open after
@@ -304,9 +318,98 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
   const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
+  const upstreamAgent = new http.Agent({ keepAlive: true });
+  const pendingConnections = new Set<() => void>();
+  let closing = false;
+  const connectUpstream = (
+    port: number,
+    callback: (error: NodeJS.ErrnoException | null, socket: net.Socket) => void
+  ) => {
+    if (closing) {
+      queueMicrotask(() => {
+        callback(
+          Object.assign(new Error("The operation was aborted"), { code: "ABORT_ERR" }),
+          undefined!
+        );
+      });
+      return () => undefined;
+    }
+    const cancel = createLoopbackConnection(port, (error, socket) => {
+      pendingConnections.delete(cancel);
+      callback(error, socket!);
+    });
+    pendingConnections.add(cancel);
+    return cancel;
+  };
+  const upstream = new Map<number, { dialing: number; waiting: (() => void)[] }>();
+  const upstreamState = (port: number) => {
+    let state = upstream.get(port);
+    if (!state) {
+      state = { dialing: 0, waiting: [] };
+      upstream.set(port, state);
+    }
+    return state;
+  };
+  const hasIdleSocket = (port: number) =>
+    (upstreamAgent.freeSockets[upstreamAgent.getName({ port })]?.length ?? 0) > 0;
+  // Start waiting requests once a dial settles and a slot or idle socket is free.
+  const drainUpstream = (port: number) => {
+    if (closing) return;
+    const state = upstream.get(port);
+    if (!state) return;
+    while (
+      state.waiting.length > 0 &&
+      (hasIdleSocket(port) || state.dialing < MAX_PENDING_UPSTREAM_DIALS)
+    ) {
+      state.waiting.shift()?.();
+    }
+    if (state.dialing === 0 && state.waiting.length === 0) upstream.delete(port);
+  };
+  const whenUpstreamReady = (port: number, send: () => void, res: http.ServerResponse) => {
+    const state = upstreamState(port);
+    if (hasIdleSocket(port) || state.dialing < MAX_PENDING_UPSTREAM_DIALS) {
+      send();
+    } else {
+      const cancel = () => {
+        const index = state.waiting.indexOf(waiting);
+        if (index !== -1) state.waiting.splice(index, 1);
+      };
+      const waiting = () => {
+        res.removeListener("close", cancel);
+        send();
+      };
+      state.waiting.push(waiting);
+      res.once("close", cancel);
+    }
+  };
+  // Dial via createLoopbackConnection so ::1-only backends work too.
+  upstreamAgent.createConnection = (options, callback) => {
+    const port = options.port as number;
+    const connection = (
+      options as typeof options & {
+        upstreamConnection: { cancel?: () => void };
+      }
+    ).upstreamConnection;
+    const state = upstreamState(port);
+    state.dialing++;
+    connection.cancel = connectUpstream(port, (error, socket) => {
+      state.dialing--;
+      callback?.(error, socket);
+      drainUpstream(port);
+    });
+    return undefined;
+  };
+  const closeUpstream = () => {
+    closing = true;
+    for (const state of upstream.values()) {
+      for (const send of state.waiting.splice(0)) send();
+    }
+    for (const cancel of pendingConnections) cancel();
+  };
+
   const refusesPeer = (address: string | undefined) => loopbackOnly && !isLoopbackPeer(address);
 
-  const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse) => {
+  const handleRequest = (req: http.IncomingMessage, res: http.ServerResponse, isReplay = false) => {
     if (refusesPeer(req.socket.remoteAddress)) {
       res.writeHead(403, { "Content-Type": "text/plain", [PORTLESS_HEADER]: "1" });
       res.end("Forbidden");
@@ -456,72 +559,116 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     if (!proxyReqHeaders.host) {
       proxyReqHeaders.host = getRequestHost(req);
     }
+    // HTTP/2 frames the body itself, so a stream can carry DATA with no
+    // content-length. Node only adds chunked framing by default for methods
+    // that usually have a body, so a GET, DELETE or OPTIONS body would reach
+    // the backend unframed and be parsed as garbage after the request.
+    const h2Stream = (req as unknown as http2.Http2ServerRequest).stream;
+    if (h2Stream && !h2Stream.endAfterHeaders && proxyReqHeaders["content-length"] === undefined) {
+      proxyReqHeaders["transfer-encoding"] = "chunked";
+    }
 
-    const proxyReq = http.request(
-      {
-        // Dial via createLoopbackConnection so ::1-only backends work too.
-        createConnection: () => createLoopbackConnection(route.port),
-        path: req.url,
-        method: req.method,
-        headers: proxyReqHeaders,
-      },
-      (proxyRes) => {
-        const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
-        if (reqTls) {
-          for (const h of HOP_BY_HOP_HEADERS) {
-            delete responseHeaders[h];
+    const send = () => {
+      // The client may have gone away while the request waited for a socket.
+      if (res.destroyed) return;
+      if (closing) {
+        res.destroy();
+        return;
+      }
+      const connection: { cancel?: () => void } = {};
+      const proxyReq = http.request(
+        {
+          agent: upstreamAgent,
+          ...{ upstreamConnection: connection },
+          port: route.port,
+          path: req.url,
+          method: req.method,
+          headers: proxyReqHeaders,
+        },
+        (proxyRes) => {
+          const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
+          if (reqTls) {
+            for (const h of HOP_BY_HOP_HEADERS) {
+              delete responseHeaders[h];
+            }
           }
+          res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+          proxyRes.on("error", () => {
+            if (!res.headersSent) {
+              res.writeHead(502, { "Content-Type": "text/plain" });
+              res.end();
+            } else {
+              // Headers already sent (mid-stream): destroy instead of end to
+              // send RST_STREAM. Calling res.end() here can cause a
+              // content-length mismatch that Chrome treats as a session error.
+              res.destroy();
+            }
+          });
+          proxyRes.pipe(res);
         }
-        res.writeHead(proxyRes.statusCode || 502, responseHeaders);
-        proxyRes.on("error", () => {
-          if (!res.headersSent) {
-            res.writeHead(502, { "Content-Type": "text/plain" });
-            res.end();
-          } else {
-            // Headers already sent (mid-stream): destroy instead of end to
-            // send RST_STREAM. Calling res.end() here can cause a
-            // content-length mismatch that Chrome treats as a session error.
-            res.destroy();
-          }
-        });
-        proxyRes.pipe(res);
-      }
-    );
+      );
 
-    proxyReq.on("error", (err) => {
-      req.unpipe(proxyReq);
-      req.resume();
-      onError(`Proxy error for ${getRequestHost(req)}: ${err.message}`);
-      if (!res.headersSent) {
+      proxyReq.on("error", (err) => {
+        if (res.destroyed || h2Stream?.destroyed || h2Stream?.closed) return;
         const errWithCode = err as NodeJS.ErrnoException;
-        const detail =
-          errWithCode.code === "ECONNREFUSED"
-            ? "The target app is not responding. It may have crashed."
-            : "The target app may not be running.";
-        sendProxyError(req, res, 502, "bad_gateway", detail, getRequestHost(req), () =>
-          renderPage(
-            502,
-            "Bad Gateway",
-            `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
-          )
-        );
-      }
-    });
+        // The backend closed a pooled socket as it was reused: replay once
+        // instead of returning a 502.
+        if (
+          !isReplay &&
+          proxyReq.reusedSocket &&
+          errWithCode.code === "ECONNRESET" &&
+          !res.headersSent &&
+          REPLAYABLE_METHODS.has(req.method || "") &&
+          // The first attempt consumed the body, so only bodiless requests replay.
+          !proxyReqHeaders["transfer-encoding"] &&
+          !Number(req.headers["content-length"])
+        ) {
+          req.unpipe(proxyReq);
+          handleRequest(req, res, true);
+          return;
+        }
+        req.unpipe(proxyReq);
+        req.resume();
+        if (errWithCode.code !== "ABORT_ERR") {
+          onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
+        }
+        if (!res.headersSent) {
+          const detail =
+            errWithCode.code === "ECONNREFUSED"
+              ? "The target app is not responding. It may have crashed."
+              : "The target app may not be running.";
+          sendProxyError(req, res, 502, "bad_gateway", detail, getRequestHost(req), () =>
+            renderPage(
+              502,
+              "Bad Gateway",
+              `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
+            )
+          );
+        }
+      });
 
-    // Abort the outgoing request if the client disconnects
-    res.on("close", () => {
-      if (!proxyReq.destroyed) {
-        proxyReq.destroy();
-      }
-    });
+      // Abort the outgoing request if the client disconnects
+      res.on("close", () => {
+        connection.cancel?.();
+        if (!proxyReq.destroyed) {
+          proxyReq.destroy();
+        }
+      });
 
-    req.on("error", () => {
-      if (!proxyReq.destroyed) {
-        proxyReq.destroy();
-      }
-    });
+      req.on("error", () => {
+        connection.cancel?.();
+        if (!proxyReq.destroyed) {
+          proxyReq.destroy();
+        }
+      });
 
-    req.pipe(proxyReq);
+      if (isReplay) {
+        proxyReq.end();
+      } else {
+        req.pipe(proxyReq);
+      }
+    };
+    whenUpstreamReady(route.port, send, res);
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
@@ -575,12 +722,21 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders.host = getRequestHost(req);
     }
 
+    const connection: { cancel?: () => void } = {};
     const proxyReq = http.request({
       // Dial via createLoopbackConnection so ::1-only backends work too.
-      createConnection: () => createLoopbackConnection(route.port),
+      createConnection: (_options, callback) => {
+        connection.cancel = connectUpstream(route.port, callback);
+        return undefined;
+      },
       path: req.url,
       method: req.method,
       headers: proxyReqHeaders,
+    });
+
+    socket.once("close", () => {
+      connection.cancel?.();
+      proxyReq.destroy();
     });
 
     // Whether the backend's handshake answer (101 or a rejection) has been
@@ -621,7 +777,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(req)}: ${err.message}`);
+      if (socket.destroyed) return;
+      if ((err as NodeJS.ErrnoException).code !== "ABORT_ERR") {
+        onError(`WebSocket proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
+      }
       // A dead backend (ECONNREFUSED) or a malformed rejection (e.g. Next.js
       // dev writes a bare "Unauthorized" with no status line when an Origin
       // is not allow-listed, which surfaces here as a parse error) would
@@ -735,9 +894,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders["sec-websocket-version"] = "13";
     }
 
+    const connection: { cancel?: () => void } = {};
     const proxyReq = http.request({
       // Dial via createLoopbackConnection so ::1-only backends work too.
-      createConnection: () => createLoopbackConnection(route.port),
+      createConnection: (_options, callback) => {
+        connection.cancel = connectUpstream(route.port, callback);
+        return undefined;
+      },
       path: req.url,
       method: "GET",
       headers: proxyReqHeaders,
@@ -804,7 +967,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
 
     proxyReq.on("error", (err) => {
-      onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${err.message}`);
+      if (res.destroyed || req.stream.destroyed || req.stream.closed) return;
+      if ((err as NodeJS.ErrnoException).code !== "ABORT_ERR") {
+        onError(`WebSocket proxy error for ${getRequestHost(compatReq)}: ${formatProxyError(err)}`);
+      }
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "text/plain" });
         res.end("Bad Gateway: the target app is not responding\n");
@@ -815,6 +981,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
     // Abort the backend handshake if the client goes away first.
     req.stream.on("close", () => {
+      connection.cancel?.();
       if (!proxyReq.destroyed) {
         proxyReq.destroy();
       }
@@ -925,18 +1092,33 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     // Proxy close() through to inner servers so tests and cleanup work.
     const origClose = wrapper.close.bind(wrapper);
     wrapper.close = function (cb?: (err?: Error) => void) {
+      closeUpstream();
       h2Server.close();
       plainServer.close();
+      upstreamAgent.destroy();
       return origClose(cb);
     } as typeof wrapper.close;
 
+    wrapper.on("listening", () => {
+      closing = false;
+    });
     return wrapper;
   }
 
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
+  httpServer.on("close", () => upstreamAgent.destroy());
+  const origClose = httpServer.close.bind(httpServer);
+  httpServer.close = function (cb?: (err?: Error) => void) {
+    closeUpstream();
+    return origClose(cb);
+  };
 
-  return loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
+  const server = loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
+  server.on("listening", () => {
+    closing = false;
+  });
+  return server;
 }
 
 /**

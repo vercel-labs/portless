@@ -74,7 +74,13 @@ describe("buildArgv", () => {
     ["get", { name: "backend", noWorktree: true }, ["get", "backend", "--no-worktree"]],
     ["get", { name: "backend", noWorktree: false }, ["get", "backend"]],
     ["alias_add", { name: "db", port: 5432, force: true }, ["alias", "db", "5432", "--force"]],
+    [
+      "alias_add",
+      { name: "db", port: 5432, tld: ["test", "localhost"], force: true },
+      ["alias", "db", "5432", "--tld", "test", "--tld", "localhost", "--force"],
+    ],
     ["alias_remove", { name: "db" }, ["alias", "--remove", "db"]],
+    ["alias_remove", { name: "db", tld: ["test"] }, ["alias", "--remove", "db", "--tld", "test"]],
     [
       "proxy_start",
       { port: 1355, noTls: true, tld: ["test", "localhost"] },
@@ -93,6 +99,12 @@ describe("buildArgv", () => {
 
   it("rejects a flag-shaped name so it cannot become a CLI flag", () => {
     expect(() => buildArgv("alias_add", { name: "--remove", port: 5432 })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+  });
+
+  it("rejects an empty tld list with -32602", () => {
+    expect(() => buildArgv("alias_add", { name: "db", port: 5432, tld: [] })).toThrow(
       expect.objectContaining({ code: -32602 })
     );
   });
@@ -222,6 +234,7 @@ describe("toToolResult", () => {
 const OMITTED_COMMANDS: Record<string, string> = {
   portless: "zero-arg and named mode run foreground dev servers",
   "portless run": "runs a foreground dev server",
+  "portless compose up": "runs Docker Compose, often in the foreground",
   "portless mcp": "the MCP server itself",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",

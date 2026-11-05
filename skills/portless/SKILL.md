@@ -149,6 +149,8 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"`, and `worktree.hostnameTemplate` to replace the hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash at runtime, and a template applies only when a label exists. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree. `get` reads worktree config from the current directory, not the named service's package, so `cd` into a package to use its per-app options; `get --no-worktree` skips worktree config and naming, and without it an invalid config in the current directory or workspace fails instead of printing a guessed URL. Worktree options inherit from the workspace root into package directories, and a package's own `portless.json` applies in a root multi-app startup; for worktree options, the `package.json` `"portless"` key is used only when the package has no `portless.json`, while `name`, `script`, `appPort`, and `proxy` keep their existing precedence. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
+
 ### Bypassing portless
 
 Set `PORTLESS=0` to run the command directly without the proxy:
@@ -177,9 +179,12 @@ When portless itself returns an error (404 for an unknown host, 421 for a misdir
 
 Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. When configured TLDs overlap (e.g. `example.com` and `dev.example.com`), hostnames are matched against the longest TLD first, regardless of configuration order. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
+`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected configured TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing, empty, or unconfigured value fails before any route changes, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
+
 TLDs can be multi-segment DNS names such as `dev.example.com`, so local URLs can mirror production structure (`myapp.dev.example.com`). Each label follows DNS rules: lowercase letters, digits, interior hyphens, 63 characters per label, 253 total. Strict OAuth providers that reject `.localhost` redirect URIs accept a real domain like `https://myapp.dev.example.com/api/auth/callback/google`.
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, VitePress, Astro, React Router, Angular, Expo, React Native, Wrangler), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag (`--ip` for Wrangler). Injection reaches through a package script whose command starts with the framework or a known runner (`"dev": "vite"`, `"dev": "bunx vite"`). Only the framework's server commands get the flags (`dev`, `serve`, `preview`, `start`, a bare `vite`, or `vite [root]`); a command that does not serve, such as `vite build`, `vite optimize`, `vp test` or `astro check`, rejects them and is left alone. Expo connection modes (`--localhost`, `--lan`, `--tunnel`) are preserved while the assigned port is still injected. A script portless cannot classify is left alone too: a flag before the subcommand on a CLI whose flag grammar it does not track (`vp --mode dev build`). Portless also leaves a script alone when appending flags to it would not work: a compound command (`&&`, `|`, `;`), a trailing `#` comment, its own `--` option terminator, an env prefix (`NODE_ENV=production vite`), delegation to another script (`"dev": "npm run dev:vite"`), or runner flags before the script name (`bun run --bun dev`). Those keep their own port, so set it in the script yourself.
+If a wrapped command self-daemonizes (exits while its server keeps listening on the assigned port), portless keeps the route pointed at that server and prints its PID. The route goes away when the server stops.
 
 ### State directory
 
@@ -191,6 +196,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | ------------------------- | ------------------------------------------------------------------------------- |
 | `PORTLESS_PORT`           | Override the default proxy port (default: 443 with HTTPS, 80 without)           |
 | `PORTLESS_APP_PORT`       | Use a fixed port for the app (skip auto-assignment)                             |
+| `PORTLESS_PREFIX`         | Set the worktree prefix (`""` for none, same as `--prefix`)                     |
 | `PORTLESS_HTTPS`          | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                 |
 | `PORTLESS_LAN`            | Set to `1` to always enable LAN mode (auto-detects LAN IP)                      |
 | `PORTLESS_LAN_IP`         | Pin a specific LAN IP for LAN mode                                              |
@@ -318,9 +324,10 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
+| `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
-| `portless get <name> --no-worktree`               | Print URL without worktree prefix                              |
+| `portless get <name> --no-worktree`               | Print URL without worktree config or naming                    |
 | `portless list`                                   | Show active routes and uptime                                  |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
@@ -344,8 +351,13 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless service status`                         | Show service and proxy status                                  |
 | `portless service uninstall`                      | Remove the startup service                                     |
 | `portless alias <name> <port>`                    | Register a static route (e.g. for Docker containers)           |
-| `portless alias <name> <port> --force`            | Overwrite an existing route                                    |
-| `portless alias --remove <name>`                  | Remove a static route                                          |
+| `portless alias <name> <port> --force`            | Stop the conflicting app and overwrite its route               |
+| `portless alias --remove <name>`                  | Remove PID 0 routes                                            |
+| `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                      |
+| `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected configured TLDs               |
+| `portless compose up [args...]`                   | Run a Docker Compose project with a route per service          |
+| `portless compose down [args...]`                 | Stop the compose project and remove its routes                 |
+| `portless.enable` / `.name` / `.ports` labels     | Skip a compose service, rename its route, or pick its ports    |
 | `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
@@ -361,7 +373,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless run --help`                             | Show help for a subcommand (also: alias, hosts, clean)         |
 | `portless --version` / `-v`                       | Show version                                                   |
 
-**Reserved names:** `run`, `get`, `alias`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## MCP server
 
@@ -373,18 +385,19 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 ## portless.json
 
-Optional config file. Portless looks for it in the current directory.
+Optional config file. Portless looks for it in the current directory; `worktree` options also inherit from the workspace root into package directories.
 
-| Field     | Type    | Default                    | Description                                              |
-| --------- | ------- | -------------------------- | -------------------------------------------------------- |
-| `name`    | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
-| `script`  | string  | `"dev"`                    | Name of a package.json script to run                     |
-| `appPort` | number  | auto-assigned              | Fixed port for the child process                         |
-| `proxy`   | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
-| `apps`    | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `turbo`   | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
+| Field      | Type    | Default                    | Description                                              |
+| ---------- | ------- | -------------------------- | -------------------------------------------------------- |
+| `name`     | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
+| `script`   | string  | `"dev"`                    | Name of a package.json script to run                     |
+| `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
+| `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
+| `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
+| `worktree` | object  |                            | Worktree label style and hostname template               |
+| `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`). When `apps` is present, top-level fields apply only in single-app mode.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
 
 ### package.json "portless" key
 
@@ -394,7 +407,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 { "portless": "myapp" }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
 
 ```json
 { "portless": { "name": "myapp", "script": "dev:app" } }
@@ -407,6 +420,10 @@ Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.
 ### Run diagnostics
 
 Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites.
+
+The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection, without a timer that abandons either family. A backend listening on both families may accept an extra connection that closes without an HTTP request. Later requests reuse the winning connection when possible.
+
+For upstream 502 errors, stop an existing proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
 
 ### Proxy not running
 
