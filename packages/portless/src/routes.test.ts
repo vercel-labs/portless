@@ -413,7 +413,7 @@ describe("RouteStore", () => {
       expect(routes[0].hostname).toBe("test.localhost");
     });
 
-    it.each([...Array(25).keys()])(
+    it.each([...Array(100).keys()])(
       "parallel addRoute stress (%i)",
       async () => {
         const count = 20;
@@ -424,9 +424,11 @@ describe("RouteStore", () => {
           scriptPath,
           [
             `import fs from "node:fs";`,
+            `import { syncBuiltinESMExports } from "node:module";`,
             `import { RouteStore } from ${JSON.stringify(importUrl)};`,
             `const mkdirSync = fs.mkdirSync;`,
             `fs.mkdirSync = (...args) => { try { return mkdirSync(...args); } catch (e) { if (e.code !== "EEXIST") console.error(e.stack); throw e; } };`,
+            `syncBuiltinESMExports();`,
             `const [dir, hostname, port] = process.argv.slice(2);`,
             `const store = new RouteStore(dir);`,
             `try { store.addRoute(hostname, Number(port), process.pid); console.log("ok"); }`,
