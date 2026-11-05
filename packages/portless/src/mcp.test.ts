@@ -73,6 +73,8 @@ describe("buildArgv", () => {
   it.each([
     ["get", { name: "backend", noWorktree: true }, ["get", "backend", "--no-worktree"]],
     ["get", { name: "backend", noWorktree: false }, ["get", "backend"]],
+    ["get", { name: "backend", json: true }, ["get", "backend", "--json"]],
+    ["list", { json: true }, ["list", "--json"]],
     ["alias_add", { name: "db", port: 5432, force: true }, ["alias", "db", "5432", "--force"]],
     [
       "alias_add",
@@ -181,12 +183,12 @@ describe("tools/call validation", () => {
     expect(res.result.content[0].text).toContain("Tool arguments: name, noWorktree");
     expect(res.result.content[0].text).not.toMatch(/Unknown argument\(s\)[^.]*cwd/);
 
-    const none = await call(["core"], "tools/call", {
+    const list = await call(["core"], "tools/call", {
       name: "list",
       arguments: { bogus: 1 },
     });
-    expect(none.result.isError).toBe(true);
-    expect(none.result.content[0].text).toContain("Tool arguments: none");
+    expect(list.result.isError).toBe(true);
+    expect(list.result.content[0].text).toContain("Tool arguments: json");
   });
 
   it("returns -32602 for an unknown tool and -32700 for a non-JSON line", async () => {

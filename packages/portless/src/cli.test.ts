@@ -439,6 +439,32 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("list", () => {
+    it("prints JSON for empty and registered routes and rejects unknown arguments", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-json-"));
+      try {
+        const options = { cwd: tmpDir, env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" } };
+        const empty = run(["list", "--json"], options);
+        expect(empty.status).toBe(0);
+        expect(JSON.parse(empty.stdout)).toEqual({ routes: [] });
+        const route = { hostname: "db.localhost", port: 5432, pid: 0, registeredAt: 123 };
+        fs.writeFileSync(path.join(tmpDir, "routes.json"), JSON.stringify([route]));
+        const json = run(["list", "--json"], options);
+        const human = run(["list"], options);
+        expect(json.status).toBe(0);
+        const listed = JSON.parse(json.stdout).routes;
+        expect(listed).toEqual([
+          { ...route, url: expect.stringMatching(/^http:\/\/db\.localhost/) },
+        ]);
+        expect(human.stdout).toContain(listed[0].url);
+        expect(human.stdout).toContain("localhost:5432");
+        const invalid = run(["list", "--bogus"], options);
+        expect(invalid.status).toBe(1);
+        expect(invalid.stderr).toContain('Error: Unknown flag "--bogus".');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("shows no active routes message when none registered", () => {
       // Note: the CLI discovers the state dir dynamically. We just verify
       // it doesn't crash and returns 0.
@@ -2160,9 +2186,9 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
 
       try {
-        const { status, stdout } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        const { status, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
         expect(status).toBe(0);
-        expect(stdout).toContain(`http://myapp.localhost:${proxyPort}`);
+        expect(stderr).toContain(`http://myapp.localhost:${proxyPort}`);
         expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
       } finally {
         run(["proxy", "stop"], { env });
@@ -2675,13 +2701,27 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
 
     it("prints URL for a given service name", () => {
-      const { status, stdout } = run(["get", "backend"], { env: getEnv() });
+      const { status, stdout } = run(["get", "backend"], { cwd: tmpDir, env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("prints get JSON using the same worktree-aware URL as plain get", () => {
+      const options = { cwd: tmpDir, env: { ...getEnv(), PORTLESS_PREFIX: "feature" } };
+      const plain = run(["get", "backend"], options);
+      const json = run(["get", "backend", "--json"], options);
+      expect(json.status).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual({
+        name: "backend",
+        hostname: "feature.backend.localhost",
+        url: plain.stdout.trim(),
+      });
+      const noWorktree = run(["get", "backend", "--json", "--no-worktree"], options);
+      expect(JSON.parse(noWorktree.stdout).hostname).toBe("backend.localhost");
+    });
+
     it("prints URL for a dotted service name", () => {
-      const { status, stdout } = run(["get", "api.backend"], { env: getEnv() });
+      const { status, stdout } = run(["get", "api.backend"], { cwd: tmpDir, env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/api\.backend\.localhost(:\d+)?$/);
     });
