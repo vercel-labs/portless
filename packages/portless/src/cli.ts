@@ -1736,11 +1736,11 @@ async function runApp(
     // a successful register or exits the process on final failure.
     tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
     const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
-    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+    console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
     if (wantsFunnel) {
-      console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+      console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
     } else {
-      console.log(chalk.gray("  (accessible from your tailnet)\n"));
+      console.error(chalk.gray("  (accessible from your tailnet)\n"));
     }
 
     try {
@@ -1764,8 +1764,8 @@ async function runApp(
         onExit: (code, signal) => handleTunnelExit(run, code, signal),
         configPath: path.join(store.dir, "cloudflared.yml"),
       });
-      console.log(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
-      console.log(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
+      console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
+      console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
 
       try {
         store.updateRoute(hostname, {
@@ -2376,18 +2376,18 @@ async function handleTrust(args: string[] = []): Promise<void> {
     // built in memory, so it presents the old chain until it restarts.
     if (await isProxyRunning(port, tls)) {
       const portFlag = port !== getDefaultPort(tls) ? ` -p ${port}` : "";
-      console.log(
+      console.error(
         colors.yellow("The running proxy still serves certificates from the previous CA.")
       );
-      console.log(
+      console.error(
         colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
       );
     }
   }
   const result = trustCA(dir);
   if (result.trusted) {
-    console.log(colors.green("Local CA added to system trust store."));
-    console.log(colors.gray("Browsers will now trust portless HTTPS certificates."));
+    console.error(colors.green("Local CA added to system trust store."));
+    console.error(colors.gray("Browsers will now trust portless HTTPS certificates."));
     return;
   }
 
@@ -2396,7 +2396,9 @@ async function handleTrust(args: string[] = []): Promise<void> {
   const isPermissionError =
     result.error?.includes("Permission denied") || result.error?.includes("EACCES");
   if (isPermissionError && !isWindows && process.getuid?.() !== 0) {
-    console.log(colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo..."));
+    console.error(
+      colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo...")
+    );
     const sudoResult = spawnSync(
       "sudo",
       [
@@ -4562,10 +4564,10 @@ async function runWithTurbo(
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
     for (const { label, url } of appUrls) {
       const pad = " ".repeat(maxLabel - label.length);
-      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+      console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.log("");
+  console.error("");
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
@@ -4668,10 +4670,10 @@ async function runWithDirectSpawn(
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
     for (const { label, url } of appUrls) {
       const pad = " ".repeat(maxLabel - label.length);
-      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+      console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.log("");
+  console.error("");
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
