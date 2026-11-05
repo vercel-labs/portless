@@ -208,7 +208,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_start",
     "Start proxy",
-    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code.',
+    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. See `portless proxy --help` for command-line options. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code.',
     {
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },
@@ -457,7 +457,7 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
         );
       }
       argv.push("proxy", "start");
-      if (port !== undefined) argv.push("-p", String(port));
+      if (port !== undefined) argv.push("--port", String(port));
       if (readBoolean(args, "noTls") === true) argv.push("--no-tls");
       if (readBoolean(args, "lan") === true) argv.push("--lan");
       for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);

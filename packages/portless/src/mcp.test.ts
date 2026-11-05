@@ -101,7 +101,7 @@ describe("buildArgv", () => {
     [
       "proxy_start",
       { port: 1355, noTls: true, tld: ["test", "localhost"] },
-      ["proxy", "start", "-p", "1355", "--no-tls", "--tld", "test", "--tld", "localhost"],
+      ["proxy", "start", "--port", "1355", "--no-tls", "--tld", "test", "--tld", "localhost"],
     ],
     ["version", {}, ["--version"]],
     ["list", { extraArgs: ["--x"], cwd: "/tmp", timeoutMs: 5 }, ["list", "--x"]],
@@ -331,7 +331,13 @@ describe("CLI coverage", () => {
         if (!owner) continue;
         const emitted = buildArgv(owner.name, sampleArgs(owner, false));
         for (const flag of line.match(/(?<=^|\s)(-p|--[a-z][a-z-]*)\b/g) ?? []) {
-          if (flag === "--help" || emitted.includes(flag)) continue;
+          const portAlias = flag === "-p" ? "--port" : flag === "--port" ? "-p" : undefined;
+          if (
+            flag === "--help" ||
+            emitted.includes(flag) ||
+            (portAlias && emitted.includes(portAlias))
+          )
+            continue;
           expect(
             () => buildArgv(owner.name, { ...sampleArgs(owner, true), extraArgs: [flag] }),
             `"${flag}" is in "portless ${page} --help" but the ${owner.name} tool does not handle it. Type it in mcp.ts or reject it.`
