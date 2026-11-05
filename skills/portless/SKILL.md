@@ -374,13 +374,13 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless <name> --force <cmd>`                   | Kill the existing process and take over its route              |
 | `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child    |
-| `portless help [command]`                         | Show main help or help for one command                         |
+| `portless --help` / `-h`                          | Show help                                                      |
 | `portless <command> --help` / `-h`                | Print command help without running it                          |
 | `portless --version` / `-v`                       | Show version                                                   |
 
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
-**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `mcp`, and `help` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## MCP server
 
