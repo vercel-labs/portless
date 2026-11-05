@@ -49,9 +49,16 @@ function editDistance(a: string, b: string): number {
   return d[a.length][b.length];
 }
 
-/** The command one edit away from `word`, if exactly one is, for "did you mean" hints. */
-export function suggestCommand(word: string | undefined): CommandName | undefined {
-  if (!word) return undefined;
-  const matches = COMMAND_NAMES.filter((name) => editDistance(word, name) === 1);
+/** The candidate one edit away from `word`, if exactly one is, for "did you mean" hints. */
+export function closestMatch<T extends string>(
+  word: string,
+  candidates: readonly T[]
+): T | undefined {
+  const matches = candidates.filter((name) => editDistance(word, name) === 1);
   return matches.length === 1 ? matches[0] : undefined;
+}
+
+/** The command one edit away from `word`, if exactly one is. */
+export function suggestCommand(word: string | undefined): CommandName | undefined {
+  return word ? closestMatch(word, COMMAND_NAMES) : undefined;
 }

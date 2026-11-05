@@ -322,6 +322,8 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 ## CLI Reference
 
+Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, missing value or argument, extra argument).
+
 | Command                                           | Description                                                    |
 | ------------------------------------------------- | -------------------------------------------------------------- |
 | `portless`                                        | Run dev script through proxy                                   |
