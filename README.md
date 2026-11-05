@@ -129,6 +129,8 @@ Run `portless --help` for the full list, or `portless <command> --help` for one 
 
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
+`portless clean` previews its cleanup and asks for confirmation. Use `portless clean --yes` (or `-y`) in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code.
+
 ## Platforms
 
 portless runs on macOS, Linux, and Windows with Node.js 24 or later. `--tailscale` and `--funnel` need the Tailscale CLI, `--ngrok` needs the ngrok CLI, and `--cloudflare` needs `cloudflared`.

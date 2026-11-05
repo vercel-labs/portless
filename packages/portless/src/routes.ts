@@ -389,30 +389,36 @@ export class RouteStore {
     }
   }
 
-  /**
-   * Remove all route entries whose owning process is dead and persist the
-   * result. Returns the removed stale entries so the caller can act on them.
-   */
-  pruneStaleRoutes(): RouteMapping[] {
+  /** Return routes whose owners are dead without removing them from storage. */
+  findStaleRoutes(): RouteMapping[] {
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
-      const all = this.loadRoutesRaw();
-      const alive: RouteMapping[] = [];
-      const stale: RouteMapping[] = [];
-      for (const r of all) {
-        if (r.pid === 0 || this.isProcessAlive(r.pid)) {
-          alive.push(r);
-        } else {
-          stale.push(r);
-        }
-      }
-      if (stale.length > 0) {
-        this.saveRoutes(alive);
-      }
-      return stale;
+      return this.loadRoutesRaw().filter(
+        (route) => route.pid !== 0 && !this.isProcessAlive(route.pid)
+      );
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /** Remove one route only while its recorded owner is still dead. */
+  removeStaleRoute(hostname: string, ownerPid: number): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const routes = this.loadRoutesRaw();
+      const remaining = routes.filter(
+        (route) =>
+          route.hostname !== hostname || route.pid !== ownerPid || this.isProcessAlive(route.pid)
+      );
+      if (remaining.length === routes.length) return false;
+      this.saveRoutes(remaining);
+      return true;
     } finally {
       this.releaseLock();
     }

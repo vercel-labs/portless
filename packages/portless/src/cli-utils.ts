@@ -2296,13 +2296,13 @@ export function injectPackageScriptFrameworkFlags(
 export function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output: process.stderr,
   });
   return new Promise((resolve) => {
     rl.on("close", () => resolve(""));
     rl.question(question, (answer) => {
-      rl.close();
       resolve(answer.trim().toLowerCase());
+      rl.close();
     });
   });
 }
