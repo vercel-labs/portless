@@ -97,7 +97,7 @@ If a wrapped command self-daemonizes, exiting while its server keeps listening o
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners such as Turborepo and CI scripts fail early with a clear message.
 
-`run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
+`run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `mcp`, and `help` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
 
 ### Share on Tailscale
 
@@ -471,11 +471,15 @@ Tools accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments, except `tools
 PORTLESS=0 pnpm dev
 ```
 
-Runs the command directly without the proxy.
+Runs the command directly without the proxy. Commands such as `portless get` and `portless list` still run normally.
 
-## Info
+## Help and version
 
 ```bash
 portless --help
+portless help list
+portless list --help
 portless --version
 ```
+
+`--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command: `portless run next dev --help` passes `--help` to Next.js. A misspelled command such as `portless lsit` suggests the closest match.
