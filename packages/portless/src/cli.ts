@@ -3432,37 +3432,37 @@ async function handleProxy(args: string[]): Promise<void> {
     return;
   }
 
-  const isForeground = args.includes("--foreground");
-  const skipTrust = args.includes("--skip-trust");
-  const hasUnprivilegedFlag = args.includes("--unprivileged");
+  const startFlags = parseCommandArgs(
+    "proxy start",
+    args.slice(2),
+    {
+      "--foreground": "boolean",
+      "--skip-trust": "boolean",
+      "--unprivileged": "boolean",
+      "--https": "boolean",
+      "--no-tls": "boolean",
+      "--wildcard": "boolean",
+      "--cert": "value",
+      "--key": "value",
+      "--port": "value",
+      "-p": "value",
+      "--tld": "value",
+    },
+    0
+  );
+  const isForeground = startFlags.has("--foreground");
+  const skipTrust = startFlags.has("--skip-trust");
+  const hasUnprivilegedFlag = startFlags.has("--unprivileged");
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
-  const hasHttpsFlag = args.includes("--https");
-  const hasNoTls = args.includes("--no-tls") || isHttpsEnvDisabled();
+  const hasHttpsFlag = startFlags.has("--https");
+  const hasNoTls = startFlags.has("--no-tls") || isHttpsEnvDisabled();
   const wantHttps = !hasNoTls;
 
-  // Parse optional --cert / --key for custom certificates
-  let customCertPath: string | null = null;
-  let customKeyPath: string | null = null;
-  const certIdx = args.indexOf("--cert");
-  if (certIdx !== -1) {
-    customCertPath = args[certIdx + 1] || null;
-    if (!customCertPath || customCertPath.startsWith("-")) {
-      console.error(colors.red("Error: --cert requires a file path."));
-      process.exit(1);
-    }
-  }
-  const keyIdx = args.indexOf("--key");
-  if (keyIdx !== -1) {
-    customKeyPath = args[keyIdx + 1] || null;
-    if (!customKeyPath || customKeyPath.startsWith("-")) {
-      console.error(colors.red("Error: --key requires a file path."));
-      process.exit(1);
-    }
-  }
-  if ((customCertPath && !customKeyPath) || (!customCertPath && customKeyPath)) {
-    console.error(colors.red("Error: --cert and --key must be used together."));
-    process.exit(1);
+  let customCertPath = startFlags.value("--cert") ?? null;
+  let customKeyPath = startFlags.value("--key") ?? null;
+  if (!customCertPath !== !customKeyPath) {
+    throw new UsageError("--cert and --key must be used together.");
   }
 
   // Custom cert/key implies HTTPS
@@ -3472,21 +3472,13 @@ async function handleProxy(args: string[]): Promise<void> {
   // port (443 for HTTPS, 80 for HTTP) so URLs are clean.
   let hasExplicitPort = false;
   let proxyPort = getDefaultPort(useHttps);
-  let portFlagIndex = args.indexOf("--port");
-  if (portFlagIndex === -1) portFlagIndex = args.indexOf("-p");
-  if (portFlagIndex !== -1) {
-    const portValue = args[portFlagIndex + 1];
-    if (!portValue || portValue.startsWith("-")) {
-      console.error(colors.red("Error: --port / -p requires a port number."));
-      console.error(colors.blue("Usage:"));
-      console.error(colors.cyan("  portless proxy start -p 8080"));
-      process.exit(1);
-    }
+  const portValue = startFlags.value("--port") ?? startFlags.value("-p");
+  if (portValue !== undefined) {
     const parsed = parsePort(portValue);
     if (parsed === null) {
-      console.error(colors.red(`Error: Invalid port number: ${portValue}`));
-      console.error(colors.blue("Port must be between 1 and 65535."));
-      process.exit(1);
+      throw new UsageError(`Invalid port number: ${portValue}`, [
+        "Port must be between 1 and 65535.",
+      ]);
     }
     proxyPort = parsed;
     hasExplicitPort = true;
@@ -3500,20 +3492,7 @@ async function handleProxy(args: string[]): Promise<void> {
     console.error(colors.red(`Error: ${(err as Error).message}`));
     process.exit(1);
   }
-  const tldFlagValues: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--tld") {
-      const tldValue = args[i + 1];
-      if (!tldValue || tldValue.startsWith("-")) {
-        console.error(
-          colors.red("Error: --tld requires a TLD value (e.g. test, dev.example.com).")
-        );
-        process.exit(1);
-      }
-      tldFlagValues.push(tldValue);
-      i += 1;
-    }
-  }
+  const tldFlagValues = startFlags.values("--tld");
   if (tldFlagValues.length > 0) {
     try {
       tlds = normalizeTlds(tldFlagValues.flatMap((value) => parseTldList(value)));
@@ -3524,7 +3503,7 @@ async function handleProxy(args: string[]): Promise<void> {
   }
   let tld = primaryTld(tlds);
   // Parse --wildcard flag (disables the default strict subdomain matching)
-  const useWildcard = args.includes("--wildcard") || isWildcardEnvEnabled();
+  const useWildcard = startFlags.has("--wildcard") || isWildcardEnvEnabled();
 
   const explicit: ProxyConfigExplicitness = {
     useHttps:
@@ -3537,7 +3516,7 @@ async function handleProxy(args: string[]): Promise<void> {
     lanMode: process.env.PORTLESS_LAN !== undefined,
     lanIp: process.env.PORTLESS_LAN_IP !== undefined,
     tlds: tldFlagValues.length > 0 || process.env.PORTLESS_TLD !== undefined,
-    useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
+    useWildcard: startFlags.has("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: hasUnprivilegedFlag || process.env.PORTLESS_UNPRIVILEGED !== undefined,
   };
 

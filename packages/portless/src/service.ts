@@ -13,6 +13,7 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
+import { UsageError } from "./args.js";
 import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
@@ -205,7 +206,7 @@ function parsePortValue(value: string, source: string): number {
 function getFlagValue(args: string[], index: number, flag: string): string {
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
-    throw new Error(`${flag} requires a value.`);
+    throw new UsageError(`${flag} requires a value.`);
   }
   return value;
 }
@@ -352,11 +353,11 @@ export function parseServiceInstallConfig(
       case "--foreground":
       case "--skip-trust":
         if (!options.allowRuntimeFlags) {
-          throw new Error(`Unknown service install option "${token}".`);
+          throw new UsageError(`Unknown service install option "${token}".`);
         }
         break;
       default:
-        throw new Error(`Unknown service install option "${token}".`);
+        throw new UsageError(`Unknown service install option "${token}".`);
     }
   }
 
@@ -364,7 +365,7 @@ export function parseServiceInstallConfig(
     (config.customCertPath && !config.customKeyPath) ||
     (!config.customCertPath && config.customKeyPath)
   ) {
-    throw new Error("--cert and --key must be used together.");
+    throw new UsageError("--cert and --key must be used together.");
   }
 
   // Match proxy start: unprivileged mode serves plain HTTP on 80 unless
@@ -1270,6 +1271,9 @@ export async function handleService(
       await installService(options.entryScript, runner, args);
       return;
     }
+    if (args.length > 2) {
+      throw new UsageError(`Unexpected argument "${args[2]}" for portless service ${action}.`);
+    }
     if (action === "uninstall") {
       await uninstallService(options.entryScript, runner);
       return;
@@ -1279,10 +1283,9 @@ export async function handleService(
       return;
     }
 
-    console.error(colors.red(`Error: Unknown service command "${action}".`));
-    printServiceHelp();
-    process.exit(1);
+    throw new UsageError(`Unknown service command "${action}".`, ["See: portless service --help"]);
   } catch (err) {
+    if (err instanceof UsageError) throw err;
     const message = err instanceof Error ? err.message : String(err);
     console.error(colors.red("Error:"), message);
     process.exit(1);
