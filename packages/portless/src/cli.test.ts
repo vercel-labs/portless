@@ -381,9 +381,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       [["service", "install", "--help"], "service"],
       [["alias", "foo", "3000", "--help"], "alias"],
       [["clean", "--help"], "clean"],
-      [["help", "trust"], "trust"],
-      [["help", "run"], "run"],
-      [["help", "compose"], "compose"],
     ])("prints help for %j without running the command", (args, command) => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
       try {
@@ -402,19 +399,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
-    });
-
-    it("reports an unknown help command", () => {
-      const { status, stderr } = run(["help", "nope"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("Unknown command");
-    });
-
-    it("suggests a command for a misspelled help topic", () => {
-      const { status, stderr } = run(["help", "lsit"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("Unknown command");
-      expect(stderr).toContain("portless help list");
     });
   });
 

@@ -111,7 +111,7 @@ The server does not start dev servers. Agents run `portless run <cmd>` in a shel
 
 ## Commands
 
-Run `portless --help` for the full list, or `portless help <command>` for one command. `--help` and `-h` only print help; they never run the command.
+Run `portless --help` for the full list, or `portless <command> --help` for one command. `--help` and `-h` only print help; they never run the command.
 
 | Group                | Commands                                                                              | Docs                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -121,7 +121,6 @@ Run `portless --help` for the full list, or `portless help <command>` for one co
 | HTTPS and DNS        | `trust`, `hosts sync`, `hosts clean`                                                  | [HTTPS](https://portless.sh/https), [Hosts](https://portless.sh/commands#hosts)                                                                               |
 | Inspect and clean up | `list`, `doctor`, `prune`, `clean`                                                    | [Doctor](https://portless.sh/commands#doctor), [Prune orphans](https://portless.sh/commands#prune-orphans), [Clean up](https://portless.sh/commands#clean-up) |
 | Agents               | `mcp`                                                                                 | [MCP server](https://portless.sh/commands#mcp-server)                                                                                                         |
-| Help                 | `help [command]`                                                                      | [Command help](https://portless.sh/commands#help-and-version)                                                                                                 |
 
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes.
 
