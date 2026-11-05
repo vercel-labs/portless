@@ -423,7 +423,10 @@ describe("RouteStore", () => {
         fs.writeFileSync(
           scriptPath,
           [
+            `import fs from "node:fs";`,
             `import { RouteStore } from ${JSON.stringify(importUrl)};`,
+            `const mkdirSync = fs.mkdirSync;`,
+            `fs.mkdirSync = (...args) => { try { return mkdirSync(...args); } catch (e) { if (e.code !== "EEXIST") console.error(e.stack); throw e; } };`,
             `const [dir, hostname, port] = process.argv.slice(2);`,
             `const store = new RouteStore(dir);`,
             `try { store.addRoute(hostname, Number(port), process.pid); console.log("ok"); }`,
