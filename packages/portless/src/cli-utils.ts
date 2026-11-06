@@ -1460,25 +1460,21 @@ export function getProcessCommand(pid: number): string | null {
   }
 }
 
-/**
- * Kill a process group left behind by a portless session that died without
- * cleaning up. The group is only signaled while its leader is alive, still
- * leads the group, and has the start time recorded at spawn, so a recycled PID
- * is not targeted. Returns true when the signal was sent.
- */
+/** Signal a process group only while its recorded member and start time still match. */
 export function killOrphanedProcessGroup(
   pgid: number,
   startTime: string | undefined,
-  signal: NodeJS.Signals = "SIGTERM"
+  signal: NodeJS.Signals = "SIGTERM",
+  identityPid = pgid
 ): boolean {
   if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
   try {
-    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pgid)], {
+    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(identityPid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
     });
     if (Number(output.trim()) !== pgid) return false;
-    if (getProcessStartTime(pgid) !== startTime) return false;
+    if (getProcessStartTime(identityPid) !== startTime) return false;
     process.kill(-pgid, signal);
     return true;
   } catch {

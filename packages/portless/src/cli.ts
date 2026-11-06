@@ -2457,7 +2457,7 @@ async function handleClean(args: string[]): Promise<void> {
   console.error(`  Remove the portless block from ${HOSTS_DISPLAY}`);
 
   if (!parsed.has("--yes") && !parsed.has("-y")) {
-    if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.CI !== undefined) {
+    if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.CI) {
       throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
     }
     const answer = await prompt("Continue? [y/N] ");
@@ -2492,12 +2492,13 @@ async function handleClean(args: string[]): Promise<void> {
   console.log(colors.cyan("Stopping proxy if it is running..."));
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
-    onWarning: (msg) => {
-      console.warn(colors.yellow(msg));
-      problems++;
-    },
+    onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
   await stopProxy(store, port, tls);
+  if (await isProxyRunning(port, tls)) {
+    console.error(colors.red(`Proxy is still running on port ${port}. Stop it and retry clean.`));
+    problems++;
+  }
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
   const routesForClean = store.loadRoutesRaw();
@@ -2510,7 +2511,7 @@ async function handleClean(args: string[]): Promise<void> {
         // Tailscale may not be installed; non-fatal
       }
     }
-    for (const t of stopRecordedTunnels(route)) {
+    for (const t of stopRecordedTunnels(route, true)) {
       console.log(colors.green(`Stopped ${t.label} tunnel for ${route.hostname}.`));
     }
   }
@@ -2576,12 +2577,15 @@ async function handleClean(args: string[]): Promise<void> {
 
 function printPruneHelp(): void {
   console.log(`
-${colors.bold("portless prune")} - Kill orphaned dev servers left behind by crashed portless sessions.
+${colors.bold("portless prune")} - Clean up routes left by crashed portless sessions.
 
-When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
-may survive and continue holding their ports. This command finds those orphans
-by checking routes whose owning CLI process is dead but whose port is still in
-use, then terminates them and cleans up the stale route entries.
+Finds routes whose owning portless process is gone. On macOS and Linux, it
+signals the recorded dev server process group only if its leader matches, or a
+previously recorded surviving member matches on retry. It removes stale routes
+and their Tailscale and tunnel shares. A group that still holds its port after
+SIGTERM keeps its route; retry with --force.
+Unrelated port holders are reported, never killed. On Windows, process groups
+and recorded tunnel processes cannot be verified or signaled.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2609,45 +2613,71 @@ async function handlePrune(args: string[]): Promise<void> {
     return;
   }
 
-  let killed = 0;
   let pruned = 0;
   let skipped = 0;
   const signal = forceKill ? "SIGKILL" : "SIGTERM";
   const killedGroups = new Set<number>();
+  const survivingGroups = new Set<number>();
   for (const route of stale) {
     const pgid = route.childPgid;
     if (
       pgid &&
       !killedGroups.has(pgid) &&
-      killOrphanedProcessGroup(pgid, route.childStartTime, signal)
+      (killOrphanedProcessGroup(pgid, route.childStartTime, signal) ||
+        (route.orphanPid !== undefined &&
+          killOrphanedProcessGroup(pgid, route.orphanStartTime, signal, route.orphanPid)))
     ) {
       killedGroups.add(pgid);
-      killed++;
-      console.log(`  ${route.hostname} - killed process group ${pgid} (${signal})`);
     }
   }
 
   for (const route of stale) {
-    if (route.childPgid && killedGroups.has(route.childPgid)) {
+    const pgid = route.childPgid;
+    const signaled = pgid !== undefined && killedGroups.has(pgid);
+    if (signaled) {
       for (let i = 0; i < 20 && (await isPortListening(route.port)); i++) {
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
     }
-    if (!store.removeStaleRoute(route.hostname, route.pid)) {
+    const holders = findPidsOnPort(route.port);
+    const held = holders.length > 0 || (await isPortListening(route.port));
+    const groupHolder =
+      signaled &&
+      holders.find((pid) => {
+        const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+          encoding: "utf-8",
+          timeout: 2000,
+        });
+        return result.status === 0 && Number(result.stdout.trim()) === pgid;
+      });
+    const groupHoldsPort =
+      signaled &&
+      held &&
+      ((groupHolder !== false && groupHolder !== undefined) ||
+        (holders.length === 0 && getProcessStartTime(pgid) === route.childStartTime));
+    if (groupHoldsPort) {
+      if (groupHolder) {
+        const startTime = getProcessStartTime(groupHolder);
+        if (startTime) store.recordStaleOrphan(route, groupHolder, startTime);
+      }
+      survivingGroups.add(pgid);
+      skipped++;
+      console.log(
+        `  ${route.hostname} :${route.port} - process group ${pgid} did not exit; route kept. Retry with portless prune --force`
+      );
+    } else if (!store.removeStaleRoute(route.hostname, route.pid)) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
       );
       skipped++;
       continue;
+    } else {
+      pruned++;
+      const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
+      console.log(
+        `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
+      );
     }
-
-    pruned++;
-    const holders = findPidsOnPort(route.port);
-    const held = holders.length > 0 || (await isPortListening(route.port));
-    const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
-    console.log(
-      `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
-    );
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
@@ -2658,11 +2688,15 @@ async function handlePrune(args: string[]): Promise<void> {
         console.warn(colors.yellow(`  ${route.hostname} - could not remove tailscale serve`));
       }
     }
-    for (const t of stopRecordedTunnels(route)) {
+    for (const t of stopRecordedTunnels(route, true)) {
       console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
   }
 
+  for (const pgid of killedGroups) {
+    if (!survivingGroups.has(pgid)) console.log(`  killed process group ${pgid} (${signal})`);
+  }
+  const killed = killedGroups.size - survivingGroups.size;
   const routeWord = pruned === 1 ? "route" : "routes";
   const procWord = killed === 1 ? "process" : "processes";
   const skippedSummary =

@@ -6,7 +6,12 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canBindProxyPort, getProxyBindTargets } from "./cli-utils.js";
+import {
+  canBindProxyPort,
+  findPidsOnPort,
+  getProcessStartTime,
+  getProxyBindTargets,
+} from "./cli-utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_PROOF_HEADER,
@@ -636,6 +641,60 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("prune", () => {
+    it.skipIf(process.platform === "win32")(
+      "keeps a surviving orphan for prune --force",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-retry-"));
+        const child = spawn(
+          "sh",
+          [
+            "-c",
+            '"$1" -e "$2"',
+            "sh",
+            process.execPath,
+            'process.on("SIGTERM",()=>{});require("net").createServer().listen(0,"127.0.0.1",function(){console.log(this.address().port)})',
+          ],
+          {
+            detached: true,
+            stdio: ["ignore", "pipe", "ignore"],
+          }
+        );
+        try {
+          const port = await new Promise<number>((resolve, reject) => {
+            child.once("error", reject);
+            child.stdout.once("data", (data) => resolve(Number(data.toString().trim())));
+          });
+          const childPgid = child.pid!;
+          const childStartTime = getProcessStartTime(childPgid);
+          expect(childStartTime).toBeTruthy();
+          const routesPath = path.join(tmpDir, "routes.json");
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              { hostname: "retry.localhost", port, pid: 999999, childPgid, childStartTime },
+            ])
+          );
+          const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+          expect(first.status).toBe(0);
+          expect(first.stdout).toContain("did not exit");
+          expect(first.stdout).toContain("portless prune --force");
+          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toHaveLength(1);
+          const second = run(["prune", "--force"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+          expect(second.status).toBe(0);
+          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
+          expect(findPidsOnPort(port)).toEqual([]);
+        } finally {
+          try {
+            process.kill(-child.pid!, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      15_000
+    );
+
     it("removes a stale route without killing an unrelated process on its port", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-safe-"));
       const listener = net.createServer();
@@ -2187,6 +2246,50 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("clean subcommand", () => {
+    it.skipIf(process.platform === "win32")(
+      "clean --yes removes a leftover routes.lock directory",
+      async ({ skip }) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-lock-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        const bin = path.join(tmpDir, "bin");
+        try {
+          let hostsWritable = true;
+          try {
+            fs.accessSync("/etc/hosts", fs.constants.W_OK);
+          } catch {
+            hostsWritable = false;
+          }
+          if (
+            fs.existsSync("/tmp/portless") ||
+            hostsWritable ||
+            fs.readFileSync("/etc/hosts", "utf-8").includes("# portless-start")
+          )
+            skip();
+          fs.mkdirSync(path.join(stateDir, "routes.lock"), { recursive: true });
+          fs.mkdirSync(home);
+          fs.mkdirSync(bin);
+          fs.symlinkSync(process.execPath, path.join(bin, "node"));
+          fs.writeFileSync(path.join(stateDir, "routes.json"), "not json");
+          const result = run(["clean", "--yes"], {
+            env: {
+              HOME: home,
+              PORTLESS_STATE_DIR: stateDir,
+              PATH: bin,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+              NODE_OPTIONS: undefined,
+            },
+          });
+          expect(result.status, result.stderr).toBe(0);
+          expect(fs.existsSync(path.join(stateDir, "routes.lock"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
     it("refuses non-interactive cleanup without confirmation", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-confirm-"));
       try {

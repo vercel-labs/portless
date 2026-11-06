@@ -28,6 +28,8 @@ export interface RouteMapping extends RouteInfo {
   childPgid?: number;
   /** Start time of the process group leader, as reported by `ps`. */
   childStartTime?: string;
+  orphanPid?: number;
+  orphanStartTime?: string;
   tailscaleUrl?: string;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
@@ -390,6 +392,30 @@ export class RouteStore {
       return this.loadRoutesRaw().filter(
         (route) => route.pid !== 0 && !this.isProcessAlive(route.pid)
       );
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /** Save a surviving group member only if the stale route is unchanged. */
+  recordStaleOrphan(route: RouteMapping, orphanPid: number, orphanStartTime: string): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) throw new Error("Failed to acquire route lock");
+    try {
+      const routes = this.loadRoutesRaw();
+      const current = routes.find(
+        (entry) =>
+          entry.hostname === route.hostname &&
+          entry.pid === route.pid &&
+          entry.childPgid === route.childPgid &&
+          entry.childStartTime === route.childStartTime &&
+          !this.isProcessAlive(entry.pid)
+      );
+      if (!current) return false;
+      current.orphanPid = orphanPid;
+      current.orphanStartTime = orphanStartTime;
+      this.saveRoutes(routes);
+      return true;
     } finally {
       this.releaseLock();
     }

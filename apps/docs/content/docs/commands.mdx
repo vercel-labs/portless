@@ -286,9 +286,9 @@ portless prune
 portless prune --force
 ```
 
-Finds and kills orphaned dev server processes left behind by crashed portless sessions. When the CLI is killed with `kill -9` or crashes, child dev servers may survive and continue holding their ports. This command checks routes whose owning process is dead but whose port is still in use, terminates the orphans, and removes the stale route entries. Use `--force` to send SIGKILL instead of SIGTERM.
+Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time. If the group still holds the port after SIGTERM, prune keeps the route and records a surviving listener so you can retry with `portless prune --force`, which verifies that listener and sends SIGKILL. Prune reports unrelated port holders without killing them.
 
-On macOS and Linux, prune stops the whole process group portless started for the route, including processes that do not hold the port. A group is only signaled when its leader still has the start time portless recorded at spawn, so a reused PID is never targeted. `portless run` does the same cleanup on startup for routes whose session died.
+On Windows, prune cannot verify or signal process groups or recorded tunnel processes. It removes stale routes and Tailscale shares and reports any port holders. `portless run` also attempts to stop recorded orphaned process groups on startup.
 
 ## Proxy control
 
