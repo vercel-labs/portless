@@ -4425,6 +4425,28 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
     }, 30_000);
 
+    it("serves HTTPS with --https even when PORTLESS_HTTPS=0", () => {
+      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-home-"));
+      try {
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_HTTPS: "0",
+          HOME: homeDir,
+          USERPROFILE: homeDir,
+        };
+        const start = run(["proxy", "start", "--https", "--skip-trust", "-p", String(testPort)], {
+          env,
+        });
+        expect(start.status).toBe(0);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+        expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain(
+          "HTTPS/2 proxy listening on"
+        );
+      } finally {
+        fs.rmSync(homeDir, { recursive: true, force: true });
+      }
+    }, 30_000);
+
     it("never writes the hosts file in unprivileged mode", async () => {
       const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -4611,6 +4633,42 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("hello");
     });
+
+    it("bare portless gives the app PORTLESS_APP_PORT over portless.json appPort", async () => {
+      const proxyPort = await getFreePort();
+      const configPort = await getFreePort();
+      const envPort = await getFreePort();
+      const proxyEnv = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: String(proxyPort),
+        PORTLESS_HTTPS: "0",
+      };
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "node -e \"console.log('port=' + process.env.PORT)\"" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "test-app", appPort: configPort })
+      );
+      try {
+        const start = run(["proxy", "start"], { env: proxyEnv });
+        expect(start.status).toBe(0);
+
+        const { status, stdout } = run([], {
+          cwd: tmpDir,
+          env: { ...proxyEnv, PORTLESS_APP_PORT: String(envPort) },
+        });
+        expect(status).toBe(0);
+        expect(stdout).toContain(`port=${envPort}`);
+        expect(stdout).not.toContain(`port=${configPort}`);
+      } finally {
+        run(["proxy", "stop"], { env: proxyEnv });
+      }
+    }, 30_000);
 
     // Run the CLI against a fake package-manager binary (shim) that records
     // the args and env it was invoked with, so package-script flag forwarding

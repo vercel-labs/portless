@@ -3616,7 +3616,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (also --port)
-  ${colors.cyan("portless proxy start --unprivileged")}  Port 80 without sudo; plain HTTP unless --https
+  ${colors.cyan("portless proxy start --unprivileged")}  Port 80 without sudo (443 with --https); plain HTTP unless --https
   ${colors.cyan("portless proxy start --https")}        Serve HTTPS, even with --unprivileged or PORTLESS_HTTPS=0
   ${colors.cyan("portless proxy start --cert <path> --key <path>")}  Use a custom certificate and key
   ${colors.cyan("portless proxy start --lan --ip <address>")}  Pin the LAN IP
