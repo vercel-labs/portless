@@ -509,7 +509,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("--prefix <label>");
       expect(stdout).toContain("portless doctor");
       expect(stdout).not.toContain("--port");
-      expect(stdout).not.toContain("-p, --port");
       expect(stdout).not.toContain("--foreground");
       expect(stdout).toContain("Proxy options: portless proxy --help");
       expect(stdout).toContain("PORTLESS_APP_PORT");
@@ -524,7 +523,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stdout } = run(["proxy", "--help"]);
       expect(status).toBe(0);
       for (const flag of [
-        "-p",
         "--port",
         "--https",
         "--no-tls",
