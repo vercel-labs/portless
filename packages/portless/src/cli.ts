@@ -55,6 +55,7 @@ import {
   registerFunnel,
   registerServe,
   unregisterTailscale,
+  type ServeScheme,
 } from "./tailscale.js";
 import { ensureNgrokAvailable, startNgrok, stopNgrokProcess, stopTunnelPid } from "./tunnel.js";
 import { ensureCloudflaredAvailable, startCloudflare } from "./cloudflare.js";
@@ -1464,15 +1465,29 @@ async function runApp(
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
-  const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
+  const wantsTailscaleHttp = isEnabledEnv(process.env.PORTLESS_TAILSCALE_HTTP);
+  const wantsTailscale =
+    wantsFunnel || wantsTailscaleHttp || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
   const tunnels = PROCESS_TUNNELS.filter((t) => isEnabledEnv(process.env[t.env]));
+  const tailscaleScheme: ServeScheme = wantsTailscaleHttp ? "http" : "https";
   let tsBaseUrl: string | undefined;
+
+  if (wantsFunnel && wantsTailscaleHttp) {
+    console.error(colors.red("Error: --funnel cannot be combined with --tailscale-http."));
+    console.error(
+      colors.blue(
+        "Funnel serves the public internet over TLS and has no plain-HTTP mode. Use one or the other."
+      )
+    );
+    process.exit(1);
+  }
 
   if (wantsTailscale) {
     try {
       const tsReady = ensureTailscaleReady({
         requireFunnel: wantsFunnel,
-        requireHttps: true,
+        requireHttps: !wantsTailscaleHttp,
+        scheme: tailscaleScheme,
       });
       tsBaseUrl = tsReady.baseUrl;
     } catch (err: unknown) {
@@ -1480,7 +1495,10 @@ async function runApp(
       console.error(colors.red(`Error: ${message}`));
       if (message.includes("not found")) {
         console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
-      } else if (!message.includes("not enabled on your tailnet")) {
+      } else if (
+        !message.includes("not enabled on your tailnet") &&
+        !message.includes("MagicDNS is disabled")
+      ) {
         console.error(colors.blue("Make sure Tailscale is connected:"));
         console.error(colors.cyan("  tailscale up"));
       }
@@ -1652,12 +1670,16 @@ async function runApp(
     const maxAttempts = 3;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const usedPorts = getUsedServePorts();
-      tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
+      tailscaleHttpsPort = findAvailableServePort(
+        usedPorts,
+        wantsFunnel ? "funnel" : "serve",
+        tailscaleScheme
+      );
       try {
         if (wantsFunnel) {
           registerFunnel(port, tailscaleHttpsPort);
         } else {
-          registerServe(port, tailscaleHttpsPort);
+          registerServe(port, tailscaleHttpsPort, { scheme: tailscaleScheme });
         }
         break;
       } catch (err: unknown) {
@@ -1685,6 +1707,7 @@ async function runApp(
         tailscaleUrl: tailscaleUrl,
         tailscaleHttpsPort,
         tailscaleFunnel: wantsFunnel || undefined,
+        tailscaleHttp: wantsTailscaleHttp || undefined,
       });
     } catch {
       // Non-fatal: the local hostname keeps routing without it, but the
@@ -1725,6 +1748,7 @@ async function runApp(
         unregisterTailscale({
           tailscaleHttpsPort,
           tailscaleFunnel: wantsFunnel || undefined,
+          tailscaleHttp: wantsTailscaleHttp || undefined,
         });
       } catch {
         // Best-effort cleanup; non-fatal
@@ -1827,6 +1851,7 @@ async function runApp(
         unregisterTailscale({
           tailscaleHttpsPort,
           tailscaleFunnel: wantsFunnel || undefined,
+          tailscaleHttp: wantsTailscaleHttp || undefined,
         });
       } catch {
         // Best-effort cleanup; non-fatal
@@ -1890,6 +1915,11 @@ function applySharingFlag(flag: string): boolean {
     process.env.PORTLESS_TAILSCALE = "1";
     return true;
   }
+  if (flag === "--tailscale-http") {
+    process.env.PORTLESS_TAILSCALE_HTTP = "1";
+    process.env.PORTLESS_TAILSCALE = "1";
+    return true;
+  }
   if (flag === "--funnel") {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
@@ -1943,6 +1973,7 @@ ${colors.bold("Options:")}
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
+  --tailscale-http       Share on the tailnet over plain HTTP (no MagicDNS needed)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
   --cloudflare           Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
@@ -1998,7 +2029,7 @@ ${colors.bold("Examples:")}
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --name, --prefix, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
+          "Known flags: --name, --prefix, --force, --app-port, --tailscale, --tailscale-http, --funnel, --ngrok, --cloudflare, --help"
         )
       );
       process.exit(1);
@@ -2039,7 +2070,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
+          "Known flags: --force, --app-port, --tailscale, --tailscale-http, --funnel, --ngrok, --cloudflare"
         )
       );
       process.exit(1);
@@ -2067,7 +2098,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
       console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
       console.error(
         colors.blue(
-          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
+          "Known flags: --force, --app-port, --tailscale, --tailscale-http, --funnel, --ngrok, --cloudflare"
         )
       );
       process.exit(1);
@@ -2214,9 +2245,13 @@ ${colors.bold("Tailscale sharing:")}
   8444, etc.) so no basePath configuration is needed.
   Use --funnel to expose your dev server to the public internet via
   Tailscale Funnel. Requires Tailscale CLI to be installed and connected,
-  with Tailscale HTTPS certificates enabled. Funnel must also be enabled
-  on your tailnet.
+  with MagicDNS and Tailscale HTTPS certificates enabled. Funnel must also
+  be enabled on your tailnet.
+  Use --tailscale-http on tailnets that cannot enable MagicDNS. It serves
+  plain HTTP inside the tailnet, addressed by this node's tailnet IP, so no
+  certificate is needed. Traffic stays encrypted by WireGuard.
   ${colors.cyan("portless myapp --tailscale next dev")}
+  ${colors.cyan("portless myapp --tailscale-http next dev")}
   ${colors.cyan("portless myapp --funnel next dev")}
 
 ${colors.bold("ngrok sharing:")}
@@ -2254,6 +2289,7 @@ ${colors.bold("Options:")}
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
+  --tailscale-http              Share on the tailnet over plain HTTP (no MagicDNS needed)
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
@@ -2273,6 +2309,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
+  PORTLESS_TAILSCALE_HTTP=1     Share on the tailnet over plain HTTP (same as --tailscale-http)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
   PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
   PORTLESS_CLOUDFLARE=1         Share apps publicly via Cloudflare (same as --cloudflare)
@@ -5218,6 +5255,7 @@ async function main() {
   const globalBooleanFlags = new Set([
     "--lan",
     "--tailscale",
+    "--tailscale-http",
     "--funnel",
     "--ngrok",
     "--cloudflare",
@@ -5332,6 +5370,10 @@ async function main() {
   }
 
   if (stripGlobalFlag("--tailscale", false)) {
+    process.env.PORTLESS_TAILSCALE = "1";
+  }
+  if (stripGlobalFlag("--tailscale-http", false)) {
+    process.env.PORTLESS_TAILSCALE_HTTP = "1";
     process.env.PORTLESS_TAILSCALE = "1";
   }
   if (stripGlobalFlag("--funnel", false)) {
