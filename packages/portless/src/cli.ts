@@ -174,13 +174,7 @@ import {
 } from "./service.js";
 import { runMcp } from "./mcp.js";
 import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
-import {
-  parseCommandArgs,
-  parseLeadingArgs,
-  UsageError,
-  type FlagKind,
-  type ParsedArgs,
-} from "./args.js";
+import { parseCommandArgs, visitLeadingFlags, UsageError, type FlagKind } from "./args.js";
 
 const chalk = colors;
 
@@ -1931,7 +1925,6 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
-/** Flags `run` takes before its child command. */
 const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--name": "value",
   "--prefix": "text",
@@ -1945,7 +1938,6 @@ const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "-h": "boolean",
 };
 
-/** Flags a named app takes before its child command. */
 const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--force": "boolean",
   "--app-port": "value",
@@ -1955,15 +1947,13 @@ const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--cloudflare": "boolean",
 };
 
-/** Turn the sharing flags that were actually given into their env vars. */
-function enableSharingFlags(flags: ParsedArgs): void {
-  if (flags.has("--tailscale")) process.env.PORTLESS_TAILSCALE = "1";
-  if (flags.has("--funnel")) {
+function enableSharingFlag(flag: string): void {
+  if (flag === "--tailscale") process.env.PORTLESS_TAILSCALE = "1";
+  else if (flag === "--funnel") {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
-  }
-  if (flags.has("--ngrok")) process.env.PORTLESS_NGROK = "1";
-  if (flags.has("--cloudflare")) process.env.PORTLESS_CLOUDFLARE = "1";
+  } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
+  else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
 }
 
 function printRunHelp(): void {
@@ -2022,22 +2012,40 @@ ${colors.bold("Examples:")}
  * passed through untouched.
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
-  const { flags, rest } = parseLeadingArgs("run", args, RUN_FLAG_SPEC);
+  let force = false;
+  let appPort: number | undefined;
+  let name: string | undefined;
+  let prefix: string | undefined;
 
-  if (flags.has("--help") || flags.has("-h")) {
-    printRunHelp();
-    process.exit(0);
-  }
-
-  enableSharingFlags(flags);
-  const appPort = flags.value("--app-port");
+  const commandArgs = visitLeadingFlags("run", args, RUN_FLAG_SPEC, (flag, value) => {
+    if (flag === "--help" || flag === "-h") {
+      printRunHelp();
+      process.exit(0);
+    }
+    switch (flag) {
+      case "--force":
+        force = true;
+        break;
+      case "--app-port":
+        appPort = parseAppPort(value);
+        break;
+      case "--name":
+        name = value;
+        break;
+      case "--prefix":
+        prefix = value;
+        break;
+      default:
+        enableSharingFlag(flag);
+    }
+  });
 
   return {
-    force: flags.has("--force"),
-    appPort: appPort === undefined ? appPortFromEnv() : parseAppPort(appPort),
-    name: flags.value("--name"),
-    prefix: flags.value("--prefix"),
-    commandArgs: rest,
+    force,
+    appPort: appPort ?? appPortFromEnv(),
+    name,
+    prefix,
+    commandArgs,
   };
 }
 
@@ -2049,27 +2057,29 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
  * Unrecognized `--` flags are rejected to catch typos.
  */
 function parseAppArgs(args: string[]): ParsedAppArgs {
-  const leading = parseLeadingArgs("", args, APP_FLAG_SPEC);
-  enableSharingFlags(leading.flags);
-  const name = leading.rest[0];
-  let force = leading.flags.has("--force");
-  let appPort = leading.flags.value("--app-port");
-  let rest = leading.rest.slice(1);
+  let force = false;
+  let appPort: number | undefined;
+
+  const readFlag = (flag: string, value: string | undefined): void => {
+    if (flag === "--force") force = true;
+    else if (flag === "--app-port") appPort = parseAppPort(value);
+    else enableSharingFlag(flag);
+  };
+
+  const afterLeading = visitLeadingFlags("", args, APP_FLAG_SPEC, readFlag);
+  const name = afterLeading[0];
+  let commandArgs = afterLeading.slice(1);
 
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
-  if (rest.length > 0 && rest[0].startsWith("--")) {
-    const afterName = parseLeadingArgs("", rest, APP_FLAG_SPEC);
-    enableSharingFlags(afterName.flags);
-    force = force || afterName.flags.has("--force");
-    appPort = appPort ?? afterName.flags.value("--app-port");
-    rest = afterName.rest;
+  if (commandArgs.length > 0 && commandArgs[0].startsWith("--")) {
+    commandArgs = visitLeadingFlags("", commandArgs, APP_FLAG_SPEC, readFlag);
   }
 
   return {
     force,
-    appPort: appPort === undefined ? appPortFromEnv() : parseAppPort(appPort),
+    appPort: appPort ?? appPortFromEnv(),
     name,
-    commandArgs: rest,
+    commandArgs,
   };
 }
 
@@ -4937,8 +4947,10 @@ async function handleCompose(args: string[]): Promise<void> {
   const composeArgs = args.slice(1);
   const { globals, subcommand, rest } = splitComposeArgs(composeArgs);
   if (!subcommand) {
-    const error = composeGlobalError(globals);
-    if (error) throw new UsageError(error, ["See: portless compose --help"]);
+    if (!globals.includes("--help") && !globals.includes("-h")) {
+      const error = composeGlobalError(globals);
+      if (error) throw new UsageError(error, ["See: portless compose --help"]);
+    }
     printComposeHelp();
     process.exit(0);
   }
@@ -5261,7 +5273,6 @@ async function main() {
     const equalsIndex = arg.startsWith("--") ? arg.indexOf("=") : -1;
     const flag = equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
     if (globalBooleanFlags.has(flag) || flag === "--force" || flag === "--help" || flag === "-h") {
-      if (equalsIndex !== -1) throw new UsageError(`${flag} does not take a value.`);
       return index + 1;
     }
     if (globalValueFlags.has(flag) || localValueFlags.has(flag)) {

@@ -24,7 +24,6 @@ const VALUE_FLAGS = new Set([
   "--parallel",
 ]);
 
-/** Compose global flags that take no value. */
 const BOOLEAN_FLAGS = new Set([
   "--help",
   "-h",

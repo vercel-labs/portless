@@ -13,7 +13,7 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
-import { UsageError, parseCommandArgs, type FlagKind } from "./args.js";
+import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
 import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
@@ -233,7 +233,6 @@ function collectServiceExtraEnv(
   return extraEnv;
 }
 
-/** Flags `service install` accepts. */
 const SERVICE_INSTALL_FLAGS: Readonly<Record<string, FlagKind>> = {
   "-p": "value",
   "--port": "value",
@@ -249,7 +248,6 @@ const SERVICE_INSTALL_FLAGS: Readonly<Record<string, FlagKind>> = {
   "--state-dir": "value",
 };
 
-/** Extra flags the elevated re-run passes to itself. */
 const SERVICE_RUNTIME_FLAGS: Readonly<Record<string, FlagKind>> = {
   "--foreground": "boolean",
   "--skip-trust": "boolean",
@@ -313,68 +311,85 @@ export function parseServiceInstallConfig(
   }
 
   const tokens = args[0] === "service" ? args.slice(2) : args;
-  const flags = parseCommandArgs(
+  let portFlagSeen = false;
+  let tldFlagSeen = false;
+  let tldFlagValues: string[] = [];
+
+  const rest = visitLeadingFlags(
     "service install",
     tokens,
     serviceInstallSpec(options.allowRuntimeFlags),
-    0
+    (flag, value) => {
+      const flagValue = value ?? "";
+      switch (flag) {
+        case "-p":
+        case "--port": {
+          const port = parsePort(flagValue);
+          if (port === null) {
+            throw new UsageError(`Invalid port number: ${flagValue}`, [
+              "Port must be between 1 and 65535.",
+            ]);
+          }
+          config.proxyPort = port;
+          portFlagSeen = true;
+          break;
+        }
+        case "--https":
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--no-tls":
+          config.useHttps = false;
+          httpsExplicit = true;
+          break;
+        case "--lan":
+          config.lanMode = true;
+          break;
+        case "--ip":
+          config.lanMode = true;
+          config.lanIp = flagValue;
+          config.lanIpExplicit = true;
+          break;
+        case "--tld":
+          try {
+            tldFlagValues = [...tldFlagValues, ...parseTldList(flagValue)];
+          } catch (err) {
+            throw new UsageError((err as Error).message, ["See: portless service install --help"]);
+          }
+          tldFlagSeen = true;
+          break;
+        case "--wildcard":
+          config.useWildcard = true;
+          break;
+        case "--unprivileged":
+          config.unprivileged = true;
+          break;
+        case "--cert":
+          config.customCertPath = flagValue;
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--key":
+          config.customKeyPath = flagValue;
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--state-dir":
+          config.stateDir = flagValue;
+          break;
+      }
+    }
   );
 
-  if (flags.has("--https")) {
-    config.useHttps = true;
-    httpsExplicit = true;
-  }
-  if (flags.has("--no-tls")) {
-    config.useHttps = false;
-    httpsExplicit = true;
-  }
-  if (flags.has("--lan")) config.lanMode = true;
-
-  const lanIp = flags.value("--ip");
-  if (lanIp !== undefined) {
-    config.lanMode = true;
-    config.lanIp = lanIp;
-    config.lanIpExplicit = true;
+  if (rest.length > 0) {
+    throw new UsageError(`Unexpected argument "${rest[0]}" for portless service install.`, [
+      "See: portless service install --help",
+    ]);
   }
 
-  const tldFlagValues = flags.values("--tld");
-  if (tldFlagValues.length > 0) {
-    try {
-      config.tlds = normalizeTlds(tldFlagValues.flatMap((value) => parseTldList(value)));
-    } catch (err) {
-      throw new UsageError((err as Error).message, ["See: portless service install --help"]);
-    }
+  if (tldFlagSeen) {
+    config.tlds = normalizeTlds(tldFlagValues);
     config.tld = primaryTld(config.tlds);
-  }
-
-  if (flags.has("--wildcard")) config.useWildcard = true;
-  if (flags.has("--unprivileged")) config.unprivileged = true;
-
-  const customCertPath = flags.value("--cert");
-  if (customCertPath !== undefined) {
-    config.customCertPath = customCertPath;
-    config.useHttps = true;
-    httpsExplicit = true;
-  }
-  const customKeyPath = flags.value("--key");
-  if (customKeyPath !== undefined) {
-    config.customKeyPath = customKeyPath;
-    config.useHttps = true;
-    httpsExplicit = true;
-  }
-
-  const stateDir = flags.value("--state-dir");
-  if (stateDir !== undefined) config.stateDir = stateDir;
-
-  const portFlag = flags.value("--port") ?? flags.value("-p");
-  if (portFlag !== undefined) {
-    const port = parsePort(portFlag);
-    if (port === null) {
-      throw new UsageError(`Invalid port number: ${portFlag}`, [
-        "Port must be between 1 and 65535.",
-      ]);
-    }
-    config.proxyPort = port;
   }
 
   if (
@@ -390,7 +405,7 @@ export function parseServiceInstallConfig(
     config.useHttps = false;
   }
 
-  if (!env.PORTLESS_PORT && portFlag === undefined) {
+  if (!env.PORTLESS_PORT && !portFlagSeen) {
     config.proxyPort = getProtocolPort(config.useHttps);
   }
 
