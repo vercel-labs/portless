@@ -2337,7 +2337,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
 
 Precedence: flags override PORTLESS_* variables, which override portless.json.
-The proxy also reuses its saved settings unless a flag or variable changes them.
+Auto-start reuses the proxy's saved settings unless a flag or variable changes them.
 Proxy options: portless proxy --help
 Run portless <command> --help or visit https://portless.sh for details.
 `);
