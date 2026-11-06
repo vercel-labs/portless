@@ -88,6 +88,40 @@ describe("RouteStore", () => {
       expect(loaded[0].hostname).toBe("valid.localhost");
     });
 
+    it("rejects malformed or unknown upstream fields while retaining valid routes", () => {
+      const valid = { hostname: "valid.localhost", port: 4001, pid: 0 };
+      const upstreams = [
+        null,
+        [],
+        "https",
+        { tls: "true" },
+        { host: 123 },
+        { host: "" },
+        { host: "api.internal:0" },
+        { host: "api.internal:65536" },
+        { host: "api.internal:000001" },
+        { host: "256.1.1.1" },
+        { host: "127.0.0" },
+        { host: "127.00.0.1" },
+        { host: "user@api.internal" },
+        { host: "api.internal/path" },
+        { host: "[not-ipv6]" },
+        { tls: true, extra: 1 },
+      ];
+      const routes = [
+        valid,
+        { ...valid, hostname: "tls.localhost", upstream: { tls: true, host: "api.internal:8443" } },
+        ...upstreams.map((upstream, index) => ({
+          ...valid,
+          hostname: `invalid${index}.localhost`,
+          upstream,
+        })),
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      expect(store.loadRoutes()).toEqual(routes.slice(0, 2));
+    });
+
     it("loads routes from file", () => {
       const routes = [{ hostname: "app.localhost", port: 4001, pid: process.pid }];
       store.ensureDir();
@@ -188,6 +222,17 @@ describe("RouteStore", () => {
   });
 
   describe("addRoute", () => {
+    it("persists and reloads upstream settings and clears them on replacement", () => {
+      const upstream = { tls: true, host: "api.internal:8443" };
+      store.addRoute("api.localhost", 4001, 0, false, upstream);
+      const saved = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+      expect(saved[0].upstream).toEqual(upstream);
+      expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toEqual(upstream);
+
+      store.addRoute("api.localhost", 4002, 0, true);
+      expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toBeUndefined();
+    });
+
     it("adds a route to empty store", () => {
       const before = Date.now();
       store.addRoute("myapp.localhost", 4001, process.pid);

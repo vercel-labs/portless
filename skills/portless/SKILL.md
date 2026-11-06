@@ -181,6 +181,21 @@ Use `portless proxy start --tld localhost --tld test` to serve the same app name
 
 `portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected configured TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing, empty, or unconfigured value fails before any route changes, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
+Use `--upstream https` for TLS to loopback while preserving Host. Use
+`--upstream https://api.internal[:port]` to enable TLS, override Host with the full
+authority, and set SNI to the hostname without its port. Use `--upstream http://api.internal[:port]` to
+override Host without TLS. The positional port always dials loopback, and this setting
+does not change client-facing proxy TLS. Authorities accept only a hostname or IP address
+with an optional port, without credentials, paths, queries, fragments, or whitespace.
+
+Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
+certificate verification, so TLS does not authenticate backend identity, including
+through an SSH tunnel. Restart the proxy daemon after upgrading portless.
+
+```bash
+portless alias api 8080 --upstream https://api.internal
+```
+
 TLDs can be multi-segment DNS names such as `dev.example.com`, so local URLs can mirror production structure (`myapp.dev.example.com`). Each label follows DNS rules: lowercase letters, digits, interior hyphens, 63 characters per label, 253 total. Strict OAuth providers that reject `.localhost` redirect URIs accept a real domain like `https://myapp.dev.example.com/api/auth/callback/google`.
 
 Most frameworks (Next.js, Express, Nuxt, etc.) respect the `PORT` env var automatically. For frameworks that ignore `PORT` (Vite, VitePlus, VitePress, Astro, React Router, Angular, Expo, React Native, Wrangler), portless auto-injects the correct `--port` flag and, when needed, a matching `--host` CLI flag (`--ip` for Wrangler). Injection reaches through a package script whose command starts with the framework or a known runner (`"dev": "vite"`, `"dev": "bunx vite"`). Only the framework's server commands get the flags (`dev`, `serve`, `preview`, `start`, a bare `vite`, or `vite [root]`); a command that does not serve, such as `vite build`, `vite optimize`, `vp test` or `astro check`, rejects them and is left alone. Expo connection modes (`--localhost`, `--lan`, `--tunnel`) are preserved while the assigned port is still injected. A script portless cannot classify is left alone too: a flag before the subcommand on a CLI whose flag grammar it does not track (`vp --mode dev build`). Portless also leaves a script alone when appending flags to it would not work: a compound command (`&&`, `|`, `;`), a trailing `#` comment, its own `--` option terminator, an env prefix (`NODE_ENV=production vite`), delegation to another script (`"dev": "npm run dev:vite"`), or runner flags before the script name (`bun run --bun dev`). Those keep their own port, so set it in the script yourself.
@@ -343,6 +358,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless alias <name> <port> --force`            | Stop the conflicting app and overwrite its route               |
 | `portless alias --remove <name>`                  | Remove PID 0 routes                                            |
 | `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                      |
+| `portless alias <name> <port> --upstream https`   | Use TLS to the loopback backend while preserving Host          |
 | `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected configured TLDs               |
 | `portless compose up [args...]`                   | Run a Docker Compose project with a route per service          |
 | `portless compose down [args...]`                 | Stop the compose project and remove its routes                 |

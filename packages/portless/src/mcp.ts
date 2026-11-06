@@ -153,10 +153,15 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_add",
     "Add alias",
-    "Register a static route for a service portless does not run, such as a database. Registers it for every configured TLD unless tld selects specific ones.",
+    "Register a static route for a service portless does not run, such as a database. The optional upstream accepts https, https://<host>[:<port>], or http://<host>[:<port>]. The alias's positional port always dials loopback; an upstream host overrides Host and HTTPS SNI. Upstream TLS supports HTTP/1.1 only and disables certificate verification, so it does not authenticate backend identity, including through an SSH tunnel, and does not change client-facing proxy TLS. Restart the proxy daemon after upgrading. Registers it for every configured TLD unless tld selects specific ones.",
     {
       name: NAME_PROPERTY,
       port: PORT_PROPERTY,
+      upstream: {
+        type: "string",
+        description:
+          'Use "https" for loopback TLS without changing Host, "https://<host>[:<port>]" for TLS with Host override and SNI set to the hostname without its port, or "http://<host>[:<port>]" for cleartext with Host override. Host uses the full supplied authority, including its optional port. The authority accepts only a hostname or IP address with an optional port, without credentials, path, query, fragment, or whitespace.',
+      },
       tld: ALIAS_TLD_PROPERTY,
       force: {
         type: "boolean",
@@ -425,7 +430,9 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
     case "alias_add": {
       const name = readRequiredName(args, "name");
       const port = readPort(args, "port", true);
+      const upstream = readString(args, "upstream", false);
       argv.push("alias", name, String(port));
+      if (upstream !== undefined) argv.push("--upstream", upstream);
       for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "force") === true) argv.push("--force");
       break;
@@ -782,7 +789,7 @@ export function printMcpHelp(): void {
       "Common tools:",
       "  list            List active routes.",
       "  get             Print an app URL.",
-      "  alias_add       Register a static route.",
+      "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
       "",
       "Worktree options inherit from the workspace root into package directories.",

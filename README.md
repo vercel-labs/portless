@@ -56,6 +56,27 @@ Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/et
 
 To reach an app from another device or share it, use [LAN mode](https://portless.sh/commands#lan-mode) for phones on the same network, or [Tailscale](https://portless.sh/commands#share-on-tailscale), [ngrok](https://portless.sh/commands#share-with-ngrok), or a [Cloudflare quick tunnel](https://portless.sh/commands#share-with-cloudflare) with `--tailscale`, `--ngrok`, or `--cloudflare`.
 
+### Upstream aliases
+
+Use `--upstream` to route an alias to an HTTP or HTTPS service listening on loopback:
+
+```bash
+portless alias api 8080 --upstream https
+portless alias api 8080 --upstream https://api.internal
+portless alias api 8080 --upstream http://api.internal
+```
+
+The positional port always dials loopback. `https` enables TLS and preserves the incoming
+Host header. An `https://` authority enables TLS and overrides Host with the full
+authority, including its optional port; SNI uses the hostname without the port. An
+`http://` authority overrides Host without TLS. This setting does not
+change client-facing proxy TLS. Authorities accept only a hostname or IP address with an
+optional port, without credentials, paths, queries, fragments, or whitespace.
+
+Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
+certificate verification, so TLS does not authenticate backend identity, even through
+an SSH tunnel. Restart the proxy daemon after upgrading portless.
+
 ## Configuration
 
 An optional `portless.json` sets the name and script. In a monorepo, one file at the root covers every workspace package, and `portless` from the root starts all of them:

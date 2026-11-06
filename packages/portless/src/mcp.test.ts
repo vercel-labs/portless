@@ -76,6 +76,21 @@ describe("buildArgv", () => {
     ["alias_add", { name: "db", port: 5432, force: true }, ["alias", "db", "5432", "--force"]],
     [
       "alias_add",
+      { name: "db", port: 5432, upstream: "https" },
+      ["alias", "db", "5432", "--upstream", "https"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "https://api.internal:8443", tld: ["test"] },
+      ["alias", "db", "5432", "--upstream", "https://api.internal:8443", "--tld", "test"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "http://api.internal" },
+      ["alias", "db", "5432", "--upstream", "http://api.internal"],
+    ],
+    [
+      "alias_add",
       { name: "db", port: 5432, tld: ["test", "localhost"], force: true },
       ["alias", "db", "5432", "--tld", "test", "--tld", "localhost", "--force"],
     ],
@@ -105,6 +120,12 @@ describe("buildArgv", () => {
 
   it("rejects an empty tld list with -32602", () => {
     expect(() => buildArgv("alias_add", { name: "db", port: 5432, tld: [] })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+  });
+
+  it("requires upstream to be a string when provided", () => {
+    expect(() => buildArgv("alias_add", { name: "db", port: 5432, upstream: 123 })).toThrow(
       expect.objectContaining({ code: -32602 })
     );
   });
