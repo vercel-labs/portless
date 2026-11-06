@@ -958,12 +958,9 @@ describe("handleService", () => {
         entryScript: "/fake/cli.js",
         runner,
       })
-    ).rejects.toThrow("process.exit");
+    ).rejects.toThrow("Access denied");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
     expect(rmSync).not.toHaveBeenCalled();
-    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
-    expect(output).toContain("Access denied");
     expect(logSpy.mock.calls.flat().join(" ")).not.toContain("uninstalled");
   });
 
