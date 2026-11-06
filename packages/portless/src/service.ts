@@ -202,6 +202,16 @@ function parsePortValue(value: string, source: string): number {
   return port;
 }
 
+/**
+ * A service manager restarts the proxy whenever it exits, so idle exit would
+ * only make it restart in a loop.
+ */
+function serviceIdleExitError(source: string): Error {
+  return new Error(
+    `${source} cannot be combined with service install: the service manager restarts the proxy whenever it exits. Use portless proxy start --idle-exit without a service instead.`
+  );
+}
+
 function getFlagValue(args: string[], index: number, flag: string): string {
   const value = args[index + 1];
   if (!value || value.startsWith("-")) {
@@ -286,6 +296,10 @@ export function parseServiceInstallConfig(
     config.unprivileged = envUnprivileged;
   }
 
+  if (parseBooleanEnv(env.PORTLESS_IDLE_EXIT) === true) {
+    throw serviceIdleExitError("PORTLESS_IDLE_EXIT");
+  }
+
   if (env.PORTLESS_PORT) {
     config.proxyPort = parsePortValue(env.PORTLESS_PORT, "PORTLESS_PORT");
   } else {
@@ -333,6 +347,9 @@ export function parseServiceInstallConfig(
       case "--unprivileged":
         config.unprivileged = true;
         break;
+      case "--idle-exit":
+      case "--idle-exit-after":
+        throw serviceIdleExitError(token);
       case "--cert":
         config.customCertPath = getFlagValue(tokens, i, token);
         config.useHttps = true;
@@ -439,6 +456,8 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
     PORTLESS_LAN: ctx.config.lanMode ? "1" : "0",
     PORTLESS_WILDCARD: ctx.config.useWildcard ? "1" : "0",
     PORTLESS_UNPRIVILEGED: ctx.config.unprivileged ? "1" : "0",
+    // A proxy.idle-exit marker left by an earlier proxy must not stop this one.
+    PORTLESS_IDLE_EXIT: "0",
     ...ctx.config.extraEnv,
   };
 

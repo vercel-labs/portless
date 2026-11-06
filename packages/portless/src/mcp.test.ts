@@ -86,6 +86,12 @@ describe("buildArgv", () => {
       { port: 1355, noTls: true, tld: ["test", "localhost"] },
       ["proxy", "start", "-p", "1355", "--no-tls", "--tld", "test", "--tld", "localhost"],
     ],
+    [
+      "proxy_start",
+      { port: 1355, idleExit: true, idleExitAfter: 30 },
+      ["proxy", "start", "-p", "1355", "--idle-exit", "--idle-exit-after", "30"],
+    ],
+    ["proxy_start", { idleExit: false }, ["proxy", "start"]],
     ["version", {}, ["--version"]],
     ["list", { extraArgs: ["--x"], cwd: "/tmp", timeoutMs: 5 }, ["list", "--x"]],
     ["proxy_stop", { port: 1356 }, ["proxy", "stop", "-p", "1356"]],
@@ -105,6 +111,12 @@ describe("buildArgv", () => {
 
   it("rejects an empty tld list with -32602", () => {
     expect(() => buildArgv("alias_add", { name: "db", port: 5432, tld: [] })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+  });
+
+  it.each([0, -1, 1.5, "60"])("rejects idleExitAfter %j with -32602", (idleExitAfter) => {
+    expect(() => buildArgv("proxy_start", { idleExit: true, idleExitAfter })).toThrow(
       expect.objectContaining({ code: -32602 })
     );
   });

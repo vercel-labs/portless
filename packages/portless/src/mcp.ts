@@ -217,6 +217,16 @@ export const TOOLS: ToolDef[] = [
         description:
           "Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers only. Serves plain HTTP on port 80 unless HTTPS is requested, and turns off hosts sync.",
       },
+      idleExit: {
+        type: "boolean",
+        description:
+          "Stop the proxy 5 seconds after its last app exits, or after idleExitAfter. Remembered for auto-start.",
+      },
+      idleExitAfter: {
+        type: "integer",
+        minimum: 1,
+        description: "Seconds the proxy lingers with no apps before an idle exit. Needs idleExit.",
+      },
     },
     [],
     {
@@ -452,6 +462,18 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "wildcard") === true) argv.push("--wildcard");
       if (readBoolean(args, "unprivileged") === true) argv.push("--unprivileged");
+      if (readBoolean(args, "idleExit") === true) argv.push("--idle-exit");
+      const idleExitAfter = args.idleExitAfter;
+      if (idleExitAfter !== undefined && idleExitAfter !== null) {
+        if (
+          typeof idleExitAfter !== "number" ||
+          !Number.isSafeInteger(idleExitAfter) ||
+          idleExitAfter < 1
+        ) {
+          fail("idleExitAfter must be a positive integer");
+        }
+        argv.push("--idle-exit-after", String(idleExitAfter));
+      }
       break;
     }
     case "proxy_stop": {

@@ -91,6 +91,12 @@ function isEncrypted(req: http.IncomingMessage): boolean {
 
 export const HOSTS_SYNC_PATH = "/.portless/hosts-sync";
 
+/** A `portless run` holds this response open for as long as its process lives. */
+export const LEASE_PATH = "/.portless/lease";
+export const LEASE_HEADER = "x-portless-lease";
+/** First line of a held lease; the client counts the lease only once it reads it. */
+export const LEASE_ACK = "leased\n";
+
 function isLoopbackPeer(address: string | undefined): boolean {
   if (!address) return false;
   const bare = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
@@ -157,6 +163,47 @@ function handleHostsSyncRequest(
   }
   res.writeHead(204);
   res.end();
+}
+
+function handleLeaseRequest(
+  req: http.IncomingMessage,
+  res: http.ServerResponse,
+  onLeaseRequest: ProxyServerOptions["onLeaseRequest"]
+): void {
+  // The custom header makes a browser send a CORS preflight the proxy never
+  // answers, and Origin / Sec-Fetch-Site mark a page that got past it anyway:
+  // a tab must never hold the proxy open.
+  const allowed =
+    isLoopbackPeer(req.socket.remoteAddress) &&
+    getSingleRawHeader(req, LEASE_HEADER) === "1" &&
+    req.headers.origin === undefined &&
+    req.headers["sec-fetch-site"] === undefined;
+  if (!allowed) {
+    res.writeHead(403, { "Content-Type": "text/plain" });
+    res.end("Forbidden");
+    return;
+  }
+  if (!onLeaseRequest) {
+    res.writeHead(404, { "Content-Type": "text/plain" });
+    res.end("Not Found");
+    return;
+  }
+  const result = onLeaseRequest({
+    on: (event, listener) => res.on(event, listener),
+    end: () => res.end(),
+  });
+  if (result === "full") {
+    res.writeHead(429, { "Content-Type": "text/plain" });
+    res.end("Too many leases");
+    return;
+  }
+  if (result === "closing") {
+    res.writeHead(503, { "Content-Type": "text/plain", Connection: "close" });
+    res.end("Proxy is stopping");
+    return;
+  }
+  res.writeHead(200, { "Content-Type": "text/plain", "Cache-Control": "no-store" });
+  res.write(LEASE_ACK);
 }
 
 /**
@@ -312,6 +359,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     loopbackOnly = false,
     onError = (msg: string) => console.error(msg),
     onHostsSyncRequest,
+    onLeaseRequest,
     hostsSyncToken,
     tls,
   } = options;
@@ -434,6 +482,15 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         res.setHeader(HOSTS_SYNC_AUTH_PROOF_HEADER, proof);
         res.setHeader("Cache-Control", "no-store");
       }
+    }
+
+    if (
+      req.method === "POST" &&
+      req.url === LEASE_PATH &&
+      isLoopbackAuthority(rawHost.toLowerCase())
+    ) {
+      handleLeaseRequest(req, res, onLeaseRequest);
+      return;
     }
 
     const routes = getRoutes();

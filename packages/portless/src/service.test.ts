@@ -286,6 +286,36 @@ describe("buildServiceSpec", () => {
     expect(config).toMatchObject({ unprivileged: true, useHttps: true, proxyPort: 443 });
   });
 
+  it.each([
+    [["--idle-exit"], {}, "--idle-exit cannot be combined with service install"],
+    [["--idle-exit-after", "60"], {}, "--idle-exit-after cannot be combined with service install"],
+    [[], { PORTLESS_IDLE_EXIT: "1" }, "PORTLESS_IDLE_EXIT cannot be combined with service install"],
+  ])("refuses idle exit for a service: %j %j", (flags, env, message) => {
+    expect(() => parseServiceInstallConfig(["service", "install", ...flags], env)).toThrow(message);
+  });
+
+  it("accepts PORTLESS_IDLE_EXIT=0 for a service", () => {
+    expect(() =>
+      parseServiceInstallConfig(["service", "install"], { PORTLESS_IDLE_EXIT: "0" })
+    ).not.toThrow();
+  });
+
+  it("turns idle exit off in the service environment", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      installConfig: { proxyPort: 443, useHttps: true },
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.unit).toContain('Environment=PORTLESS_IDLE_EXIT="0"');
+    expect(spec.execStart).not.toContain("--idle-exit");
+  });
+
   it("persists unprivileged mode in a Linux service", () => {
     const spec = buildServiceSpec({
       platform: "linux",

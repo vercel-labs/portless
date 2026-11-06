@@ -44,6 +44,7 @@ portless myapp next dev
 - The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)).
 - `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, or [configure the label style and hostname template](https://portless.sh/configuration#worktree-hostnames).
 - A name with dots is a subdomain: `portless api.myapp pnpm start` serves `https://api.myapp.localhost`.
+- The proxy keeps running after your apps exit. Start it with `--idle-exit` to have it stop 5 seconds after the last one ([Idle exit](https://portless.sh/commands#idle-exit)).
 - `PORTLESS=0 pnpm dev` runs the command directly, without the proxy.
 
 The full walkthrough is in [Getting started](https://portless.sh).

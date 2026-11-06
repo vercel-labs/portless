@@ -224,6 +224,18 @@ For the worktree label: CLI `--prefix` flag (`portless run`) > `PORTLESS_PREFIX`
       <td>off</td>
     </tr>
     <tr>
+      <td>`PORTLESS_IDLE_EXIT`</td>
+      <td>Set to `1` to stop the proxy after its last app exits (same as `--idle-exit`)</td>
+      <td>off</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_IDLE_EXIT_AFTER`</td>
+      <td>
+        Seconds an idle-exit proxy waits after its last app exits (same as `--idle-exit-after`)
+      </td>
+      <td>5</td>
+    </tr>
+    <tr>
       <td>`PORTLESS_STATE_DIR`</td>
       <td>Override the state directory</td>
       <td>`~/.portless`</td>
