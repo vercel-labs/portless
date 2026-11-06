@@ -533,6 +533,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("portless doctor");
       expect(stdout).toContain("state");
       expect(stdout).toContain("does not start");
+      expect(stdout).toContain("Exit codes:");
+      expect(stdout).toMatch(/2\s+Invalid arguments/);
     });
 
     it("reports a stopped proxy as a warning and exits 0", async () => {
@@ -556,7 +558,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("prints findings and a summary as JSON with --json", async () => {
+    it("prints the report as JSON with --json and exits 0 when nothing fails", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-json-"));
       const proxyPort = await getFreePort();
       try {
@@ -570,14 +572,89 @@ describe("CLI", { timeout: 15_000 }, () => {
 
         expect(status).toBe(0);
         const report = JSON.parse(stdout);
-        expect(Array.isArray(report.findings)).toBe(true);
+        expect(stdout.trim()).toBe(JSON.stringify(report));
+        expect(Object.keys(report).sort()).toEqual([
+          "findings",
+          "mode",
+          "nodeVersion",
+          "platform",
+          "proxyTarget",
+          "stateDir",
+          "summary",
+          "version",
+        ]);
+        expect(report.version).toMatch(/^\d+\.\d+\.\d+/);
+        expect(report.nodeVersion).toBe(process.versions.node);
+        expect(report.platform).toBe(`${process.platform} ${process.arch}`);
+        expect(fs.realpathSync(report.stateDir)).toBe(fs.realpathSync(tmpDir));
+        expect(report.proxyTarget).toBe(`http://127.0.0.1:${proxyPort}`);
+        expect(report.mode).toBe("HTTP, .localhost");
         expect(report.findings.length).toBeGreaterThan(0);
-        expect(typeof report.summary.failures).toBe("number");
-        expect(typeof report.summary.warnings).toBe("number");
+        for (const finding of report.findings) {
+          expect(["ok", "warn", "fail", "info"]).toContain(finding.status);
+          expect(typeof finding.message).toBe("string");
+          if (finding.hint !== undefined) expect(typeof finding.hint).toBe("string");
+        }
+        expect(report.summary).toEqual({
+          failures: report.findings.filter((f: { status: string }) => f.status === "fail").length,
+          warnings: report.findings.filter((f: { status: string }) => f.status === "warn").length,
+        });
+        expect(report.summary.failures).toBe(0);
         expect(stderr).not.toContain('"findings"');
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
+    });
+
+    it("keeps stdout to JSON and exits 1 when a check fails with --json", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-json-fail-"));
+      const server = http.createServer((_req, res) => {
+        res.end("not portless");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        const { status, stdout } = run(["doctor", "--json"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(1);
+        const report = JSON.parse(stdout);
+        expect(stdout.trim()).toBe(JSON.stringify(report));
+        const failures = report.findings.filter((f: { status: string }) => f.status === "fail");
+        expect(report.summary).toEqual({
+          failures: failures.length,
+          warnings: report.findings.filter((f: { status: string }) => f.status === "warn").length,
+        });
+        expect(failures.length).toBeGreaterThan(0);
+        expect(
+          failures.some((f: { message: string }) =>
+            f.message.includes(`Port ${proxyPort} is in use, but it is not a portless proxy`)
+          )
+        ).toBe(true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("exits 2 with empty stdout for an unknown flag with --json", () => {
+      const { status, stdout, stderr } = run(["doctor", "--json", "--bogus"]);
+      expect(status).toBe(2);
+      expect(stdout).toBe("");
+      expect(stderr).toContain('Error: Unknown flag "--bogus" for portless doctor.');
     });
 
     it("does not fail for a missing nested state directory with a writable ancestor", async () => {
