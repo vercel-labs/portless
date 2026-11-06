@@ -46,7 +46,13 @@ import {
   cleanHostsFile,
   shouldAutoSyncHosts,
 } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore, type RouteMapping } from "./routes.js";
+import {
+  FILE_MODE,
+  PortTakenError,
+  RouteConflictError,
+  RouteStore,
+  type RouteMapping,
+} from "./routes.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
@@ -589,13 +595,20 @@ function addRoutes(
   hostnames: readonly string[],
   port: number,
   pid: number,
-  force = false
+  force = false,
+  exclusivePort = false
 ): number[] {
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
     for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force);
+      const killedPid = store.addRoute(
+        hostname,
+        port,
+        pid,
+        force,
+        exclusivePort ? hostnames : undefined
+      );
       registered.push(hostname);
       if (killedPid !== undefined) {
         killedPids.push(killedPid);
@@ -612,6 +625,33 @@ function addRoutes(
     throw err;
   }
   return [...new Set(killedPids)];
+}
+
+const PORT_PICK_ATTEMPTS = 5;
+
+/**
+ * Register `hostnames` on `desiredPort`, or on a free port picked here.
+ * `findFreePort` releases its probe before the app binds, so a concurrent run
+ * can pick the same port; the route store refuses it and we pick again.
+ */
+async function addRoutesOnPort(
+  store: RouteStore,
+  hostnames: readonly string[],
+  desiredPort: number | undefined,
+  pid: number,
+  force = false
+): Promise<{ port: number; killedPids: number[] }> {
+  if (desiredPort !== undefined) {
+    return { port: desiredPort, killedPids: addRoutes(store, hostnames, desiredPort, pid, force) };
+  }
+  for (let attempt = 1; ; attempt++) {
+    const port = await findFreePort();
+    try {
+      return { port, killedPids: addRoutes(store, hostnames, port, pid, force, true) };
+    } catch (err) {
+      if (!(err instanceof PortTakenError) || attempt >= PORT_PICK_ATTEMPTS) throw err;
+    }
+  }
 }
 
 /**
@@ -1570,22 +1610,23 @@ async function runApp(
     }
   }
 
-  const port = desiredPort ?? (await findFreePort());
-  if (desiredPort) {
-    console.log(colors.green(`-- Using port ${port} (fixed)`));
-  } else {
-    console.log(colors.green(`-- Using port ${port}`));
-  }
-
   stopOrphanedProcessGroups(store);
 
   // Register route (--force kills the existing owner if any)
+  let port: number;
   let killedPids: number[] = [];
   try {
-    killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    ({ port, killedPids } = await addRoutesOnPort(
+      store,
+      hostnames,
+      desiredPort,
+      process.pid,
+      force
+    ));
+    console.log(colors.green(`-- Using port ${port}${desiredPort ? " (fixed)" : ""}`));
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
-    if (err instanceof RouteConflictError) {
+    if (err instanceof RouteConflictError || err instanceof PortTakenError) {
       console.error(colors.red(`Error: ${err.message}`));
       process.exit(1);
     }
@@ -4118,13 +4159,12 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    ({ port: appPort } = await addRoutesOnPort(store, hostnames, app.appPort, process.pid));
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 
     env = {
@@ -4459,13 +4499,12 @@ async function runWithTurbo(
       continue;
     }
 
-    const appPort = app.appPort ?? (await findFreePort());
     const hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    const { port: appPort } = await addRoutesOnPort(store, hostnames, app.appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 
