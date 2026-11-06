@@ -558,6 +558,30 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
+    it("prints findings and a summary as JSON with --json", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-json-"));
+      const proxyPort = await getFreePort();
+      try {
+        const { status, stdout, stderr } = run(["doctor", "--json"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        const report = JSON.parse(stdout);
+        expect(Array.isArray(report.findings)).toBe(true);
+        expect(report.findings.length).toBeGreaterThan(0);
+        expect(typeof report.summary.failures).toBe("number");
+        expect(typeof report.summary.warnings).toBe("number");
+        expect(stderr).not.toContain('"findings"');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("does not fail for a missing nested state directory with a writable ancestor", async () => {
       const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-nested-"));
       const proxyPort = await getFreePort();
@@ -2186,9 +2210,11 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
 
       try {
-        const { status, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        const { status, stdout, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
         expect(status).toBe(0);
         expect(stderr).toContain(`http://myapp.localhost:${proxyPort}`);
+        expect(stdout).not.toContain("Running:");
+        expect(stdout).not.toContain(`http://myapp.localhost:${proxyPort}`);
         expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
       } finally {
         run(["proxy", "stop"], { env });
