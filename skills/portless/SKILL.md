@@ -183,7 +183,8 @@ Use `portless proxy start --tld localhost --tld test` to serve the same app name
 
 Use `--upstream https` for TLS to loopback while preserving Host. Use
 `--upstream https://api.internal[:port]` to enable TLS, override Host with the full
-authority, and set SNI to the hostname without its port. Use `--upstream http://api.internal[:port]` to
+authority, and set SNI to the DNS hostname without its port. IP addresses are not sent
+as SNI. Use `--upstream http://api.internal[:port]` to
 override Host without TLS. The positional port always dials loopback, and this setting
 does not change client-facing proxy TLS. Authorities accept only a hostname or IP address
 with an optional port, without credentials, paths, queries, fragments, or whitespace.

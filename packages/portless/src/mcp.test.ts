@@ -124,10 +124,16 @@ describe("buildArgv", () => {
     );
   });
 
-  it("requires upstream to be a string when provided", () => {
-    expect(() => buildArgv("alias_add", { name: "db", port: 5432, upstream: 123 })).toThrow(
+  it.each([null, 123])("rejects upstream %j before launching the CLI", async (upstream) => {
+    expect(() => buildArgv("alias_add", { name: "db", port: 5432, upstream })).toThrow(
       expect.objectContaining({ code: -32602 })
     );
+    const res = await call(["core"], "tools/call", {
+      name: "alias_add",
+      arguments: { name: "db", port: 5432, upstream, cwd: "/definitely/not/a/real/dir" },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("upstream must be a string");
   });
 
   it("rejects --foreground for proxy start with -32602", () => {

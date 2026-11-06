@@ -68,7 +68,8 @@ portless alias api 8080 --upstream http://api.internal
 
 The positional port always dials loopback. `https` enables TLS and preserves the incoming
 Host header. An `https://` authority enables TLS and overrides Host with the full
-authority, including its optional port; SNI uses the hostname without the port. An
+authority, including its optional port. SNI uses a DNS hostname without the port;
+IP addresses are not sent as SNI. An
 `http://` authority overrides Host without TLS. This setting does not
 change client-facing proxy TLS. Authorities accept only a hostname or IP address with an
 optional port, without credentials, paths, queries, fragments, or whitespace.

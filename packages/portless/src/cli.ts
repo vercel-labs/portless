@@ -2725,8 +2725,9 @@ ${colors.bold("Options:")}
 
 The positional port always dials loopback. The value "https" enables TLS and
 preserves Host. An "https://" authority enables TLS and overrides Host with the full
-authority, including its optional port; SNI uses the hostname without the port. An
-"http://" authority overrides Host without TLS. Upstream TLS connects only to an
+authority, including its optional port. SNI uses a DNS hostname without the port;
+IP addresses are not sent as SNI. An "http://" authority overrides Host without TLS.
+Upstream TLS connects only to an
 HTTP/1.1 backend on loopback. Certificate verification is disabled, so backend
 identity is not authenticated, including through an SSH tunnel. This does not change
 client-facing proxy TLS. Authorities accept only a hostname or IP with an optional

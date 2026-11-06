@@ -183,8 +183,9 @@ An alias covers every configured TLD by default. Pass `--tld <tld>` after the al
 
 The positional port always dials loopback. `--upstream https` enables TLS and preserves
 the incoming Host header. A URL authority such as `https://api.internal:8443` enables
-TLS and overrides Host with the full authority, including its optional port; SNI uses
-the hostname without the port. An `http://` authority overrides Host without TLS. This
+TLS and overrides Host with the full authority, including its optional port. SNI uses
+a DNS hostname without the port; IP addresses are not sent as SNI. An `http://`
+authority overrides Host without TLS. This
 setting does not change client-facing proxy TLS. Authorities accept only a hostname or
 IP address with an optional port, without credentials, paths, queries, fragments, or
 whitespace.
