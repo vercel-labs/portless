@@ -84,7 +84,8 @@ export function removePortlessStateFiles(
     if (options.preserveCAIdentity && CA_IDENTITY_FILES.has(f)) continue;
     const file = path.join(dir, f);
     try {
-      fs.unlinkSync(file);
+      if (f === "routes.lock") fs.rmSync(file, { recursive: true, force: true });
+      else fs.unlinkSync(file);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(file);
     }

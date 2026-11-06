@@ -124,6 +124,8 @@ Run `portless --help` for the full list, or `portless <command> --help` for one 
 | Inspect and clean up | `list`, `doctor`, `prune`, `clean`                                                    | [Doctor](https://portless.sh/commands#doctor), [Prune orphans](https://portless.sh/commands#prune-orphans), [Clean up](https://portless.sh/commands#clean-up) |
 | Agents               | `mcp`                                                                                 | [MCP server](https://portless.sh/commands#mcp-server)                                                                                                         |
 
+`portless prune` removes stale routes and shares without killing unrelated port holders. If a recorded process group survives, retry with `portless prune --force`.
+
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
 `portless clean` previews its cleanup and asks for confirmation. Use `portless clean --yes` (or `-y`) in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code.

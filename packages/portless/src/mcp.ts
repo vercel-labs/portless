@@ -261,7 +261,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "prune",
     "Prune servers",
-    "Kill orphaned dev servers left by crashed sessions.",
+    "Remove stale routes and shares, and stop matching recorded process groups. Unrelated port holders are not killed.",
     {
       force: {
         type: "boolean",
