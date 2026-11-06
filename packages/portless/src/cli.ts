@@ -1953,7 +1953,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless run [options] [command...]")}
 
   When no command is given, runs the configured script (default: "dev")
-  from package.json.
+  from package.json. Value flags accept both --flag <value> and --flag=<value>.
 
   Ctrl+C is forwarded to the command. Portless waits for its process tree to
   exit and terminates remaining descendants after a short grace period.
@@ -2008,6 +2008,10 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let i = 0;
 
   while (i < args.length && args[i].startsWith("-")) {
+    const equalsIndex = args[i].startsWith("--") ? args[i].indexOf("=") : -1;
+    if (equalsIndex !== -1) {
+      args.splice(i, 1, args[i].slice(0, equalsIndex), args[i].slice(equalsIndex + 1));
+    }
     if (args[i] === "--") {
       i++;
       break;
@@ -2064,6 +2068,10 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
   // Consume leading flags before name
   while (i < args.length && args[i].startsWith("-")) {
+    const equalsIndex = args[i].startsWith("--") ? args[i].indexOf("=") : -1;
+    if (equalsIndex !== -1) {
+      args.splice(i, 1, args[i].slice(0, equalsIndex), args[i].slice(equalsIndex + 1));
+    }
     if (args[i] === "--") {
       i++;
       break;
@@ -2088,6 +2096,10 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
   while (i < args.length && args[i].startsWith("--")) {
+    const equalsIndex = args[i].indexOf("=");
+    if (equalsIndex !== -1) {
+      args.splice(i, 1, args[i].slice(0, equalsIndex), args[i].slice(equalsIndex + 1));
+    }
     if (args[i] === "--") {
       i++;
       break;
@@ -2153,6 +2165,7 @@ ${colors.bold("Usage:")}
 
 Every command accepts --help or -h, which only prints help. After run <cmd>,
 compose <subcommand>, or --, they belong to the wrapped command.
+Value flags for run and named apps accept both --flag <value> and --flag=<value>.
 
 ${colors.bold("Examples:")}
   portless                            # Run dev script through proxy
@@ -2784,12 +2797,6 @@ async function handleAlias(args: string[]): Promise<void> {
   }
   if (!isRemove && !aliasName) throw new UsageError("Missing alias name.", usageHints);
   if (!isRemove && !aliasPortValue) throw new UsageError("Missing port.", usageHints);
-  if (isRemove && removeName?.startsWith("-")) {
-    throw new UsageError("No alias name provided.", ["  portless alias --remove <name>"]);
-  }
-  if (!isRemove && aliasName?.startsWith("-")) {
-    throw new UsageError("Missing arguments.", usageHints);
-  }
   if (args.slice(1).some((arg) => arg.startsWith("--upstream="))) {
     throw new UsageError("Use --upstream followed by a separate value.", [
       "See: portless alias --help",
@@ -5300,11 +5307,13 @@ async function main() {
 
   const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
     const arg = args[index];
-    if (globalBooleanFlags.has(arg) || arg === "--force" || arg === "--help" || arg === "-h") {
+    const equalsIndex = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const flag = equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
+    if (globalBooleanFlags.has(flag) || flag === "--force" || flag === "--help" || flag === "-h") {
       return index + 1;
     }
-    if (globalValueFlags.has(arg) || localValueFlags.has(arg)) {
-      return index + 2;
+    if (globalValueFlags.has(flag) || localValueFlags.has(flag)) {
+      return index + (equalsIndex === -1 ? 2 : 1);
     }
     return null;
   };
@@ -5336,8 +5345,8 @@ async function main() {
     }
     if (isCommandName(mode) || mode === "--version" || mode === "-v") return limit;
 
-    if (mode === "--name") {
-      index += 2;
+    if (mode === "--name" || mode.startsWith("--name=")) {
+      index += mode === "--name" ? 2 : 1;
     } else {
       index++;
     }
@@ -5353,15 +5362,18 @@ async function main() {
 
   const stripGlobalFlag = (flag: string, hasValue: boolean): string | boolean | null => {
     const end = globalFlagEnd();
-    const idx = args.indexOf(flag);
-    if (idx === -1 || idx >= end) return null;
+    const idx = args.findIndex(
+      (arg, index) => index < end && (arg === flag || (hasValue && arg.startsWith(`${flag}=`)))
+    );
+    if (idx === -1) return null;
     if (!hasValue) {
       args.splice(idx, 1);
       return true;
     }
-    const value = args[idx + 1];
-    if (!value || value.startsWith("-")) return false; // present but missing value
-    args.splice(idx, 2);
+    const equalsIndex = args[idx].indexOf("=");
+    const value = equalsIndex === -1 ? args[idx + 1] : args[idx].slice(equalsIndex + 1);
+    if (!value || value.startsWith("-")) return false;
+    args.splice(idx, equalsIndex === -1 ? 2 : 1);
     return value;
   };
 
@@ -5411,6 +5423,9 @@ async function main() {
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
   // subcommand (see COMMAND_NAMES).
+  if (args[0]?.startsWith("--name=")) {
+    args.splice(0, 1, "--name", args[0].slice("--name=".length));
+  }
   const explicitName = args[0] === "--name";
   if (explicitName) {
     args.shift();

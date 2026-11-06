@@ -451,14 +451,13 @@ describe("handleService", () => {
         entryScript: "/fake/cli.js",
         runner,
       })
-    ).rejects.toThrow("process.exit");
+    ).rejects.toThrow("LAN mode requires mDNS publishing");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
     expect(runner).not.toHaveBeenCalled();
     expect(mkdirSync).not.toHaveBeenCalled();
     expect(writeFileSync).not.toHaveBeenCalled();
-    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
-    expect(output).toContain("LAN mode requires mDNS publishing");
   });
 
   it("registers the Windows task with no execution time limit before starting it", async () => {
@@ -529,7 +528,7 @@ describe("handleService", () => {
           entryScript: "C:\\cli.js",
           runner,
         })
-      ).rejects.toThrow("process.exit");
+      ).rejects.toThrow("registration failed");
     } finally {
       if (originalUserProfile === undefined) {
         delete process.env.USERPROFILE;
@@ -543,12 +542,13 @@ describe("handleService", () => {
       }
     }
 
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
     const calls = runner.mock.calls.map(([command, args]) => ({ command, args }));
     expect(calls.some((call) => call.command === "powershell.exe")).toBe(false);
     expect(calls.some((call) => call.command === "schtasks" && call.args[0] === "/Run")).toBe(
       false
     );
-    expect(errorSpy.mock.calls.flat().join(" ")).toContain("registration failed");
   });
 
   it("does not stop the previous Windows task when replacement registration fails", async () => {
@@ -569,7 +569,7 @@ describe("handleService", () => {
           entryScript: "C:\\cli.js",
           runner,
         })
-      ).rejects.toThrow("process.exit");
+      ).rejects.toThrow("registration failed");
     } finally {
       if (originalUserProfile === undefined) {
         delete process.env.USERPROFILE;
@@ -583,6 +583,8 @@ describe("handleService", () => {
       }
     }
 
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
     const taskCalls = runner.mock.calls
       .filter(([command]) => command === "schtasks")
       .map(([, args]) => args[0]);

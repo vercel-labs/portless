@@ -788,6 +788,44 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(2);
       expect(stderr).toContain('Unknown proxy subcommand "unknown"');
     });
+
+    it("rejects an unknown start flag before starting the proxy", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-args-"));
+      const testPort = await getFreePort();
+      try {
+        const { status, stderr } = run(["proxy", "start", "--forground"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: String(testPort),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Unknown flag");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("prune", () => {
+    it("rejects an unknown flag without changing routes.json", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-args-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const routes = JSON.stringify([{ hostname: "example.localhost", port: 3000, pid: 0 }]);
+      fs.writeFileSync(routesPath, routes);
+      try {
+        const { status, stderr } = run(["prune", "--forc"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Did you mean --force?");
+        expect(fs.readFileSync(routesPath, "utf-8")).toBe(routes);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("service", () => {
