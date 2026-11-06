@@ -27,7 +27,7 @@ portless <name> <cmd> [args...]
 
 `portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
-`portless <name>` uses an explicit name with no inference or prefixing.
+`portless <name>` uses an explicit name with no inference or prefixing. Value flags for `portless run` and named apps accept either `--flag value` or `--flag=value`.
 
 ```bash
 portless run                             # run dev script through proxy

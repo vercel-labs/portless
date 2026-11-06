@@ -1266,28 +1266,19 @@ export async function handleService(
     process.exit(0);
   }
 
-  try {
-    if (action === "install") {
-      await installService(options.entryScript, runner, args);
-      return;
-    }
-    if (args.length > 2) {
-      throw new UsageError(`Unexpected argument "${args[2]}" for portless service ${action}.`);
-    }
-    if (action === "uninstall") {
-      await uninstallService(options.entryScript, runner);
-      return;
-    }
-    if (action === "status") {
-      await printServiceStatus(options.entryScript, runner);
-      return;
-    }
-
-    throw new UsageError(`Unknown service command "${action}".`, ["See: portless service --help"]);
-  } catch (err) {
-    if (err instanceof UsageError) throw err;
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(colors.red("Error:"), message);
-    process.exit(1);
+  if (action === "install") {
+    await installService(options.entryScript, runner, args);
+    return;
   }
+  if (action !== "uninstall" && action !== "status") {
+    throw new UsageError(`Unknown service command "${action}".`, ["See: portless service --help"]);
+  }
+  if (args.length > 2) {
+    throw new UsageError(`Unexpected argument "${args[2]}" for portless service ${action}.`);
+  }
+  if (action === "uninstall") {
+    await uninstallService(options.entryScript, runner);
+    return;
+  }
+  await printServiceStatus(options.entryScript, runner);
 }
