@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -4833,27 +4834,60 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
     }, 30_000);
 
-    it("serves HTTPS with --https even when PORTLESS_HTTPS=0", () => {
-      const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-home-"));
-      try {
-        const env = {
-          PORTLESS_STATE_DIR: tmpDir,
-          PORTLESS_HTTPS: "0",
-          HOME: homeDir,
-          USERPROFILE: homeDir,
-        };
-        const start = run(["proxy", "start", "--https", "--skip-trust", "-p", String(testPort)], {
-          env,
-        });
-        expect(start.status).toBe(0);
-        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
-        expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain(
-          "HTTPS/2 proxy listening on"
-        );
-      } finally {
-        fs.rmSync(homeDir, { recursive: true, force: true });
-      }
-    }, 30_000);
+    it.each(["daemon", "foreground"])(
+      "serves HTTPS with --https even when PORTLESS_HTTPS=0 (%s)",
+      async (mode) => {
+        const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-home-"));
+        let child: ReturnType<typeof spawn> | undefined;
+        try {
+          const env = {
+            ...proxyEnv(),
+            HOME: homeDir,
+            USERPROFILE: homeDir,
+          };
+          const args = ["proxy", "start", "--https", "--skip-trust", "-p", String(testPort)];
+          if (mode === "foreground") {
+            child = spawn(process.execPath, [CLI_PATH, ...args, "--foreground"], {
+              env: {
+                ...process.env,
+                ...env,
+                NO_COLOR: "1",
+                PNPM_SCRIPT_SRC_DIR: undefined,
+                npm_command: undefined,
+              },
+              stdio: "ignore",
+            });
+          } else {
+            const start = run(args, { env });
+            expect(start.status, start.stdout + start.stderr).toBe(0);
+          }
+          await waitForHttpHeader(testPort, "X-Portless", "1");
+
+          const header = await new Promise<string | string[] | undefined>((resolve, reject) => {
+            const req = https.get(
+              {
+                hostname: "127.0.0.1",
+                port: testPort,
+                rejectUnauthorized: false,
+                timeout: 2000,
+              },
+              (res) => {
+                res.resume();
+                resolve(res.headers["x-portless"]);
+              }
+            );
+            req.on("error", reject);
+            req.on("timeout", () => req.destroy(new Error("HTTPS request timed out")));
+          });
+          expect(header).toBe("1");
+        } finally {
+          if (child) await stopChild(child);
+          run(["proxy", "stop"], { env: proxyEnv() });
+          fs.rmSync(homeDir, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
 
     it("never writes the hosts file in unprivileged mode", async () => {
       const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
@@ -5045,7 +5079,8 @@ describe("CLI", { timeout: 15_000 }, () => {
     it("bare portless gives the app PORTLESS_APP_PORT over portless.json appPort", async () => {
       const proxyPort = await getFreePort();
       const configPort = await getFreePort();
-      const envPort = await getFreePort();
+      let envPort = await getFreePort();
+      while (envPort === configPort || envPort === proxyPort) envPort = await getFreePort();
       const proxyEnv = {
         PORTLESS_STATE_DIR: tmpDir,
         PORTLESS_PORT: String(proxyPort),
@@ -5055,8 +5090,23 @@ describe("CLI", { timeout: 15_000 }, () => {
         path.join(tmpDir, "package.json"),
         JSON.stringify({
           name: "test-app",
-          scripts: { dev: "node -e \"console.log('port=' + process.env.PORT)\"" },
+          scripts: { dev: "node dev.cjs" },
         })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "dev.cjs"),
+        [
+          'const fs = require("node:fs");',
+          'const http = require("node:http");',
+          "const server = http.createServer();",
+          'server.listen(Number(process.env.PORT), "127.0.0.1", () => {',
+          '  fs.writeFileSync("port.json", JSON.stringify({',
+          "    envPort: Number(process.env.PORT),",
+          "    boundPort: server.address().port,",
+          "  }));",
+          "  server.close();",
+          "});",
+        ].join("\n") + "\n"
       );
       fs.writeFileSync(
         path.join(tmpDir, "portless.json"),
@@ -5064,15 +5114,17 @@ describe("CLI", { timeout: 15_000 }, () => {
       );
       try {
         const start = run(["proxy", "start"], { env: proxyEnv });
-        expect(start.status).toBe(0);
+        expect(start.status, start.stdout + start.stderr).toBe(0);
 
-        const { status, stdout } = run([], {
+        const result = run([], {
           cwd: tmpDir,
           env: { ...proxyEnv, PORTLESS_APP_PORT: String(envPort) },
         });
-        expect(status).toBe(0);
-        expect(stdout).toContain(`port=${envPort}`);
-        expect(stdout).not.toContain(`port=${configPort}`);
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(JSON.parse(fs.readFileSync(path.join(tmpDir, "port.json"), "utf-8"))).toEqual({
+          envPort,
+          boundPort: envPort,
+        });
       } finally {
         run(["proxy", "stop"], { env: proxyEnv });
       }
