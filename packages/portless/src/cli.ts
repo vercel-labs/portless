@@ -661,13 +661,13 @@ function stopOrphanedProcessGroups(store: RouteStore): void {
     if (route.pid === 0 || isPidAlive(route.pid)) continue;
     for (const t of stopRecordedTunnels(route, true)) {
       const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
-      console.log(colors.yellow(message));
+      console.error(colors.yellow(message));
     }
     const pgid = route.childPgid;
     if (!pgid || seen.has(pgid)) continue;
     seen.add(pgid);
     if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
-      console.log(
+      console.error(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
     }
@@ -1285,20 +1285,16 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: bo
   const routes = store.loadRoutes();
 
   if (json) {
-    const shared = (route: RouteMapping) =>
-      Object.fromEntries(
-        [
-          ["tailscaleUrl", route.tailscaleUrl],
-          ...PROCESS_TUNNELS.map((t) => [t.urlField, route[t.urlField]]),
-        ].filter(([, value]) => value)
-      );
     const output = routes.map((route) => ({
       hostname: route.hostname,
       url: formatUrl(route.hostname, proxyPort, tls),
       port: route.port,
       pid: route.pid,
       registeredAt: route.registeredAt,
-      ...shared(route),
+      ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
+      ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
+      ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
+      ...(route.cloudflareUrl ? { cloudflareUrl: route.cloudflareUrl } : {}),
     }));
     console.log(JSON.stringify({ routes: output }));
     return;
@@ -3059,7 +3055,8 @@ ${colors.bold("Options:")}
 
 ${colors.bold("Exit codes:")}
   0                      No failures; warnings do not affect the exit code
-  1                      One or more failures, or an invalid argument
+  1                      One or more failures
+  2                      Invalid arguments
 `);
 }
 
@@ -3846,10 +3843,10 @@ async function handleProxy(args: string[]): Promise<void> {
         );
         console.warn(colors.cyan("  portless trust"));
       } else if (!skipTrust && !isCATrusted(stateDir)) {
-        console.log(colors.yellow("Adding CA to system trust store..."));
+        console.error(colors.yellow("Adding CA to system trust store..."));
         const trustResult = trustCA(stateDir);
         if (trustResult.trusted) {
-          console.log(
+          console.error(
             colors.green("CA added to system trust store. Browsers will trust portless certs.")
           );
         } else {
