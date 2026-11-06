@@ -11,8 +11,12 @@ import {
   createHttpRedirectServer,
   createProxyServer,
   HOSTS_SYNC_PATH,
+  LEASE_ACK,
+  LEASE_HEADER,
+  LEASE_PATH,
   PORTLESS_HEADER,
 } from "./proxy.js";
+import { createIdleExitTracker } from "./idle-exit.js";
 import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_PROOF_HEADER } from "./hosts-sync-auth.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
@@ -3660,3 +3664,139 @@ describe("loopbackOnly", () => {
     expect(await plainRequest("127.0.0.1", port)).toEqual({ status: 302 });
   });
 });
+
+describe("lease route", () => {
+  const servers: AnyServer[] = [];
+  const clients: http.ClientRequest[] = [];
+
+  afterEach(async () => {
+    for (const client of clients) client.destroy();
+    clients.length = 0;
+    for (const server of servers) {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  function start(onLeaseRequest?: ProxyServerLeaseHandler, hostname = "127.0.0.1") {
+    const server = createProxyServer({
+      getRoutes: () => [],
+      proxyPort: TEST_PROXY_PORT,
+      onLeaseRequest,
+    });
+    servers.push(server);
+    return new Promise<AnyServer>((resolve) => server.listen(0, hostname, () => resolve(server)));
+  }
+
+  /** Open a lease and resolve with the status and the first chunk of the body. */
+  function openLease(
+    server: AnyServer,
+    options: { hostname?: string; host?: string; headers?: http.OutgoingHttpHeaders } = {}
+  ): Promise<{ status: number; firstChunk: string }> {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+    return new Promise((resolve, reject) => {
+      const req = http.request(
+        {
+          hostname: options.hostname ?? "127.0.0.1",
+          port: address.port,
+          path: LEASE_PATH,
+          method: "POST",
+          agent: false,
+          headers: Object.fromEntries(
+            Object.entries({
+              host: options.host ?? "127.0.0.1",
+              [LEASE_HEADER]: "1",
+              ...options.headers,
+            }).filter(([, value]) => value !== undefined)
+          ),
+        },
+        (res) => {
+          res.setEncoding("utf-8");
+          res.once("data", (chunk: string) =>
+            resolve({ status: res.statusCode ?? 0, firstChunk: chunk })
+          );
+          res.once("end", () => resolve({ status: res.statusCode ?? 0, firstChunk: "" }));
+        }
+      );
+      clients.push(req);
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("acknowledges a lease and holds it until the client goes away", async () => {
+    const closed = vi.fn();
+    const server = await start((lease) => {
+      lease.on("close", closed);
+      return "held";
+    });
+
+    const lease = await openLease(server);
+    expect(lease).toEqual({ status: 200, firstChunk: LEASE_ACK });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(closed).not.toHaveBeenCalled();
+
+    clients[0]!.destroy();
+    await vi.waitFor(() => expect(closed).toHaveBeenCalledTimes(1));
+  });
+
+  it("answers 404 when the daemon takes no leases", async () => {
+    const server = await start();
+    expect((await openLease(server)).status).toBe(404);
+  });
+
+  it.each<[string, http.OutgoingHttpHeaders]>([
+    ["without the lease header", { [LEASE_HEADER]: undefined }],
+    ["with a wrong lease header", { [LEASE_HEADER]: "yes" }],
+    ["with a duplicated lease header", { [LEASE_HEADER]: ["1", "1"] }],
+    ["from a browser origin", { origin: "http://127.0.0.1:3000" }],
+    ["with browser fetch metadata", { "sec-fetch-site": "same-origin" }],
+  ])("refuses a lease %s", async (_name, headers) => {
+    const onLease = vi.fn(() => "held" as const);
+    const server = await start(onLease);
+    expect((await openLease(server, { headers })).status).toBe(403);
+    expect(onLease).not.toHaveBeenCalled();
+  });
+
+  it("does not treat a request for an app hostname as a lease", async () => {
+    const onLease = vi.fn(() => "held" as const);
+    const server = await start(onLease);
+    expect((await openLease(server, { host: "web.localhost" })).status).toBe(404);
+    expect(onLease).not.toHaveBeenCalled();
+  });
+
+  it("refuses a lease from a non-loopback peer", async (ctx) => {
+    const lanIp = Object.values(os.networkInterfaces())
+      .flat()
+      .find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address;
+    if (!lanIp) return ctx.skip();
+    const onLease = vi.fn(() => "held" as const);
+    const server = await start(onLease, "0.0.0.0");
+    expect((await openLease(server, { hostname: lanIp })).status).toBe(403);
+    expect(onLease).not.toHaveBeenCalled();
+  });
+
+  it("caps the number of leases held at once", async () => {
+    const tracker = createIdleExitTracker({
+      graceMs: 1000,
+      hasLiveRoutes: () => false,
+      onIdle: () => {},
+      maxLeases: 2,
+    });
+    const server = await start((lease) => tracker.lease(lease));
+    expect((await openLease(server)).status).toBe(200);
+    expect((await openLease(server)).status).toBe(200);
+    expect(await openLease(server)).toEqual({ status: 429, firstChunk: "Too many leases" });
+    tracker.closeAll();
+  });
+
+  it("refuses a lease while the proxy is stopping", async () => {
+    const server = await start(() => "closing");
+    expect(await openLease(server)).toEqual({ status: 503, firstChunk: "Proxy is stopping" });
+  });
+});
+
+type ProxyServerLeaseHandler = NonNullable<
+  Parameters<typeof createProxyServer>[0]["onLeaseRequest"]
+>;

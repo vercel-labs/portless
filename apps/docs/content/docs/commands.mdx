@@ -301,6 +301,17 @@ portless proxy start
       </td>
     </tr>
     <tr>
+      <td>`--idle-exit`</td>
+      <td>
+        Stop the proxy 5 seconds after the last app that uses it exits. Remembered for auto-start.
+        Not available with `service install`.
+      </td>
+    </tr>
+    <tr>
+      <td>`--idle-exit-after <seconds>`</td>
+      <td>How long an idle-exit proxy waits after its last app exits (default: 5). Requires `--idle-exit`.</td>
+    </tr>
+    <tr>
       <td>`--no-tls`</td>
       <td>Disable HTTPS (use plain HTTP on port 80)</td>
     </tr>
@@ -364,6 +375,21 @@ The mode is remembered in the state directory, so auto-start reuses it, and `POR
 
 On a Mac with the application firewall turned on, the first wildcard bind shows an "allow incoming connections" prompt for Node. It asks for no password, and the proxy still refuses non-loopback peers whatever you answer.
 
+### Idle exit
+
+The proxy runs as a background daemon, so by default it keeps running, and keeps its port, after every app that used it has exited. Start it with `--idle-exit` to have it stop on its own once nothing uses it:
+
+```bash
+portless proxy start --idle-exit
+# stops 5 seconds after the last app exits
+```
+
+Each `portless run`, multi-app workspace run, and `portless compose up` holds an open connection to the proxy, called a lease, for as long as its process lives. The operating system closes that connection when the process exits for any reason, including a crash or `kill -9`, so the proxy learns about it at once instead of polling. When the last lease closes, the proxy waits 5 seconds and then stops the way `portless proxy stop` does. A run that starts within those 5 seconds keeps the running proxy, so restarting a dev server or switching worktrees does not start a new one. Pass `--idle-exit-after <seconds>` to change the wait, for example when your dev server takes longer than that to restart.
+
+Some routes keep the proxy up without a lease: aliases from `portless alias` and `portless compose up -d`, and a server that portless kept routed after its command [self-daemonized](#run-an-app). The proxy stays up while any of them exists. A proxy that never receives a lease, such as one started with `portless proxy start` and no app, stops 30 seconds after it starts, or after the `--idle-exit-after` wait if that is longer.
+
+The next `portless run` starts the proxy again. The mode is remembered in the state directory, so the auto-started proxy also stops when idle. `PORTLESS_IDLE_EXIT=1` and `PORTLESS_IDLE_EXIT_AFTER=<seconds>` select it without flags, and `PORTLESS_IDLE_EXIT=0` switches it off. `service install` refuses it, since the service manager restarts the proxy whenever it exits.
+
 ### Stop
 
 ```bash
@@ -381,7 +407,7 @@ portless service status
 portless service uninstall
 ```
 
-Installs the proxy as an OS startup service. The default is HTTPS on port 443 with `.localhost` names, but `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written.
+Installs the proxy as an OS startup service. The default is HTTPS on port 443 with `.localhost` names, but `service install` accepts proxy options including `--port`, `--no-tls`, `--lan`, `--ip`, `--tld`, `--wildcard`, `--cert`, and `--key`. Use `--state-dir <path>` or `PORTLESS_STATE_DIR=<path>` to choose where service state and logs are written. `--idle-exit` is refused, since the service manager restarts the proxy whenever it exits.
 
 The chosen service configuration is written into launchd, systemd, or Task Scheduler and reused after reboot. `portless service status` reports the installed port, HTTPS mode, TLDs, LAN mode, wildcard mode, and state directory. macOS and Linux use a root-owned service so port 443 can bind at boot. Windows uses a Task Scheduler startup task that runs as SYSTEM. Installation and removal may require administrator privileges. `portless clean` automatically removes the service.
 

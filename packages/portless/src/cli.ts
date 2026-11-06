@@ -92,6 +92,10 @@ import {
   isUnprivilegedEnvEnabled,
   readUnprivilegedMarker,
   writeUnprivilegedMarker,
+  holdProxyLease,
+  readIdleExitMarker,
+  resolveIdleExitSeconds,
+  writeIdleExitMarker,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -135,6 +139,7 @@ import {
   unpublish,
   cleanupAll as cleanupMdns,
 } from "./mdns.js";
+import { createIdleExitTracker } from "./idle-exit.js";
 import {
   loadConfig,
   resolveAppConfig,
@@ -190,6 +195,7 @@ type ProxyConfigExplicitness = {
   tlds: boolean;
   useWildcard: boolean;
   unprivileged: boolean;
+  idleExit: boolean;
 };
 
 type ProxyConfig = {
@@ -204,6 +210,8 @@ type ProxyConfig = {
   useWildcard: boolean;
   /** Bind the wildcard address, accept loopback peers only, never elevate. */
   unprivileged: boolean;
+  /** Seconds without apps before the proxy stops itself; 0 is off. */
+  idleExit: number;
 };
 
 function normalizeTlds(tlds: readonly string[]): string[] {
@@ -235,6 +243,7 @@ function defaultProxyConfig(
     tlds: effectiveTlds,
     useWildcard: false,
     unprivileged: false,
+    idleExit: 0,
   };
 }
 
@@ -251,6 +260,7 @@ function resolveProxyConfig(options: {
   tlds: string[];
   useWildcard: boolean;
   unprivileged: boolean;
+  idleExit: number;
 }): ProxyConfig {
   const config = defaultProxyConfig(
     options.defaultTlds,
@@ -305,6 +315,8 @@ function resolveProxyConfig(options: {
     ? options.unprivileged
     : options.persistedUnprivileged;
 
+  config.idleExit = options.idleExit;
+
   // Unprivileged mode promises no prompt of any kind, and trusting a
   // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
   if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
@@ -348,6 +360,7 @@ function readCurrentProxyConfig(dir: string): ProxyConfig {
     tlds,
     useWildcard: false,
     unprivileged: readUnprivilegedMarker(dir),
+    idleExit: readIdleExitMarker(dir),
   };
 }
 
@@ -428,6 +441,7 @@ function formatProxyStartCommand(proxyPort: number, config: ProxyConfig): string
     tlds: config.tlds,
     useWildcard: config.useWildcard,
     unprivileged: config.unprivileged,
+    idleExit: config.idleExit,
     includePort: proxyPort !== getDefaultPort(config.useHttps),
     proxyPort,
   });
@@ -764,7 +778,8 @@ function startProxyServer(
   lanIp?: string | null,
   strict?: boolean,
   customCert = false,
-  unprivileged = false
+  unprivileged = false,
+  idleExitSeconds = 0
 ): void {
   store.ensureDir();
 
@@ -801,6 +816,18 @@ function startProxyServer(
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
+
+  const idleExit = createIdleExitTracker({
+    graceMs: idleExitSeconds * 1000,
+    hasLiveRoutes: () => store.loadRoutesRaw().some((route) => store.isRouteOwnerAlive(route)),
+    onIdle: () => {
+      console.log(colors.yellow(`No apps for ${idleExitSeconds}s, stopping (idle exit)`));
+      keepProxySettings = true;
+      cleanup();
+    },
+  });
+  const pinIdleExitForAliases = () =>
+    idleExit.setPinned(cachedRoutes.some((route) => route.pid === 0));
 
   // Writing the hosts file needs root, which unprivileged mode never has, so
   // it does not try; `proxy start` refuses an explicit PORTLESS_SYNC_HOSTS=1.
@@ -870,6 +897,7 @@ function startProxyServer(
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
+      pinIdleExitForAliases();
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
@@ -929,6 +957,7 @@ function startProxyServer(
       loopbackOnly,
       onError: (msg) => console.error(colors.red(msg)),
       onHostsSyncRequest,
+      onLeaseRequest: (lease) => idleExit.lease(lease),
       hostsSyncToken,
       tls: tlsOptions,
     });
@@ -1026,12 +1055,18 @@ function startProxyServer(
     writeTldsFile(store.dir, tlds);
     writeLanMarker(store.dir, activeLanIp);
     writeUnprivilegedMarker(store.dir, unprivileged);
+    writeIdleExitMarker(store.dir, idleExitSeconds);
     fixOwnership(store.dir, store.pidPath, store.portFilePath);
     console.log(
       colors.green(
         `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
       )
     );
+    if (idleExitSeconds > 0) {
+      console.log(colors.gray(`Idle exit: stops ${idleExitSeconds}s after the last app exits`));
+    }
+    pinIdleExitForAliases();
+    idleExit.start();
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
       console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
@@ -1054,9 +1089,13 @@ function startProxyServer(
 
   // Cleanup on exit
   let exiting = false;
+  // An idle exit is not a stop the user asked for: the next auto-start must
+  // come back on the same port, TLS, TLD and LAN settings.
+  let keepProxySettings = false;
   const cleanup = () => {
     if (exiting) return;
     exiting = true;
+    idleExit.closeAll();
     if (debounceTimer) clearTimeout(debounceTimer);
     if (pollingInterval) clearInterval(pollingInterval);
     if (lanMonitor) lanMonitor.stop();
@@ -1070,15 +1109,17 @@ function startProxyServer(
     } catch {
       // PID file may already be removed; non-fatal
     }
-    try {
-      fs.unlinkSync(store.portFilePath);
-    } catch {
-      // Port file may already be removed; non-fatal
+    if (!keepProxySettings) {
+      try {
+        fs.unlinkSync(store.portFilePath);
+      } catch {
+        // Port file may already be removed; non-fatal
+      }
+      writeTlsMarker(store.dir, false);
+      writeCustomCertMarker(store.dir, false);
+      writeTldFile(store.dir, DEFAULT_TLD);
+      writeLanMarker(store.dir, null);
     }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1289,6 +1330,12 @@ interface ProxyDesiredState {
 function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
   const envTlds = getDefaultTlds();
   const envTld = primaryTld(envTlds);
+  // proxy.idle-exit outlives the proxy, so an auto-start after an idle exit
+  // stops itself again.
+  const idleExit = resolveIdleExitSeconds({
+    flag: false,
+    persisted: readIdleExitMarker(resolveStateDir()),
+  });
   const explicit: ProxyConfigExplicitness = {
     useHttps: process.env.PORTLESS_HTTPS !== undefined,
     customCert: false,
@@ -1297,6 +1344,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: process.env.PORTLESS_TLD !== undefined,
     useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    idleExit: idleExit.explicit,
   };
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
@@ -1311,6 +1359,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: envTlds,
     useWildcard: isWildcardEnvEnabled(),
     unprivileged: isUnprivilegedEnvEnabled(),
+    idleExit: idleExit.seconds,
   });
   return { explicit, desiredConfig, envTld, envTlds };
 }
@@ -1406,6 +1455,7 @@ async function ensureProxyRunning(
     tlds: startConfig.tlds,
     useWildcard: startConfig.useWildcard,
     unprivileged: startConfig.unprivileged,
+    idleExit: startConfig.idleExit,
     includePort: startPort !== undefined,
     proxyPort: startPort,
   });
@@ -1442,6 +1492,26 @@ async function ensureProxyRunning(
   }
 
   return { started: true, state: discovered };
+}
+
+/**
+ * Lease the proxy once this process has registered its routes, so an
+ * idle-exit proxy stays up for as long as this process lives. If it stopped
+ * before the lease landed, start a fresh one, which serves the routes already
+ * on disk, and lease that.
+ */
+async function leaseProxy(
+  stateDir: string,
+  proxyPort: number,
+  tls: boolean,
+  lanMode: boolean
+): Promise<void> {
+  const lease = await holdProxyLease(proxyPort, tls);
+  if (lease !== "closing" && lease !== "unreachable") return;
+  if (readIdleExitMarker(stateDir) === 0) return;
+  const ensured = await ensureProxyRunning(proxyPort, tls, resolveProxyDesiredState(lanMode));
+  if (ensured.started) await holdProxyLease(ensured.state.port, ensured.state.tls);
+  else await holdProxyLease(proxyPort, tls);
 }
 
 async function runApp(
@@ -1594,6 +1664,7 @@ async function runApp(
   if (killedPids.length > 0) {
     console.log(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
   }
+  await leaseProxy(store.dir, proxyPort, tls, lanMode);
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   const allUrls = formatUrls(hostnames, proxyPort, tls);
@@ -2242,6 +2313,9 @@ ${colors.bold("Options:")}
                                 HTTP on port 80 unless --https is also given, and
                                 never writes the hosts file. Remembered after
                                 stop; PORTLESS_UNPRIVILEGED=0 switches back
+  --idle-exit                   Stop the proxy 5s after its last app exits. Remembered
+                                after stop; PORTLESS_IDLE_EXIT=0 switches back
+  --idle-exit-after <seconds>   How long the proxy lingers with no apps (needs --idle-exit)
   --no-tls                      Disable HTTPS (use plain HTTP on port 80)
   --https                       Enable HTTPS (default, accepted for compatibility)
   --lan                         Enable LAN mode (mDNS .local, for real device testing)
@@ -2271,6 +2345,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS_PREFIX=<label>       Override the worktree label; an empty value disables it
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
+  PORTLESS_IDLE_EXIT=1          Stop the proxy after its last app exits (same as --idle-exit)
+  PORTLESS_IDLE_EXIT_AFTER=<s>  Idle exit linger in seconds (same as --idle-exit-after)
   PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
   PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
   PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
@@ -3345,6 +3421,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
   ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
+  ${colors.cyan("portless proxy start --idle-exit")}    Stop 5s after the last app exits
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
@@ -3424,6 +3501,20 @@ ${colors.bold("LAN mode (--lan):")}
     hasExplicitPort = true;
   }
 
+  // Idle exit resolves once the state dir is known, since its marker lives there.
+  const hasIdleExitFlag = args.includes("--idle-exit");
+  let idleExitAfterArg: string | undefined;
+  const idleExitAfterIndex = args.indexOf("--idle-exit-after");
+  if (idleExitAfterIndex !== -1) {
+    idleExitAfterArg = args[idleExitAfterIndex + 1];
+    if (!idleExitAfterArg || idleExitAfterArg.startsWith("-")) {
+      console.error(colors.red("Error: --idle-exit-after requires a number of seconds."));
+      console.error(colors.blue("Usage:"));
+      console.error(colors.cyan("  portless proxy start --idle-exit --idle-exit-after 60"));
+      process.exit(1);
+    }
+  }
+
   // Parse --tld flags
   let tlds: string[];
   try {
@@ -3471,6 +3562,7 @@ ${colors.bold("LAN mode (--lan):")}
     tlds: tldFlagValues.length > 0 || process.env.PORTLESS_TLD !== undefined,
     useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: hasUnprivilegedFlag || process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    idleExit: false,
   };
 
   // Resolve state directory based on the port
@@ -3489,6 +3581,20 @@ ${colors.bold("LAN mode (--lan):")}
       stateDir = currentState.dir;
     }
   }
+  let idleExit: ReturnType<typeof resolveIdleExitSeconds>;
+  try {
+    idleExit = resolveIdleExitSeconds({
+      flag: hasIdleExitFlag,
+      after: idleExitAfterArg,
+      persisted: readIdleExitMarker(stateDir),
+    });
+  } catch (err) {
+    console.error(colors.red(`Error: ${(err as Error).message}`));
+    console.error(colors.blue("Usage:"));
+    console.error(colors.cyan("  portless proxy start --idle-exit --idle-exit-after 60"));
+    process.exit(1);
+  }
+  explicit.idleExit = idleExit.explicit;
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
     persistedUnprivileged: readUnprivilegedMarker(stateDir),
@@ -3502,6 +3608,7 @@ ${colors.bold("LAN mode (--lan):")}
     tlds,
     useWildcard,
     unprivileged: hasUnprivilegedFlag || isUnprivilegedEnvEnabled(),
+    idleExit: idleExit.seconds,
   });
   const lanMode = desiredConfig.lanMode;
   useHttps = desiredConfig.useHttps;
@@ -3511,6 +3618,7 @@ ${colors.bold("LAN mode (--lan):")}
   tlds = desiredConfig.tlds;
   const desiredWildcard = desiredConfig.useWildcard;
   const desiredUnprivileged = desiredConfig.unprivileged;
+  const desiredIdleExit = desiredConfig.idleExit;
   let lanIp: string | null = desiredConfig.lanIpExplicit ? desiredConfig.lanIp : null;
 
   if (!hasExplicitPort && runningPort === null) {
@@ -3587,6 +3695,13 @@ ${colors.bold("LAN mode (--lan):")}
     }
     const portFlag = proxyPort !== getDefaultPort(useHttps) ? ` -p ${proxyPort}` : "";
     console.log(colors.yellow(`Proxy is already running on port ${proxyPort}.`));
+    // Idle exit does not change routing, so a different value is a note, not a mismatch.
+    if (explicit.idleExit && desiredIdleExit !== runningConfig.idleExit) {
+      const running = runningConfig.idleExit
+        ? `idle exit after ${runningConfig.idleExit}s`
+        : "no idle exit";
+      console.log(colors.yellow(`It was started with ${running}; restart it to change that.`));
+    }
     console.log(
       colors.blue(`To restart: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
     );
@@ -3679,6 +3794,7 @@ ${colors.bold("LAN mode (--lan):")}
         tld,
         tlds,
         useWildcard: desiredWildcard,
+        idleExit: desiredIdleExit,
         foreground: isForeground,
         includePort: true,
         proxyPort,
@@ -3815,7 +3931,8 @@ ${colors.bold("LAN mode (--lan):")}
       lanIp,
       desiredWildcard ? false : undefined,
       !!(customCertPath && customKeyPath),
-      desiredUnprivileged
+      desiredUnprivileged,
+      desiredIdleExit
     );
     return;
   }
@@ -3847,6 +3964,7 @@ ${colors.bold("LAN mode (--lan):")}
         tlds,
         useWildcard: desiredWildcard,
         unprivileged: desiredUnprivileged,
+        idleExit: desiredIdleExit,
         foreground: true,
         includePort: true,
         proxyPort,
@@ -4483,6 +4601,7 @@ async function runWithTurbo(
     }
     manifest[app.pkg.dir] = entry;
   }
+  if (routes.length > 0) await leaseProxy(stateDir, proxyPort, tls, lanMode);
 
   ensureEnvLoader();
   writeManifest(manifest);
@@ -4584,6 +4703,9 @@ async function runWithDirectSpawn(
     routeSettlements.push(settled);
     if (route) routeEntries.push(route);
     appUrls.push({ label: app.label, url: displayUrl });
+  }
+  if (routeEntries.length > 0) {
+    await leaseProxy(stateDir, proxyPort, tls, lanMode);
   }
 
   const taskLabels: string[] = [];
@@ -5148,8 +5270,10 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
           )
         );
       }
-      if (registered.size > 0)
+      if (registered.size > 0) {
+        await leaseProxy(dir, proxyPort, tls, lanMode);
         await reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+      }
     }
     process.exit(code !== 0 ? code : conflicts.size > 0 ? 1 : 0);
   }
@@ -5162,7 +5286,9 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
     sync();
     if (!reported && registered.size > 0) {
       reported = true;
-      void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+      void leaseProxy(dir, proxyPort, tls, lanMode).then(() =>
+        reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode)
+      );
     }
   }, 1000);
   // Ctrl+C reaches compose through the process group; wait for it to stop.

@@ -316,6 +316,161 @@ async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   });
 }
 
+function isPidRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+function killQuietly(pid: number | undefined, signal: NodeJS.Signals = "SIGKILL"): void {
+  if (!pid) return;
+  try {
+    process.kill(pid, signal);
+  } catch {
+    // Already gone.
+  }
+}
+
+async function waitUntil(
+  condition: () => boolean | Promise<boolean>,
+  timeoutMs: number,
+  what: string
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`Timed out after ${timeoutMs}ms waiting for ${what}`);
+}
+
+/** GET a path through the proxy with the given Host header; null unless it answers 200. */
+function requestThroughProxy(port: number, host: string, urlPath = "/"): Promise<string | null> {
+  return new Promise((resolve) => {
+    const req = http.get(
+      { hostname: "127.0.0.1", port, path: urlPath, headers: { host }, timeout: 1000 },
+      (res) => {
+        let body = "";
+        res.on("data", (chunk) => (body += chunk));
+        res.on("end", () => resolve(res.statusCode === 200 ? body : null));
+      }
+    );
+    req.on("error", () => resolve(null));
+    req.on("timeout", () => {
+      req.destroy();
+      resolve(null);
+    });
+  });
+}
+
+function canListenOn(port: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.listen(port, "127.0.0.1", () => server.close(() => resolve(true)));
+  });
+}
+
+/**
+ * A proxy started with idle exit, in its own state dir and port, plus fake
+ * apps that bind PORT, record their pid, and exit 1 on GET /crash.
+ */
+async function createIdleExitHarness() {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-idle-exit-"));
+  const port = await getFreePort();
+  const env: Record<string, string | undefined> = {
+    PORTLESS_PORT: String(port),
+    PORTLESS_HTTPS: "0",
+    PORTLESS_STATE_DIR: dir,
+    PORTLESS_IDLE_EXIT: undefined,
+    PORTLESS_UNPRIVILEGED: undefined,
+  };
+  const appPath = path.join(dir, "app.cjs");
+  fs.writeFileSync(
+    appPath,
+    [
+      'const fs = require("node:fs");',
+      'const http = require("node:http");',
+      "fs.writeFileSync(process.env.APP_PID_FILE, String(process.pid));",
+      "http",
+      "  .createServer((req, res) => {",
+      '    if (req.url === "/crash") {',
+      '      res.end("bye", () => process.exit(1));',
+      "      return;",
+      "    }",
+      "    res.end(process.env.APP_NAME);",
+      "  })",
+      "  .listen(Number(process.env.PORT), process.env.HOST);",
+    ].join("\n") + "\n"
+  );
+  const children: ReturnType<typeof spawn>[] = [];
+  const appPidFiles: string[] = [];
+
+  const startApp = async (name: string, extraEnv: Record<string, string | undefined> = {}) => {
+    const pidFile = path.join(dir, `${name}.pid`);
+    appPidFiles.push(pidFile);
+    const childEnv: Record<string, string | undefined> = { ...process.env, ...env, ...extraEnv };
+    // Same scrubbing as run(): the CLI must not look like it runs under pnpm dlx / npx.
+    delete childEnv.PORTLESS_PREFIX;
+    delete childEnv.PNPM_SCRIPT_SRC_DIR;
+    if (childEnv.npm_command === "exec") delete childEnv.npm_command;
+    childEnv.NO_COLOR = "1";
+    childEnv.APP_NAME = name;
+    childEnv.APP_PID_FILE = pidFile;
+    // Outside any git worktree, so the hostname carries no branch label.
+    const child = spawn(process.execPath, [CLI_PATH, name, "node", appPath], {
+      cwd: dir,
+      env: childEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    children.push(child);
+    let output = "";
+    child.stdout?.on("data", (chunk) => (output += chunk));
+    child.stderr?.on("data", (chunk) => (output += chunk));
+    const exited = new Promise<number | null>((resolve) =>
+      child.once("exit", (code) => resolve(code))
+    );
+    return { child, exited, output: () => output };
+  };
+
+  const waitForServed = (name: string, timeoutMs = 15_000) =>
+    waitUntil(
+      async () => (await requestThroughProxy(port, `${name}.localhost`)) === name,
+      timeoutMs,
+      `${name}.localhost to be served`
+    );
+
+  const readProxyPid = () => Number(fs.readFileSync(path.join(dir, "proxy.pid"), "utf-8"));
+
+  /** Wait for the proxy to stop itself, then check it freed its port and kept its settings. */
+  const expectProxyGone = async (pid: number, timeoutMs = 10_000) => {
+    await waitUntil(() => !isPidRunning(pid), timeoutMs, `proxy ${pid} to exit`);
+    expect(fs.existsSync(path.join(dir, "proxy.pid"))).toBe(false);
+    // Kept so the next auto-start comes back on the same port.
+    expect(fs.readFileSync(path.join(dir, "proxy.port"), "utf-8").trim()).toBe(String(port));
+    expect(await canListenOn(port)).toBe(true);
+    expect(fs.readFileSync(path.join(dir, "proxy.log"), "utf-8")).toContain("stopping (idle exit)");
+  };
+
+  const cleanup = () => {
+    for (const child of children) killQuietly(child.pid);
+    for (const pidFile of appPidFiles) {
+      try {
+        killQuietly(Number(fs.readFileSync(pidFile, "utf-8")));
+      } catch {
+        // The app never started.
+      }
+    }
+    run(["proxy", "stop"], { env });
+    fs.rmSync(dir, { recursive: true, force: true });
+  };
+
+  return { dir, port, env, startApp, waitForServed, readProxyPid, expectProxyGone, cleanup };
+}
+
 // A command that exits 0 waits up to EXIT_TIMEOUT_MS for a detached daemon.
 describe("CLI", { timeout: 15_000 }, () => {
   beforeAll(() => {
@@ -2631,6 +2786,343 @@ describe("CLI", { timeout: 15_000 }, () => {
       });
       expect(stop.status).toBe(0);
       expect(stop.stdout).toContain("Proxy stopped");
+    });
+  });
+
+  describe("idle exit", { timeout: 30_000 }, () => {
+    const IDLE_START = ["proxy", "start", "--idle-exit", "--idle-exit-after", "1"];
+
+    it.each(["SIGINT", "SIGTERM", "SIGHUP", "SIGKILL"] as const)(
+      "stops the proxy once the last app's run gets %s",
+      async (signal) => {
+        const h = await createIdleExitHarness();
+        try {
+          expect(run(IDLE_START, { env: h.env }).status).toBe(0);
+          const proxyPid = h.readProxyPid();
+          const app = await h.startApp("web");
+          await h.waitForServed("web");
+
+          app.child.kill(signal);
+          await app.exited;
+          await h.expectProxyGone(proxyPid);
+        } finally {
+          h.cleanup();
+        }
+      }
+    );
+
+    it("stops the proxy once the last app crashes on its own", async () => {
+      const h = await createIdleExitHarness();
+      try {
+        expect(run(IDLE_START, { env: h.env }).status).toBe(0);
+        const proxyPid = h.readProxyPid();
+        const app = await h.startApp("web");
+        await h.waitForServed("web");
+
+        expect(await requestThroughProxy(h.port, "web.localhost", "/crash")).toBe("bye");
+        expect(await app.exited).toBe(1);
+        await h.expectProxyGone(proxyPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("stays up while any app lives and stops after the last one", async () => {
+      const h = await createIdleExitHarness();
+      try {
+        expect(run(IDLE_START, { env: h.env }).status).toBe(0);
+        const proxyPid = h.readProxyPid();
+        const web = await h.startApp("web");
+        const storybook = await h.startApp("storybook.web");
+        await h.waitForServed("web");
+        await h.waitForServed("storybook.web");
+
+        storybook.child.kill("SIGTERM");
+        await storybook.exited;
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        expect(isPidRunning(proxyPid)).toBe(true);
+        await h.waitForServed("web", 2000);
+
+        web.child.kill("SIGTERM");
+        await web.exited;
+        await h.expectProxyGone(proxyPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("stays up while an alias is registered", async () => {
+      const h = await createIdleExitHarness();
+      try {
+        expect(run(IDLE_START, { env: h.env }).status).toBe(0);
+        const proxyPid = h.readProxyPid();
+        const app = await h.startApp("web");
+        await h.waitForServed("web");
+        expect(run(["alias", "db", "4567"], { env: h.env }).status).toBe(0);
+
+        app.child.kill("SIGTERM");
+        await app.exited;
+        await new Promise((resolve) => setTimeout(resolve, 3000));
+        expect(isPidRunning(proxyPid)).toBe(true);
+
+        expect(run(["alias", "--remove", "db"], { env: h.env }).status).toBe(0);
+        await h.expectProxyGone(proxyPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("stops after the last app with other proxy modes on", async () => {
+      const h = await createIdleExitHarness();
+      try {
+        const start = run(
+          [...IDLE_START, "-p", String(h.port), "--unprivileged", "--wildcard", "--tld", "test"],
+          { env: { ...h.env, PORTLESS_PORT: undefined } }
+        );
+        expect(start.status).toBe(0);
+        const proxyPid = h.readProxyPid();
+        const log = fs.readFileSync(path.join(h.dir, "proxy.log"), "utf-8");
+        expect(log).toContain("(wildcard) (unprivileged, loopback peers only)");
+        expect(log).toContain("Idle exit: stops 1s after the last app exits");
+
+        const app = await h.startApp("web");
+        await waitUntil(
+          async () => (await requestThroughProxy(h.port, "web.test")) === "web",
+          15_000,
+          "web.test to be served"
+        );
+        app.child.kill("SIGTERM");
+        await app.exited;
+        // Well inside the 30s boot grace, so only the lease can have ended it.
+        await h.expectProxyGone(proxyPid);
+        // Like a stop, the modes stay for the next auto-start.
+        expect(fs.existsSync(path.join(h.dir, "proxy.unprivileged"))).toBe(true);
+        expect(fs.readFileSync(path.join(h.dir, "proxy.idle-exit"), "utf-8")).toBe("1");
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("holds the lease on an HTTPS proxy", async () => {
+      const h = await createIdleExitHarness();
+      try {
+        const start = run([...IDLE_START, "--https", "--skip-trust"], {
+          env: { ...h.env, PORTLESS_HTTPS: undefined },
+        });
+        expect(start.status).toBe(0);
+        expect(fs.existsSync(path.join(h.dir, "proxy.tls"))).toBe(true);
+        const proxyPid = h.readProxyPid();
+        const app = await h.startApp("web", { PORTLESS_HTTPS: undefined });
+        await waitUntil(() => app.output().includes("Running:"), 15_000, "the app to start");
+
+        app.child.kill("SIGTERM");
+        await app.exited;
+        // Well inside the 30s boot grace, so only the lease can have ended it.
+        await h.expectProxyGone(proxyPid, 10_000);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("keeps idle exit for a proxy auto-started after a stop", async () => {
+      const h = await createIdleExitHarness();
+      try {
+        const start = run(IDLE_START, { env: { ...h.env, PORTLESS_IDLE_EXIT_AFTER: "30" } });
+        expect(start.status).toBe(0);
+        expect(fs.readFileSync(path.join(h.dir, "proxy.idle-exit"), "utf-8")).toBe("1");
+        expect(run(["proxy", "stop"], { env: h.env }).status).toBe(0);
+        expect(fs.readFileSync(path.join(h.dir, "proxy.idle-exit"), "utf-8")).toBe("1");
+
+        const app = await h.startApp("web");
+        await h.waitForServed("web");
+        expect(app.output()).toContain("Starting proxy");
+        const proxyPid = h.readProxyPid();
+
+        app.child.kill("SIGTERM");
+        await app.exited;
+        await h.expectProxyGone(proxyPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("auto-starts on the same port, TLS and TLD after an idle exit", async () => {
+      const h = await createIdleExitHarness();
+      // Nothing in the environment: the settings come only from the flags.
+      const bare = { PORTLESS_PORT: undefined, PORTLESS_HTTPS: undefined, PORTLESS_TLD: undefined };
+      try {
+        const start = run([...IDLE_START, "-p", String(h.port), "--no-tls", "--tld", "test"], {
+          env: { ...h.env, ...bare },
+        });
+        expect(start.status).toBe(0);
+        const first = await h.startApp("web", bare);
+        await waitUntil(
+          async () => (await requestThroughProxy(h.port, "web.test")) === "web",
+          15_000,
+          "web.test to be served"
+        );
+        const proxyPid = h.readProxyPid();
+        first.child.kill("SIGTERM");
+        await first.exited;
+        await h.expectProxyGone(proxyPid);
+
+        // A second name keeps a separate pid file, so cleanup can still end the
+        // first app's server on Windows, where killing its run leaves it behind.
+        const second = await h.startApp("api", bare);
+        await waitUntil(
+          async () => (await requestThroughProxy(h.port, "api.test")) === "api",
+          15_000,
+          "api.test to be served by the auto-started proxy"
+        );
+        expect(second.output()).toContain("Starting proxy");
+        const secondPid = h.readProxyPid();
+        expect(secondPid).not.toBe(proxyPid);
+        second.child.kill("SIGTERM");
+        await second.exited;
+        // Also lets Windows remove the state dir, which a running proxy keeps open.
+        await h.expectProxyGone(secondPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("serves a run whose route lands after the proxy idled out", async () => {
+      const h = await createIdleExitHarness();
+      const lockPath = path.join(h.dir, "routes.lock");
+      try {
+        expect(
+          run(["proxy", "start", "--idle-exit", "--idle-exit-after", "3"], { env: h.env }).status
+        ).toBe(0);
+        const proxyPid = h.readProxyPid();
+        const first = await h.startApp("first");
+        await h.waitForServed("first");
+        first.child.kill("SIGTERM");
+        await first.exited;
+
+        // While the proxy lingers, a second run finds it up, then blocks on
+        // the route lock until the proxy has stopped. Its lease then finds no
+        // proxy, so it must start a new one.
+        fs.mkdirSync(lockPath);
+        const second = await h.startApp("second");
+        await waitUntil(
+          () => second.output().includes("Using port"),
+          5000,
+          "the run to reach registration"
+        );
+        expect(second.output()).toContain("Proxy is running");
+        await waitUntil(() => !isPidRunning(proxyPid), 8000, "the proxy to idle out");
+        fs.rmdirSync(lockPath);
+
+        await h.waitForServed("second");
+        expect(h.readProxyPid()).not.toBe(proxyPid);
+        expect(second.output()).toContain("Starting proxy");
+      } finally {
+        fs.rmSync(lockPath, { recursive: true, force: true });
+        h.cleanup();
+      }
+    });
+  });
+
+  describe("idle exit options", () => {
+    let tmpDir: string;
+    let testPort: number;
+
+    const proxyEnv = () => ({
+      PORTLESS_PORT: String(testPort),
+      PORTLESS_HTTPS: "0",
+      PORTLESS_STATE_DIR: tmpDir,
+      PORTLESS_IDLE_EXIT: undefined,
+      PORTLESS_IDLE_EXIT_AFTER: undefined,
+    });
+    const marker = () => path.join(tmpDir, "proxy.idle-exit");
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-idle-exit-options-"));
+      testPort = await getFreePort();
+    });
+
+    afterEach(() => {
+      run(["proxy", "stop"], { env: proxyEnv() });
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("remembers the default linger for --idle-exit", () => {
+      expect(run(["proxy", "start", "--idle-exit"], { env: proxyEnv() }).status).toBe(0);
+      expect(fs.readFileSync(marker(), "utf-8")).toBe("5");
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).toContain(
+        "Idle exit: stops 5s after the last app exits"
+      );
+    });
+
+    it("reads idle exit and its linger from the environment", () => {
+      const start = run(["proxy", "start"], {
+        env: { ...proxyEnv(), PORTLESS_IDLE_EXIT: "1", PORTLESS_IDLE_EXIT_AFTER: "45" },
+      });
+      expect(start.status).toBe(0);
+      expect(fs.readFileSync(marker(), "utf-8")).toBe("45");
+    });
+
+    it("passes PORTLESS_IDLE_EXIT through auto-start", () => {
+      const result = run(["web", "node", "-e", "process.exit(0)"], {
+        env: { ...proxyEnv(), PORTLESS_IDLE_EXIT: "1" },
+        cwd: tmpDir,
+      });
+      expect(result.status).toBe(0);
+      expect(fs.readFileSync(marker(), "utf-8")).toBe("5");
+    });
+
+    it("turns a remembered idle exit off with PORTLESS_IDLE_EXIT=0", () => {
+      fs.writeFileSync(marker(), "45");
+      const start = run(["proxy", "start"], { env: { ...proxyEnv(), PORTLESS_IDLE_EXIT: "0" } });
+      expect(start.status).toBe(0);
+      expect(fs.existsSync(marker())).toBe(false);
+    });
+
+    it("leaves idle exit off when it was never asked for", () => {
+      expect(run(["proxy", "start"], { env: proxyEnv() }).status).toBe(0);
+      expect(fs.existsSync(marker())).toBe(false);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8")).not.toContain("Idle exit");
+    });
+
+    it.each([
+      [["--idle-exit", "--idle-exit-after", "soon"], {}, 'Invalid --idle-exit-after value "soon"'],
+      [["--idle-exit", "--idle-exit-after", "0"], {}, 'Invalid --idle-exit-after value "0"'],
+      [["--idle-exit", "--idle-exit-after"], {}, "--idle-exit-after requires a number of seconds"],
+      [["--idle-exit-after", "20"], {}, "--idle-exit-after only applies with idle exit on"],
+      [
+        [],
+        { PORTLESS_IDLE_EXIT_AFTER: "20" },
+        "PORTLESS_IDLE_EXIT_AFTER only applies with idle exit on",
+      ],
+      [
+        [],
+        { PORTLESS_IDLE_EXIT: "1", PORTLESS_IDLE_EXIT_AFTER: "-5" },
+        'Invalid PORTLESS_IDLE_EXIT_AFTER value "-5"',
+      ],
+    ])("rejects %j %j", (flags, env, message) => {
+      const start = run(["proxy", "start", ...flags], { env: { ...proxyEnv(), ...env } });
+      expect(start.status).toBe(1);
+      expect(start.stderr).toContain(message);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+    });
+
+    it("notes a different idle exit on a running proxy instead of failing", () => {
+      expect(run(["proxy", "start"], { env: proxyEnv() }).status).toBe(0);
+      const again = run(["proxy", "start", "--idle-exit"], { env: proxyEnv() });
+      expect(again.status).toBe(0);
+      expect(again.stdout).toContain(
+        "It was started with no idle exit; restart it to change that."
+      );
+    });
+
+    it.each([
+      [["--idle-exit"], {}],
+      [["--idle-exit-after", "60"], {}],
+      [[], { PORTLESS_IDLE_EXIT: "1" }],
+    ])("refuses idle exit with service install: %j %j", (flags, env) => {
+      const install = run(["service", "install", ...flags], { env: { ...proxyEnv(), ...env } });
+      expect(install.status).toBe(1);
+      expect(install.stderr).toContain("cannot be combined with service install");
     });
   });
 

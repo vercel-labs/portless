@@ -37,6 +37,14 @@ export interface ProxyServerOptions {
   loopbackOnly?: boolean;
   /** Optional error logger; defaults to console.error. */
   onError?: (message: string) => void;
+  /**
+   * Hold a lease for a running app: the response stays open until the app's
+   * process exits. Without it the lease endpoint answers 404.
+   */
+  onLeaseRequest?: (lease: {
+    on(event: "close", listener: () => void): unknown;
+    end(): void;
+  }) => "held" | "full" | "closing";
   /** Run the daemon-owned hosts sync for the current route table. */
   onHostsSyncRequest?: () => "acted" | "disabled";
   hostsSyncToken?: string;

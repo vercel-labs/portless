@@ -7,7 +7,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
-import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import { HOSTS_SYNC_PATH, LEASE_ACK, LEASE_HEADER, LEASE_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
@@ -539,6 +539,91 @@ export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
   }
 }
 
+/** Name of the marker file that remembers idle exit across proxy restarts. */
+const IDLE_EXIT_MARKER_FILE = "proxy.idle-exit";
+
+/**
+ * Default idle-exit linger. Long enough that restarting a dev server in place
+ * or switching worktrees reuses the running proxy instead of starting a new one.
+ */
+export const DEFAULT_IDLE_EXIT_SECONDS = 5;
+
+/** Parse an idle-exit linger in whole seconds above 0; null when invalid. */
+export function parseIdleExitSeconds(value: string): number | null {
+  const trimmed = value.trim();
+  if (!/^\d+$/.test(trimmed)) return null;
+  const seconds = Number(trimmed);
+  return Number.isSafeInteger(seconds) && seconds > 0 ? seconds : null;
+}
+
+/** Return whether idle exit is requested via the PORTLESS_IDLE_EXIT env var. */
+export function isIdleExitEnvEnabled(): boolean {
+  const val = process.env.PORTLESS_IDLE_EXIT;
+  return val === "1" || val === "true";
+}
+
+/**
+ * Resolve idle exit to its linger in seconds, 0 when off. `--idle-exit` or
+ * PORTLESS_IDLE_EXIT decides whether it is on; without either, the marker
+ * left by the last proxy does, so an auto-start keeps the mode. Throws on an
+ * invalid linger, or one given while idle exit is off.
+ */
+export function resolveIdleExitSeconds(options: {
+  flag: boolean;
+  /** Value of `--idle-exit-after`, when given. */
+  after?: string;
+  /** Linger from proxy.idle-exit, 0 when absent. */
+  persisted: number;
+}): { seconds: number; explicit: boolean } {
+  const envAfter = process.env.PORTLESS_IDLE_EXIT_AFTER || undefined;
+  const afterSource =
+    options.after !== undefined ? "--idle-exit-after" : "PORTLESS_IDLE_EXIT_AFTER";
+  const afterValue = options.after ?? envAfter;
+  const explicitOn = options.flag || process.env.PORTLESS_IDLE_EXIT !== undefined;
+  const enabled = explicitOn ? options.flag || isIdleExitEnvEnabled() : options.persisted > 0;
+  let after: number | null = null;
+  if (afterValue !== undefined) {
+    after = parseIdleExitSeconds(afterValue);
+    if (after === null) {
+      throw new Error(
+        `Invalid ${afterSource} value "${afterValue}". Use a whole number of seconds above 0.`
+      );
+    }
+    if (!enabled) {
+      throw new Error(
+        `${afterSource} only applies with idle exit on. Add --idle-exit or set PORTLESS_IDLE_EXIT=1.`
+      );
+    }
+  }
+  const seconds = enabled ? (after ?? (options.persisted || DEFAULT_IDLE_EXIT_SECONDS)) : 0;
+  return { seconds, explicit: explicitOn || afterValue !== undefined };
+}
+
+/** Read the idle-exit linger from a state directory; 0 when idle exit is off. */
+export function readIdleExitMarker(dir: string): number {
+  try {
+    return (
+      parseIdleExitSeconds(fs.readFileSync(path.join(dir, IDLE_EXIT_MARKER_FILE), "utf-8")) ?? 0
+    );
+  } catch {
+    return 0;
+  }
+}
+
+/** Write the idle-exit marker with its linger, or remove it when `seconds` is 0. */
+export function writeIdleExitMarker(dir: string, seconds: number): void {
+  const markerPath = path.join(dir, IDLE_EXIT_MARKER_FILE);
+  if (seconds > 0) {
+    fs.writeFileSync(markerPath, String(seconds), { mode: 0o644 });
+  } else {
+    try {
+      fs.unlinkSync(markerPath);
+    } catch {
+      // Marker may already be absent; non-fatal
+    }
+  }
+}
+
 export function readCustomCertMarker(dir: string): boolean {
   try {
     return fs.existsSync(path.join(dir, CUSTOM_CERT_MARKER_FILE));
@@ -858,6 +943,7 @@ export function buildProxyStartConfig(options: {
   tlds?: readonly string[];
   useWildcard?: boolean;
   unprivileged?: boolean;
+  idleExit?: number;
   foreground?: boolean;
   includePort?: boolean;
   proxyPort?: number;
@@ -907,6 +993,12 @@ export function buildProxyStartConfig(options: {
 
   if (options.unprivileged) {
     args.push("--unprivileged");
+  }
+
+  if (options.idleExit) {
+    // Always explicit: the daemon inherits the environment, so leaving the
+    // default out would let PORTLESS_IDLE_EXIT_AFTER override it there.
+    args.push("--idle-exit", "--idle-exit-after", options.idleExit.toString());
   }
 
   if (options.skipTrust) {
@@ -1195,6 +1287,74 @@ function probeHostsSyncAuth(
     req.on("error", (err: NodeJS.ErrnoException) => {
       resolve(err.code === "ECONNREFUSED" || err.code === "ENOTFOUND" ? "absent" : "mute");
     });
+    req.end();
+  });
+}
+
+/** How long (ms) to wait for the proxy to acknowledge a lease. */
+const LEASE_TIMEOUT_MS = 2000;
+
+export type ProxyLease = "held" | "full" | "closing" | "unsupported" | "unreachable";
+
+/**
+ * Lease the proxy for the life of this process: the proxy keeps the response
+ * open, and the socket closes when this process exits, however it exits. The
+ * socket is unref'd, so the lease never keeps this process alive. "closing"
+ * and "unreachable" mean the proxy stopped or is stopping.
+ */
+export function holdProxyLease(port: number, tls = false): Promise<ProxyLease> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const settle = (result: ProxyLease) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    // An HTTPS proxy redirects plain HTTP, so speak TLS to it like hosts sync does.
+    const requestFn = tls ? https.request : http.request;
+    const req = requestFn(
+      {
+        hostname: "127.0.0.1",
+        port,
+        path: LEASE_PATH,
+        method: "POST",
+        headers: { [LEASE_HEADER]: "1" },
+        agent: false,
+        timeout: LEASE_TIMEOUT_MS,
+        ...(tls ? { rejectUnauthorized: false } : {}),
+      },
+      (res) => {
+        if (res.statusCode !== 200) {
+          res.resume();
+          settle(
+            res.statusCode === 503 ? "closing" : res.statusCode === 429 ? "full" : "unsupported"
+          );
+          return;
+        }
+        let received = "";
+        res.setEncoding("utf-8");
+        res.on("data", (chunk: string) => {
+          if (settled) return;
+          received += chunk;
+          if (!received.startsWith(LEASE_ACK)) {
+            if (received.length >= LEASE_ACK.length) {
+              req.destroy();
+              settle("unsupported");
+            }
+            return;
+          }
+          // An idle lease is the point, so it must not time itself out.
+          req.setTimeout(0);
+          req.socket?.setTimeout(0);
+          req.socket?.unref();
+          settle("held");
+        });
+        res.on("end", () => settle("unsupported"));
+        res.on("error", () => settle("unreachable"));
+      }
+    );
+    req.on("timeout", () => req.destroy());
+    req.on("error", () => settle("unreachable"));
     req.end();
   });
 }
