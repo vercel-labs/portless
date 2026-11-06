@@ -836,6 +836,17 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(2);
       expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
     });
+
+    it("prints compose help when --help is given with a bad flag", () => {
+      for (const args of [
+        ["compose", "--help", "--bad"],
+        ["compose", "--bad", "--help"],
+      ]) {
+        const { status, stdout } = run(args);
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless compose");
+      }
+    });
   });
 
   describe("prune", () => {
@@ -1055,6 +1066,57 @@ describe("CLI", { timeout: 15_000 }, () => {
       );
       expect(status).toBe(0);
       expect(stdout.trim()).toBe("--port,3000,--force");
+    });
+  });
+
+  describe("flag order", () => {
+    it("prints run help before a later bad flag", () => {
+      for (const args of [
+        ["run", "--help", "--bogus"],
+        ["run", "--help", "--force=false"],
+        ["run", "-h", "--app-port", "abc"],
+      ]) {
+        const { status, stdout, stderr } = run(args);
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless run");
+        expect(stderr).toBe("");
+      }
+    });
+
+    it("rejects a bad flag before a later --help", () => {
+      const unknown = run(["run", "--bogus", "--help"]);
+      expect(unknown.status).toBe(2);
+      expect(unknown.stderr).toContain("Unknown flag");
+
+      const badValue = run(["run", "--app-port", "abc", "--help"]);
+      expect(badValue.status).toBe(2);
+      expect(badValue.stderr).toContain("Invalid app port");
+
+      const booleanValue = run(["run", "--force=false", "--help"]);
+      expect(booleanValue.status).toBe(2);
+      expect(booleanValue.stderr).toContain("--force does not take a value.");
+    });
+
+    it("checks every --app-port, not only the first", () => {
+      for (const args of [
+        ["run", "--app-port=3000", "--app-port=abc", "echo", "ran"],
+        ["myapp", "--app-port", "abc", "--app-port", "3000", "echo", "ran"],
+        ["--app-port=3000", "myapp", "--app-port=abc", "echo", "ran"],
+      ]) {
+        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" } });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Invalid app port");
+        expect(stdout).not.toContain("ran");
+      }
+    });
+
+    it("accepts repeated flags and runs the child", () => {
+      const { status, stdout } = run(
+        ["run", "--force", "--force", "--name=a", "--name=b", "echo", "ok"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
     });
   });
 

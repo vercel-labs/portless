@@ -22,12 +22,8 @@ export interface ParsedArgs {
   value(flag: string): string | undefined;
 }
 
-export interface LeadingArgs {
-  /** The flags that appeared before the first positional. */
-  flags: ParsedArgs;
-  /** The first positional and every argument after it, unchanged. */
-  rest: string[];
-}
+/** Reports a flag as it is read, with the value of a value flag. Return false to stop reading. */
+export type FlagVisitor = (flag: string, value: string | undefined) => boolean | void;
 
 /** One recognized flag token: its name, its value, and the last index it used. */
 interface FlagToken {
@@ -137,28 +133,26 @@ export function parseCommandArgs(
 }
 
 /**
- * Parse the flags before a command's first positional and stop there. The
- * first positional and everything after it come back in `rest`, untouched, so
- * a wrapper command can hand its child the arguments it was given. Accepts
- * `--flag value`, `--flag=value`, repeated flags, and `--`.
+ * Read a command's flags in argument order and report each one to `visit`.
+ * Stops after `--` or at the first positional, and returns the arguments from
+ * there so a wrapper can hand its child exactly what it was given. Accepts
+ * `--flag value`, `--flag=value`, and repeated flags; a caller that keeps more
+ * than one occurrence decides itself which one wins.
  */
-export function parseLeadingArgs(
+export function visitLeadingFlags(
   command: string,
   args: readonly string[],
-  spec: Readonly<Record<string, FlagKind>>
-): LeadingArgs {
-  const seen = new Map<string, string[]>();
-
+  spec: Readonly<Record<string, FlagKind>>,
+  visit: FlagVisitor
+): string[] {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === "--") return { flags: parsedArgs(seen, []), rest: args.slice(i + 1) };
-    if (!arg.startsWith("-") || arg === "-") {
-      return { flags: parsedArgs(seen, []), rest: args.slice(i) };
-    }
+    if (arg === "--") return args.slice(i + 1);
+    if (!arg.startsWith("-") || arg === "-") return args.slice(i);
     const token = readFlagToken(command, args, i, spec);
-    collect(seen, token);
+    if (visit(token.flag, token.value) === false) return [];
     i = token.end;
   }
 
-  return { flags: parsedArgs(seen, []), rest: [] };
+  return [];
 }

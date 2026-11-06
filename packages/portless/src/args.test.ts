@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseCommandArgs, parseLeadingArgs, UsageError } from "./args.js";
+import { parseCommandArgs, visitLeadingFlags, UsageError } from "./args.js";
 
 const spec = { "--name": "value", "--port": "value", "--force": "boolean" } as const;
 
@@ -64,47 +64,85 @@ describe("parseCommandArgs", () => {
 
 const childSpec = { "--name": "value", "--force": "boolean", "--prefix": "text" } as const;
 
-describe("parseLeadingArgs", () => {
-  it("reads value flags and returns the child command untouched", () => {
-    const { flags, rest } = parseLeadingArgs(
+describe("visitLeadingFlags", () => {
+  it("reports flags in argument order and returns the child command untouched", () => {
+    const visits: [string, string | undefined][] = [];
+    const rest = visitLeadingFlags(
       "run",
       ["--name=api", "--force", "next", "dev", "--port", "3000"],
-      childSpec
+      childSpec,
+      (flag, value) => {
+        visits.push([flag, value]);
+      }
     );
-    expect(flags.value("--name")).toBe("api");
-    expect(flags.has("--force")).toBe(true);
+    expect(visits).toEqual([
+      ["--name", "api"],
+      ["--force", undefined],
+    ]);
     expect(rest).toEqual(["next", "dev", "--port", "3000"]);
   });
 
+  it("reports every value in order so a caller can keep the last one", () => {
+    const values: string[] = [];
+    visitLeadingFlags("run", ["--name=one", "--name", "two"], childSpec, (_flag, value) => {
+      if (value !== undefined) values.push(value);
+    });
+    expect(values).toEqual(["one", "two"]);
+  });
+
   it("keeps a value that itself contains =", () => {
-    const { flags } = parseLeadingArgs("run", ["--name=a=b", "next"], childSpec);
-    expect(flags.value("--name")).toBe("a=b");
+    const values: string[] = [];
+    visitLeadingFlags("run", ["--name=a=b", "next"], childSpec, (_flag, value) => {
+      if (value !== undefined) values.push(value);
+    });
+    expect(values).toEqual(["a=b"]);
   });
 
   it("rejects a value given to a boolean flag", () => {
-    expect(() => parseLeadingArgs("run", ["--force=false", "next"], childSpec)).toThrow(
+    expect(() => visitLeadingFlags("run", ["--force=false", "next"], childSpec, () => {})).toThrow(
       "--force does not take a value."
     );
   });
 
   it("accepts an empty text value but not an empty value flag", () => {
-    const { flags } = parseLeadingArgs("run", ["--prefix=", "--name=x", "next"], childSpec);
-    expect(flags.value("--prefix")).toBe("");
-    expect(flags.value("--name")).toBe("x");
-    expect(() => parseLeadingArgs("run", ["--name=", "next"], childSpec)).toThrow(
+    const visits: [string, string | undefined][] = [];
+    visitLeadingFlags("run", ["--prefix=", "--name=x", "next"], childSpec, (flag, value) => {
+      visits.push([flag, value]);
+    });
+    expect(visits).toEqual([
+      ["--prefix", ""],
+      ["--name", "x"],
+    ]);
+    expect(() => visitLeadingFlags("run", ["--name=", "next"], childSpec, () => {})).toThrow(
       "--name requires a value."
     );
   });
 
   it("stops at the first positional so child flags are left alone", () => {
-    const { flags, rest } = parseLeadingArgs("run", ["next", "--force=false"], childSpec);
-    expect(flags.has("--force")).toBe(false);
+    const visits: string[] = [];
+    const rest = visitLeadingFlags("run", ["next", "--force=false"], childSpec, (flag) => {
+      visits.push(flag);
+    });
+    expect(visits).toEqual([]);
     expect(rest).toEqual(["next", "--force=false"]);
   });
 
+  it("stops when the visitor asks it to", () => {
+    const visits: string[] = [];
+    const rest = visitLeadingFlags("run", ["--name=a", "--bogus"], childSpec, (flag) => {
+      visits.push(flag);
+      return false;
+    });
+    expect(visits).toEqual(["--name"]);
+    expect(rest).toEqual([]);
+  });
+
   it("drops a leading -- and keeps everything after it", () => {
-    const { flags, rest } = parseLeadingArgs("run", ["--", "--force", "next"], childSpec);
-    expect(flags.has("--force")).toBe(false);
+    const visits: string[] = [];
+    const rest = visitLeadingFlags("run", ["--", "--force", "next"], childSpec, (flag) => {
+      visits.push(flag);
+    });
+    expect(visits).toEqual([]);
     expect(rest).toEqual(["--force", "next"]);
   });
 });

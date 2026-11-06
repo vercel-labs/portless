@@ -287,6 +287,57 @@ describe("buildServiceSpec", () => {
     expect(config).toMatchObject({ proxyPort: 8443, tld: "mydb" });
   });
 
+  it("lets the last TLS option decide HTTPS", () => {
+    expect(
+      parseServiceInstallConfig(["service", "install", "--no-tls", "--https"], {}).useHttps
+    ).toBe(true);
+    expect(
+      parseServiceInstallConfig(["service", "install", "--https", "--no-tls"], {}).useHttps
+    ).toBe(false);
+
+    const certThenNoTls = parseServiceInstallConfig(
+      ["service", "install", "--cert", "a.pem", "--key", "b.pem", "--no-tls"],
+      {}
+    );
+    expect(certThenNoTls.useHttps).toBe(false);
+    expect(certThenNoTls.customCertPath).toBe("a.pem");
+
+    const noTlsThenCert = parseServiceInstallConfig(
+      ["service", "install", "--no-tls", "--cert", "a.pem", "--key", "b.pem"],
+      {}
+    );
+    expect(noTlsThenCert.useHttps).toBe(true);
+  });
+
+  it("keeps the last value of a repeated scalar flag", () => {
+    expect(
+      parseServiceInstallConfig(["service", "install", "--port", "1000", "-p", "2000"], {})
+        .proxyPort
+    ).toBe(2000);
+    expect(
+      parseServiceInstallConfig(["service", "install", "-p", "1000", "--port=2000"], {}).proxyPort
+    ).toBe(2000);
+    expect(
+      parseServiceInstallConfig(["service", "install", "--ip", "10.0.0.1", "--ip", "10.0.0.2"], {})
+        .lanIp
+    ).toBe("10.0.0.2");
+    expect(
+      parseServiceInstallConfig(
+        ["service", "install", "--state-dir", "/one", "--state-dir", "/two"],
+        {}
+      ).stateDir
+    ).toBe("/two");
+  });
+
+  it("accumulates repeated --tld flags in order", () => {
+    const config = parseServiceInstallConfig(
+      ["service", "install", "--tld=one", "--tld", "two"],
+      {}
+    );
+    expect(config.tlds).toEqual(["one", "two"]);
+    expect(config.tld).toBe("one");
+  });
+
   it("rejects an invalid --port value as a usage error", () => {
     expect(() => parseServiceInstallConfig(["service", "install", "--port=abc"], {})).toThrow(
       "Invalid port number: abc"
