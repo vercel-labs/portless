@@ -227,6 +227,8 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
 | `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
 
+portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
+
 ### HTTP/2 + HTTPS
 
 HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with many files). WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441 extended CONNECT), so dev server HMR works through the proxy. First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
