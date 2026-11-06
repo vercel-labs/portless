@@ -286,9 +286,9 @@ portless prune
 portless prune --force
 ```
 
-Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time. If the group still holds the port after SIGTERM, prune keeps the route and records a surviving listener so you can retry with `portless prune --force`, which verifies that listener and sends SIGKILL. Prune reports unrelated port holders without killing them.
+Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time. If the group still holds the port after SIGTERM, prune keeps the route and its shares and records a surviving listener so you can retry with `portless prune --force`, which verifies that listener and sends SIGKILL. Prune reports unrelated port holders without killing them.
 
-On Windows, prune cannot verify or signal process groups or recorded tunnel processes. It removes stale routes and Tailscale shares and reports any port holders. `portless run` also attempts to stop recorded orphaned process groups on startup.
+On Windows, prune cannot verify or signal process groups. It removes stale routes and Tailscale shares and reports any port holders. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. `portless run` also attempts to stop recorded orphaned process groups on startup.
 
 ## Proxy control
 

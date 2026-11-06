@@ -1137,7 +1137,7 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
   const spec = currentServiceSpec(entryScript);
 
   if (spec.platform === "darwin") {
-    runRemovalStep(runner, "launchctl", ["bootout", "system", spec.plistPath]);
+    runRemovalStep(runner, "launchctl", ["bootout", `system/${spec.label}`]);
     fs.rmSync(spec.plistPath, { force: true });
   } else if (spec.platform === "linux") {
     runRemovalStep(runner, "systemctl", ["disable", "--now", spec.serviceName]);
@@ -1170,7 +1170,7 @@ export function tryUninstallService(
     if (spec.platform === "darwin") {
       installed = fs.existsSync(spec.plistPath);
       if (!installed) return { removed: false, installed: false };
-      runRemovalStep(runner, "launchctl", ["bootout", "system", spec.plistPath]);
+      runRemovalStep(runner, "launchctl", ["bootout", `system/${spec.label}`]);
       fs.rmSync(spec.plistPath, { force: true });
     } else if (spec.platform === "linux") {
       installed = fs.existsSync(spec.unitPath);

@@ -582,6 +582,81 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("prune", () => {
+    it("stops only verified Windows tunnel executables", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-win-tunnels-"));
+      const preload = path.join(tmpDir, "windows.cjs");
+      const capture = path.join(tmpDir, "capture.json");
+      try {
+        fs.writeFileSync(
+          preload,
+          [
+            'const fs = require("node:fs");',
+            'const cp = require("node:child_process");',
+            'const { syncBuiltinESMExports } = require("node:module");',
+            'Object.defineProperty(process, "platform", { value: "win32" });',
+            'const names = { 71001: "NGROK.EXE\\r\\n", 71002: "Cloudflared.exe\\r\\n", 71003: "other.exe\\r\\n" };',
+            "const calls = { queries: [], signals: [] };",
+            "cp.execFileSync = (command, args, options) => {",
+            '  if (command !== "powershell.exe") throw new Error("unexpected lookup: " + command);',
+            "  calls.queries.push({ command, args, options });",
+            "  const pid = args.at(-1).match(/ProcessId = (\\d+)/)?.[1];",
+            '  if (!(pid in names)) throw new Error("process unavailable");',
+            "  return names[pid];",
+            "};",
+            "process.kill = (pid, signal) => {",
+            '  if (signal === "SIGTERM" && pid >= 71001 && pid <= 71004) {',
+            "    calls.signals.push(pid); return true;",
+            "  }",
+            '  throw Object.assign(new Error("not found"), { code: "ESRCH" });',
+            "};",
+            "syncBuiltinESMExports();",
+            `process.on("exit", () => fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify(calls)));`,
+          ].join("\n")
+        );
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "verified.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              ngrokPid: 71001,
+              cloudflarePid: 71002,
+            },
+            {
+              hostname: "unverified.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              ngrokPid: 71003,
+              cloudflarePid: 71004,
+            },
+          ])
+        );
+        const result = run(["prune"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, NODE_OPTIONS: `--require=${preload}` },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        const calls = JSON.parse(fs.readFileSync(capture, "utf-8"));
+        expect(calls.signals).toEqual([71001, 71002]);
+        expect(calls.queries).toHaveLength(4);
+        expect(calls.queries[0]).toMatchObject({
+          command: "powershell.exe",
+          args: [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            expect.stringContaining("ProcessId = 71001"),
+          ],
+          options: { windowsHide: true, timeout: expect.any(Number) },
+        });
+        expect(result.stdout).toContain("verified.localhost - stopped ngrok tunnel");
+        expect(result.stdout).toContain("verified.localhost - stopped Cloudflare tunnel");
+        expect(result.stdout).not.toContain("unverified.localhost - stopped");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it.skipIf(process.platform === "win32")(
       "keeps a surviving orphan for prune --force",
       async () => {
@@ -600,7 +675,38 @@ describe("CLI", { timeout: 15_000 }, () => {
             stdio: ["ignore", "pipe", "ignore"],
           }
         );
+        const tunnels: ReturnType<typeof spawn>[] = [];
+        const tailscaleLog = path.join(tmpDir, "tailscale.log");
+        fs.writeFileSync(
+          path.join(tmpDir, "tailscale"),
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
+          { mode: 0o755 }
+        );
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
+          PATH: `${tmpDir}${path.delimiter}${process.env.PATH}`,
+        };
         try {
+          for (const binary of ["ngrok", "cloudflared"]) {
+            const binaryPath = path.join(tmpDir, binary);
+            fs.copyFileSync(process.execPath, binaryPath);
+            const tunnel = spawn(
+              binaryPath,
+              [
+                "-e",
+                `process.title=${JSON.stringify(binary)};setInterval(()=>{},1000);console.log("ready")`,
+              ],
+              {
+                stdio: ["ignore", "pipe", "ignore"],
+              }
+            );
+            tunnels.push(tunnel);
+            await new Promise<void>((resolve, reject) => {
+              tunnel.once("error", reject);
+              tunnel.stdout!.once("data", () => resolve());
+            });
+          }
           const port = await new Promise<number>((resolve, reject) => {
             child.once("error", reject);
             child.stdout.once("data", (data) => resolve(Number(data.toString().trim())));
@@ -612,19 +718,41 @@ describe("CLI", { timeout: 15_000 }, () => {
           fs.writeFileSync(
             routesPath,
             JSON.stringify([
-              { hostname: "retry.localhost", port, pid: 999999, childPgid, childStartTime },
+              {
+                hostname: "retry.localhost",
+                port,
+                pid: 999999,
+                childPgid,
+                childStartTime,
+                tailscaleHttpsPort: 8443,
+                ngrokPid: tunnels[0]!.pid,
+                cloudflarePid: tunnels[1]!.pid,
+              },
             ])
           );
-          const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+          const first = run(["prune"], { env });
           expect(first.status).toBe(0);
           expect(first.stdout).toContain("did not exit");
           expect(first.stdout).toContain("portless prune --force");
           expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toHaveLength(1);
-          const second = run(["prune", "--force"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+          expect(fs.existsSync(tailscaleLog)).toBe(false);
+          for (const tunnel of tunnels) expect(() => process.kill(tunnel.pid!, 0)).not.toThrow();
+          expect(first.stdout).not.toContain("stopped");
+          const second = run(["prune", "--force"], { env });
           expect(second.status).toBe(0);
           expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
           expect(findPidsOnPort(port)).toEqual([]);
+          expect(fs.readFileSync(tailscaleLog, "utf-8")).toContain("serve --yes --https=8443 off");
+          expect(second.stdout).toContain("stopped ngrok tunnel");
+          expect(second.stdout).toContain("stopped Cloudflare tunnel");
+          for (const tunnel of tunnels) {
+            if (tunnel.exitCode === null && tunnel.signalCode === null) {
+              await new Promise<void>((resolve) => tunnel.once("exit", () => resolve()));
+            }
+            expect(() => process.kill(tunnel.pid!, 0)).toThrow();
+          }
         } finally {
+          for (const tunnel of tunnels) tunnel.kill("SIGKILL");
           try {
             process.kill(-child.pid!, "SIGKILL");
           } catch {
