@@ -133,11 +133,8 @@ export function parseCommandArgs(
 }
 
 /**
- * Read a command's flags in argument order and report each one to `visit`.
- * Stops after `--` or at the first positional, and returns the arguments from
- * there so a wrapper can hand its child exactly what it was given. Accepts
- * `--flag value`, `--flag=value`, and repeated flags; a caller that keeps more
- * than one occurrence decides itself which one wins.
+ * Visits leading flags in argument order until `--`, a positional, or `visit` returns false.
+ * Returns child arguments unchanged; callers decide how repeated flags are handled.
  */
 export function visitLeadingFlags(
   command: string,

@@ -108,7 +108,7 @@ const TLD_PROPERTY = {
   type: "array",
   items: { type: "string" },
   minItems: 1,
-  description: "One or more TLDs to serve.",
+  description: "One or more TLDs to serve. Invalid TLDs are usage errors (CLI exit code 2).",
 };
 const ALIAS_TLD_PROPERTY = {
   ...TLD_PROPERTY,
