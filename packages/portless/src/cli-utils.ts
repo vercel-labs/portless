@@ -1446,10 +1446,28 @@ export function getProcessStartTime(pid: number): string | null {
   }
 }
 
-/** Read the executable name of a process. Returns null on Windows or when it cannot be read. */
+/** Read the executable name of a process, without the Windows .exe suffix. Returns null if unreadable. */
 export function getProcessCommand(pid: number): string | null {
-  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
+    if (isWindows) {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop).Name`,
+        ],
+        { encoding: "utf-8", windowsHide: true, timeout: PID_LOOKUP_TIMEOUT_MS }
+      );
+      return (
+        output
+          .trim()
+          .replace(/\.exe$/i, "")
+          .toLowerCase() || null
+      );
+    }
     const output = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
