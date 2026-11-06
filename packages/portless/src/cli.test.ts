@@ -2966,11 +2966,13 @@ describe("CLI", { timeout: 15_000 }, () => {
         await first.exited;
         await h.expectProxyGone(proxyPid);
 
-        const second = await h.startApp("web", bare);
+        // A second name keeps a separate pid file, so cleanup can still end the
+        // first app's server on Windows, where killing its run leaves it behind.
+        const second = await h.startApp("api", bare);
         await waitUntil(
-          async () => (await requestThroughProxy(h.port, "web.test")) === "web",
+          async () => (await requestThroughProxy(h.port, "api.test")) === "api",
           15_000,
-          "web.test to be served by the auto-started proxy"
+          "api.test to be served by the auto-started proxy"
         );
         expect(second.output()).toContain("Starting proxy");
         const secondPid = h.readProxyPid();
