@@ -13,7 +13,7 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
-import { UsageError } from "./args.js";
+import { UsageError, parseCommandArgs, type FlagKind } from "./args.js";
 import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
@@ -203,14 +203,6 @@ function parsePortValue(value: string, source: string): number {
   return port;
 }
 
-function getFlagValue(args: string[], index: number, flag: string): string {
-  const value = args[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new UsageError(`${flag} requires a value.`);
-  }
-  return value;
-}
-
 function resolveServicePath(value: string): string {
   const expanded =
     value === "~"
@@ -239,6 +231,33 @@ function collectServiceExtraEnv(
     if (value) extraEnv[key] = value;
   }
   return extraEnv;
+}
+
+/** Flags `service install` accepts. */
+const SERVICE_INSTALL_FLAGS: Readonly<Record<string, FlagKind>> = {
+  "-p": "value",
+  "--port": "value",
+  "--https": "boolean",
+  "--no-tls": "boolean",
+  "--lan": "boolean",
+  "--ip": "value",
+  "--tld": "value",
+  "--wildcard": "boolean",
+  "--unprivileged": "boolean",
+  "--cert": "value",
+  "--key": "value",
+  "--state-dir": "value",
+};
+
+/** Extra flags the elevated re-run passes to itself. */
+const SERVICE_RUNTIME_FLAGS: Readonly<Record<string, FlagKind>> = {
+  "--foreground": "boolean",
+  "--skip-trust": "boolean",
+};
+
+function serviceInstallSpec(allowRuntimeFlags: boolean | undefined): Record<string, FlagKind> {
+  if (!allowRuntimeFlags) return { ...SERVICE_INSTALL_FLAGS };
+  return { ...SERVICE_INSTALL_FLAGS, ...SERVICE_RUNTIME_FLAGS };
 }
 
 export function parseServiceInstallConfig(
@@ -294,71 +313,68 @@ export function parseServiceInstallConfig(
   }
 
   const tokens = args[0] === "service" ? args.slice(2) : args;
-  let tldFlagSeen = false;
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    switch (token) {
-      case "-p":
-      case "--port":
-        config.proxyPort = parsePortValue(getFlagValue(tokens, i, token), token);
-        i += 1;
-        break;
-      case "--https":
-        config.useHttps = true;
-        httpsExplicit = true;
-        break;
-      case "--no-tls":
-        config.useHttps = false;
-        httpsExplicit = true;
-        break;
-      case "--lan":
-        config.lanMode = true;
-        break;
-      case "--ip":
-        config.lanMode = true;
-        config.lanIp = getFlagValue(tokens, i, token);
-        config.lanIpExplicit = true;
-        i += 1;
-        break;
-      case "--tld": {
-        const tlds = parseTldList(getFlagValue(tokens, i, token));
-        config.tlds = normalizeTlds([...(tldFlagSeen ? config.tlds : []), ...tlds]);
-        config.tld = primaryTld(config.tlds);
-        tldFlagSeen = true;
-        i += 1;
-        break;
-      }
-      case "--wildcard":
-        config.useWildcard = true;
-        break;
-      case "--unprivileged":
-        config.unprivileged = true;
-        break;
-      case "--cert":
-        config.customCertPath = getFlagValue(tokens, i, token);
-        config.useHttps = true;
-        httpsExplicit = true;
-        i += 1;
-        break;
-      case "--key":
-        config.customKeyPath = getFlagValue(tokens, i, token);
-        config.useHttps = true;
-        httpsExplicit = true;
-        i += 1;
-        break;
-      case "--state-dir":
-        config.stateDir = getFlagValue(tokens, i, token);
-        i += 1;
-        break;
-      case "--foreground":
-      case "--skip-trust":
-        if (!options.allowRuntimeFlags) {
-          throw new UsageError(`Unknown service install option "${token}".`);
-        }
-        break;
-      default:
-        throw new UsageError(`Unknown service install option "${token}".`);
+  const flags = parseCommandArgs(
+    "service install",
+    tokens,
+    serviceInstallSpec(options.allowRuntimeFlags),
+    0
+  );
+
+  if (flags.has("--https")) {
+    config.useHttps = true;
+    httpsExplicit = true;
+  }
+  if (flags.has("--no-tls")) {
+    config.useHttps = false;
+    httpsExplicit = true;
+  }
+  if (flags.has("--lan")) config.lanMode = true;
+
+  const lanIp = flags.value("--ip");
+  if (lanIp !== undefined) {
+    config.lanMode = true;
+    config.lanIp = lanIp;
+    config.lanIpExplicit = true;
+  }
+
+  const tldFlagValues = flags.values("--tld");
+  if (tldFlagValues.length > 0) {
+    try {
+      config.tlds = normalizeTlds(tldFlagValues.flatMap((value) => parseTldList(value)));
+    } catch (err) {
+      throw new UsageError((err as Error).message, ["See: portless service install --help"]);
     }
+    config.tld = primaryTld(config.tlds);
+  }
+
+  if (flags.has("--wildcard")) config.useWildcard = true;
+  if (flags.has("--unprivileged")) config.unprivileged = true;
+
+  const customCertPath = flags.value("--cert");
+  if (customCertPath !== undefined) {
+    config.customCertPath = customCertPath;
+    config.useHttps = true;
+    httpsExplicit = true;
+  }
+  const customKeyPath = flags.value("--key");
+  if (customKeyPath !== undefined) {
+    config.customKeyPath = customKeyPath;
+    config.useHttps = true;
+    httpsExplicit = true;
+  }
+
+  const stateDir = flags.value("--state-dir");
+  if (stateDir !== undefined) config.stateDir = stateDir;
+
+  const portFlag = flags.value("--port") ?? flags.value("-p");
+  if (portFlag !== undefined) {
+    const port = parsePort(portFlag);
+    if (port === null) {
+      throw new UsageError(`Invalid port number: ${portFlag}`, [
+        "Port must be between 1 and 65535.",
+      ]);
+    }
+    config.proxyPort = port;
   }
 
   if (
@@ -374,7 +390,7 @@ export function parseServiceInstallConfig(
     config.useHttps = false;
   }
 
-  if (!env.PORTLESS_PORT && !tokens.includes("--port") && !tokens.includes("-p")) {
+  if (!env.PORTLESS_PORT && portFlag === undefined) {
     config.proxyPort = getProtocolPort(config.useHttps);
   }
 
@@ -1247,6 +1263,7 @@ ${colors.bold("Install options:")}
   --state-dir <path>               Use a custom service state directory
 
 ${colors.bold("Notes:")}
+  Value flags accept both --flag <value> and --flag=<value>.
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.

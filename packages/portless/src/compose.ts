@@ -24,6 +24,19 @@ const VALUE_FLAGS = new Set([
   "--parallel",
 ]);
 
+/** Compose global flags that take no value. */
+const BOOLEAN_FLAGS = new Set([
+  "--help",
+  "-h",
+  "--version",
+  "-v",
+  "--dry-run",
+  "--verbose",
+  "--no-ansi",
+  "--compatibility",
+  "--all-resources",
+]);
+
 /** Global flags portless replaces when it runs compose on the resolved model. */
 const REPLACED_FLAGS = new Set(["-f", "--file", "-p", "--project-name", "--project-directory"]);
 
@@ -75,6 +88,31 @@ export function splitComposeArgs(args: readonly string[]): ComposeArgs {
     }
   }
   return { globals, subcommand: args[i], rest: args.slice(i + 1) };
+}
+
+/**
+ * Report the first problem with a compose invocation's own global flags, or
+ * null when they all parse. Used when there is no subcommand to hand to docker
+ * compose, so a typo is a usage error instead of a printed help page.
+ */
+export function composeGlobalError(globals: readonly string[]): string | null {
+  for (let i = 0; i < globals.length; i++) {
+    const arg = globals[i]!;
+    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const flag = eq === -1 ? arg : arg.slice(0, eq);
+    if (VALUE_FLAGS.has(flag)) {
+      if (eq !== -1) {
+        if (eq === arg.length - 1) return `${flag} requires a value.`;
+        continue;
+      }
+      if (i + 1 >= globals.length) return `${flag} requires a value.`;
+      i += 1;
+      continue;
+    }
+    if (!BOOLEAN_FLAGS.has(flag)) return `Unknown flag "${flag}" for portless compose.`;
+    if (eq !== -1) return `${flag} does not take a value.`;
+  }
+  return null;
 }
 
 /** Values of a global flag, in order. Handles `--flag=value`. */

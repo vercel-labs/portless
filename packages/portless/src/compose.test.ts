@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   allocatePorts,
   buildUpArgs,
+  composeGlobalError,
   explicitProject,
   isDetachedUp,
   parseContainers,
@@ -407,5 +408,26 @@ describe("allocatePorts", () => {
     await expect(
       allocatePorts(["web:80"], {}, { ...base, reserved: new Set([14000, 14001, 14002, 14003]) })
     ).rejects.toThrow(/No free port/);
+  });
+});
+
+describe("composeGlobalError", () => {
+  it("accepts the global flags portless knows", () => {
+    expect(
+      composeGlobalError(["-f", "compose.yml", "--profile", "dev", "--ansi=never", "--dry-run"])
+    ).toBeNull();
+  });
+
+  it("reports an unknown flag", () => {
+    expect(composeGlobalError(["--bad"])).toBe('Unknown flag "--bad" for portless compose.');
+  });
+
+  it("reports a value flag with no value", () => {
+    expect(composeGlobalError(["-f"])).toBe("-f requires a value.");
+    expect(composeGlobalError(["--env-file="])).toBe("--env-file requires a value.");
+  });
+
+  it("reports a value given to a boolean flag", () => {
+    expect(composeGlobalError(["--dry-run=1"])).toBe("--dry-run does not take a value.");
   });
 });

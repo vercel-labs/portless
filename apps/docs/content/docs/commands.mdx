@@ -485,4 +485,4 @@ portless --version
 
 ## Exit codes
 
-`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, a missing flag value or required argument, or an extra argument. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code.
+`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, a missing flag value or required argument, or an extra argument. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.

@@ -807,6 +807,35 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it("rejects an invalid --tld value as a usage error", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-tld-"));
+      try {
+        const { status, stderr } = run(["proxy", "start", "--tld", "_bad"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Invalid TLD");
+        expect(stderr).toContain("portless proxy start --help");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("compose", () => {
+    it("prints help and exits 0 with no arguments", () => {
+      const { status, stdout } = run(["compose"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless compose");
+    });
+
+    it("treats an unknown global flag without a subcommand as a usage error", () => {
+      const { status, stderr } = run(["compose", "--bad"]);
+      expect(status).toBe(2);
+      expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
+    });
   });
 
   describe("prune", () => {
@@ -974,6 +1003,58 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["--forec", "myapp", "echo", "test"]);
       expect(status).toBe(2);
       expect(stderr).toContain("Unknown flag");
+    });
+  });
+
+  describe("flag values", () => {
+    it("accepts --flag=value for run and named mode", () => {
+      const runMode = run(["run", "--name=myapp", "echo", "ok"], { env: { PORTLESS: "0" } });
+      expect(runMode.status).toBe(0);
+      expect(runMode.stdout.trim()).toBe("ok");
+
+      const namedMode = run(["myapp", "--app-port=3000", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(namedMode.status).toBe(0);
+      expect(namedMode.stdout.trim()).toBe("ok");
+    });
+
+    it("keeps a value that itself contains =", () => {
+      const { status, stdout } = run(["run", "--name=a=b", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("rejects a value on a boolean flag before running the child", () => {
+      for (const args of [
+        ["run", "--force=false", "echo", "ran"],
+        ["myapp", "--force=true", "echo", "ran"],
+      ]) {
+        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" } });
+        expect(status).toBe(2);
+        expect(stderr).toContain("--force does not take a value.");
+        expect(stdout).not.toContain("ran");
+      }
+    });
+
+    it("passes child flags after the command untouched", () => {
+      const { status, stdout } = run(
+        [
+          "run",
+          "node",
+          "-e",
+          "console.log(process.argv.slice(1).join(','))",
+          "--",
+          "--port",
+          "3000",
+          "--force",
+        ],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("--port,3000,--force");
     });
   });
 

@@ -7,6 +7,7 @@ import {
   tryUninstallService,
   parseServiceInstallConfig,
 } from "./service.js";
+import { UsageError } from "./args.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const mod = await importOriginal<typeof import("node:fs")>();
@@ -276,6 +277,32 @@ describe("buildServiceSpec", () => {
   it("defaults an unprivileged service to plain HTTP on port 80", () => {
     const config = parseServiceInstallConfig(["service", "install", "--unprivileged"], {});
     expect(config).toMatchObject({ unprivileged: true, useHttps: false, proxyPort: 80 });
+  });
+
+  it("accepts --flag=value for install options", () => {
+    const config = parseServiceInstallConfig(
+      ["service", "install", "--port=8443", "--tld=mydb"],
+      {}
+    );
+    expect(config).toMatchObject({ proxyPort: 8443, tld: "mydb" });
+  });
+
+  it("rejects an invalid --port value as a usage error", () => {
+    expect(() => parseServiceInstallConfig(["service", "install", "--port=abc"], {})).toThrow(
+      "Invalid port number: abc"
+    );
+  });
+
+  it("rejects a value given to a boolean install flag", () => {
+    expect(() => parseServiceInstallConfig(["service", "install", "--https=1"], {})).toThrow(
+      "--https does not take a value."
+    );
+  });
+
+  it("rejects an invalid --tld value as a usage error", () => {
+    expect(() => parseServiceInstallConfig(["service", "install", "--tld=_bad"], {})).toThrow(
+      UsageError
+    );
   });
 
   it.each([
