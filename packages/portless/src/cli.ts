@@ -2292,6 +2292,7 @@ Run portless <command> --help or visit https://portless.sh for details.
 `);
   process.exit(0);
 }
+
 function printVersion(): void {
   console.log(__VERSION__);
   process.exit(0);
@@ -3615,7 +3616,11 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (also --port)
-  ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
+  ${colors.cyan("portless proxy start --unprivileged")}  Port 80 without sudo; plain HTTP unless --https
+  ${colors.cyan("portless proxy start --https")}        Serve HTTPS, even with --unprivileged or PORTLESS_HTTPS=0
+  ${colors.cyan("portless proxy start --cert <path> --key <path>")}  Use a custom certificate and key
+  ${colors.cyan("portless proxy start --lan --ip <address>")}  Pin the LAN IP
+  ${colors.cyan("portless proxy start --skip-trust")}   Do not add the CA to the system trust store
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
@@ -3632,11 +3637,9 @@ ${colors.bold("LAN mode (--lan):")}
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
 
-${colors.bold("Other start options:")}
-  --https                       Keep HTTPS enabled (the default)
-  --cert <path> --key <path>    Use a custom certificate and private key
-  --ip <address>                Pin the LAN IP
-  --skip-trust                  Skip adding the generated CA to the system trust store
+${colors.bold("Unprivileged mode (--unprivileged):")}
+  Binds without sudo, installs nothing, and never writes the hosts file.
+  Stopped proxies keep the mode; use PORTLESS_UNPRIVILEGED=0 to switch back.
 `);
 }
 
@@ -3706,7 +3709,7 @@ async function handleProxy(args: string[]): Promise<void> {
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
   const hasHttpsFlag = startFlags.has("--https");
-  const hasNoTls = startFlags.has("--no-tls") || isHttpsEnvDisabled();
+  const hasNoTls = startFlags.has("--no-tls") || (!hasHttpsFlag && isHttpsEnvDisabled());
   const wantHttps = !hasNoTls;
 
   let customCertPath = startFlags.value("--cert") ?? null;
@@ -4319,7 +4322,7 @@ async function handleDefaultSingle(
     tlds,
     false,
     { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    appConfig?.appPort,
+    appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
     lanIp
   );
