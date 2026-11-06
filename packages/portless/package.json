@@ -34,7 +34,8 @@
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc-ts --noEmit",
+    "type-check:tsc": "tsc --noEmit"
   },
   "keywords": [
     "local",
@@ -56,6 +57,7 @@
     "@types/node": "^24.12.4",
     "@vitest/coverage-v8": "^4.0.18",
     "oxlint": "^1.91.0",
+    "tsc-ts": "0.1.2",
     "tsup": "^8.0.1",
     "typescript": "^7.0.2",
     "vitest": "^4.0.18"
