@@ -9,7 +9,8 @@
     "postinstall": "fumadocs-mdx",
     "prebuild": "fumadocs-mdx",
     "build": "next build",
-    "type-check": "fumadocs-mdx && tsc --noEmit",
+    "type-check": "fumadocs-mdx && tsc-ts --noEmit",
+    "type-check:tsc": "fumadocs-mdx && tsc --noEmit",
     "start": "next start",
     "test": "vitest run src/lib",
     "test:routes": "node scripts/test-routes.mjs"
@@ -44,6 +45,7 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "tailwindcss": "^4",
+    "tsc-ts": "0.1.2",
     "typescript": "^7.0.2",
     "vitest": "^4.0.18"
   }
