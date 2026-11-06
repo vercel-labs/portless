@@ -5585,7 +5585,13 @@ describe("CLI", { timeout: 15_000 }, () => {
       30_000
     );
 
-    it.each(["proxy stop", "SIGTERM"] as const)(
+    // Windows ends a SIGTERMed process without running its exit cleanup, so
+    // there the markers are never reset and only `proxy stop` applies.
+    it.each(
+      process.platform === "win32"
+        ? (["proxy stop"] as const)
+        : (["proxy stop", "SIGTERM"] as const)
+    )(
       "keeps HTTPS for unprivileged mode after %s",
       async (how) => {
         const env = { ...proxyEnv(), PORTLESS_HTTPS: undefined };
