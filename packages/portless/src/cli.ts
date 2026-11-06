@@ -171,7 +171,7 @@ import {
   printServiceHelp,
   tryUninstallService,
 } from "./service.js";
-import { printMcpHelp, runMcp } from "./mcp.js";
+import { runMcp } from "./mcp.js";
 import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
 
 const chalk = colors;
@@ -4841,12 +4841,12 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   );
 }
 
-async function handleNamedMode(args: string[]): Promise<void> {
+async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
   const parsed = parseAppArgs(args);
 
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
-    const suggestion = suggestCommand(parsed.name);
+    const suggestion = explicitName ? undefined : suggestCommand(parsed.name);
     if (suggestion) {
       console.error(colors.blue(`"${parsed.name}" is not a portless command. Did you mean:`));
       console.error(colors.cyan(`  portless ${suggestion}`));
@@ -5305,21 +5305,17 @@ function isPortlessSkipped(): boolean {
 
 interface CommandEntry {
   run: (args: string[], context: { globalScript?: string }) => Promise<void>;
-  help: () => void;
-  /** Parses --help itself because it may belong to a wrapped command. */
-  ownsHelp?: boolean;
+  help?: () => void;
 }
 
 const COMMANDS: Record<CommandName, CommandEntry> = {
   run: {
     run: (args, { globalScript }) => handleRunMode(args.slice(1), globalScript),
-    help: printRunHelp,
-    ownsHelp: true,
   },
   get: { run: handleGet, help: printGetHelp },
   list: { run: handleList, help: printListHelp },
-  alias: { run: handleAlias, help: printAliasHelp, ownsHelp: true },
-  compose: { run: handleCompose, help: printComposeHelp, ownsHelp: true },
+  alias: { run: handleAlias, help: printAliasHelp },
+  compose: { run: handleCompose },
   proxy: { run: handleProxy, help: printProxyHelp },
   service: {
     run: (args) => handleService(args, { entryScript: getEntryScript() }),
@@ -5330,7 +5326,7 @@ const COMMANDS: Record<CommandName, CommandEntry> = {
   trust: { run: handleTrust, help: printTrustHelp },
   clean: { run: handleClean, help: printCleanHelp },
   prune: { run: handlePrune, help: printPruneHelp },
-  mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp, ownsHelp: true },
+  mcp: { run: (args) => runMcp(args.slice(1)) },
 };
 
 async function main() {
@@ -5518,7 +5514,7 @@ async function main() {
   }
 
   if (command) {
-    if (!command.ownsHelp && hasHelpFlag(args)) {
+    if (command.help && hasHelpFlag(args)) {
       command.help();
       return;
     }
@@ -5543,7 +5539,7 @@ async function main() {
     }
   }
 
-  await handleNamedMode(args);
+  await handleNamedMode(args, explicitName);
 }
 
 main().catch((err: unknown) => {
