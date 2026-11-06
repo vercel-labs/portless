@@ -568,6 +568,34 @@ function buildHostnames(
   return parseHostnames(name, normalizeTlds(tlds), targetTlds);
 }
 
+/**
+ * Build the hostnames for every name an app answers to, primary name first.
+ * Two names that resolve to the same hostname (for example through a
+ * worktree.hostnameTemplate without {name}) are rejected. `labels` holds the
+ * names as the user wrote them, for the error message.
+ */
+function buildAppHostnames(
+  names: readonly string[],
+  tlds: readonly string[],
+  labels: readonly string[] = names
+): string[] {
+  const owners = new Map<string, number>();
+  const hostnames: string[] = [];
+  names.forEach((name, index) => {
+    for (const hostname of buildHostnames(name, tlds)) {
+      const owner = owners.get(hostname);
+      if (owner !== undefined) {
+        throw new Error(
+          `Names "${labels[owner]}" and "${labels[index]}" both resolve to "${hostname}". Use distinct names; if using worktree.hostnameTemplate, include {name}.`
+        );
+      }
+      owners.set(hostname, index);
+      hostnames.push(hostname);
+    }
+  });
+  return hostnames;
+}
+
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
   return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls));
 }
@@ -1448,12 +1476,12 @@ async function runApp(
   initialStore: RouteStore,
   proxyPort: number,
   stateDir: string,
-  name: string,
+  names: readonly string[],
   commandArgs: string[],
   tls: boolean,
   tlds: string[],
   force: boolean,
-  autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
+  autoInfo?: { nameSource: string; baseNames: string[]; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
@@ -1507,8 +1535,8 @@ async function runApp(
     process.exit(1);
   }
 
-  // Validate the hostname before we try to auto-start the proxy.
-  buildHostnames(name, tlds);
+  // Validate the hostnames before we try to auto-start the proxy.
+  buildAppHostnames(names, tlds, autoInfo?.baseNames);
 
   const ensureResult = await ensureProxyRunning(proxyPort, tls, desired);
 
@@ -1543,7 +1571,8 @@ async function runApp(
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
-  const hostnames = buildHostnames(name, tlds);
+  // The first name is the primary one: it gets PORTLESS_URL and any tunnel.
+  const hostnames = buildAppHostnames(names, tlds, autoInfo?.baseNames);
   const hostname = hostnames[0]!;
 
   if (
@@ -1564,7 +1593,9 @@ async function runApp(
     console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    console.log(chalk.gray(`-- Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
+    const label = autoInfo.baseNames.length === 1 ? "Name" : "Names";
+    const quoted = autoInfo.baseNames.map((baseName) => `"${baseName}"`).join(", ");
+    console.log(chalk.gray(`-- ${label} ${quoted} (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
       console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
@@ -1844,19 +1875,22 @@ async function runApp(
 // Argument parsing
 // ---------------------------------------------------------------------------
 
-interface ParsedRunArgs {
+interface ParsedCommonArgs {
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
-  /** Override the inferred base name (from --name flag). */
-  name?: string;
-  /** Override the worktree label (from --prefix flag). Empty disables it. */
-  prefix?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
 
-interface ParsedAppArgs extends ParsedRunArgs {
+interface ParsedRunArgs extends ParsedCommonArgs {
+  /** Override the inferred base name (from --name flags, primary first). */
+  names: string[];
+  /** Override the worktree label (from --prefix flag). Empty disables it. */
+  prefix?: string;
+}
+
+interface ParsedAppArgs extends ParsedCommonArgs {
   /** App name. */
   name: string;
 }
@@ -1907,16 +1941,16 @@ function applySharingFlag(flag: string): boolean {
 }
 
 /**
- * Parse `run` subcommand arguments: `[--name <name>] [--prefix <label>] [--force] [--] <command...>`
+ * Parse `run` subcommand arguments: `[--name <name>]... [--prefix <label>] [--force] [--] <command...>`
  *
- * `--name`, `--prefix`, `--force`, and `--app-port` are recognized. `--`
+ * `--name` (repeatable), `--prefix`, `--force`, and `--app-port` are recognized. `--`
  * stops flag parsing. Everything after the flag region is the child command,
  * passed through untouched.
  */
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
-  let name: string | undefined;
+  const names: string[] = [];
   let prefix: string | undefined;
   let i = 0;
 
@@ -1938,7 +1972,9 @@ ${colors.bold("Usage:")}
   exit and terminates remaining descendants after a short grace period.
 
 ${colors.bold("Options:")}
-  --name <name>          Override the inferred base name (worktree prefix still applies)
+  --name <name>          Override the inferred base name (worktree prefix still applies).
+                         Repeat to serve one app on several hostnames; the first
+                         name sets PORTLESS_URL and receives any tunnel.
   --prefix <label>       Override the worktree label (an empty value disables it)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
@@ -1966,6 +2002,7 @@ ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
+  portless run --name a --name b vite dev  # -> https://a.localhost and https://b.localhost
   portless run --prefix pr-42 next dev  # -> https://pr-42.<project>.localhost
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
@@ -1983,7 +2020,7 @@ ${colors.bold("Examples:")}
         console.error(colors.cyan("  portless run --name <name> <command...>"));
         process.exit(1);
       }
-      name = args[i];
+      names.push(args[i]);
     } else if (args[i] === "--prefix") {
       i++;
       if (args[i] === undefined || args[i].startsWith("-")) {
@@ -2008,7 +2045,7 @@ ${colors.bold("Examples:")}
 
   if (!appPort) appPort = appPortFromEnv();
 
-  return { force, appPort, name, prefix, commandArgs: args.slice(i) };
+  return { force, appPort, names, prefix, commandArgs: args.slice(i) };
 }
 
 /**
@@ -2230,8 +2267,9 @@ ${colors.bold("Proxy connections:")}
   Connection errors include each loopback address and error code.
 
 ${colors.bold("Options:")}
-  run [--name <name>] [--prefix <label>] <cmd>
+  run [--name <name>]... [--prefix <label>] <cmd>
                                 Infer project name and add a worktree prefix
+                                Repeat --name to serve one app on several hostnames
   --script <name>               Run a specific package.json script (default: dev)
   -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
                                 Standard ports auto-elevate with sudo when the bind needs root
@@ -4017,12 +4055,12 @@ async function handleDefaultSingle(
     store,
     port,
     dir,
-    effectiveName,
+    [effectiveName],
     resolved,
     tls,
     tlds,
     false,
-    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseNames: [baseName], prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
     lanMode,
     lanIp
@@ -4674,26 +4712,35 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     process.exit(1);
   }
 
-  let baseName: string;
+  let baseNames: string[];
   let nameSource: string;
 
-  if (parsed.name) {
+  if (parsed.names.length > 0) {
     // Truncate individual labels that exceed the DNS limit. Dots are preserved
-    // as intentional subdomain separators (e.g. --name local.myapp).
-    baseName = parsed.name
-      .split(".")
-      .map((label) => truncateLabel(label))
-      .join(".");
-    nameSource = "--name flag";
+    // as intentional subdomain separators (e.g. --name local.myapp). Repeated
+    // identical names collapse into one.
+    baseNames = [
+      ...new Set(
+        parsed.names.map((name) =>
+          name
+            .split(".")
+            .map((label) => truncateLabel(label))
+            .join(".")
+        )
+      ),
+    ];
+    nameSource = parsed.names.length === 1 ? "--name flag" : "--name flags";
   } else if (appConfig?.name) {
-    baseName = appConfig.name
-      .split(".")
-      .map((label) => truncateLabel(label))
-      .join(".");
+    baseNames = [
+      appConfig.name
+        .split(".")
+        .map((label) => truncateLabel(label))
+        .join("."),
+    ];
     nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName();
-    baseName = inferred.name;
+    baseNames = [inferred.name];
     nameSource = inferred.source;
   }
 
@@ -4702,10 +4749,8 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   }
 
   const worktree = detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
-  const effectiveName = applyWorktreePrefix(
-    baseName,
-    worktree,
-    appConfig?.worktree?.hostnameTemplate
+  const effectiveNames = baseNames.map((baseName) =>
+    applyWorktreePrefix(baseName, worktree, appConfig?.worktree?.hostnameTemplate)
   );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
@@ -4716,12 +4761,12 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     store,
     port,
     dir,
-    effectiveName,
+    effectiveNames,
     parsed.commandArgs,
     tls,
     tlds,
     parsed.force,
-    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseNames, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
     lanIp
@@ -4762,7 +4807,7 @@ async function handleNamedMode(args: string[]): Promise<void> {
     store,
     port,
     dir,
-    safeName,
+    [safeName],
     parsed.commandArgs,
     tls,
     tlds,

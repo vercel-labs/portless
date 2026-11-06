@@ -313,6 +313,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
+| `portless run --name <a> --name <b> <cmd>`        | Serve one app on several names; the first sets `PORTLESS_URL`  |
 | `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |

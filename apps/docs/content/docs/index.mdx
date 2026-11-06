@@ -103,6 +103,14 @@ Use `--name` to override the inferred base name while keeping the worktree prefi
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost
 ```
 
+Repeat `--name` when one dev server answers to several hostnames. Each name gets the prefix, and the first one sets `PORTLESS_URL`:
+
+```bash
+portless run --name brand-a --name brand-b vite dev
+# -> https://fix-ui.brand-a.localhost
+# also -> https://fix-ui.brand-b.localhost
+```
+
 Use `--prefix <label>` (or `PORTLESS_PREFIX`) to set the label yourself, with `""` for none. See [Configuration](/configuration) to change the label style or the whole hostname.
 
 ## Custom TLD

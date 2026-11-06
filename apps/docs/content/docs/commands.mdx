@@ -21,11 +21,11 @@ Use a `portless.json` to override defaults. See [Configuration](/configuration).
 ## Run an app
 
 ```bash
-portless run [--name <name>] [--prefix <label>] [cmd] [args...]
+portless run [--name <name>]... [--prefix <label>] [cmd] [args...]
 portless <name> <cmd> [args...]
 ```
 
-`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
+`portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Repeat `--name` to serve one dev server on several hostnames, for example an app that picks a site from the `Host` header. Each name gets the worktree prefix or `worktree.hostnameTemplate`. The first name sets `PORTLESS_URL` and receives any Tailscale, ngrok, or Cloudflare tunnel. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
 `portless <name>` uses an explicit name with no inference or prefixing.
 
@@ -33,6 +33,7 @@ portless <name> <cmd> [args...]
 portless run                             # run dev script through proxy
 portless run next dev                    # infer name from project
 portless run --name myapp next dev       # override inferred name
+portless run --name a --name b vite dev  # serve one app as a.localhost and b.localhost
 portless myapp next dev                  # explicit name
 portless api pnpm start
 portless docs.myapp next dev
@@ -48,7 +49,7 @@ portless docs.myapp next dev
   <tbody>
     <tr>
       <td>`--name <name>`</td>
-      <td>Override the inferred base name (worktree prefix still applies). Only for `portless run`.</td>
+      <td>Override the inferred base name (worktree prefix still applies). Repeat to serve one app on several hostnames; the first name sets `PORTLESS_URL`. Only for `portless run`.</td>
     </tr>
     <tr>
       <td>`--prefix <label>`</td>
