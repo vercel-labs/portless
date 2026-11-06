@@ -2584,9 +2584,10 @@ Finds routes whose owning portless process is gone. On macOS and Linux, it
 signals the recorded dev server process group only if its leader matches, or a
 previously recorded surviving member matches on retry. It removes stale routes
 and their Tailscale and tunnel shares. A group that still holds its port after
-SIGTERM keeps its route; retry with --force.
+SIGTERM keeps its route and shares; retry with --force.
 Unrelated port holders are reported, never killed. On Windows, process groups
-and recorded tunnel processes cannot be verified or signaled.
+cannot be verified or signaled. Recorded ngrok and cloudflared tunnels are stopped
+only when their executable names match, including on Windows.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2666,6 +2667,7 @@ async function handlePrune(args: string[]): Promise<void> {
       console.log(
         `  ${route.hostname} :${route.port} - process group ${pgid} did not exit; route kept. Retry with portless prune --force`
       );
+      continue;
     } else if (!store.removeStaleRoute(route.hostname, route.pid)) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
