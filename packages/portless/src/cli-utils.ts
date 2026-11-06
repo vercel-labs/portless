@@ -996,10 +996,9 @@ export function buildProxyStartConfig(options: {
   }
 
   if (options.idleExit) {
-    args.push("--idle-exit");
-    if (options.idleExit !== DEFAULT_IDLE_EXIT_SECONDS) {
-      args.push("--idle-exit-after", options.idleExit.toString());
-    }
+    // Always explicit: the daemon inherits the environment, so leaving the
+    // default out would let PORTLESS_IDLE_EXIT_AFTER override it there.
+    args.push("--idle-exit", "--idle-exit-after", options.idleExit.toString());
   }
 
   if (options.skipTrust) {

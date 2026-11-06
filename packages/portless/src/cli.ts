@@ -822,6 +822,7 @@ function startProxyServer(
     hasLiveRoutes: () => store.loadRoutesRaw().some((route) => store.isRouteOwnerAlive(route)),
     onIdle: () => {
       console.log(colors.yellow(`No apps for ${idleExitSeconds}s, stopping (idle exit)`));
+      keepProxySettings = true;
       cleanup();
     },
   });
@@ -1088,6 +1089,9 @@ function startProxyServer(
 
   // Cleanup on exit
   let exiting = false;
+  // An idle exit is not a stop the user asked for: the next auto-start must
+  // come back on the same port, TLS, TLD and LAN settings.
+  let keepProxySettings = false;
   const cleanup = () => {
     if (exiting) return;
     exiting = true;
@@ -1105,15 +1109,17 @@ function startProxyServer(
     } catch {
       // PID file may already be removed; non-fatal
     }
-    try {
-      fs.unlinkSync(store.portFilePath);
-    } catch {
-      // Port file may already be removed; non-fatal
+    if (!keepProxySettings) {
+      try {
+        fs.unlinkSync(store.portFilePath);
+      } catch {
+        // Port file may already be removed; non-fatal
+      }
+      writeTlsMarker(store.dir, false);
+      writeCustomCertMarker(store.dir, false);
+      writeTldFile(store.dir, DEFAULT_TLD);
+      writeLanMarker(store.dir, null);
     }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));

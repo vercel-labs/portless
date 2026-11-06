@@ -445,11 +445,12 @@ async function createIdleExitHarness() {
 
   const readProxyPid = () => Number(fs.readFileSync(path.join(dir, "proxy.pid"), "utf-8"));
 
-  /** Wait for the proxy to stop itself, then check it left nothing behind. */
+  /** Wait for the proxy to stop itself, then check it freed its port and kept its settings. */
   const expectProxyGone = async (pid: number, timeoutMs = 10_000) => {
     await waitUntil(() => !isPidRunning(pid), timeoutMs, `proxy ${pid} to exit`);
     expect(fs.existsSync(path.join(dir, "proxy.pid"))).toBe(false);
-    expect(fs.existsSync(path.join(dir, "proxy.port"))).toBe(false);
+    // Kept so the next auto-start comes back on the same port.
+    expect(fs.readFileSync(path.join(dir, "proxy.port"), "utf-8").trim()).toBe(String(port));
     expect(await canListenOn(port)).toBe(true);
     expect(fs.readFileSync(path.join(dir, "proxy.log"), "utf-8")).toContain("stopping (idle exit)");
   };
@@ -2940,6 +2941,41 @@ describe("CLI", { timeout: 15_000 }, () => {
         app.child.kill("SIGTERM");
         await app.exited;
         await h.expectProxyGone(proxyPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
+    it("auto-starts on the same port, TLS and TLD after an idle exit", async () => {
+      const h = await createIdleExitHarness();
+      // Nothing in the environment: the settings come only from the flags.
+      const bare = { PORTLESS_PORT: undefined, PORTLESS_HTTPS: undefined, PORTLESS_TLD: undefined };
+      try {
+        const start = run([...IDLE_START, "-p", String(h.port), "--no-tls", "--tld", "test"], {
+          env: { ...h.env, ...bare },
+        });
+        expect(start.status).toBe(0);
+        const first = await h.startApp("web", bare);
+        await waitUntil(
+          async () => (await requestThroughProxy(h.port, "web.test")) === "web",
+          15_000,
+          "web.test to be served"
+        );
+        const proxyPid = h.readProxyPid();
+        first.child.kill("SIGTERM");
+        await first.exited;
+        await h.expectProxyGone(proxyPid);
+
+        const second = await h.startApp("web", bare);
+        await waitUntil(
+          async () => (await requestThroughProxy(h.port, "web.test")) === "web",
+          15_000,
+          "web.test to be served by the auto-started proxy"
+        );
+        expect(second.output()).toContain("Starting proxy");
+        expect(h.readProxyPid()).not.toBe(proxyPid);
+        second.child.kill("SIGTERM");
+        await second.exited;
       } finally {
         h.cleanup();
       }

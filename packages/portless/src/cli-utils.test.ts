@@ -2045,11 +2045,13 @@ describe("buildProxyStartConfig", () => {
     expect(buildProxyStartConfig(base).args).toEqual(["--no-tls"]);
   });
 
-  it("emits --idle-exit, and --idle-exit-after only for a non-default linger", () => {
+  it("emits --idle-exit with an explicit --idle-exit-after, even for the default", () => {
     const base = { useHttps: false, lanMode: false, tld: "localhost" };
     expect(buildProxyStartConfig({ ...base, idleExit: DEFAULT_IDLE_EXIT_SECONDS }).args).toEqual([
       "--no-tls",
       "--idle-exit",
+      "--idle-exit-after",
+      "5",
     ]);
     expect(buildProxyStartConfig({ ...base, idleExit: 30 }).args).toEqual([
       "--no-tls",
