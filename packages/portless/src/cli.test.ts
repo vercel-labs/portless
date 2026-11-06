@@ -2973,9 +2973,12 @@ describe("CLI", { timeout: 15_000 }, () => {
           "web.test to be served by the auto-started proxy"
         );
         expect(second.output()).toContain("Starting proxy");
-        expect(h.readProxyPid()).not.toBe(proxyPid);
+        const secondPid = h.readProxyPid();
+        expect(secondPid).not.toBe(proxyPid);
         second.child.kill("SIGTERM");
         await second.exited;
+        // Also lets Windows remove the state dir, which a running proxy keeps open.
+        await h.expectProxyGone(secondPid);
       } finally {
         h.cleanup();
       }
