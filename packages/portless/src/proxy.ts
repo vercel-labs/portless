@@ -232,6 +232,7 @@ function rewriteUpstreamLocation(
     const client = new URL(`${isEncrypted(req) ? "https" : "http"}://${getRequestHost(req)}`);
     url.protocol = client.protocol;
     url.host = client.host;
+    url.port = client.port;
     headers.location = url.toString();
   } catch {
     return;

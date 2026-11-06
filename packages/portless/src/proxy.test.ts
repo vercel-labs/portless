@@ -2344,16 +2344,39 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
         upstream: { tls: true, host: "api.internal:8443" },
       },
     ];
-    const server = trackServer(
+    const plain = trackServer(
       createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
     );
-    await listen(server);
+    const secure = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(plain);
+    await listen(secure);
+
+    for (const [proxy, encrypted, host, location] of [
+      [plain, false, "api.localhost", "http://api.localhost/login?next=1#section"],
+      [plain, false, "api.localhost:80", "http://api.localhost/login?next=1#section"],
+      [plain, false, "api.localhost:1444", "http://api.localhost:1444/login?next=1#section"],
+      [secure, true, "api.localhost", "https://api.localhost/login?next=1#section"],
+      [secure, true, "api.localhost:443", "https://api.localhost/login?next=1#section"],
+      [secure, true, "api.localhost:1444", "https://api.localhost:1444/login?next=1#section"],
+    ] as const) {
+      const response = encrypted
+        ? await httpsRequest(proxy, { host, path: "/matching" })
+        : await request(proxy, { host, path: "/matching" });
+      expect(response.status).toBe(302);
+      expect(response.headers.location).toBe(location);
+    }
+
     for (const [path, location] of [
-      ["/matching", "http://api.localhost:1444/login?next=1#section"],
       ["/other", "https://elsewhere.internal/login"],
       ["/relative", "/login"],
     ]) {
-      const response = await request(server, { host: "api.localhost:1444", path });
+      const response = await request(plain, { host: "api.localhost:1444", path });
       expect(response.status).toBe(302);
       expect(response.headers.location).toBe(location);
     }
