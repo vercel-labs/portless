@@ -1111,6 +1111,11 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
   }
 }
 
+/** Whether a previous CA removal still needs the distro trust cache refresh. */
+export function isCATrustRefreshPending(stateDir: string): boolean {
+  return fs.existsSync(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
+}
+
 /**
  * Remove the portless CA from the system trust store (inverse of trustCA).
  * No-op when the CA is not trusted or ca.pem is missing in stateDir.

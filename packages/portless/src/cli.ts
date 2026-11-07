@@ -24,7 +24,14 @@ import {
   splitComposeArgs,
   staleAliases,
 } from "./compose.js";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import {
+  createSNICallback,
+  ensureCerts,
+  isCATrusted,
+  isCATrustRefreshPending,
+  trustCA,
+  untrustCA,
+} from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   generateHostsSyncToken,
@@ -2799,7 +2806,9 @@ async function handleClean(args: string[]): Promise<void> {
   if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
     runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
     for (const stateDir of [...failedCAStateDirs]) {
-      if (!isCATrusted(stateDir)) failedCAStateDirs.delete(stateDir);
+      if (!isCATrustRefreshPending(stateDir) && !isCATrusted(stateDir)) {
+        failedCAStateDirs.delete(stateDir);
+      }
     }
     if (retrySteps.includes("ca") || retrySteps.includes("files")) {
       stateFailures = removeStateFilesForCleanup(
