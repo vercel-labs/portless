@@ -250,15 +250,29 @@ export function detectPackageManager(cwd: string): PackageManager {
   return "npm";
 }
 
+/** Build the package-manager command that runs a script, appending extra arguments after the separator npm requires. */
+export function scriptRunCommand(
+  pm: PackageManager,
+  scriptName: string,
+  extraArgs: readonly string[] = []
+): string[] {
+  if (extraArgs.length === 0) return [pm, "run", scriptName];
+  return [pm, "run", scriptName, ...(pm === "npm" ? ["--"] : []), ...extraArgs];
+}
+
 /**
  * Resolve a named script to a package-manager-delegated command.
- * Returns e.g. `["pnpm", "run", "dev"]` instead of parsing the script contents.
+ * Returns e.g. `["pnpm", "run", "dev"]` instead of parsing the script contents,
+ * with any extra arguments appended for the script.
  * Returns null if the script doesn't exist.
  */
-export function resolveScriptCommand(scriptName: string, packageDir: string): string[] | null {
+export function resolveScriptCommand(
+  scriptName: string,
+  packageDir: string,
+  extraArgs: readonly string[] = []
+): string[] | null {
   if (!hasScript(scriptName, packageDir)) return null;
-  const pm = detectPackageManager(packageDir);
-  return [pm, "run", scriptName];
+  return scriptRunCommand(detectPackageManager(packageDir), scriptName, extraArgs);
 }
 
 /** Split a command string on whitespace, respecting quotes and backslash escapes. */
