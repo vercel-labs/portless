@@ -5314,7 +5314,7 @@ const COMMANDS: Record<CommandName, CommandEntry> = {
   },
   get: { run: handleGet, help: printGetHelp },
   list: { run: handleList, help: printListHelp },
-  alias: { run: handleAlias, help: printAliasHelp },
+  alias: { run: handleAlias },
   compose: { run: handleCompose },
   proxy: { run: handleProxy, help: printProxyHelp },
   service: {
