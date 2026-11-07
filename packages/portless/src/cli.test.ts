@@ -1549,7 +1549,11 @@ describe("CLI", { timeout: 15_000 }, () => {
         const forceRemove = run(["alias", "--remove", "mydb", "--force"], { env });
         expect(forceRemove.status).toBe(2);
         expect(forceRemove.stderr).toContain("--force cannot be used with --remove");
-        expect(hostnames()).toEqual(["mydb.localhost"]);
+        expect(hostnames().sort()).toEqual([
+          "mydb.localhost",
+          "myplain.localhost",
+          "mytls.localhost",
+        ]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
