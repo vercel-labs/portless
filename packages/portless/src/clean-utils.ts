@@ -117,7 +117,17 @@ export function attemptCATrustRemovalForCleanup(
   const results = new Map<string, CATrustRemovalResult>();
   for (const stateDir of stateDirs) {
     if (!isCleanableStateDir(stateDir)) continue;
-    if (!fs.existsSync(path.join(stateDir, "ca.pem"))) continue;
+    try {
+      fs.statSync(path.join(stateDir, "ca.pem"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      const message = error instanceof Error ? error.message : String(error);
+      results.set(stateDir, {
+        removed: false,
+        error: `Could not inspect CA certificate: ${message}`,
+      });
+      continue;
+    }
     results.set(stateDir, untrust(stateDir));
   }
   return results;

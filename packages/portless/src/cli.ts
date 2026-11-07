@@ -2571,6 +2571,23 @@ function cleanupStepLabel(step: CleanupStep): string {
   return "hosts file";
 }
 
+/** Whether CA identity must survive because removal or trust refresh is unfinished. */
+function shouldPreserveCAIdentity(stateDir: string, failedCAStateDirs: Set<string>): boolean {
+  return (
+    failedCAStateDirs.has(stateDir) || isCATrustRefreshPending(stateDir) || isCATrusted(stateDir)
+  );
+}
+
+/** Whether the unprivileged process can inspect a state directory. */
+function canInspectStateDir(stateDir: string): boolean {
+  try {
+    fs.accessSync(stateDir, fs.constants.R_OK | fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Remove allowlisted state files and return every path that remains. */
 function removeStateFilesForCleanup(
   stateDirs: string[],
@@ -2580,7 +2597,7 @@ function removeStateFilesForCleanup(
   const failures = new Set<string>();
   for (const stateDir of stateDirs) {
     const removed = removePortlessStateFiles(stateDir, {
-      preserveCAIdentity: failedCAStateDirs.has(stateDir),
+      preserveCAIdentity: shouldPreserveCAIdentity(stateDir, failedCAStateDirs),
       preserveProxyRuntime,
     });
     for (const file of removed) failures.add(file);
@@ -2606,12 +2623,9 @@ function runElevatedCleanupSteps(
   }
 
   if (steps.includes("files")) {
-    const preserveCAIdentity = steps.includes("ca")
-      ? failedCAStateDirs
-      : new Set(cleanableDirs.filter((stateDir) => isCATrusted(stateDir)));
     problems += removeStateFilesForCleanup(
       cleanableDirs,
-      preserveCAIdentity,
+      failedCAStateDirs,
       preserveProxyRuntime
     ).length;
   }
@@ -2630,8 +2644,8 @@ function runElevatedCleanup(
   steps: CleanupStep[],
   stateDirs: string[],
   preserveProxyRuntime: boolean
-): void {
-  if (steps.length === 0) return;
+): number | null {
+  if (steps.length === 0) return 0;
   const labels = steps.map(cleanupStepLabel).join(", ");
   console.log(colors.yellow(`Cleanup needs elevated privileges. Requesting sudo for ${labels}...`));
   const home = process.env.HOME;
@@ -2652,7 +2666,9 @@ function runElevatedCleanup(
   );
   if (result.error) {
     console.error(colors.red(`Could not run sudo: ${result.error.message}`));
+    return null;
   }
+  return result.status;
 }
 
 function printCleanHelp(): void {
@@ -2804,20 +2820,30 @@ async function handleClean(args: string[]): Promise<void> {
   if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
   if (!hostsCleaned) retrySteps.push("hosts");
   if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
-    runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
-    for (const stateDir of [...failedCAStateDirs]) {
-      if (!isCATrustRefreshPending(stateDir) && !isCATrusted(stateDir)) {
-        failedCAStateDirs.delete(stateDir);
+    const elevatedStatus = runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
+    if (elevatedStatus === 0) {
+      failedCAStateDirs.clear();
+      if (retrySteps.includes("files")) stateFailures = [];
+      if (retrySteps.includes("hosts")) hostsCleaned = true;
+    } else {
+      for (const stateDir of [...failedCAStateDirs]) {
+        if (
+          canInspectStateDir(stateDir) &&
+          !isCATrustRefreshPending(stateDir) &&
+          !isCATrusted(stateDir)
+        ) {
+          failedCAStateDirs.delete(stateDir);
+        }
       }
+      if (retrySteps.includes("ca") || retrySteps.includes("files")) {
+        stateFailures = removeStateFilesForCleanup(
+          stateDirs,
+          failedCAStateDirs,
+          preserveProxyRuntime
+        );
+      }
+      if (!hostsCleaned) hostsCleaned = cleanHostsFile();
     }
-    if (retrySteps.includes("ca") || retrySteps.includes("files")) {
-      stateFailures = removeStateFilesForCleanup(
-        stateDirs,
-        failedCAStateDirs,
-        preserveProxyRuntime
-      );
-    }
-    if (!hostsCleaned) hostsCleaned = cleanHostsFile();
   }
 
   for (const [stateDir, untrustResult] of caRemovalResults) {
