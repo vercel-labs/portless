@@ -43,6 +43,15 @@ describe("splitComposeArgs", () => {
       rest: [],
     });
   });
+
+  it("ends the wrapper's globals at --", () => {
+    expect(splitComposeArgs(["-f", "a.yml", "--", "up", "-d"])).toEqual({
+      globals: ["-f", "a.yml"],
+      subcommand: "up",
+      rest: ["-d"],
+    });
+    expect(splitComposeArgs(["--"])).toEqual({ globals: [], subcommand: undefined, rest: [] });
+  });
 });
 
 describe("buildUpArgs", () => {

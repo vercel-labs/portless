@@ -4943,20 +4943,29 @@ async function composeDown(args: string[], globals: string[], input?: string): P
   process.exit(code);
 }
 
+/** Reject a compose invocation whose own global flags do not parse. */
+function assertComposeGlobals(globals: readonly string[]): void {
+  const error = composeGlobalError(globals);
+  if (error) throw new UsageError(error, ["See: portless compose --help"]);
+}
+
 async function handleCompose(args: string[]): Promise<void> {
   const composeArgs = args.slice(1);
   const { globals, subcommand, rest } = splitComposeArgs(composeArgs);
+  const help = rest.includes("--help") || rest.includes("-h");
+  const wantsHelp = help || globals.includes("--help") || globals.includes("-h");
+
   if (!subcommand) {
-    if (!globals.includes("--help") && !globals.includes("-h")) {
-      const error = composeGlobalError(globals);
-      if (error) throw new UsageError(error, ["See: portless compose --help"]);
-    }
+    if (!wantsHelp) assertComposeGlobals(globals);
     printComposeHelp();
     process.exit(0);
   }
 
-  const help = rest.includes("--help") || rest.includes("-h");
-  if (isPortlessSkipped() || help || (subcommand !== "up" && subcommand !== "down")) {
+  if (isPortlessSkipped()) process.exit(await spawnDockerCompose(composeArgs).exited);
+
+  if (!wantsHelp) assertComposeGlobals(globals);
+
+  if (wantsHelp || (subcommand !== "up" && subcommand !== "down")) {
     process.exit(await spawnDockerCompose(composeArgs).exited);
   }
 

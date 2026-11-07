@@ -71,12 +71,17 @@ export interface ComposeArgs {
   rest: string[];
 }
 
-/** Split `portless compose` arguments into global flags, subcommand, and the rest. */
+/**
+ * Split `portless compose` arguments into global flags, subcommand, and the
+ * rest. A `--` ends the wrapper's own flags, so the next argument is the
+ * subcommand.
+ */
 export function splitComposeArgs(args: readonly string[]): ComposeArgs {
   const globals: string[] = [];
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
+    if (arg === "--") return { globals, subcommand: args[i + 1], rest: args.slice(i + 2) };
     if (!arg.startsWith("-")) break;
     globals.push(arg);
     if (VALUE_FLAGS.has(arg) && i + 1 < args.length) {
@@ -91,8 +96,8 @@ export function splitComposeArgs(args: readonly string[]): ComposeArgs {
 
 /**
  * Report the first problem with a compose invocation's own global flags, or
- * null when they all parse. Used when there is no subcommand to hand to docker
- * compose, so a typo is a usage error instead of a printed help page.
+ * null when they all parse. Portless checks this before any docker work, so a
+ * typo is a usage error (exit 2) instead of a docker failure (exit 1).
  */
 export function composeGlobalError(globals: readonly string[]): string | null {
   for (let i = 0; i < globals.length; i++) {

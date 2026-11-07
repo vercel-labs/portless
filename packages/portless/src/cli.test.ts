@@ -847,6 +847,62 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(stdout).toContain("portless compose");
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "rejects a bad global flag before a subcommand without running docker",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-globals-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 1\n', {
+            mode: 0o755,
+          });
+          for (const subcommand of ["up", "down", "ps", "config"]) {
+            const { status, stdout, stderr } = run(["compose", "--bad", subcommand], {
+              env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined },
+            });
+            expect(status).toBe(2);
+            expect(stdout).toBe("");
+            expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
+            expect(stderr).toContain("See: portless compose --help");
+          }
+          expect(fs.existsSync(log)).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps docker's exit code and arguments for the commands portless passes through",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-passthrough-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(
+            docker,
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\necho "docker $*"\nexit 7\n',
+            { mode: 0o755 }
+          );
+          const env = { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined };
+          for (const [args, expected] of [
+            [["compose", "ps", "--bad"], "compose ps --bad"],
+            [["compose", "--", "logs", "-n", "5"], "compose -- logs -n 5"],
+            [["compose", "-f", "compose.dev.yml", "config"], "compose -f compose.dev.yml config"],
+          ] as const) {
+            fs.rmSync(log, { force: true });
+            const { status, stdout } = run([...args], { env });
+            expect(status).toBe(7);
+            expect(stdout).toContain(`docker ${expected}`);
+            expect(fs.readFileSync(log, "utf-8").trim()).toBe(expected);
+          }
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
   });
 
   describe("prune", () => {
