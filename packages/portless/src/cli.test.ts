@@ -74,6 +74,7 @@ type HostsFileMockOptions = {
   sudoStatus?: number;
   stateDir: string;
   failPrivilegedCleanup?: boolean;
+  failCAOnly?: boolean;
   failCAAlways?: boolean;
   sudoRunsCommand?: boolean;
   extraEnv?: Record<string, string | undefined>;
@@ -119,6 +120,7 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "const capture = { writes: [], sudo: null, sudoCalls: [] };",
         "const elevated = () => Boolean(process.env.PORTLESS_INTERNAL_CLEAN_STEPS);",
         'const failUntilElevated = process.env.PORTLESS_TEST_FAIL_PRIVILEGED === "1";',
+        'const failCAOnly = process.env.PORTLESS_TEST_FAIL_CA_ONLY === "1";',
         "const stateDirs = (() => {",
         "  const raw = process.env.PORTLESS_INTERNAL_CLEAN_DIRS;",
         "  if (raw) {",
@@ -153,7 +155,7 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "};",
         "childProcess.execFileSync = function (command, ...rest) {",
         "  const update = /^update-ca-(certificates|trust)$/.test(String(command));",
-        "  if (failUntilElevated && update) {",
+        "  if ((failUntilElevated || failCAOnly) && update) {",
         '    if (!elevated() || process.env.PORTLESS_TEST_FAIL_CA_ALWAYS === "1") {',
         '      throw denied("CA update denied");',
         "    }",
@@ -210,6 +212,7 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         PORTLESS_TEST_HOSTS_UID: String(options.uid ?? 0),
         PORTLESS_TEST_HOSTS_SUDO_STATUS: String(options.sudoStatus ?? 1),
         PORTLESS_TEST_FAIL_PRIVILEGED: options.failPrivilegedCleanup ? "1" : "0",
+        PORTLESS_TEST_FAIL_CA_ONLY: options.failCAOnly ? "1" : "0",
         PORTLESS_TEST_FAIL_CA_ALWAYS: options.failCAAlways ? "1" : "0",
         PORTLESS_TEST_SUDO_RUNS: options.sudoRunsCommand ? "1" : "0",
         ...options.extraEnv,
@@ -2818,6 +2821,46 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(result.capture.sudoCalls).toHaveLength(1);
           const sudoArgs = result.capture.sudoCalls[0]!.args;
           expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps CA identity when a failed sudo refresh leaves the retry marker",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-pending-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            failCAOnly: true,
+            stateDir,
+            uid: 1000,
+            sudoStatus: 1,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.capture.sudoCalls).toHaveLength(1);
+          expect(result.stderr).toContain("Could not remove CA from trust store");
+          expect(result.stderr).toContain("Retained CA identity files");
+          expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
+          expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
+          expect(fs.readFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "utf-8")).toBe(
+            "1"
+          );
         } finally {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
