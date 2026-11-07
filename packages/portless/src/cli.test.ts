@@ -316,6 +316,56 @@ async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   });
 }
 
+/**
+ * Run `portless compose up -d` against a mock proxy and a docker stub that
+ * answers `config` with `model`, `ps` with one running routed container, and
+ * `up` with `upStdout`. Nothing else runs: no real docker, no real proxy.
+ */
+async function runComposeUpDetached(fixture: {
+  model: Record<string, unknown>;
+  upStdout: string;
+  upExit?: number;
+}): Promise<{ status: number | null; stdout: string; stderr: string; proxyPort: number }> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-streams-"));
+  const proxy = await startMockProxy(tmpDir);
+  try {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+    const bin = path.join(tmpDir, "bin");
+    fs.mkdirSync(bin);
+    const containers = JSON.stringify({
+      Project: "myapp",
+      Service: "web",
+      State: "running",
+      Publishers: [{ TargetPort: 3000, PublishedPort: 14501, Protocol: "tcp" }],
+    });
+    fs.writeFileSync(
+      path.join(bin, "docker"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        `  *" config "*) printf '%s' '${JSON.stringify(fixture.model)}' ;;`,
+        `  *" ps "*) printf '%s\\n' '${containers}' ;;`,
+        `  *" up "*) printf '%s' '${fixture.upStdout}'; exit ${fixture.upExit ?? 0} ;;`,
+        "esac",
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    const { status, stdout, stderr } = run(["compose", "up", "-d"], {
+      env: {
+        PORTLESS_STATE_DIR: tmpDir,
+        PATH: `${bin}:${process.env.PATH}`,
+        PORTLESS: undefined,
+      },
+    });
+    return { status, stdout, stderr, proxyPort: proxy.port };
+  } finally {
+    await stopChild(proxy.child);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 // A command that exits 0 waits up to EXIT_TIMEOUT_MS for a detached daemon.
 describe("CLI", { timeout: 15_000 }, () => {
   beforeAll(() => {
@@ -437,6 +487,32 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("list", () => {
+    it("prints JSON for empty and registered routes and rejects unknown arguments", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-json-"));
+      try {
+        const options = { cwd: tmpDir, env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" } };
+        const empty = run(["list", "--json"], options);
+        expect(empty.status).toBe(0);
+        expect(JSON.parse(empty.stdout)).toEqual({ routes: [] });
+        const route = { hostname: "db.localhost", port: 5432, pid: 0, registeredAt: 123 };
+        fs.writeFileSync(path.join(tmpDir, "routes.json"), JSON.stringify([route]));
+        const json = run(["list", "--json"], options);
+        const human = run(["list"], options);
+        expect(json.status).toBe(0);
+        const listed = JSON.parse(json.stdout).routes;
+        expect(listed).toEqual([
+          { ...route, url: expect.stringMatching(/^http:\/\/db\.localhost/) },
+        ]);
+        expect(human.stdout).toContain(listed[0].url);
+        expect(human.stdout).toContain("localhost:5432");
+        const invalid = run(["list", "--bogus"], options);
+        expect(invalid.status).toBe(2);
+        expect(invalid.stderr).toContain('Error: Unknown flag "--bogus" for portless list.');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("shows no active routes message when none registered", () => {
       // Note: the CLI discovers the state dir dynamically. We just verify
       // it doesn't crash and returns 0.
@@ -507,6 +583,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("portless doctor");
       expect(stdout).toContain("state");
       expect(stdout).toContain("does not start");
+      expect(stdout).toContain("Exit codes:");
+      expect(stdout).toMatch(/2\s+Invalid arguments/);
     });
 
     it("reports a stopped proxy as a warning and exits 0", async () => {
@@ -528,6 +606,105 @@ describe("CLI", { timeout: 15_000 }, () => {
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
+    });
+
+    it("prints the report as JSON with --json and exits 0 when nothing fails", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-json-"));
+      const proxyPort = await getFreePort();
+      try {
+        const { status, stdout, stderr } = run(["doctor", "--json"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(0);
+        const report = JSON.parse(stdout);
+        expect(stdout.trim()).toBe(JSON.stringify(report));
+        expect(Object.keys(report).sort()).toEqual([
+          "findings",
+          "mode",
+          "nodeVersion",
+          "platform",
+          "proxyTarget",
+          "stateDir",
+          "summary",
+          "version",
+        ]);
+        expect(report.version).toMatch(/^\d+\.\d+\.\d+/);
+        expect(report.nodeVersion).toBe(process.versions.node);
+        expect(report.platform).toBe(`${process.platform} ${process.arch}`);
+        expect(fs.realpathSync(report.stateDir)).toBe(fs.realpathSync(tmpDir));
+        expect(report.proxyTarget).toBe(`http://127.0.0.1:${proxyPort}`);
+        expect(report.mode).toBe("HTTP, .localhost");
+        expect(report.findings.length).toBeGreaterThan(0);
+        for (const finding of report.findings) {
+          expect(["ok", "warn", "fail", "info"]).toContain(finding.status);
+          expect(typeof finding.message).toBe("string");
+          if (finding.hint !== undefined) expect(typeof finding.hint).toBe("string");
+        }
+        expect(report.summary).toEqual({
+          failures: report.findings.filter((f: { status: string }) => f.status === "fail").length,
+          warnings: report.findings.filter((f: { status: string }) => f.status === "warn").length,
+        });
+        expect(report.summary.failures).toBe(0);
+        expect(stderr).not.toContain('"findings"');
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("keeps stdout to JSON and exits 1 when a check fails with --json", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-json-fail-"));
+      const server = http.createServer((_req, res) => {
+        res.end("not portless");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+
+        const { status, stdout } = run(["doctor", "--json"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: proxyPort.toString(),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(status).toBe(1);
+        const report = JSON.parse(stdout);
+        expect(stdout.trim()).toBe(JSON.stringify(report));
+        const failures = report.findings.filter((f: { status: string }) => f.status === "fail");
+        expect(report.summary).toEqual({
+          failures: failures.length,
+          warnings: report.findings.filter((f: { status: string }) => f.status === "warn").length,
+        });
+        expect(failures.length).toBeGreaterThan(0);
+        expect(
+          failures.some((f: { message: string }) =>
+            f.message.includes(`Port ${proxyPort} is in use, but it is not a portless proxy`)
+          )
+        ).toBe(true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("exits 2 with empty stdout for an unknown flag with --json", () => {
+      const { status, stdout, stderr } = run(["doctor", "--json", "--bogus"]);
+      expect(status).toBe(2);
+      expect(stdout).toBe("");
+      expect(stderr).toContain('Error: Unknown flag "--bogus" for portless doctor.');
     });
 
     it("does not fail for a missing nested state directory with a writable ancestor", async () => {
@@ -825,6 +1002,63 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("compose", () => {
+    it.skipIf(process.platform === "win32")(
+      "keeps container output on stdout and compose diagnostics on stderr",
+      async () => {
+        const routed = {
+          name: "myapp",
+          services: { web: { ports: [{ target: 3000, published: "3000" }] } },
+        };
+        const containerOut = "web-1  | ready on http://0.0.0.0:3000\nweb-1  | GET / 200 4ms\n";
+        const result = await runComposeUpDetached({ model: routed, upStdout: containerOut });
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(containerOut);
+        expect(result.stderr).toContain("portless compose myapp");
+        expect(result.stderr).toContain(
+          `-> http://web.myapp.localhost:${result.proxyPort}  (web:3000)`
+        );
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "sends the no-route notice and kept ports to stderr",
+      async () => {
+        const databaseOnly = {
+          name: "myapp",
+          services: { db: { ports: [{ target: 5432, published: "5432" }] } },
+        };
+        const containerOut = "db-1  | database system is ready\n";
+        const result = await runComposeUpDetached({ model: databaseOnly, upStdout: containerOut });
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(containerOut);
+        expect(result.stderr).toContain("db:5432 keeps host port 5432 (not HTTP)");
+        expect(result.stderr).toContain("No published HTTP ports found. Nothing to route.");
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps docker's exit code and stdout when a detached up fails",
+      async () => {
+        const routed = {
+          name: "myapp",
+          services: { web: { ports: [{ target: 3000, published: "3000" }] } },
+        };
+        const containerOut = "web-1  | image pull failed\n";
+        const result = await runComposeUpDetached({
+          model: routed,
+          upStdout: containerOut,
+          upExit: 3,
+        });
+
+        expect(result.status).toBe(3);
+        expect(result.stdout).toBe(containerOut);
+        expect(result.stderr).toContain("portless compose myapp");
+        expect(result.stderr).not.toContain("-> http");
+      }
+    );
+
     it("prints help and exits 0 with no arguments", () => {
       const { status, stdout } = run(["compose"]);
       expect(status).toBe(0);
@@ -2122,9 +2356,11 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
 
       try {
-        const { status, stdout } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        const { status, stdout, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
         expect(status).toBe(0);
-        expect(stdout).toContain(`http://myapp.localhost:${proxyPort}`);
+        expect(stderr).toContain(`http://myapp.localhost:${proxyPort}`);
+        expect(stdout).not.toContain("Running:");
+        expect(stdout).not.toContain(`http://myapp.localhost:${proxyPort}`);
         expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
       } finally {
         run(["proxy", "stop"], { env });
@@ -2637,13 +2873,27 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
 
     it("prints URL for a given service name", () => {
-      const { status, stdout } = run(["get", "backend"], { env: getEnv() });
+      const { status, stdout } = run(["get", "backend"], { cwd: tmpDir, env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/backend\.localhost(:\d+)?$/);
     });
 
+    it("prints get JSON using the same worktree-aware URL as plain get", () => {
+      const options = { cwd: tmpDir, env: { ...getEnv(), PORTLESS_PREFIX: "feature" } };
+      const plain = run(["get", "backend"], options);
+      const json = run(["get", "backend", "--json"], options);
+      expect(json.status).toBe(0);
+      expect(JSON.parse(json.stdout)).toEqual({
+        name: "backend",
+        hostname: "feature.backend.localhost",
+        url: plain.stdout.trim(),
+      });
+      const noWorktree = run(["get", "backend", "--json", "--no-worktree"], options);
+      expect(JSON.parse(noWorktree.stdout).hostname).toBe("backend.localhost");
+    });
+
     it("prints URL for a dotted service name", () => {
-      const { status, stdout } = run(["get", "api.backend"], { env: getEnv() });
+      const { status, stdout } = run(["get", "api.backend"], { cwd: tmpDir, env: getEnv() });
       expect(status).toBe(0);
       expect(stdout.trim()).toMatch(/^https?:\/\/api\.backend\.localhost(:\d+)?$/);
     });

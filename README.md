@@ -56,6 +56,8 @@ Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/et
 
 To reach an app from another device or share it, use [LAN mode](https://portless.sh/commands#lan-mode) for phones on the same network, or [Tailscale](https://portless.sh/commands#share-on-tailscale), [ngrok](https://portless.sh/commands#share-with-ngrok), or a [Cloudflare quick tunnel](https://portless.sh/commands#share-with-cloudflare) with `--tailscale`, `--ngrok`, or `--cloudflare`.
 
+portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
+
 ### Upstream aliases
 
 Use `--upstream` to route an alias to an HTTP or HTTPS service listening on loopback:
@@ -111,7 +113,7 @@ The server does not start dev servers. Agents run `portless run <cmd>` in a shel
 
 ## Commands
 
-Run `portless --help` for the full list, or `portless <command> --help` for one command. `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js. Usage errors, such as an unknown flag or a missing argument, exit with code `2`; other failures exit with `1`. Wrapped commands (`run`, named apps, and `compose`) keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
+Run `portless --help` for the full list, or `portless <command> --help` for one command. `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js. Usage errors, such as an unknown flag or a missing argument, exit with code `2`; other failures exit with `1`. Wrapped commands (`run`, named apps, and `compose`) keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`. Use `portless list --json` or `portless get <name> --json` for JSON output.
 
 | Group                | Commands                                                                              | Docs                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -122,7 +124,7 @@ Run `portless --help` for the full list, or `portless <command> --help` for one 
 | Inspect and clean up | `list`, `doctor`, `prune`, `clean`                                                    | [Doctor](https://portless.sh/commands#doctor), [Prune orphans](https://portless.sh/commands#prune-orphans), [Clean up](https://portless.sh/commands#clean-up) |
 | Agents               | `mcp`                                                                                 | [MCP server](https://portless.sh/commands#mcp-server)                                                                                                         |
 
-Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes.
+Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
 ## Platforms
 

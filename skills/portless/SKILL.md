@@ -227,6 +227,8 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
 | `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
 
+portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
+
 ### HTTP/2 + HTTPS
 
 HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with many files). WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441 extended CONNECT), so dev server HMR works through the proxy. First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
@@ -335,7 +337,9 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
 | `portless get <name> --no-worktree`               | Print URL without worktree config or naming                    |
+| `portless get <name> --json`                      | Print name, hostname, and URL as JSON                          |
 | `portless list`                                   | Show active routes and uptime                                  |
+| `portless list --json`                            | Print routes as JSON                                           |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
@@ -428,7 +432,7 @@ Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.
 
 ### Run diagnostics
 
-Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites.
+Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites. Use `portless doctor --json` to print the report as JSON.
 
 The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection, without a timer that abandons either family. A backend listening on both families may accept an extra connection that closes without an HTTP request. Later requests reuse the winning connection when possible.
 
