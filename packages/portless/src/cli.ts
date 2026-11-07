@@ -46,7 +46,14 @@ import {
   cleanHostsFile,
   shouldAutoSyncHosts,
 } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore, type RouteMapping } from "./routes.js";
+import {
+  FILE_MODE,
+  RouteConflictError,
+  RouteStore,
+  isValidUpstream,
+  type RouteMapping,
+} from "./routes.js";
+import type { RouteInfo } from "./types.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
@@ -580,6 +587,25 @@ function formatBindEndpoint(host: string, port: number): string {
   return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
+type AliasUpstream = NonNullable<RouteInfo["upstream"]>;
+
+function parseAliasUpstream(value: string): AliasUpstream {
+  const usage = 'Use "https", "https://<host>[:<port>]", or "http://<host>[:<port>]".';
+  let upstream: AliasUpstream;
+  if (value === "https") {
+    upstream = { tls: true };
+  } else {
+    const match = /^(https?):\/\/(.+)$/.exec(value);
+    if (!match || match[0] !== value) throw new Error(usage);
+    upstream = { tls: match[1] === "https", host: match[2]! };
+  }
+
+  if (!isValidUpstream(upstream)) {
+    throw new Error(`${usage} The authority must be a hostname or IP with an optional port.`);
+  }
+  return upstream;
+}
+
 function isUnavailableIpv6Bind(err: NodeJS.ErrnoException, host: string): boolean {
   return host.includes(":") && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL");
 }
@@ -589,13 +615,14 @@ function addRoutes(
   hostnames: readonly string[],
   port: number,
   pid: number,
-  force = false
+  force = false,
+  upstream?: AliasUpstream
 ): number[] {
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
     for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force);
+      const killedPid = store.addRoute(hostname, port, pid, force, upstream);
       registered.push(hostname);
       if (killedPid !== undefined) {
         killedPids.push(killedPid);
@@ -1257,11 +1284,18 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   console.log(colors.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
     const url = formatUrl(route.hostname, proxyPort, tls);
+    const upstream = route.upstream;
+    const endpoint = upstream
+      ? `${upstream.tls ? "https" : "http"}://localhost:${route.port}`
+      : `localhost:${route.port}`;
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
     const uptime = route.pid === 0 ? null : formatUptime(route.registeredAt, Date.now());
     console.log(
-      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}${uptime ? ` ${colors.gray(`up ${uptime}`)}` : ""}`
+      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(endpoint)}  ${colors.gray(label)}${uptime ? ` ${colors.gray(`up ${uptime}`)}` : ""}`
     );
+    if (upstream?.host) {
+      console.log(`    ${colors.gray("Host:")} ${colors.white(upstream.host)}`);
+    }
     if (route.tailscaleUrl) {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
@@ -2670,31 +2704,56 @@ ${colors.bold("Examples:")}
 }
 
 async function handleAlias(args: string[]): Promise<void> {
-  if (hasHelpFlag(args)) {
+  const helpIsUpstreamValue = args.some(
+    (arg, index) => arg === "--upstream" && ["--help", "-h"].includes(args[index + 1] ?? "")
+  );
+  if (hasHelpFlag(args) && !helpIsUpstreamValue) {
     console.log(`
 ${colors.bold("portless alias")} - Register a static route for services not managed by portless.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless alias <name> <port>")}        Register a route
-  ${colors.cyan("portless alias --remove <name>")}      Remove static routes, preserve process-owned routes
-  ${colors.cyan("portless alias <name> <port> --force")} Override an existing route
+  ${colors.cyan("portless alias <name> <port>")}                 Register a route
+  ${colors.cyan("portless alias <name> <port> --upstream https")}  Use HTTPS to the local backend
+  ${colors.cyan("portless alias --remove <name>")}               Remove static routes, preserve process-owned routes
+  ${colors.cyan("portless alias <name> <port> --force")}          Override an existing route
 
 ${colors.bold("Options:")}
-  --force                Override a route; stop a conflicting app if any
-  --tld <tld>            Only these configured TLDs (repeatable, comma-separated)
-  --help, -h             Show this help
+  --force                   Override a route; stop a conflicting app if any
+  --tld <tld>               Only these configured TLDs (repeatable, comma-separated)
+  --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
+  --help, -h                Show this help
+
+The positional port always dials loopback. The value "https" enables TLS and
+preserves Host. An "https://" authority enables TLS and overrides Host with the full
+authority, including its optional port. SNI uses a DNS hostname without the port;
+IP addresses are not sent as SNI. An "http://" authority overrides Host without TLS.
+Upstream TLS connects only to an
+HTTP/1.1 backend on loopback. Certificate verification is disabled, so backend
+identity is not authenticated, including through an SSH tunnel. This does not change
+client-facing proxy TLS. Authorities accept only a hostname or IP with an optional
+port, without credentials, paths, queries, fragments, or whitespace. Restart the
+proxy daemon after upgrading.
 
 ${colors.bold("Examples:")}
-  portless alias my-postgres 5432     # -> https://my-postgres.localhost
-  portless alias redis 6379           # -> https://redis.localhost
+  portless alias my-postgres 5432      # -> https://my-postgres.localhost
+  portless alias redis 6379            # -> https://redis.localhost
   portless alias redis 6379 --tld test # -> https://redis.test only
-  portless alias --remove my-postgres # Remove the alias
+  portless alias api 8080 --upstream https://api.internal
+  portless alias --remove my-postgres  # Remove the alias
 `);
     process.exit(0);
   }
 
   const isRemove = args[1] === "--remove";
   const tldFlagValues: string[] = [];
+  let upstream: AliasUpstream | undefined;
+  let upstreamSeen = false;
+  const usageError = (message: string): never => {
+    console.error(colors.red(`Error: ${message}`));
+    console.error(colors.blue("Usage: portless alias <name> <port> [--upstream <value>]"));
+    process.exit(2);
+  };
+
   for (let i = isRemove ? 2 : 1; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--tld") {
@@ -2705,16 +2764,33 @@ ${colors.bold("Examples:")}
       }
       tldFlagValues.push(value);
       i++;
+    } else if (arg.startsWith("--upstream=")) {
+      usageError("Use --upstream followed by a separate value.");
+    } else if (arg === "--upstream") {
+      if (isRemove) usageError("--upstream can only be used when adding an alias.");
+      if (upstreamSeen) usageError("--upstream may be specified only once.");
+      const value = args[i + 1];
+      if (value === undefined || value.startsWith("-")) {
+        usageError("--upstream requires a value.");
+      }
+      try {
+        upstream = parseAliasUpstream(value);
+      } catch (err) {
+        usageError(`Invalid --upstream value. ${(err as Error).message}`);
+      }
+      upstreamSeen = true;
+      i++;
     } else if (arg.startsWith("-") && (isRemove || arg !== "--force")) {
       console.error(colors.red(`Error: Unknown flag "${arg}".`));
       console.error(
-        colors.blue(`Known flags: ${isRemove ? "--tld, --help" : "--force, --tld, --help"}`)
+        colors.blue(
+          `Known flags: ${isRemove ? "--tld, --help" : "--force, --tld, --upstream, --help"}`
+        )
       );
       process.exit(1);
     }
   }
 
-  const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
   let targetTlds: string[] | undefined;
   if (tldFlagValues.length > 0) {
     try {
@@ -2723,6 +2799,35 @@ ${colors.bold("Examples:")}
       console.error(colors.red(`Error: ${(err as Error).message}`));
       process.exit(1);
     }
+  }
+
+  const aliasName = isRemove ? args[2] : args[1];
+  const aliasPort = isRemove ? undefined : args[2];
+  if (isRemove && (!aliasName || aliasName.startsWith("-"))) {
+    console.error(colors.red("Error: No alias name provided."));
+    console.error(colors.cyan("  portless alias --remove <name>"));
+    process.exit(1);
+  }
+  if (
+    !isRemove &&
+    (!aliasName || !aliasPort || aliasName.startsWith("-") || aliasPort.startsWith("-"))
+  ) {
+    console.error(colors.red("Error: Missing arguments."));
+    console.error(colors.blue("Usage:"));
+    console.error(colors.cyan("  portless alias <name> <port>"));
+    console.error(colors.cyan("  portless alias --remove <name>"));
+    console.error(colors.blue("Example:"));
+    console.error(colors.cyan("  portless alias my-postgres 5432"));
+    process.exit(1);
+  }
+  const port = aliasPort ? parsePort(aliasPort) : null;
+  if (!isRemove && port === null) {
+    console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
+    process.exit(1);
+  }
+
+  const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
+  if (targetTlds) {
     const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
     if (unconfigured) {
       console.error(
@@ -2736,13 +2841,7 @@ ${colors.bold("Examples:")}
   });
 
   if (isRemove) {
-    const aliasName = args[2];
-    if (!aliasName || aliasName.startsWith("-")) {
-      console.error(colors.red("Error: No alias name provided."));
-      console.error(colors.cyan("  portless alias --remove <name>"));
-      process.exit(1);
-    }
-    const hostnames = buildHostnames(aliasName, tlds, targetTlds);
+    const hostnames = buildHostnames(aliasName!, tlds, targetTlds);
     const routes = store.loadRoutes();
     const aliases = hostnames.filter((hostname) =>
       routes.some((route) => route.hostname === hostname && route.pid === 0)
@@ -2757,27 +2856,8 @@ ${colors.bold("Examples:")}
     return;
   }
 
-  const aliasName = args[1];
-  const aliasPort = args[2];
-  if (!aliasName || !aliasPort || aliasName.startsWith("-") || aliasPort.startsWith("-")) {
-    console.error(colors.red("Error: Missing arguments."));
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless alias <name> <port>"));
-    console.error(colors.cyan("  portless alias --remove <name>"));
-    console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless alias my-postgres 5432"));
-    process.exit(1);
-  }
-
-  const hostnames = buildHostnames(aliasName, tlds, targetTlds);
-  const port = parsePort(aliasPort);
-  if (port === null) {
-    console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
-    process.exit(1);
-  }
-
-  const force = args.includes("--force");
-  addRoutes(store, hostnames, port, 0, force);
+  const hostnames = buildHostnames(aliasName!, tlds, targetTlds);
+  addRoutes(store, hostnames, port!, 0, args.includes("--force"), upstream);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
   // Awaited: this command exits, and a warning printed after exit reaches nobody.
   await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);

@@ -168,6 +168,9 @@ Worktree config is read from the current directory, including workspace root def
 portless alias <name> <port>
 portless alias <name> <port> --force
 portless alias <name> <port> --tld <tld>
+portless alias <name> <port> --upstream https
+portless alias <name> <port> --upstream https://api.internal
+portless alias <name> <port> --upstream http://api.internal
 portless alias --remove <name>
 portless alias --remove <name> --tld <tld>
 ```
@@ -178,11 +181,25 @@ An alias covers every configured TLD by default. Pass `--tld <tld>` after the al
 
 `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
+The positional port always dials loopback. `--upstream https` enables TLS and preserves
+the incoming Host header. A URL authority such as `https://api.internal:8443` enables
+TLS and overrides Host with the full authority, including its optional port. SNI uses
+a DNS hostname without the port; IP addresses are not sent as SNI. An `http://`
+authority overrides Host without TLS. This
+setting does not change client-facing proxy TLS. Authorities accept only a hostname or
+IP address with an optional port, without credentials, paths, queries, fragments, or
+whitespace.
+
+Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
+certificate verification, so TLS does not authenticate backend identity, including
+through an SSH tunnel. Restart the proxy daemon after upgrading portless.
+
 ```bash
-portless alias my-postgres 5432     # -> https://my-postgres.localhost
-portless alias redis 6379           # -> https://redis.localhost
-portless alias redis 6379 --tld test # -> https://redis.test only
-portless alias --remove my-postgres # remove the alias
+portless alias my-postgres 5432                         # -> https://my-postgres.localhost
+portless alias redis 6379                               # -> https://redis.localhost
+portless alias redis 6379 --tld test                    # -> https://redis.test only
+portless alias api 8080 --upstream https://api.internal # TLS, Host and SNI override
+portless alias --remove my-postgres                    # remove the alias
 ```
 
 ## Docker Compose
