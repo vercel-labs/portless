@@ -849,7 +849,7 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
 
     it.skipIf(process.platform === "win32")(
-      "rejects a bad global flag before a subcommand without running docker",
+      "rejects a bad global flag before a subcommand, even with child help, without running docker",
       () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-globals-"));
         const log = path.join(tmpDir, "docker.log");
@@ -858,14 +858,16 @@ describe("CLI", { timeout: 15_000 }, () => {
           fs.writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 1\n', {
             mode: 0o755,
           });
-          for (const subcommand of ["up", "down", "ps", "config"]) {
-            const { status, stdout, stderr } = run(["compose", "--bad", subcommand], {
-              env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined },
-            });
-            expect(status).toBe(2);
-            expect(stdout).toBe("");
-            expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
-            expect(stderr).toContain("See: portless compose --help");
+          for (const extra of [[], ["--help"], ["-h"]] as const) {
+            for (const subcommand of ["up", "down", "ps", "config"]) {
+              const { status, stdout, stderr } = run(["compose", "--bad", subcommand, ...extra], {
+                env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined },
+              });
+              expect(status).toBe(2);
+              expect(stdout).toBe("");
+              expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
+              expect(stderr).toContain("See: portless compose --help");
+            }
           }
           expect(fs.existsSync(log)).toBe(false);
         } finally {

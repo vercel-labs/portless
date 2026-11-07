@@ -4952,20 +4952,20 @@ function assertComposeGlobals(globals: readonly string[]): void {
 async function handleCompose(args: string[]): Promise<void> {
   const composeArgs = args.slice(1);
   const { globals, subcommand, rest } = splitComposeArgs(composeArgs);
-  const help = rest.includes("--help") || rest.includes("-h");
-  const wantsHelp = help || globals.includes("--help") || globals.includes("-h");
+  const childHelp = rest.includes("--help") || rest.includes("-h");
+  const globalHelp = globals.includes("--help") || globals.includes("-h");
 
   if (!subcommand) {
-    if (!wantsHelp) assertComposeGlobals(globals);
+    if (!globalHelp) assertComposeGlobals(globals);
     printComposeHelp();
     process.exit(0);
   }
 
   if (isPortlessSkipped()) process.exit(await spawnDockerCompose(composeArgs).exited);
 
-  if (!wantsHelp) assertComposeGlobals(globals);
+  if (!globalHelp) assertComposeGlobals(globals);
 
-  if (wantsHelp || (subcommand !== "up" && subcommand !== "down")) {
+  if (globalHelp || childHelp || (subcommand !== "up" && subcommand !== "down")) {
     process.exit(await spawnDockerCompose(composeArgs).exited);
   }
 
