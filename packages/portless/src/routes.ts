@@ -231,13 +231,11 @@ export class RouteStore {
       }
       // Filter out stale routes whose owning process is no longer alive
       const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
-      if (persistCleanup && routes.length === parsed.length && alive.length !== routes.length) {
+      if (persistCleanup && alive.length !== routes.length) {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.
         try {
-          fs.writeFileSync(this.routesPath, JSON.stringify(alive, null, 2), {
-            mode: FILE_MODE,
-          });
+          this.saveRoutes(alive);
         } catch {
           // Write may fail (permissions); non-fatal
         }
@@ -248,32 +246,34 @@ export class RouteStore {
     }
   }
 
-  private assertValidUpstreams(): void {
-    if (fs.existsSync(this.routesPath)) {
-      let existing: unknown;
-      try {
-        existing = JSON.parse(fs.readFileSync(this.routesPath, "utf-8"));
-      } catch {
-        existing = undefined;
-      }
-      if (
-        Array.isArray(existing) &&
-        existing.some(
-          (value) =>
-            typeof value === "object" &&
-            value !== null &&
-            "upstream" in value &&
-            !isValidUpstream(value.upstream)
-        )
-      ) {
-        throw new Error("Cannot change routes while an invalid upstream configuration is present");
-      }
+  private skippedRoutes(): unknown[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.routesPath, "utf-8");
+    } catch (err) {
+      if (isErrnoException(err) && err.code === "ENOENT") return [];
+      throw err;
+    }
+    try {
+      const existing: unknown = JSON.parse(raw);
+      return Array.isArray(existing) ? existing.filter((value) => !isValidRoute(value)) : [];
+    } catch {
+      return [];
     }
   }
 
-  private saveRoutes(routes: RouteMapping[]): void {
-    this.assertValidUpstreams();
-    fs.writeFileSync(this.routesPath, JSON.stringify(routes, null, 2), { mode: FILE_MODE });
+  private saveRoutes(routes: RouteMapping[], replaceSkippedHostname?: string): void {
+    const skipped = this.skippedRoutes().filter(
+      (value) =>
+        replaceSkippedHostname === undefined ||
+        typeof value !== "object" ||
+        value === null ||
+        !("hostname" in value) ||
+        value.hostname !== replaceSkippedHostname
+    );
+    fs.writeFileSync(this.routesPath, JSON.stringify([...routes, ...skipped], null, 2), {
+      mode: FILE_MODE,
+    });
     fixOwnership(this.routesPath);
   }
 
@@ -299,7 +299,20 @@ export class RouteStore {
     }
     let killedPid: number | undefined;
     try {
-      this.assertValidUpstreams();
+      if (
+        !force &&
+        this.skippedRoutes().some(
+          (value) =>
+            typeof value === "object" &&
+            value !== null &&
+            "hostname" in value &&
+            value.hostname === hostname
+        )
+      ) {
+        throw new Error(
+          `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
+        );
+      }
       const routes = this.loadRoutes(true);
       const existing = routes.find((r) => r.hostname === hostname);
       const isAlias = existing?.pid === 0;
@@ -326,7 +339,7 @@ export class RouteStore {
         ...(upstream === undefined ? {} : { upstream }),
       };
       filtered.push(entry);
-      this.saveRoutes(filtered);
+      this.saveRoutes(filtered, force ? hostname : undefined);
     } finally {
       this.releaseLock();
     }
