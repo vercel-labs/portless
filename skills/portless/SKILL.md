@@ -193,6 +193,9 @@ Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
 certificate verification, so TLS does not authenticate backend identity, including
 through an SSH tunnel. Restart the proxy daemon after upgrading portless.
 
+`portless list --json` includes the optional `upstream` object with the same `tls` and
+`host` values.
+
 ```bash
 portless alias api 8080 --upstream https://api.internal
 ```
