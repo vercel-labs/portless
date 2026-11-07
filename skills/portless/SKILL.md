@@ -64,7 +64,7 @@ portless -- --inspect  # -> runs "dev --inspect"
 pnpm dev        # -> works without portless, plain "next dev"
 ```
 
-Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts, or to the root script when one is configured.
+Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts.
 
 Use an optional `portless.json` to override defaults (name, script, port):
 
