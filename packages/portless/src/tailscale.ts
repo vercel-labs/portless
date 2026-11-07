@@ -47,8 +47,8 @@ export interface EnsureTailscaleReadyOptions {
   runner?: TailscaleCommandRunner;
 }
 
-function defaultRunner(args: string[]): TailscaleCommandResult {
-  const result = spawnSync(TAILSCALE_BINARY, args, {
+function runTailscaleCommand(command: string, args: string[]): TailscaleCommandResult {
+  const result = spawnSync(command, args, {
     encoding: "utf-8",
     killSignal: "SIGKILL",
     timeout: TAILSCALE_COMMAND_TIMEOUT_MS,
@@ -60,6 +60,25 @@ function defaultRunner(args: string[]): TailscaleCommandResult {
     stderr: result.stderr ?? "",
     ...(result.error ? { error: result.error } : {}),
   };
+}
+
+/**
+ * Run the Tailscale CLI. On Windows, retry through the command shell when the
+ * name resolves to a `.cmd` shim, which cannot be spawned directly.
+ */
+function defaultRunner(args: string[]): TailscaleCommandResult {
+  const result = runTailscaleCommand(TAILSCALE_BINARY, args);
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (process.platform !== "win32" || (code !== "ENOENT" && code !== "EINVAL")) {
+    return result;
+  }
+  return runTailscaleCommand(process.env.ComSpec ?? "cmd.exe", [
+    "/d",
+    "/s",
+    "/c",
+    TAILSCALE_BINARY,
+    ...args,
+  ]);
 }
 
 function trimDot(value: string): string {

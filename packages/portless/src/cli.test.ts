@@ -69,22 +69,26 @@ function run(args: string[], options?: { env?: Record<string, string | undefined
 type HostsFileMockOptions = {
   content: string;
   readMode?: "ok" | "initial-error" | "verification-error";
-  writeMode?: "ok" | "error";
+  writeMode?: "ok" | "error" | "privileged";
   uid?: number;
   sudoStatus?: number;
   stateDir: string;
+  failPrivilegedCleanup?: boolean;
+  extraEnv?: Record<string, string | undefined>;
 };
 
 type HostsFileMockCapture = {
   content: string;
   writes: string[];
   sudo: { command: string; args: string[] } | null;
+  sudoCalls: Array<{ command: string; args: string[] }>;
 };
 
 /**
- * Run the built CLI with a preload that intercepts only hosts-file I/O. This
- * exercises the process boundary without reading, writing, or elevating against
- * the real system hosts file.
+ * Run the built CLI with a preload that intercepts hosts-file I/O and, when
+ * requested, the allowlisted cleanup writes that need elevation. This exercises
+ * the process boundary without reading, writing, or elevating against the real
+ * system files.
  */
 function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
   const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-hosts-cli-shim-"));
@@ -100,13 +104,47 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         'const { syncBuiltinESMExports } = require("node:module");',
         "const originalReadFileSync = fs.readFileSync;",
         "const originalWriteFileSync = fs.writeFileSync;",
+        "const originalUnlinkSync = fs.unlinkSync;",
+        "const originalRmSync = fs.rmSync;",
         "const originalSpawnSync = childProcess.spawnSync;",
+        "const originalExecFileSync = childProcess.execFileSync;",
         'const hostsPath = process.platform === "win32"',
         '  ? path.join(process.env.SystemRoot || "C:\\\\Windows", "System32", "drivers", "etc", "hosts")',
         '  : "/etc/hosts";',
         'let content = process.env.PORTLESS_TEST_HOSTS_CONTENT || "";',
         "let reads = 0;",
-        "const capture = { writes: [], sudo: null };",
+        "const capture = { writes: [], sudo: null, sudoCalls: [] };",
+        "const elevated = () => Boolean(process.env.PORTLESS_INTERNAL_CLEAN_STEPS);",
+        'const failUntilElevated = process.env.PORTLESS_TEST_FAIL_PRIVILEGED === "1";',
+        "const stateDir = process.env.PORTLESS_STATE_DIR",
+        "  ? path.resolve(process.env.PORTLESS_STATE_DIR)",
+        "  : null;",
+        "const isStatePath = (file) => {",
+        "  if (!stateDir) return false;",
+        "  const resolved = path.resolve(String(file));",
+        "  return resolved === stateDir || resolved.startsWith(stateDir + path.sep);",
+        "};",
+        "const denied = (message) => {",
+        "  const error = new Error(message);",
+        '  error.code = "EACCES";',
+        "  return error;",
+        "};",
+        "fs.unlinkSync = function (file, ...rest) {",
+        '  if (failUntilElevated && !elevated() && isStatePath(file)) throw denied("state file removal denied");',
+        "  return originalUnlinkSync.call(this, file, ...rest);",
+        "};",
+        "fs.rmSync = function (file, ...rest) {",
+        '  if (failUntilElevated && !elevated() && isStatePath(file)) throw denied("state file removal denied");',
+        "  return originalRmSync.call(this, file, ...rest);",
+        "};",
+        "childProcess.execFileSync = function (command, ...rest) {",
+        "  const update = /^update-ca-(certificates|trust)$/.test(String(command));",
+        "  if (failUntilElevated && update) {",
+        '    if (!elevated()) throw denied("CA update denied");',
+        '    return "";',
+        "  }",
+        "  return originalExecFileSync.call(this, command, ...rest);",
+        "};",
         "fs.readFileSync = function (file, ...rest) {",
         "  if (String(file) !== hostsPath) return originalReadFileSync.call(this, file, ...rest);",
         "  reads += 1;",
@@ -121,10 +159,9 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "fs.writeFileSync = function (file, data, ...rest) {",
         "  if (String(file) !== hostsPath) return originalWriteFileSync.call(this, file, data, ...rest);",
         "  capture.writes.push(String(data));",
-        '  if (process.env.PORTLESS_TEST_HOSTS_WRITE_MODE === "error") {',
-        '    const error = new Error("hosts write failed");',
-        '    error.code = "EACCES";',
-        "    throw error;",
+        '  if (process.env.PORTLESS_TEST_HOSTS_WRITE_MODE === "error" ||',
+        '      (process.env.PORTLESS_TEST_HOSTS_WRITE_MODE === "privileged" && !elevated())) {',
+        '    throw denied("hosts write failed");',
         "  }",
         "  content = String(data);",
         "};",
@@ -134,6 +171,7 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "childProcess.spawnSync = function (command, commandArgs, spawnOptions) {",
         '  if (command !== "sudo") return originalSpawnSync.call(this, command, commandArgs, spawnOptions);',
         "  capture.sudo = { command, args: commandArgs };",
+        "  capture.sudoCalls.push(capture.sudo);",
         '  return { status: Number(process.env.PORTLESS_TEST_HOSTS_SUDO_STATUS || "1") };',
         "};",
         "syncBuiltinESMExports();",
@@ -152,6 +190,8 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         PORTLESS_TEST_HOSTS_WRITE_MODE: options.writeMode ?? "ok",
         PORTLESS_TEST_HOSTS_UID: String(options.uid ?? 0),
         PORTLESS_TEST_HOSTS_SUDO_STATUS: String(options.sudoStatus ?? 1),
+        PORTLESS_TEST_FAIL_PRIVILEGED: options.failPrivilegedCleanup ? "1" : "0",
+        ...options.extraEnv,
         NODE_OPTIONS: `--require=${preloadPath}`,
       },
     });
@@ -194,6 +234,22 @@ function writeExpoShim(dir: string): void {
   const shimPath = path.join(dir, "expo");
   fs.writeFileSync(shimPath, `#!/bin/sh\n"${process.execPath}" "${captureScriptPath}" "$@"\n`);
   fs.chmodSync(shimPath, 0o755);
+}
+
+/** Write a cross-platform tailscale shim that records its arguments. */
+function writeTailscaleShim(dir: string): void {
+  if (process.platform === "win32") {
+    fs.writeFileSync(
+      path.join(dir, "tailscale.cmd"),
+      '@echo off\r\n>>"%PORTLESS_TEST_TAILSCALE_LOG%" echo %*\r\n'
+    );
+    return;
+  }
+  fs.writeFileSync(
+    path.join(dir, "tailscale"),
+    '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
+    { mode: 0o755 }
+  );
 }
 
 function captureBypassedExpo(args: string[]): {
@@ -241,7 +297,7 @@ async function getFreePort(): Promise<number> {
 
 async function startMockProxy(
   dir: string,
-  options: { acknowledgeHostsSync?: boolean; port?: number } = {}
+  options: { acknowledgeHostsSync?: boolean; port?: number; sigtermDelayMs?: number } = {}
 ): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
   const port = options.port ?? (await getFreePort());
   const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
@@ -266,7 +322,9 @@ async function startMockProxy(
       '  res.end("ok");',
       "});",
       `server.listen(${port}, "127.0.0.1");`,
-      'process.on("SIGTERM", () => server.close(() => process.exit(0)));',
+      options.sigtermDelayMs
+        ? `process.on("SIGTERM", () => setTimeout(() => server.close(() => process.exit(0)), ${options.sigtermDelayMs}));`
+        : 'process.on("SIGTERM", () => server.close(() => process.exit(0)));',
     ]
       .filter(Boolean)
       .join("\n") + "\n"
@@ -738,11 +796,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         );
         const tunnels: ReturnType<typeof spawn>[] = [];
         const tailscaleLog = path.join(tmpDir, "tailscale.log");
-        fs.writeFileSync(
-          path.join(tmpDir, "tailscale"),
-          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
-          { mode: 0o755 }
-        );
+        writeTailscaleShim(tmpDir);
         const env = {
           PORTLESS_STATE_DIR: tmpDir,
           PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
@@ -954,11 +1008,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-tailscale-"));
       const routesPath = path.join(tmpDir, "routes.json");
       const tailscaleLog = path.join(tmpDir, "tailscale.log");
-      fs.writeFileSync(
-        path.join(tmpDir, "tailscale"),
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
-        { mode: 0o755 }
-      );
+      writeTailscaleShim(tmpDir);
       const env = {
         PORTLESS_STATE_DIR: tmpDir,
         PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
@@ -2587,6 +2637,122 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(result.status, result.stderr).toBe(0);
           expect(fs.existsSync(path.join(stateDir, "routes.lock"))).toBe(false);
           expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "waits for the proxy listener to close before reporting success",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-stop-race-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        const proxy = await startMockProxy(stateDir, { sigtermDelayMs: 300 });
+        try {
+          fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(proxy.child.pid));
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 0,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(proxy.port),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toContain("Proxy stopped.");
+          expect(result.stdout).not.toContain("still running");
+        } finally {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "retries only the failed CA, state-file, and hosts steps through sudo",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-retry-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
+        fs.writeFileSync(path.join(stateDir, "keep.txt"), "keep");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "# portless-start\n127.0.0.1 stale.localhost\n# portless-end\n",
+            writeMode: "privileged",
+            failPrivilegedCleanup: true,
+            stateDir,
+            uid: 1000,
+            sudoStatus: 0,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.capture.sudoCalls).toHaveLength(1);
+          const sudoArgs = result.capture.sudoCalls[0]!.args;
+          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files,hosts");
+          expect(sudoArgs.slice(-2)).toEqual(["clean", "--yes"]);
+          expect(sudoArgs.join(" ")).not.toContain("service");
+          expect(sudoArgs.join(" ")).not.toContain("prune");
+          expect(sudoArgs.join(" ")).not.toContain("--force");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "runs the elevated allowlist without calling sudo again",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-elevated-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
+        fs.writeFileSync(path.join(stateDir, "keep.txt"), "keep");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "# portless-start\n127.0.0.1 stale.localhost\n# portless-end\n",
+            writeMode: "privileged",
+            failPrivilegedCleanup: true,
+            stateDir,
+            uid: 1000,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+              PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files,hosts",
+            },
+          });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.capture.sudoCalls).toEqual([]);
+          expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "ca.pem"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
+          expect(fs.readFileSync(path.join(stateDir, "keep.txt"), "utf-8")).toBe("keep");
+          expect(result.capture.content).not.toContain("portless-start");
         } finally {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }

@@ -416,9 +416,41 @@ describe("orphaned process groups", () => {
 
     const pid = await startAndCrash("orphan-restart");
     const oldPort = state.appPort!;
+    const hostname = "orphan-restart.localhost";
 
     await startCliApp("orphan-restart", state, "server.js");
 
+    const routesPath = path.join(state.stateDir, "routes.json");
+    const records = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+      hostname: string;
+      port: number;
+      pid: number;
+    }>;
+    const matching = records.filter((route) => route.hostname === hostname);
+    expect(matching[0]).toMatchObject({ port: state.appPort, pid: state.cliChild!.pid });
+    expect(matching[0]!.port).not.toBe(oldPort);
+    expect(matching.some((route) => route.port === oldPort && !isAlive(route.pid))).toBe(true);
+
+    const pruneResult = spawnSync(process.execPath, [CLI_PATH, "prune"], {
+      env: {
+        ...process.env,
+        PORTLESS_PORT: PROXY_PORT.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_STATE_DIR: state.stateDir,
+        NO_COLOR: "1",
+      },
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    expect(pruneResult.status, pruneResult.stderr).toBe(0);
+
+    const afterPrune = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+      hostname: string;
+      port: number;
+    }>;
+    expect(afterPrune.filter((route) => route.hostname === hostname)).toEqual([
+      expect.objectContaining({ port: state.appPort }),
+    ]);
     expect(await waitForPidToExit(pid, 5000)).toBe(true);
     expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
   });
