@@ -730,14 +730,13 @@ describe("CLI", { timeout: 15_000 }, () => {
               },
             ])
           );
+          const readRaw = () =>
+            JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
           const first = run(["prune"], { env });
           expect(first.status).toBe(0);
           expect(first.stdout).toContain("did not exit");
           expect(first.stdout).toContain("portless prune --force");
-          const orphansPath = path.join(tmpDir, "orphans.json");
-          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
-          const keptOrphans = () => JSON.parse(fs.readFileSync(orphansPath, "utf-8"));
-          expect(keptOrphans()).toEqual([
+          expect(readRaw()).toEqual([
             expect.objectContaining({
               hostname: "retry.localhost",
               port,
@@ -751,15 +750,15 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(first.stdout).not.toContain("stopped");
           const other = run(["alias", "unrelated.localhost", String(await getFreePort())], { env });
           expect(other.status, other.stderr).toBe(0);
-          expect(keptOrphans()).toHaveLength(1);
+          expect(readRaw().filter((route) => route.pid === 999999)).toHaveLength(1);
           const second = run(["prune", "--force"], { env });
           expect(second.status).toBe(0);
-          expect(keptOrphans()).toEqual([]);
+          expect(readRaw().filter((route) => route.pid === 999999)).toEqual([]);
           expect(findPidsOnPort(port)).toEqual([]);
           expect(fs.readFileSync(tailscaleLog, "utf-8")).toContain("serve --yes --https=8443 off");
           expect(second.stdout).toContain("stopped ngrok tunnel");
           expect(second.stdout).toContain("stopped Cloudflare tunnel");
-          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([
+          expect(readRaw()).toEqual([
             expect.objectContaining({ hostname: "unrelated.localhost", pid: 0 }),
           ]);
           for (const tunnel of tunnels) {
@@ -786,13 +785,11 @@ describe("CLI", { timeout: 15_000 }, () => {
       async () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-leader-gone-"));
         const routesPath = path.join(tmpDir, "routes.json");
-        const orphansPath = path.join(tmpDir, "orphans.json");
-        const readOrphans = () =>
-          fs.existsSync(orphansPath) ? JSON.parse(fs.readFileSync(orphansPath, "utf-8")) : [];
+        const readRaw = () =>
+          JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
+        const deadRecords = () => readRaw().filter((route) => route.pid === 999999);
         const helperScript = `require("net").createServer().listen(Number(process.argv[1]),"127.0.0.1",()=>{setInterval(()=>{},1000)})`;
         const port = await getFreePort();
-        // The shell leads the process group, backgrounds the server and exits,
-        // so the recorded leader is gone while a group member holds the port.
         const leader = spawn(
           "sh",
           ["-c", '"$1" -e "$2" "$3" &', "sh", process.execPath, helperScript, String(port)],
@@ -825,13 +822,10 @@ describe("CLI", { timeout: 15_000 }, () => {
             ])
           );
 
-          const first = run(["prune"], { env });
-          expect(first.status, first.stderr).toBe(0);
-          expect(first.stdout).toContain("could not be verified");
-          expect(first.stdout).toContain("nothing was killed");
-          expect(first.stdout).not.toContain("tailscale");
-          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
-          expect(readOrphans()).toEqual([
+          expect(
+            run(["alias", "early.localhost", String(await getFreePort())], { env }).status
+          ).toBe(0);
+          expect(deadRecords()).toEqual([
             expect.objectContaining({
               hostname: "leader-gone.localhost",
               port,
@@ -840,21 +834,21 @@ describe("CLI", { timeout: 15_000 }, () => {
               tailscaleHttpsPort: 8443,
             }),
           ]);
-          expect(readOrphans()[0].orphanPid).toBeUndefined();
-          expect(findPidsOnPort(port)).toEqual([holderPid]);
+          expect(run(["list"], { env }).stdout).not.toContain("leader-gone.localhost");
 
-          // An interrupted move leaves the same record in both files.
-          fs.writeFileSync(routesPath, JSON.stringify(readOrphans()));
-          const duplicate = run(["prune", "--force"], { env });
-          expect(duplicate.status, duplicate.stderr).toBe(0);
-          expect(duplicate.stdout.split("could not be verified")).toHaveLength(2);
-          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
-          expect(readOrphans()).toHaveLength(1);
+          const first = run(["prune"], { env });
+          expect(first.status, first.stderr).toBe(0);
+          expect(first.stdout).toContain("could not be verified");
+          expect(first.stdout).toContain("nothing was killed");
+          expect(first.stdout).not.toContain("tailscale");
+          expect(deadRecords()).toHaveLength(1);
+          expect(deadRecords()[0].orphanPid).toBeUndefined();
+          expect(findPidsOnPort(port)).toEqual([holderPid]);
 
           const forced = run(["prune", "--force"], { env });
           expect(forced.status, forced.stderr).toBe(0);
           expect(forced.stdout).toContain("nothing was killed");
-          expect(readOrphans()).toHaveLength(1);
+          expect(deadRecords()).toHaveLength(1);
           expect(findPidsOnPort(port)).toEqual([holderPid]);
 
           expect(
@@ -863,12 +857,17 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(
             run(["alias", "leader-gone.localhost", String(await getFreePort())], { env }).status
           ).toBe(0);
-          expect(readOrphans()).toHaveLength(1);
+          expect(deadRecords()).toHaveLength(1);
           const afterAliases = run(["prune", "--force"], { env });
           expect(afterAliases.status, afterAliases.stderr).toBe(0);
           expect(afterAliases.stdout).toContain("could not be verified");
           expect(findPidsOnPort(port)).toEqual([holderPid]);
-          expect(readOrphans()).toHaveLength(1);
+          expect(deadRecords()).toHaveLength(1);
+          expect(readRaw()).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ hostname: "leader-gone.localhost", pid: 0 }),
+            ])
+          );
 
           process.kill(holderPid!, "SIGKILL");
           for (let i = 0; i < 100 && findPidsOnPort(port).length > 0; i++) {
@@ -877,18 +876,66 @@ describe("CLI", { timeout: 15_000 }, () => {
           const resolved = run(["prune", "--force"], { env });
           expect(resolved.status, resolved.stderr).toBe(0);
           expect(resolved.stdout).toContain("route removed");
-          expect(readOrphans()).toEqual([]);
+          expect(deadRecords()).toEqual([]);
         } finally {
           try {
             process.kill(-leaderPid, "SIGKILL");
           } catch {
-            // group already gone
+            // already gone
           }
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },
       20_000
     );
+
+    it("leaves a tailscale serve alone while a live route owns its port", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-tailscale-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const tailscaleLog = path.join(tmpDir, "tailscale.log");
+      fs.writeFileSync(
+        path.join(tmpDir, "tailscale"),
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
+        { mode: 0o755 }
+      );
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
+        PATH: `${tmpDir}${path.delimiter}${process.env.PATH}`,
+      };
+      const staleOnPort = async (httpsPort: number, liveHttpsPort?: number) => {
+        fs.writeFileSync(
+          routesPath,
+          JSON.stringify([
+            {
+              hostname: "dead.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              tailscaleHttpsPort: httpsPort,
+              registeredAt: Date.now() - 60_000,
+            },
+            {
+              hostname: "live.localhost",
+              port: await getFreePort(),
+              pid: 0,
+              ...(liveHttpsPort === undefined ? {} : { tailscaleHttpsPort: liveHttpsPort }),
+              registeredAt: Date.now(),
+            },
+          ])
+        );
+        const result = run(["prune"], { env });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain("route removed");
+        return fs.existsSync(tailscaleLog) ? fs.readFileSync(tailscaleLog, "utf-8") : "";
+      };
+      try {
+        expect(await staleOnPort(8443, 8443)).toBe("");
+        fs.rmSync(tailscaleLog, { force: true });
+        expect(await staleOnPort(8443)).toContain("serve --yes --https=8443 off");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
 
     it("removes a stale route without killing an unrelated process on its port", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-safe-"));

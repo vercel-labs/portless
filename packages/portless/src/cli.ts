@@ -2501,7 +2501,7 @@ async function handleClean(args: string[]): Promise<void> {
   }
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  const routesForClean = [...store.loadRoutesRaw(), ...store.loadOrphanedRoutes()];
+  const routesForClean = store.loadRoutesRaw();
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
@@ -2609,32 +2609,25 @@ async function handlePrune(args: string[]): Promise<void> {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  const keptOrphans = store.loadOrphanedRoutes();
-  const stale: RouteMapping[] = [];
-  for (const route of store.findStaleRoutes()) {
-    if (keptOrphans.some((record) => isSameRouteRecord(record, route))) {
-      // An interrupted move can leave the same record in both files.
-      store.removeStaleRoute(route.hostname, route.pid);
-      continue;
-    }
-    stale.push(route);
-  }
-  if (stale.length === 0 && keptOrphans.length === 0) {
+  const stale = store.findStaleRoutes();
+  if (stale.length === 0) {
     console.log("No orphaned routes found.");
     return;
   }
-  const entries = [
-    ...stale.map((route) => ({ route, orphan: false })),
-    ...keptOrphans.map((route) => ({ route, orphan: true })),
-  ];
-  const liveHostnames = new Set(store.loadRoutes().map((route) => route.hostname));
+  const liveTailscalePorts = new Set(
+    store
+      .loadRoutes()
+      .flatMap((route) =>
+        route.tailscaleHttpsPort === undefined ? [] : [route.tailscaleHttpsPort]
+      )
+  );
 
   let pruned = 0;
   let skipped = 0;
   const signal = forceKill ? "SIGKILL" : "SIGTERM";
   const killedGroups = new Set<number>();
   const survivingGroups = new Set<number>();
-  for (const { route } of entries) {
+  for (const route of stale) {
     const pgid = route.childPgid;
     if (
       pgid &&
@@ -2647,7 +2640,7 @@ async function handlePrune(args: string[]): Promise<void> {
     }
   }
 
-  for (const { route, orphan } of entries) {
+  for (const route of stale) {
     const pgid = route.childPgid;
     const signaled = pgid !== undefined && killedGroups.has(pgid);
     if (signaled) {
@@ -2657,8 +2650,6 @@ async function handlePrune(args: string[]): Promise<void> {
     }
     const holders = findPidsOnPort(route.port);
     const held = holders.length > 0 || (await isPortListening(route.port));
-    // A shared process group is evidence about the holder, not proof it is
-    // ours: group ids get reused once their leader is gone.
     const groupMember = holders.find(
       (pid) => pgid !== undefined && getProcessGroupId(pid) === pgid
     );
@@ -2668,18 +2659,9 @@ async function handlePrune(args: string[]): Promise<void> {
       (groupMember !== undefined ||
         (signaled && holders.length === 0 && getProcessStartTime(pgid) === route.childStartTime));
     if (groupHoldsPort) {
-      const memberStartTime =
-        signaled && groupMember !== undefined ? getProcessStartTime(groupMember) : null;
-      const stored =
-        memberStartTime !== null && groupMember !== undefined
-          ? store.keepOrphanedRoute(route, { pid: groupMember, startTime: memberStartTime })
-          : store.keepOrphanedRoute(route);
-      if (!stored) {
-        console.log(
-          `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
-        );
-        skipped++;
-        continue;
+      if (signaled && groupMember !== undefined) {
+        const memberStartTime = getProcessStartTime(groupMember);
+        if (memberStartTime) store.recordStaleOrphan(route, groupMember, memberStartTime);
       }
       if (signaled && pgid !== undefined) survivingGroups.add(pgid);
       skipped++;
@@ -2690,10 +2672,7 @@ async function handlePrune(args: string[]): Promise<void> {
       );
       continue;
     }
-    const removed = orphan
-      ? store.removeOrphanedRoute(route)
-      : store.removeStaleRoute(route.hostname, route.pid);
-    if (!removed) {
+    if (!store.removeStaleRoute(route.hostname, route.pid)) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
       );
@@ -2705,7 +2684,7 @@ async function handlePrune(args: string[]): Promise<void> {
     console.log(
       `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
     );
-    if (route.tailscaleHttpsPort && !liveHostnames.has(route.hostname)) {
+    if (route.tailscaleHttpsPort && !liveTailscalePorts.has(route.tailscaleHttpsPort)) {
       try {
         unregisterTailscale(route);
         console.log(

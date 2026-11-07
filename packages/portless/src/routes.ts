@@ -86,7 +86,7 @@ function isValidRoute(value: unknown): value is RouteMapping {
 }
 
 /** Whether two entries describe the same route and the same recorded process group. */
-export function isSameRouteRecord(a: RouteMapping, b: RouteMapping): boolean {
+function isSameRouteRecord(a: RouteMapping, b: RouteMapping): boolean {
   return (
     a.hostname === b.hostname &&
     a.port === b.port &&
@@ -94,6 +94,34 @@ export function isSameRouteRecord(a: RouteMapping, b: RouteMapping): boolean {
     a.childPgid === b.childPgid &&
     a.childStartTime === b.childStartTime
   );
+}
+
+/** Whether the portless process that registered an entry is gone; aliases never go stale. */
+function isStaleRoute(route: RouteMapping): boolean {
+  return route.pid !== 0 && !isPidAlive(route.pid);
+}
+
+/** Whether a stale entry still records a process group, share or member worth recovering. */
+function hasRecoveryData(route: RouteMapping): boolean {
+  return (
+    route.childPgid !== undefined ||
+    route.childStartTime !== undefined ||
+    route.orphanPid !== undefined ||
+    route.orphanStartTime !== undefined ||
+    route.tailscaleHttpsPort !== undefined ||
+    route.ngrokPid !== undefined ||
+    route.cloudflarePid !== undefined
+  );
+}
+
+/** Entries a write keeps: every live route plus stale records that still hold recovery data. */
+function retainStaleRecords(routes: RouteMapping[]): RouteMapping[] {
+  return routes.filter((route) => !isStaleRoute(route) || hasRecoveryData(route));
+}
+
+/** The entry a reader or a takeover means by a hostname: the live one. */
+function findActiveRoute(routes: RouteMapping[], hostname: string): RouteMapping | undefined {
+  return routes.find((route) => route.hostname === hostname && !isStaleRoute(route));
 }
 
 /**
@@ -125,7 +153,6 @@ export class RouteStore {
   /** The state directory path. */
   readonly dir: string;
   private readonly routesPath: string;
-  private readonly orphansPath: string;
   private readonly lockPath: string;
   readonly pidPath: string;
   readonly portFilePath: string;
@@ -134,7 +161,6 @@ export class RouteStore {
   constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
     this.dir = dir;
     this.routesPath = path.join(dir, "routes.json");
-    this.orphansPath = path.join(dir, "orphans.json");
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
     this.portFilePath = path.join(dir, "proxy.port");
@@ -218,59 +244,51 @@ export class RouteStore {
   }
 
   /**
-   * Load routes from disk, filtering out stale entries whose owning process
-   * is no longer alive. Stale-route cleanup is only persisted when the caller
-   * already holds the lock (i.e. inside addRoute/removeRoute) to avoid
-   * unprotected concurrent writes. Stale entries that carry a verified orphan
-   * member move to the orphan store instead of being dropped, so a route write
-   * cannot destroy retry data before `prune` reads it.
+   * Load the routes a caller should act on: entries whose portless process is
+   * still alive, plus aliases. Stale entries stay in the file for `prune`.
+   * With `persistCleanup` the caller holds the lock and ordinary stale entries
+   * are dropped from disk, while records with recovery data are kept.
    */
   loadRoutes(persistCleanup = false): RouteMapping[] {
-    if (!fs.existsSync(this.routesPath)) {
-      return [];
+    const routes = this.readRouteFile(this.routesPath);
+    const kept = retainStaleRecords(routes);
+    if (persistCleanup && kept.length !== routes.length) {
+      try {
+        this.saveRoutes(kept);
+      } catch {
+        // Write may fail (permissions); non-fatal
+      }
+    }
+    return kept.filter((route) => !isStaleRoute(route));
+  }
+
+  private withLock<T>(run: () => T): T {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
     }
     try {
-      const raw = fs.readFileSync(this.routesPath, "utf-8");
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        this.onWarning?.(`Corrupted routes file (invalid JSON): ${this.routesPath}`);
-        return [];
-      }
-      if (!Array.isArray(parsed)) {
-        this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
-        return [];
-      }
-      const routes: RouteMapping[] = parsed.filter(isValidRoute);
-      if (routes.length !== parsed.length) {
-        this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
-      }
-      const isStale = (route: RouteMapping) => route.pid !== 0 && !this.isProcessAlive(route.pid);
-      // Filter out stale routes whose owning process is no longer alive
-      const stale = routes.filter(isStale);
-      const alive = routes.filter((route) => !isStale(route));
-      if (persistCleanup && stale.length > 0) {
-        // Persist the cleaned-up list so stale entries don't accumulate.
-        // Only safe when caller holds the lock.
-        try {
-          const recoverable = stale.filter((route) => route.orphanPid !== undefined);
-          if (recoverable.length > 0) {
-            const orphans = this.readRouteFile(this.orphansPath);
-            for (const route of recoverable) {
-              if (!orphans.some((entry) => isSameRouteRecord(entry, route))) orphans.push(route);
-            }
-            this.saveOrphans(orphans);
-          }
-          this.saveRoutes(alive);
-        } catch {
-          // Write may fail (permissions); non-fatal
-        }
-      }
-      return alive;
-    } catch {
-      return [];
+      return run();
+    } finally {
+      this.releaseLock();
     }
+  }
+
+  /**
+   * Apply one change under the route lock. Every write works on the whole
+   * stored array, so stale records with recovery data survive route adds,
+   * updates, takeover and removals until `prune` resolves them.
+   */
+  private mutateRoutes<T>(
+    mutate: (routes: RouteMapping[]) => { value: T; changed: boolean },
+    replaceSkippedHostname?: string
+  ): T {
+    return this.withLock(() => {
+      const routes = this.readRouteFile(this.routesPath);
+      const outcome = mutate(routes);
+      if (outcome.changed) this.saveRoutes(retainStaleRecords(routes), replaceSkippedHostname);
+      return outcome.value;
+    });
   }
 
   private skippedRoutes(): unknown[] {
@@ -289,6 +307,16 @@ export class RouteStore {
     }
   }
 
+  private hasSkippedRoute(hostname: string): boolean {
+    return this.skippedRoutes().some(
+      (value) =>
+        typeof value === "object" &&
+        value !== null &&
+        "hostname" in value &&
+        value.hostname === hostname
+    );
+  }
+
   private saveRoutes(routes: RouteMapping[], replaceSkippedHostname?: string): void {
     const skipped = this.skippedRoutes().filter(
       (value) =>
@@ -302,11 +330,6 @@ export class RouteStore {
       mode: FILE_MODE,
     });
     fixOwnership(this.routesPath);
-  }
-
-  private saveOrphans(routes: RouteMapping[]): void {
-    fs.writeFileSync(this.orphansPath, JSON.stringify(routes, null, 2), { mode: FILE_MODE });
-    fixOwnership(this.orphansPath);
   }
 
   private readRouteFile(file: string): RouteMapping[] {
@@ -342,7 +365,7 @@ export class RouteStore {
    * Register a route. When `force` is true and the hostname is already claimed
    * by another live process, that process is sent SIGTERM before the route is
    * replaced. Returns the PID of the killed process (if any) so the caller can
-   * log it.
+   * log it. A stale record for the same hostname is left for `prune`.
    */
   addRoute(
     hostname: string,
@@ -354,30 +377,16 @@ export class RouteStore {
     if (upstream !== undefined && !isValidUpstream(upstream)) {
       throw new Error("Invalid upstream configuration");
     }
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
     let killedPid: number | undefined;
-    try {
-      if (
-        !force &&
-        this.skippedRoutes().some(
-          (value) =>
-            typeof value === "object" &&
-            value !== null &&
-            "hostname" in value &&
-            value.hostname === hostname
-        )
-      ) {
+    this.mutateRoutes((routes) => {
+      if (!force && this.hasSkippedRoute(hostname)) {
         throw new Error(
           `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
         );
       }
-      const routes = this.loadRoutes(true);
-      const existing = routes.find((r) => r.hostname === hostname);
+      const existing = findActiveRoute(routes, hostname);
       const isAlias = existing?.pid === 0;
-      if (existing && existing.pid !== pid && (isAlias || this.isProcessAlive(existing.pid))) {
+      if (existing && existing.pid !== pid) {
         if (!force) {
           throw new RouteConflictError(hostname, existing.pid);
         }
@@ -391,140 +400,71 @@ export class RouteStore {
           }
         }
       }
-      const filtered = routes.filter((r) => r.hostname !== hostname);
-      const entry: RouteMapping = {
+      const kept = routes.filter((route) => route.hostname !== hostname || isStaleRoute(route));
+      kept.push({
         hostname,
         port,
         pid,
         registeredAt: Date.now(),
         ...(upstream === undefined ? {} : { upstream }),
-      };
-      filtered.push(entry);
-      this.saveRoutes(filtered, force ? hostname : undefined);
-    } finally {
-      this.releaseLock();
-    }
+      });
+      routes.length = 0;
+      routes.push(...kept);
+      return { value: undefined, changed: true };
+    }, force ? hostname : undefined);
     return killedPid;
   }
 
   /**
    * Load all routes from disk without filtering out dead PIDs. Used by
    * `portless prune` to discover stale entries whose owning CLI is gone
-   * but whose dev server may still be holding a port.
+   * but whose dev server may still be holding a port, and by startup and
+   * doctor views that must see recovery records.
    */
   loadRoutesRaw(): RouteMapping[] {
     return this.readRouteFile(this.routesPath);
   }
 
-  /**
-   * Load the orphan records that `prune` kept for a later retry. They live
-   * apart from the live routes so routing, name registration and route writes
-   * never see them.
-   */
-  loadOrphanedRoutes(): RouteMapping[] {
-    return this.readRouteFile(this.orphansPath);
-  }
-
   /** Return routes whose owners are dead without removing them from storage. */
   findStaleRoutes(): RouteMapping[] {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      return this.loadRoutesRaw().filter(
-        (route) => route.pid !== 0 && !this.isProcessAlive(route.pid)
-      );
-    } finally {
-      this.releaseLock();
-    }
+    return this.withLock(() => this.readRouteFile(this.routesPath).filter(isStaleRoute));
   }
 
   /**
-   * Keep a route whose owner is gone for a later `prune` retry, moving it out
-   * of the live route file so a later add, update or takeover cannot drop it.
-   * `member` pins a group member that prune verified this run, and is never
-   * recorded for a group whose identity was not proven.
+   * Record the group member `prune` verified this run, only while the stored
+   * stale record is still the one it examined.
    */
-  keepOrphanedRoute(route: RouteMapping, member?: { pid: number; startTime: string }): boolean {
-    this.ensureDir();
-    if (!this.acquireLock()) throw new Error("Failed to acquire route lock");
-    try {
-      const routes = this.readRouteFile(this.routesPath);
-      const index = routes.findIndex((entry) => isSameRouteRecord(entry, route));
-      if (index !== -1 && this.isProcessAlive(routes[index]!.pid)) return false;
-      const orphans = this.readRouteFile(this.orphansPath);
-      let record = orphans.find((entry) => isSameRouteRecord(entry, route));
-      if (!record) {
-        if (index === -1) return false;
-        record = { ...route };
-        orphans.push(record);
-      }
-      if (member) {
-        record.orphanPid = member.pid;
-        record.orphanStartTime = member.startTime;
-      }
-      this.saveOrphans(orphans);
-      if (index !== -1) {
-        routes.splice(index, 1);
-        this.saveRoutes(routes);
-      }
-      return true;
-    } finally {
-      this.releaseLock();
-    }
-  }
-
-  /** Remove one orphan record only while it still matches the one prune saw. */
-  removeOrphanedRoute(route: RouteMapping): boolean {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      const orphans = this.readRouteFile(this.orphansPath);
-      const remaining = orphans.filter((entry) => !isSameRouteRecord(entry, route));
-      if (remaining.length === orphans.length) return false;
-      this.saveOrphans(remaining);
-      return true;
-    } finally {
-      this.releaseLock();
-    }
+  recordStaleOrphan(route: RouteMapping, orphanPid: number, orphanStartTime: string): boolean {
+    return this.mutateRoutes((routes) => {
+      const current = routes.find((entry) => isSameRouteRecord(entry, route));
+      if (!current || !isStaleRoute(current)) return { value: false, changed: false };
+      current.orphanPid = orphanPid;
+      current.orphanStartTime = orphanStartTime;
+      return { value: true, changed: true };
+    });
   }
 
   /** Remove one route only while its recorded owner is still dead. */
   removeStaleRoute(hostname: string, ownerPid: number): boolean {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      const routes = this.loadRoutesRaw();
-      const remaining = routes.filter(
-        (route) =>
-          route.hostname !== hostname || route.pid !== ownerPid || this.isProcessAlive(route.pid)
+    return this.mutateRoutes((routes) => {
+      const index = routes.findIndex(
+        (route) => route.hostname === hostname && route.pid === ownerPid && isStaleRoute(route)
       );
-      if (remaining.length === routes.length) return false;
-      this.saveRoutes(remaining);
-      return true;
-    } finally {
-      this.releaseLock();
-    }
+      if (index === -1) return { value: false, changed: false };
+      routes.splice(index, 1);
+      return { value: true, changed: true };
+    });
   }
 
   /**
    * Update metadata on an existing route entry. Only provided fields are
-   * merged; the route must already exist (matched by hostname).
+   * merged. The live entry for the hostname is updated, so a stale record with
+   * the same hostname keeps the metadata it needs for recovery.
    */
   updateRoute(hostname: string, fields: RouteMetadataPatch): void {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      const routes = this.loadRoutes(true);
-      const route = routes.find((r) => r.hostname === hostname);
-      if (!route) return;
+    this.mutateRoutes((routes) => {
+      const route = findActiveRoute(routes, hostname);
+      if (!route) return { value: undefined, changed: false };
       if ("childPgid" in fields) {
         if (fields.childPgid === null) delete route.childPgid;
         else if (fields.childPgid !== undefined) route.childPgid = fields.childPgid;
@@ -563,10 +503,8 @@ export class RouteStore {
         if (fields.cloudflarePid === null) delete route.cloudflarePid;
         else if (fields.cloudflarePid !== undefined) route.cloudflarePid = fields.cloudflarePid;
       }
-      this.saveRoutes(routes);
-    } finally {
-      this.releaseLock();
-    }
+      return { value: undefined, changed: true };
+    });
   }
 
   /**
@@ -574,14 +512,11 @@ export class RouteStore {
    * still owned by `fromPid`, so a `--force` takeover is never overwritten.
    */
   transferRoute(hostname: string, fromPid: number, toPid: number): boolean {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      const routes = this.loadRoutes(true);
-      const route = routes.find((r) => r.hostname === hostname && r.pid === fromPid);
-      if (!route) return false;
+    return this.mutateRoutes((routes) => {
+      const route = routes.find(
+        (entry) => entry.hostname === hostname && entry.pid === fromPid && !isStaleRoute(entry)
+      );
+      if (!route) return { value: false, changed: false };
       route.pid = toPid;
       // Tunnels and Serve config stop with the previous owner.
       delete route.ngrokUrl;
@@ -591,31 +526,29 @@ export class RouteStore {
       delete route.tailscaleUrl;
       delete route.tailscaleHttpsPort;
       delete route.tailscaleFunnel;
-      this.saveRoutes(routes);
-      return true;
-    } finally {
-      this.releaseLock();
-    }
+      return { value: true, changed: true };
+    });
   }
 
   /**
    * Remove a route by hostname. When `ownerPid` is provided, the entry is
    * only removed while it is still owned by that pid. Exit cleanups must
    * pass their own pid: after a `--force` takeover the killed process would
-   * otherwise deregister the route the new owner just registered.
+   * otherwise deregister the route the new owner just registered. Stale
+   * records are left for `prune`.
    */
   removeRoute(hostname: string, ownerPid?: number): void {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      const routes = this.loadRoutes(true).filter(
-        (r) => r.hostname !== hostname || (ownerPid !== undefined && r.pid !== ownerPid)
+    this.mutateRoutes((routes) => {
+      const kept = routes.filter(
+        (route) =>
+          route.hostname !== hostname ||
+          isStaleRoute(route) ||
+          (ownerPid !== undefined && route.pid !== ownerPid)
       );
-      this.saveRoutes(routes);
-    } finally {
-      this.releaseLock();
-    }
+      const changed = kept.length !== routes.length;
+      routes.length = 0;
+      routes.push(...kept);
+      return { value: undefined, changed };
+    });
   }
 }
