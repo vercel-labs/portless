@@ -250,14 +250,19 @@ export function detectPackageManager(cwd: string): PackageManager {
   return "npm";
 }
 
-/** Build the package-manager command that runs a script, appending extra arguments after the separator npm requires. */
+/**
+ * Build the package-manager command that runs a script with extra arguments.
+ * npm needs a `--` separator, and bun consumes one when the arguments start
+ * with `--`.
+ */
 export function scriptRunCommand(
   pm: PackageManager,
   scriptName: string,
   extraArgs: readonly string[] = []
 ): string[] {
   if (extraArgs.length === 0) return [pm, "run", scriptName];
-  return [pm, "run", scriptName, ...(pm === "npm" ? ["--"] : []), ...extraArgs];
+  const separator = pm === "npm" || (pm === "bun" && extraArgs[0] === "--") ? ["--"] : [];
+  return [pm, "run", scriptName, ...separator, ...extraArgs];
 }
 
 /**

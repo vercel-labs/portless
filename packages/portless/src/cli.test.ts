@@ -5557,12 +5557,15 @@ describe("CLI", { timeout: 15_000 }, () => {
       for (const key of Object.keys(env)) {
         if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete env[key];
       }
+      const repoBin = path.resolve(__dirname, "../../../node_modules/.bin");
+      env.PATH = [repoBin, env.PATH].filter(Boolean).join(path.delimiter);
       delete env.PORTLESS;
       return { ...env, NO_COLOR: "1", MARK_FILE: markFile, ...extra };
     };
 
-    const readMarks = (markFile: string): [string, string[]][] =>
-      fs
+    const readMarks = (markFile: string): [string, string[]][] => {
+      if (!fs.existsSync(markFile)) return [];
+      return fs
         .readFileSync(markFile, "utf-8")
         .split("\n")
         .filter(Boolean)
@@ -5571,6 +5574,7 @@ describe("CLI", { timeout: 15_000 }, () => {
           return [line.slice(0, separator), JSON.parse(line.slice(separator + 1))];
         })
         .sort(([a], [b]) => a.localeCompare(b));
+    };
 
     const spawnCli = (cwd: string, env: Record<string, string | undefined>, cliArgs: string[]) => {
       const result = spawnSync(process.execPath, [CLI_PATH, ...cliArgs], {
@@ -5662,6 +5666,42 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       },
       30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments through a root Turbo script",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev: "turbo dev" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([
+            ["api", args],
+            ["web", args],
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
     );
   });
 });

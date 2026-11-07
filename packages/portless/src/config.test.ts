@@ -7,6 +7,7 @@ import {
   resolveAppConfig,
   resolveScript,
   resolveScriptCommand,
+  scriptRunCommand,
   detectPackageManager,
   hasScript,
   splitCommand,
@@ -719,5 +720,33 @@ describe("resolveScriptCommand", () => {
       JSON.stringify({ scripts: { dev: "next dev" } })
     );
     expect(resolveScriptCommand("dev", tmpDir)).toEqual(["yarn", "run", "dev"]);
+  });
+});
+
+describe("scriptRunCommand", () => {
+  it("keeps a leading literal -- for npm, pnpm, and bun", () => {
+    expect(scriptRunCommand("npm", "dev", ["--", "--inspect"])).toEqual([
+      "npm",
+      "run",
+      "dev",
+      "--",
+      "--",
+      "--inspect",
+    ]);
+    expect(scriptRunCommand("pnpm", "dev", ["--", "--inspect"])).toEqual([
+      "pnpm",
+      "run",
+      "dev",
+      "--",
+      "--inspect",
+    ]);
+    expect(scriptRunCommand("bun", "dev", ["--", "--inspect"])).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--",
+      "--",
+      "--inspect",
+    ]);
   });
 });
