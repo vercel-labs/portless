@@ -158,6 +158,7 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScriptCommand,
+  scriptRunCommand,
   hasScript,
   isServerCommand,
   splitCommand,
@@ -2256,6 +2257,7 @@ Value flags for run and named apps accept both --flag <value> and --flag=<value>
 
 ${colors.bold("Examples:")}
   portless
+  portless -- --inspect
   portless run next dev
   portless --script start
   portless myapp next dev
@@ -2285,7 +2287,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
 
 Precedence: flags override PORTLESS_* variables, which override portless.json.
-Auto-start reuses the proxy's saved settings unless a flag or variable changes them.
+Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
+unexpected proxy exit. A normal portless proxy stop clears them.
 Proxy options: portless proxy --help
 Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
@@ -4265,7 +4268,7 @@ async function handleDefaultMode(
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
   if (hasScript(scriptName, cwd)) {
-    await handleDefaultSingle(cwd, scriptName, appConfig);
+    await handleDefaultSingle(cwd, scriptName, appConfig, extraArgs);
     return true;
   }
 
@@ -4278,9 +4281,10 @@ async function handleDefaultMode(
 async function handleDefaultSingle(
   cwd: string,
   scriptName: string,
-  appConfig: AppConfigWithSource | null
+  appConfig: AppConfigWithSource | null,
+  extraArgs: string[] = []
 ): Promise<void> {
-  const resolved = resolveScriptCommand(scriptName, cwd);
+  const resolved = resolveScriptCommand(scriptName, cwd, extraArgs);
   if (!resolved) {
     console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
     process.exit(1);
@@ -4607,7 +4611,7 @@ async function handleDefaultMulti(
     if (rawScript.length === 0) continue;
 
     const pm = detectPackageManager(pkg.dir);
-    const commandArgs = [pm, "run", effectiveScript];
+    const commandArgs = scriptRunCommand(pm, effectiveScript, extraArgs);
 
     const proxied = appOverride.proxy ?? isServerCommand(rawScript);
 
@@ -4798,13 +4802,14 @@ async function runWithTurbo(
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
+  const turboPassThrough = extraArgs.length > 0 ? ["--", ...extraArgs] : [];
   const turboArgs = useRootScript
-    ? [pm, "run", scriptName, ...extraArgs]
+    ? scriptRunCommand(pm, scriptName, extraArgs)
     : pm === "npm"
-      ? ["npx", "turbo", "run", scriptName, ...extraArgs]
+      ? ["npx", "turbo", "run", scriptName, ...turboPassThrough]
       : pm === "bun"
-        ? ["bunx", "turbo", "run", scriptName, ...extraArgs]
-        : [pm, "exec", "turbo", "run", scriptName, ...extraArgs];
+        ? ["bunx", "turbo", "run", scriptName, ...turboPassThrough]
+        : [pm, "exec", "turbo", "run", scriptName, ...turboPassThrough];
 
   const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
@@ -5699,11 +5704,28 @@ async function main() {
 
   if (
     isPortlessSkipped() &&
+    !explicitName &&
+    !isRunCommand &&
+    (args.length === 0 || args[0] === "--")
+  ) {
+    const scriptArgs = args[0] === "--" ? args.slice(1) : [];
+    const appConfig = loadAppConfig();
+    const scriptName = globalScript ?? appConfig?.script ?? "dev";
+    const resolved = resolveScriptCommand(scriptName, process.cwd(), scriptArgs);
+    if (resolved) {
+      spawnCommand(resolved);
+      return;
+    }
+    throw new UsageError("No command provided.");
+  }
+
+  if (
+    isPortlessSkipped() &&
     (isRunCommand || args.length === 0 || (args.length >= 2 && !command))
   ) {
     const parsed = isRunCommand ? parseRunArgs(args.slice(1)) : parseAppArgs(args);
     let commandArgs = parsed.commandArgs;
-    if (commandArgs.length === 0 && (isRunCommand || args.length === 0)) {
+    if (commandArgs.length === 0 && isRunCommand) {
       const appConfig = loadAppConfig();
       const scriptName = globalScript ?? appConfig?.script ?? "dev";
       const resolved = resolveScriptCommand(scriptName, process.cwd());

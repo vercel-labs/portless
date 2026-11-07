@@ -34,6 +34,8 @@ portless
 # -> runs "dev", https://<project>.localhost
 ```
 
+Pass arguments to the script after `--`, so `portless -- --inspect` runs `dev` with `--inspect`.
+
 The name comes from `package.json`, the git root, or the directory. Pass a name and a command to choose both:
 
 ```bash

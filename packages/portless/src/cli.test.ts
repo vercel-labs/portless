@@ -5526,4 +5526,142 @@ describe("CLI", { timeout: 15_000 }, () => {
       60_000
     );
   });
+
+  describe("zero-argument argument forwarding", () => {
+    const args = ["--help", "--script", "start", "--prefix", "pr-1", "--marker", "one"];
+
+    const writeApp = (dir: string, name: string, proxy = true, packageManager = "npm@10.0.0") => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          name,
+          version: "0.0.0",
+          packageManager,
+          scripts: { dev: "node mark.cjs" },
+          ...(proxy ? {} : { portless: { proxy: false } }),
+        })
+      );
+      fs.writeFileSync(
+        path.join(dir, "mark.cjs"),
+        [
+          'const fs = require("node:fs");',
+          'const pkg = require("./package.json");',
+          "fs.appendFileSync(process.env.MARK_FILE, `${pkg.name}:${JSON.stringify(process.argv.slice(2))}\\n`);",
+        ].join("\n") + "\n"
+      );
+    };
+
+    const childEnv = (markFile: string, extra: Record<string, string | undefined>) => {
+      const env: Record<string, string | undefined> = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete env[key];
+      }
+      delete env.PORTLESS;
+      return { ...env, NO_COLOR: "1", MARK_FILE: markFile, ...extra };
+    };
+
+    const readMarks = (markFile: string): [string, string[]][] =>
+      fs
+        .readFileSync(markFile, "utf-8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line): [string, string[]] => {
+          const separator = line.indexOf(":");
+          return [line.slice(0, separator), JSON.parse(line.slice(separator + 1))];
+        })
+        .sort(([a], [b]) => a.localeCompare(b));
+
+    const spawnCli = (cwd: string, env: Record<string, string | undefined>, cliArgs: string[]) => {
+      const result = spawnSync(process.execPath, [CLI_PATH, ...cliArgs], {
+        encoding: "utf-8",
+        timeout: 45_000,
+        cwd,
+        env,
+      });
+      return { status: result.status, output: `${result.stdout}${result.stderr}` };
+    };
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments after -- to the single app script through the npm separator",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-state-"));
+        const markFile = path.join(root, "marks.txt");
+        const proxyPort = await getFreePort();
+        const env = childEnv(markFile, {
+          PORTLESS_STATE_DIR: stateDir,
+          PORTLESS_PORT: String(proxyPort),
+          PORTLESS_HTTPS: "0",
+        });
+
+        try {
+          writeApp(root, "args-app");
+          const result = spawnCli(root, env, ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([["args-app", args]]);
+        } finally {
+          run(["proxy", "stop", "-p", String(proxyPort)], { env });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments after -- to the single app script with PORTLESS=0 through npm and pnpm",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-skip-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          writeApp(root, "args-app");
+          const npmResult = spawnCli(root, childEnv(markFile, { PORTLESS: "0" }), ["--", ...args]);
+          expect(npmResult.status, npmResult.output).toBe(0);
+          expect(readMarks(markFile), npmResult.output).toEqual([["args-app", args]]);
+
+          fs.rmSync(markFile, { force: true });
+          writeApp(root, "args-app", true, "pnpm@11.1.3");
+          const pnpmResult = spawnCli(root, childEnv(markFile, { PORTLESS: "0" }), ["--", ...args]);
+          expect(pnpmResult.status, pnpmResult.output).toBe(0);
+          expect(readMarks(markFile), pnpmResult.output).toEqual([["args-app", args]]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments after -- to every workspace app",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-ws-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-workspace",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([
+            ["api", args],
+            ["web", args],
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+  });
 });
