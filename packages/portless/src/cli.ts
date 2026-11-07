@@ -4858,7 +4858,7 @@ async function runWithTurbo(
   const useRootScript = hasScript(scriptName, wsRoot);
   const turboPassThrough = extraArgs.length > 0 ? ["--", ...extraArgs] : [];
   const turboArgs = useRootScript
-    ? scriptRunCommand(pm, scriptName, extraArgs)
+    ? scriptRunCommand(pm, scriptName, turboPassThrough)
     : pm === "npm"
       ? ["npx", "turbo", "run", scriptName, ...turboPassThrough]
       : pm === "bun"
