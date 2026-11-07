@@ -261,7 +261,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "prune",
     "Prune servers",
-    "Remove stale routes and shares, and stop matching recorded process groups. Surviving groups keep their routes and shares. Stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups and unrelated port holders are not killed.",
+    "Remove stale routes and shares, and stop matching recorded process groups. Surviving groups keep their routes and shares. A port holder that cannot be proven part of the recorded group is reported and kept, never killed. Stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups and unrelated port holders are not killed.",
     {
       force: {
         type: "boolean",

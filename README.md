@@ -124,7 +124,7 @@ Run `portless --help` for the full list, or `portless <command> --help` for one 
 | Inspect and clean up | `list`, `doctor`, `prune`, `clean`                                                    | [Doctor](https://portless.sh/commands#doctor), [Prune orphans](https://portless.sh/commands#prune-orphans), [Clean up](https://portless.sh/commands#clean-up) |
 | Agents               | `mcp`                                                                                 | [MCP server](https://portless.sh/commands#mcp-server)                                                                                                         |
 
-`portless prune` removes stale routes and shares without killing unrelated port holders. If a recorded process group survives, its route and shares are kept; retry with `portless prune --force`. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows.
+`portless prune` removes stale routes and shares without killing unrelated port holders. If a recorded process group survives, its route and shares are kept; retry with `portless prune --force`. A port holder that cannot be proven part of the recorded group is kept and reported, never killed. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows.
 
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
