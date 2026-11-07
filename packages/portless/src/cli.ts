@@ -15,6 +15,7 @@ import {
   composeGlobalError,
   explicitProject,
   isDetachedUp,
+  isGlobalFlagSet,
   parseContainers,
   planCompose,
   projectLabel,
@@ -4953,7 +4954,7 @@ async function handleCompose(args: string[]): Promise<void> {
   const composeArgs = args.slice(1);
   const { globals, subcommand, rest } = splitComposeArgs(composeArgs);
   const childHelp = rest.includes("--help") || rest.includes("-h");
-  const globalHelp = globals.includes("--help") || globals.includes("-h");
+  const globalHelp = isGlobalFlagSet(globals, ["--help", "-h"]);
 
   if (!subcommand) {
     if (!globalHelp) assertComposeGlobals(globals);

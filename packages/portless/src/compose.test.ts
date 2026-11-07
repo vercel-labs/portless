@@ -44,6 +44,14 @@ describe("splitComposeArgs", () => {
     });
   });
 
+  it("keeps attached shorthand values together", () => {
+    expect(splitComposeArgs(["-fcompose.yml", "-p=demo", "--profile", "dev", "up"])).toEqual({
+      globals: ["-fcompose.yml", "-p=demo", "--profile", "dev"],
+      subcommand: "up",
+      rest: [],
+    });
+  });
+
   it("ends the wrapper's globals at --", () => {
     expect(splitComposeArgs(["-f", "a.yml", "--", "up", "-d"])).toEqual({
       globals: ["-f", "a.yml"],
@@ -79,7 +87,42 @@ describe("buildUpArgs", () => {
     };
     expect(dir([])).toBe("/app");
     expect(dir(["-f", "infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
+    expect(dir(["-finfra/compose.yml"])).toBe(path.resolve("/app", "infra"));
+    expect(dir(["-f=infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
     expect(dir(["--file=infra/compose.yml", "--project-directory", "/other"])).toBe("/other");
+  });
+
+  it("strips attached file, project, and directory flags", () => {
+    expect(
+      buildUpArgs({
+        ...base,
+        globals: ["-fcompose.yml", "-p=demo", "--project-directory=/other", "--profile", "dev"],
+      })
+    ).toEqual([
+      "-p",
+      "shop",
+      "--project-directory",
+      "/other",
+      "-f",
+      "/state/shop.json",
+      "--profile",
+      "dev",
+      "up",
+      "-d",
+    ]);
+  });
+
+  it("strips an attached stdin file and keeps cwd", () => {
+    expect(buildUpArgs({ ...base, globals: ["-f-"] })).toEqual([
+      "-p",
+      "shop",
+      "--project-directory",
+      "/app",
+      "-f",
+      "/state/shop.json",
+      "up",
+      "-d",
+    ]);
   });
 
   it("takes the project directory from COMPOSE_FILE when no -f is given", () => {
@@ -325,12 +368,16 @@ describe("staleAliases", () => {
 describe("readsComposeFromStdin and explicitProject", () => {
   it("detects -f - in any form", () => {
     expect(readsComposeFromStdin(["-f", "-"])).toBe(true);
+    expect(readsComposeFromStdin(["-f-"])).toBe(true);
+    expect(readsComposeFromStdin(["-f=-"])).toBe(true);
     expect(readsComposeFromStdin(["--file=-"])).toBe(true);
     expect(readsComposeFromStdin(["-f", "compose.yml"])).toBe(false);
   });
 
-  it("reads the last -p", () => {
+  it("reads the last -p in any form", () => {
     expect(explicitProject(["-p", "a", "--project-name=b"])).toBe("b");
+    expect(explicitProject(["-pdemo"])).toBe("demo");
+    expect(explicitProject(["-p=demo"])).toBe("demo");
     expect(explicitProject(["-f", "x.yml"])).toBeUndefined();
   });
 });
@@ -427,16 +474,29 @@ describe("composeGlobalError", () => {
     ).toBeNull();
   });
 
+  it("accepts attached shorthand values", () => {
+    expect(composeGlobalError(["-fcompose.yml", "-f=compose.yml", "-pdemo", "-p=demo"])).toBeNull();
+    expect(composeGlobalError(["-f-", "-f=-"])).toBeNull();
+  });
+
+  it("accepts boolean values", () => {
+    expect(composeGlobalError(["--dry-run=true", "--dry-run=false", "--dry-run=1"])).toBeNull();
+    expect(composeGlobalError(["-h", "-h=false"])).toBeNull();
+  });
+
   it("reports an unknown flag", () => {
     expect(composeGlobalError(["--bad"])).toBe('Unknown flag "--bad" for portless compose.');
+    expect(composeGlobalError(["-x"])).toBe('Unknown flag "-x" for portless compose.');
   });
 
   it("reports a value flag with no value", () => {
     expect(composeGlobalError(["-f"])).toBe("-f requires a value.");
+    expect(composeGlobalError(["-f="])).toBe("-f requires a value.");
     expect(composeGlobalError(["--env-file="])).toBe("--env-file requires a value.");
   });
 
-  it("reports a value given to a boolean flag", () => {
-    expect(composeGlobalError(["--dry-run=1"])).toBe("--dry-run does not take a value.");
+  it("reports an invalid boolean value", () => {
+    expect(composeGlobalError(["--dry-run=yes"])).toBe("--dry-run takes true or false.");
+    expect(composeGlobalError(["-h=yes"])).toBe("-h takes true or false.");
   });
 });

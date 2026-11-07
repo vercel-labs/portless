@@ -841,6 +841,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       for (const args of [
         ["compose", "--help", "--bad"],
         ["compose", "--bad", "--help"],
+        ["compose", "--help=true"],
       ]) {
         const { status, stdout } = run(args);
         expect(status).toBe(0);
@@ -893,6 +894,20 @@ describe("CLI", { timeout: 15_000 }, () => {
             [["compose", "ps", "--bad"], "compose ps --bad"],
             [["compose", "--", "logs", "-n", "5"], "compose -- logs -n 5"],
             [["compose", "-f", "compose.dev.yml", "config"], "compose -f compose.dev.yml config"],
+            [["compose", "-fcompose.dev.yml", "config"], "compose -fcompose.dev.yml config"],
+            [["compose", "-f=compose.dev.yml", "ps"], "compose -f=compose.dev.yml ps"],
+            [["compose", "-pdemo", "config"], "compose -pdemo config"],
+            [["compose", "-p=demo", "ps"], "compose -p=demo ps"],
+            [["compose", "--dry-run=true", "config"], "compose --dry-run=true config"],
+            [["compose", "--help=false", "ps"], "compose --help=false ps"],
+            [
+              ["compose", "-fcompose.dev.yml", "up", "--help"],
+              "compose -fcompose.dev.yml up --help",
+            ],
+            [
+              ["compose", "-fcompose.dev.yml", "--", "logs", "-n", "5"],
+              "compose -fcompose.dev.yml -- logs -n 5",
+            ],
           ] as const) {
             fs.rmSync(log, { force: true });
             const { status, stdout } = run([...args], { env });
@@ -905,6 +920,27 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       }
     );
+
+    it.skipIf(process.platform === "win32")("passes raw argv through when PORTLESS=0", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-bypass-"));
+      const log = path.join(tmpDir, "docker.log");
+      try {
+        const docker = path.join(tmpDir, "docker");
+        fs.writeFileSync(
+          docker,
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\necho "docker $*"\nexit 9\n',
+          { mode: 0o755 }
+        );
+        const { status, stdout } = run(["compose", "--bad", "-fcompose.yml", "up"], {
+          env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: "0" },
+        });
+        expect(status).toBe(9);
+        expect(stdout).toContain("docker compose --bad -fcompose.yml up");
+        expect(fs.readFileSync(log, "utf-8").trim()).toBe("compose --bad -fcompose.yml up");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("prune", () => {
