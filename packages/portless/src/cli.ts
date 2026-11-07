@@ -51,7 +51,6 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
-  isSameRouteRecord,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";
