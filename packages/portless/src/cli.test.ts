@@ -2725,7 +2725,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             failPrivilegedCleanup: true,
             stateDir,
             uid: 1000,
-            sudoStatus: 0,
+            sudoStatus: 1,
             extraEnv: {
               HOME: home,
               PORTLESS_PORT: String(await getFreePort()),
@@ -2793,6 +2793,84 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
+      "preserves pending CA identity in files-only elevated cleanup",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-files-only-"));
+        const stateDir = path.join(tmpDir, "state");
+        fs.mkdirSync(stateDir);
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 0,
+            extraEnv: {
+              HOME: tmpDir,
+              PORTLESS_INTERNAL_CLEAN_STEPS: "files",
+              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
+            },
+          });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
+          expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
+          expect(fs.readFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "utf-8")).toBe(
+            "1"
+          );
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "requests CA and files retry when an approved state dir cannot be inspected",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-dir-denied-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
+        fs.chmodSync(stateDir, 0o000);
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 1000,
+            sudoStatus: 1,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.capture.sudoCalls).toHaveLength(1);
+          const sudoArgs = result.capture.sudoCalls[0]!.args;
+          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files");
+
+          fs.chmodSync(stateDir, 0o700);
+          expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
+          expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
+          expect(fs.readFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "utf-8")).toBe(
+            "1"
+          );
+          expect(fs.readFileSync(path.join(stateDir, "routes.json"), "utf-8")).toBe("[]");
+        } finally {
+          fs.chmodSync(stateDir, 0o700);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
       "retries file cleanup when CA trust removal is the only failure",
       async () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-only-"));
@@ -2809,7 +2887,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             failPrivilegedCleanup: true,
             stateDir,
             uid: 1000,
-            sudoStatus: 0,
+            sudoStatus: 1,
             extraEnv: {
               HOME: home,
               PORTLESS_PORT: String(await getFreePort()),
