@@ -61,6 +61,10 @@ function formatProxyError(error: Error): string {
     : error.message;
 }
 
+function isTlsError(error: NodeJS.ErrnoException): boolean {
+  return error.code?.startsWith("ERR_SSL_") === true || error.code?.startsWith("ERR_TLS_") === true;
+}
+
 const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
 /**
@@ -720,12 +724,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
         }
         if (!res.headersSent) {
-          const detail =
-            route.upstream?.tls && !proxyReq.socket
-              ? "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
-              : errWithCode.code === "ECONNREFUSED"
-                ? "The target app is not responding. It may have crashed."
-                : "The target app may not be running.";
+          const detail = isTlsError(errWithCode)
+            ? "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
+            : errWithCode.code === "ECONNREFUSED"
+              ? "The target app is not responding. It may have crashed."
+              : "The target app may not be running.";
           sendProxyError(req, res, 502, "bad_gateway", detail, getRequestHost(req), () =>
             renderPage(
               502,
@@ -864,7 +867,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             "Content-Type: text/plain\r\n" +
             "Connection: close\r\n" +
             "\r\n" +
-            (route.upstream?.tls && !proxyReq.socket
+            (isTlsError(err as NodeJS.ErrnoException)
               ? "Bad Gateway: could not connect to the target app over HTTPS. Check that it supports TLS on the configured port.\n"
               : "Bad Gateway: the target app is not responding or sent an invalid response to the WebSocket handshake.\n")
         );
@@ -1042,7 +1045,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       if (!res.headersSent) {
         res.writeHead(502, { "content-type": "text/plain" });
         res.end(
-          route.upstream?.tls && !proxyReq.socket
+          isTlsError(err as NodeJS.ErrnoException)
             ? "Bad Gateway: could not connect to the target app over HTTPS. Check that it supports TLS on the configured port.\n"
             : "Bad Gateway: the target app is not responding\n"
         );

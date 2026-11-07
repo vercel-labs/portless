@@ -2521,7 +2521,9 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       return client;
     };
     try {
-      expect((await request(server, { host: "api.localhost" })).status).toBe(502);
+      const timeout = await request(server, { host: "api.localhost", accept: "application/json" });
+      expect(timeout.status).toBe(502);
+      expect(JSON.parse(timeout.body).message).toBe("The target app may not be running.");
       await vi.waitFor(() => expect(sockets.size).toBe(0));
       route.upstream = { tls: true, host: "cancel.internal" };
       const initial = accepted;
@@ -3026,6 +3028,110 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       client.on("remoteSettings", (settings) => resolve({ client, settings }));
     });
   }
+
+  it("distinguishes unavailable TLS upstreams from TLS protocol errors for HTTP and WebSockets", async () => {
+    let reset = false;
+    const backend = trackServer(http.createServer());
+    backend.on("clientError", (_err, socket) => {
+      if (reset) socket.destroy();
+      else socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    });
+    await listen(backend);
+    const port = (backend.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve, reject) =>
+      backend.close((err) => (err ? reject(err) : resolve()))
+    );
+
+    const errors: string[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [
+          { hostname: "ws.localhost", port, upstream: { tls: true, host: "ws.internal" } },
+        ],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+        onError: (error) => errors.push(error),
+      })
+    );
+    await listen(server);
+    const { client } = await h2Session(server);
+    const wsHeaders = {
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-version": "13",
+      "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    };
+    const h2WebSocket = () =>
+      new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+          "sec-websocket-version": "13",
+        });
+        let status = 0;
+        let body = "";
+        req.on("response", (headers) => (status = headers[":status"] as number));
+        req.on("data", (chunk: Buffer) => (body += chunk));
+        req.on("end", () => resolve({ status, body }));
+        req.on("error", reject);
+        req.end();
+      });
+
+    try {
+      const json = await httpsRequest(server, { host: "ws.localhost", accept: "application/json" });
+      const html = await httpsRequest(server, { host: "ws.localhost" });
+      const ws = await request(server, { host: "ws.localhost", headers: wsHeaders });
+      const h2ws = await h2WebSocket();
+      const unavailable = "The target app is not responding. It may have crashed.";
+      expect.soft(json.status).toBe(502);
+      expect.soft(JSON.parse(json.body).message).toBe(unavailable);
+      expect.soft(html.status).toBe(502);
+      expect.soft(html.body.includes(unavailable)).toBe(true);
+      for (const response of [ws, h2ws]) {
+        expect.soft(response.status).toBe(502);
+        expect.soft(response.body).toContain("target app is not responding");
+        expect.soft(response.body).not.toContain("supports TLS");
+      }
+
+      await new Promise<void>((resolve) => backend.listen(port, "127.0.0.1", resolve));
+      const mismatchHttp = await httpsRequest(server, {
+        host: "ws.localhost",
+        accept: "application/json",
+      });
+      const mismatchWs = await request(server, { host: "ws.localhost", headers: wsHeaders });
+      const mismatchH2ws = await h2WebSocket();
+      for (const response of [mismatchHttp, mismatchWs, mismatchH2ws]) {
+        expect.soft(response.status).toBe(502);
+        expect.soft(response.body).toContain("supports TLS on the configured port");
+      }
+      expect.soft(errors.some((error) => /wrong version number/i.test(error))).toBe(true);
+      reset = true;
+      const resetResponse = await httpsRequest(server, {
+        host: "ws.localhost",
+        accept: "application/json",
+      });
+      expect.soft(resetResponse.status).toBe(502);
+      expect
+        .soft(JSON.parse(resetResponse.body).message)
+        .toBe("The target app may not be running.");
+
+      await new Promise<void>((resolve, reject) =>
+        backend.close((err) => (err ? reject(err) : resolve()))
+      );
+      const recovered = trackServer(
+        https.createServer({ cert: tlsCert, key: tlsKey }, (_req, res) => res.end("recovered"))
+      );
+      await new Promise<void>((resolve) => recovered.listen(port, "127.0.0.1", resolve));
+      const response = await httpsRequest(server, { host: "ws.localhost" });
+      expect(response.status).toBe(200);
+      expect(response.body).toBe("recovered");
+    } finally {
+      client.close();
+    }
+  });
 
   it("reports a malformed WebSocket response after a successful upstream TLS handshake", async () => {
     let handshakes = 0;
