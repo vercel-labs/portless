@@ -63,22 +63,49 @@ export type CATrustRemovalResult = {
   error?: string;
 };
 
+export type CollectedStateDirs = {
+  dirs: string[];
+  failures: string[];
+};
+
 /**
- * Unique existing state directories to consider for cleanup: user dir, system
- * dir, and PORTLESS_STATE_DIR when set.
+ * Canonicalize existing state directories before cleanup so a configured
+ * symlink is cleaned through its physical target. Paths that cannot be
+ * canonicalized or are not directories are reported as failures.
  */
-export function collectStateDirsForCleanup(): string[] {
+export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
   const dirs = new Set<string>();
+  const failures = new Set<string>();
   const add = (d: string | undefined) => {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
-    if (isCleanableStateDir(resolved)) dirs.add(resolved);
+    let canonical: string;
+    try {
+      canonical = fs.realpathSync(resolved);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      failures.add(resolved);
+      return;
+    }
+    if (!isCleanableStateDir(canonical)) {
+      failures.add(resolved);
+      return;
+    }
+    dirs.add(canonical);
   };
   add(USER_STATE_DIR);
   add(LEGACY_SYSTEM_STATE_DIR);
   add(process.env.PORTLESS_STATE_DIR);
-  return [...dirs];
+  return { dirs: [...dirs], failures: [...failures] };
+}
+
+/**
+ * Unique existing canonical state directories to consider for cleanup: user
+ * dir, system dir, and PORTLESS_STATE_DIR when set.
+ */
+export function collectStateDirsForCleanup(): string[] {
+  return collectStateDirsForCleanupWithFailures().dirs;
 }
 
 /** Attempt CA trust removal wherever cleanup finds a CA certificate. */
