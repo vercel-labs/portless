@@ -90,6 +90,10 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
     fs.writeFileSync(path.join(tmpDir, "proxy.log"), "log");
     fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+    fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
+    fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "localhost");
+    fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+    fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.0.2.10");
     fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
 
     removePortlessStateFiles(tmpDir, { preserveProxyRuntime: true });
@@ -97,7 +101,11 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.port"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.log"))).toBe(true);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.custom-cert"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
   });
 

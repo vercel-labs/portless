@@ -1195,7 +1195,7 @@ function isProcessRunning(pid: number): boolean {
       return !state.startsWith("Z");
     }
   } catch {
-    return false;
+    return isPidAlive(pid);
   }
   return true;
 }
@@ -2663,8 +2663,9 @@ fails, the CA certificate and key are retained so clean can safely retry.
 
 On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
 or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
-steps against the same allowlisted state directories. On Windows, run as
-Administrator if needed.
+steps against the same allowlisted state directories. If the proxy cannot be
+confirmed stopped, its PID, port, and runtime marker files are kept. On Windows,
+run as Administrator if needed.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless clean")}
@@ -2685,6 +2686,9 @@ async function handleClean(args: string[]): Promise<void> {
 
   const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
   if (requestedCleanupSteps) {
+    if (!parsed.has("--yes") && !parsed.has("-y")) {
+      throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
+    }
     const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
     const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
     process.exitCode =

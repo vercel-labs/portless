@@ -131,7 +131,7 @@ Run `portless --help` for the full list, or `portless <command> --help` for one 
 
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
-`portless clean` previews its cleanup and asks for confirmation. Use `portless clean --yes` (or `-y`) in CI or without a terminal. On macOS and Linux, a failed CA, state-file, or hosts step is retried with sudo for the same allowlisted targets. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code.
+`portless clean` previews its cleanup and asks for confirmation. Use `portless clean --yes` (or `-y`) in CI or without a terminal. On macOS and Linux, a failed CA, state-file, or hosts step is retried with sudo for the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, and runtime marker files are kept. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code.
 
 ## Platforms
 

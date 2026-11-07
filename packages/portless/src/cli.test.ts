@@ -2861,6 +2861,33 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
+      "requires confirmation before the internal cleanup allowlist runs",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-env-confirm-"));
+        const stateDir = path.join(tmpDir, "state");
+        fs.mkdirSync(stateDir);
+        fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
+        try {
+          const result = runWithHostsFileMock(["clean"], {
+            content: "",
+            stateDir,
+            uid: 0,
+            extraEnv: {
+              PORTLESS_INTERNAL_CLEAN_STEPS: "files",
+              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
+            },
+          });
+
+          expect(result.status).toBe(2);
+          expect(result.stderr).toContain("portless clean --yes");
+          expect(fs.readFileSync(path.join(stateDir, "routes.json"), "utf-8")).toBe("[]");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
       "keeps proxy identity when the proxy cannot be stopped",
       async () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-hung-proxy-"));
@@ -2872,6 +2899,11 @@ describe("CLI", { timeout: 15_000 }, () => {
         try {
           fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(proxy.child.pid));
           fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+          fs.writeFileSync(path.join(stateDir, "proxy.tls"), "1");
+          fs.writeFileSync(path.join(stateDir, "proxy.custom-cert"), "1");
+          fs.writeFileSync(path.join(stateDir, "proxy.tld"), "localhost");
+          fs.writeFileSync(path.join(stateDir, "proxy.tlds"), "localhost\ntest\n");
+          fs.writeFileSync(path.join(stateDir, "proxy.lan"), "192.0.2.10");
           fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
           const result = runWithHostsFileMock(["clean", "--yes"], {
             content: "",
@@ -2894,6 +2926,15 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(fs.readFileSync(path.join(stateDir, "proxy.port"), "utf-8")).toBe(
             String(proxy.port)
           );
+          for (const marker of [
+            "proxy.tls",
+            "proxy.custom-cert",
+            "proxy.tld",
+            "proxy.tlds",
+            "proxy.lan",
+          ]) {
+            expect(fs.existsSync(path.join(stateDir, marker))).toBe(true);
+          }
           expect(result.capture.sudoCalls).toHaveLength(1);
           const sudoArgs = result.capture.sudoCalls[0]!.args;
           expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=files");
