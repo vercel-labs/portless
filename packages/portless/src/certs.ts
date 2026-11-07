@@ -4,7 +4,7 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { fixOwnership } from "./utils.js";
+import { fixOwnership, resolveUserHome } from "./utils.js";
 import {
   isWSL,
   isWindowsCATrusted,
@@ -639,6 +639,11 @@ function isCATrustedMacOS(caCertPath: string): boolean {
  * Return the path to the current user's login keychain.
  */
 function loginKeychainPath(): string {
+  const home = resolveUserHome();
+  const sudoUser = process.env.SUDO_USER;
+  if ((process.getuid?.() ?? -1) === 0 && sudoUser && sudoUser !== "root") {
+    return path.join(home, "Library", "Keychains", "login.keychain-db");
+  }
   try {
     const result = execFileSync("security", ["default-keychain"], {
       encoding: "utf-8",
@@ -650,7 +655,6 @@ function loginKeychainPath(): string {
   } catch {
     // Fall back to conventional path
   }
-  const home = process.env.HOME || `/Users/${process.env.USER || "unknown"}`;
   return path.join(home, "Library", "Keychains", "login.keychain-db");
 }
 

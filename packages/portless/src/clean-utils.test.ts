@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanup,
+  isCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
 
@@ -22,6 +23,21 @@ describe("collectStateDirsForCleanup", () => {
     const dirs = collectStateDirsForCleanup();
     expect(dirs).toContain(path.resolve(tmp));
     fs.rmSync(tmp, { recursive: true, force: true });
+  });
+
+  it.skipIf(process.platform === "win32")("ignores a symlinked state directory", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-link-"));
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-target-"));
+    const link = path.join(tmp, "state");
+    fs.symlinkSync(target, link, "dir");
+    process.env.PORTLESS_STATE_DIR = link;
+    try {
+      expect(isCleanableStateDir(link)).toBe(false);
+      expect(collectStateDirsForCleanup()).not.toContain(link);
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+      fs.rmSync(target, { recursive: true, force: true });
+    }
   });
 });
 
@@ -68,6 +84,52 @@ describe("removePortlessStateFiles", () => {
   it("does not throw when paths are missing", () => {
     expect(() => removePortlessStateFiles(tmpDir)).not.toThrow();
   });
+
+  it("preserves proxy runtime files while the proxy still owns them", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.pid"), "123");
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
+    fs.writeFileSync(path.join(tmpDir, "proxy.log"), "log");
+    fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+    fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
+
+    removePortlessStateFiles(tmpDir, { preserveProxyRuntime: true });
+
+    expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.port"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.log"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+  });
+
+  it.skipIf(process.platform === "win32")("refuses a symlinked state directory", () => {
+    const target = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-target-"));
+    const link = path.join(tmpDir, "state-link");
+    fs.writeFileSync(path.join(target, "routes.json"), "[]");
+    fs.symlinkSync(target, link, "dir");
+    try {
+      expect(removePortlessStateFiles(link)).toEqual([link]);
+      expect(fs.existsSync(path.join(target, "routes.json"))).toBe(true);
+    } finally {
+      fs.rmSync(target, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "removes a host-certs symlink without touching its target",
+    () => {
+      const target = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-host-certs-"));
+      const link = path.join(tmpDir, "host-certs");
+      fs.writeFileSync(path.join(target, "outside.pem"), "keep");
+      fs.symlinkSync(target, link, "dir");
+      try {
+        expect(removePortlessStateFiles(tmpDir)).toEqual([]);
+        expect(fs.existsSync(link)).toBe(false);
+        expect(fs.readFileSync(path.join(target, "outside.pem"), "utf-8")).toBe("keep");
+      } finally {
+        fs.rmSync(target, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("retains the CA identity when trust removal must be retried", () => {
     fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
