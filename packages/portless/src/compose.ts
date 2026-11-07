@@ -71,6 +71,92 @@ export interface ComposeArgs {
   rest: string[];
 }
 
+/** One decoded global compose flag and the raw arguments it spans. */
+interface ComposeGlobal {
+  flag: string;
+  value?: string;
+  raw: string[];
+  error?: string;
+}
+
+const TRUE_VALUES = new Set(["1", "t", "T", "TRUE", "true", "True"]);
+const FALSE_VALUES = new Set(["0", "f", "F", "FALSE", "false", "False"]);
+
+/** Whether `value` is a boolean literal Docker's flag parser accepts. */
+function isBooleanValue(value: string): boolean {
+  return TRUE_VALUES.has(value) || FALSE_VALUES.has(value);
+}
+
+/** Whether a boolean literal means true. */
+function isBooleanTrue(value: string): boolean {
+  return TRUE_VALUES.has(value);
+}
+
+/** Read one global compose flag at `index`, keeping the raw arguments it spans. */
+function readComposeGlobal(args: readonly string[], index: number): ComposeGlobal {
+  const arg = args[index]!;
+  if (arg.startsWith("--")) {
+    const eq = arg.indexOf("=");
+    const flag = eq === -1 ? arg : arg.slice(0, eq);
+    if (VALUE_FLAGS.has(flag)) {
+      if (eq !== -1) {
+        const value = arg.slice(eq + 1);
+        return value === ""
+          ? { flag, raw: [arg], error: `${flag} requires a value.` }
+          : { flag, value, raw: [arg] };
+      }
+      const value = args[index + 1];
+      return value === undefined
+        ? { flag, raw: [arg], error: `${flag} requires a value.` }
+        : { flag, value, raw: [arg, value] };
+    }
+    if (BOOLEAN_FLAGS.has(flag)) {
+      if (eq === -1) return { flag, raw: [arg] };
+      const value = arg.slice(eq + 1);
+      return isBooleanValue(value)
+        ? { flag, value, raw: [arg] }
+        : { flag, value, raw: [arg], error: `${flag} takes true or false.` };
+    }
+    return { flag, raw: [arg], error: `Unknown flag "${flag}" for portless compose.` };
+  }
+
+  const flag = arg.slice(0, 2);
+  if (VALUE_FLAGS.has(flag)) {
+    if (arg.length === 2) {
+      const value = args[index + 1];
+      return value === undefined
+        ? { flag, raw: [arg], error: `${flag} requires a value.` }
+        : { flag, value, raw: [arg, value] };
+    }
+    const attached = arg.slice(2);
+    const value = attached.startsWith("=") ? attached.slice(1) : attached;
+    return value === ""
+      ? { flag, raw: [arg], error: `${flag} requires a value.` }
+      : { flag, value, raw: [arg] };
+  }
+  if (BOOLEAN_FLAGS.has(flag)) {
+    if (arg.length === 2) return { flag, raw: [arg] };
+    if (arg[2] === "=") {
+      const value = arg.slice(3);
+      return isBooleanValue(value)
+        ? { flag, value, raw: [arg] }
+        : { flag, value, raw: [arg], error: `${flag} takes true or false.` };
+    }
+  }
+  return { flag: arg, raw: [arg], error: `Unknown flag "${arg}" for portless compose.` };
+}
+
+/** Decode a run of global compose flags in order. */
+function decodeComposeGlobals(globals: readonly string[]): ComposeGlobal[] {
+  const decoded: ComposeGlobal[] = [];
+  for (let i = 0; i < globals.length; ) {
+    const global = readComposeGlobal(globals, i);
+    decoded.push(global);
+    i += global.raw.length;
+  }
+  return decoded;
+}
+
 /**
  * Split `portless compose` arguments into global flags, subcommand, and the
  * rest. A `--` ends the wrapper's own flags, so the next argument is the
@@ -83,13 +169,9 @@ export function splitComposeArgs(args: readonly string[]): ComposeArgs {
     const arg = args[i]!;
     if (arg === "--") return { globals, subcommand: args[i + 1], rest: args.slice(i + 2) };
     if (!arg.startsWith("-")) break;
-    globals.push(arg);
-    if (VALUE_FLAGS.has(arg) && i + 1 < args.length) {
-      globals.push(args[i + 1]!);
-      i += 2;
-    } else {
-      i += 1;
-    }
+    const global = readComposeGlobal(args, i);
+    globals.push(...global.raw);
+    i += global.raw.length;
   }
   return { globals, subcommand: args[i], rest: args.slice(i + 1) };
 }
@@ -100,37 +182,25 @@ export function splitComposeArgs(args: readonly string[]): ComposeArgs {
  * typo is a usage error (exit 2) instead of a docker failure (exit 1).
  */
 export function composeGlobalError(globals: readonly string[]): string | null {
-  for (let i = 0; i < globals.length; i++) {
-    const arg = globals[i]!;
-    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
-    const flag = eq === -1 ? arg : arg.slice(0, eq);
-    if (VALUE_FLAGS.has(flag)) {
-      if (eq !== -1) {
-        if (eq === arg.length - 1) return `${flag} requires a value.`;
-        continue;
-      }
-      if (i + 1 >= globals.length) return `${flag} requires a value.`;
-      i += 1;
-      continue;
-    }
-    if (!BOOLEAN_FLAGS.has(flag)) return `Unknown flag "${flag}" for portless compose.`;
-    if (eq !== -1) return `${flag} does not take a value.`;
+  for (const global of decodeComposeGlobals(globals)) {
+    if (global.error) return global.error;
   }
   return null;
 }
 
-/** Values of a global flag, in order. Handles `--flag=value`. */
+/** Whether a named boolean global flag is set to true. */
+export function isGlobalFlagSet(globals: readonly string[], names: readonly string[]): boolean {
+  return decodeComposeGlobals(globals).some(
+    (global) =>
+      names.includes(global.flag) && (global.value === undefined || isBooleanTrue(global.value))
+  );
+}
+
+/** Values of a global flag, in order. Handles `--flag=value` and `-fvalue`. */
 function readGlobal(globals: readonly string[], names: readonly string[]): string[] {
   const values: string[] = [];
-  for (let i = 0; i < globals.length; i++) {
-    const arg = globals[i]!;
-    const eq = arg.indexOf("=");
-    if (eq > 0 && names.includes(arg.slice(0, eq))) {
-      values.push(arg.slice(eq + 1));
-    } else if (names.includes(arg) && i + 1 < globals.length) {
-      values.push(globals[i + 1]!);
-      i++;
-    }
+  for (const global of decodeComposeGlobals(globals)) {
+    if (global.value !== undefined && names.includes(global.flag)) values.push(global.value);
   }
   return values;
 }
@@ -171,15 +241,8 @@ export function buildUpArgs(opts: {
     readGlobal(globals, ["--project-directory"]).pop() ??
     (firstFile && firstFile !== "-" ? path.dirname(path.resolve(opts.cwd, firstFile)) : opts.cwd);
   const kept: string[] = [];
-  for (let i = 0; i < globals.length; i++) {
-    const arg = globals[i]!;
-    const eq = arg.indexOf("=");
-    if (eq > 0 && REPLACED_FLAGS.has(arg.slice(0, eq))) continue;
-    if (REPLACED_FLAGS.has(arg)) {
-      i++;
-      continue;
-    }
-    kept.push(arg);
+  for (const global of decodeComposeGlobals(globals)) {
+    if (!REPLACED_FLAGS.has(global.flag)) kept.push(...global.raw);
   }
   return [
     "-p",
