@@ -507,8 +507,10 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
-      expect(stdout).toContain("--prefix <label>");
       expect(stdout).toContain("portless doctor");
+      expect(stdout).not.toContain("--prefix <label>");
+      expect(stdout).toContain("Run options: portless run --help");
+      expect(run(["run", "--help"]).stdout).toContain("--prefix <label>");
       expect(stdout).not.toContain("--port");
       expect(stdout).not.toContain("--foreground");
       expect(stdout).toContain("Proxy options: portless proxy --help");
@@ -5918,6 +5920,94 @@ describe("CLI", { timeout: 15_000 }, () => {
           run(["proxy", "stop"], {
             env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" },
           });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+  });
+
+  describe("multi-app script selection", () => {
+    // Skipped on Windows for the same reason as the multi-app worktree test:
+    // multi-app mode spawns the package manager, and spawn("npm") fails there.
+    it.skipIf(process.platform === "win32")(
+      "lets --script override a per-app script and keeps the app script otherwise",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-script-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-script-state-"));
+        const marks = path.join(root, "marks.txt");
+        const readMarks = () => fs.readFileSync(marks, "utf-8").split("\n").filter(Boolean).sort();
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          // Both apps pin "start": web in the root apps map, api in its own
+          // portless config. Neither may beat an explicit --script.
+          fs.writeFileSync(
+            path.join(root, "portless.json"),
+            JSON.stringify({ apps: { "packages/web": { script: "start", proxy: false } } })
+          );
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "mark.cjs"),
+              `require("node:fs").appendFileSync(process.env.MARK_FILE, "${name}:" + process.argv[2] + "\\n");\n`
+            );
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                version: "0.0.0",
+                scripts: { dev: "node mark.cjs dev", start: "node mark.cjs start" },
+                portless: { proxy: false, ...(name === "api" ? { script: "start" } : {}) },
+              })
+            );
+          }
+
+          // Strip parent-only npm/pnpm vars so the spawned `npm run <script>` is
+          // real npm, not the vitest runner's pnpm (npm_execpath).
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.NO_COLOR = "1";
+          childEnv.MARK_FILE = marks;
+          delete childEnv.PORTLESS_PREFIX;
+
+          const runWorkspace = (args: string[]) => {
+            fs.writeFileSync(marks, "");
+            const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
+              encoding: "utf-8",
+              timeout: 45_000,
+              cwd: root,
+              env: childEnv,
+            });
+            return {
+              status: result.status,
+              marks: readMarks(),
+              output: `${result.stdout}${result.stderr}`,
+            };
+          };
+
+          const flagged = runWorkspace(["--script", "dev"]);
+          expect(flagged.marks, flagged.output).toEqual(["api:dev", "web:dev"]);
+          expect(flagged.status, flagged.output).toBe(0);
+
+          const bare = runWorkspace([]);
+          expect(bare.marks, bare.output).toEqual(["api:start", "web:start"]);
+          expect(bare.status, bare.output).toBe(0);
+        } finally {
           fs.rmSync(root, { recursive: true, force: true });
           fs.rmSync(stateDir, { recursive: true, force: true });
         }
