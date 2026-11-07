@@ -316,6 +316,56 @@ async function stopChild(child: ReturnType<typeof spawn>): Promise<void> {
   });
 }
 
+/**
+ * Run `portless compose up -d` against a mock proxy and a docker stub that
+ * answers `config` with `model`, `ps` with one running routed container, and
+ * `up` with `upStdout`. Nothing else runs: no real docker, no real proxy.
+ */
+async function runComposeUpDetached(fixture: {
+  model: Record<string, unknown>;
+  upStdout: string;
+  upExit?: number;
+}): Promise<{ status: number | null; stdout: string; stderr: string; proxyPort: number }> {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-streams-"));
+  const proxy = await startMockProxy(tmpDir);
+  try {
+    fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+    const bin = path.join(tmpDir, "bin");
+    fs.mkdirSync(bin);
+    const containers = JSON.stringify({
+      Project: "myapp",
+      Service: "web",
+      State: "running",
+      Publishers: [{ TargetPort: 3000, PublishedPort: 14501, Protocol: "tcp" }],
+    });
+    fs.writeFileSync(
+      path.join(bin, "docker"),
+      [
+        "#!/bin/sh",
+        'case "$*" in',
+        `  *" config "*) printf '%s' '${JSON.stringify(fixture.model)}' ;;`,
+        `  *" ps "*) printf '%s\\n' '${containers}' ;;`,
+        `  *" up "*) printf '%s' '${fixture.upStdout}'; exit ${fixture.upExit ?? 0} ;;`,
+        "esac",
+        "exit 0",
+        "",
+      ].join("\n"),
+      { mode: 0o755 }
+    );
+    const { status, stdout, stderr } = run(["compose", "up", "-d"], {
+      env: {
+        PORTLESS_STATE_DIR: tmpDir,
+        PATH: `${bin}:${process.env.PATH}`,
+        PORTLESS: undefined,
+      },
+    });
+    return { status, stdout, stderr, proxyPort: proxy.port };
+  } finally {
+    await stopChild(proxy.child);
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 // A command that exits 0 waits up to EXIT_TIMEOUT_MS for a detached daemon.
 describe("CLI", { timeout: 15_000 }, () => {
   beforeAll(() => {
@@ -954,6 +1004,63 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("compose", () => {
+    it.skipIf(process.platform === "win32")(
+      "keeps container output on stdout and compose diagnostics on stderr",
+      async () => {
+        const routed = {
+          name: "myapp",
+          services: { web: { ports: [{ target: 3000, published: "3000" }] } },
+        };
+        const containerOut = "web-1  | ready on http://0.0.0.0:3000\nweb-1  | GET / 200 4ms\n";
+        const result = await runComposeUpDetached({ model: routed, upStdout: containerOut });
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(containerOut);
+        expect(result.stderr).toContain("portless compose myapp");
+        expect(result.stderr).toContain(
+          `-> http://web.myapp.localhost:${result.proxyPort}  (web:3000)`
+        );
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "sends the no-route notice and kept ports to stderr",
+      async () => {
+        const databaseOnly = {
+          name: "myapp",
+          services: { db: { ports: [{ target: 5432, published: "5432" }] } },
+        };
+        const containerOut = "db-1  | database system is ready\n";
+        const result = await runComposeUpDetached({ model: databaseOnly, upStdout: containerOut });
+
+        expect(result.status).toBe(0);
+        expect(result.stdout).toBe(containerOut);
+        expect(result.stderr).toContain("db:5432 keeps host port 5432 (not HTTP)");
+        expect(result.stderr).toContain("No published HTTP ports found. Nothing to route.");
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps docker's exit code and stdout when a detached up fails",
+      async () => {
+        const routed = {
+          name: "myapp",
+          services: { web: { ports: [{ target: 3000, published: "3000" }] } },
+        };
+        const containerOut = "web-1  | image pull failed\n";
+        const result = await runComposeUpDetached({
+          model: routed,
+          upStdout: containerOut,
+          upExit: 3,
+        });
+
+        expect(result.status).toBe(3);
+        expect(result.stdout).toBe(containerOut);
+        expect(result.stderr).toContain("portless compose myapp");
+        expect(result.stderr).not.toContain("-> http");
+      }
+    );
+
     it("prints help and exits 0 with no arguments", () => {
       const { status, stdout } = run(["compose"]);
       expect(status).toBe(0);
