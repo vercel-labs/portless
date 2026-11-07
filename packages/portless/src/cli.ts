@@ -161,6 +161,7 @@ import {
   resolveAppConfig,
   resolveScriptCommand,
   scriptRunCommand,
+  packageManagerExec,
   hasScript,
   isServerCommand,
   splitCommand,
@@ -4665,7 +4666,7 @@ async function handleDefaultMulti(
     if (rawScript.length === 0) continue;
 
     const pm = detectPackageManager(pkg.dir);
-    const commandArgs = scriptRunCommand(pm, effectiveScript, extraArgs);
+    const commandArgs = scriptRunCommand(pm, effectiveScript, pkg.dir, extraArgs);
 
     const proxied = appOverride.proxy ?? isServerCommand(rawScript);
 
@@ -4858,12 +4859,8 @@ async function runWithTurbo(
   const useRootScript = hasScript(scriptName, wsRoot);
   const turboPassThrough = extraArgs.length > 0 ? ["--", ...extraArgs] : [];
   const turboArgs = useRootScript
-    ? scriptRunCommand(pm, scriptName, turboPassThrough)
-    : pm === "npm"
-      ? ["npx", "turbo", "run", scriptName, ...turboPassThrough]
-      : pm === "bun"
-        ? ["bunx", "turbo", "run", scriptName, ...turboPassThrough]
-        : [pm, "exec", "turbo", "run", scriptName, ...turboPassThrough];
+    ? scriptRunCommand(pm, scriptName, wsRoot, turboPassThrough)
+    : packageManagerExec(pm, ["turbo", "run", scriptName, ...turboPassThrough]);
 
   const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
