@@ -10,6 +10,11 @@ import {
   removePortlessStateFiles,
 } from "./clean-utils.js";
 
+vi.mock("node:fs", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs")>();
+  return { ...actual, statSync: vi.fn(actual.statSync) };
+});
+
 describe("collectStateDirsForCleanup", () => {
   const prevState = process.env.PORTLESS_STATE_DIR;
 
@@ -208,23 +213,53 @@ describe("attemptCATrustRemovalForCleanup", () => {
     }
   });
 
-  it("reports an unreadable CA path instead of treating it as absent", () => {
-    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-trust-denied-"));
+  it("reports a statSync EACCES for the CA path without calling untrust", async () => {
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-trust-eacces-"));
+    const caPath = path.join(tmpDir, "ca.pem");
     const untrust = vi.fn(() => ({ removed: true }));
+    const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+    const statSyncMock = vi.mocked(fs.statSync);
+    statSyncMock.mockImplementation(((file: fs.PathLike) => {
+      if (String(file) === caPath) {
+        throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+      }
+      return actualFs.statSync(file);
+    }) as typeof fs.statSync);
     try {
-      fs.writeFileSync(path.join(tmpDir, "ca.pem"), "certificate");
-      fs.chmodSync(tmpDir, 0o000);
+      fs.writeFileSync(caPath, "certificate");
 
       const results = attemptCATrustRemovalForCleanup([tmpDir], untrust);
 
+      expect(statSyncMock).toHaveBeenCalledWith(caPath);
       expect(untrust).not.toHaveBeenCalled();
       expect(results.get(tmpDir)).toMatchObject({ removed: false });
       expect(results.get(tmpDir)?.error).toContain("Could not inspect CA certificate");
     } finally {
-      fs.chmodSync(tmpDir, 0o700);
+      statSyncMock.mockImplementation(actualFs.statSync);
       fs.rmSync(tmpDir, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
+    "reports a real unreadable CA path on POSIX",
+    () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-trust-denied-"));
+      const untrust = vi.fn(() => ({ removed: true }));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "ca.pem"), "certificate");
+        fs.chmodSync(tmpDir, 0o000);
+
+        const results = attemptCATrustRemovalForCleanup([tmpDir], untrust);
+
+        expect(untrust).not.toHaveBeenCalled();
+        expect(results.get(tmpDir)).toMatchObject({ removed: false });
+        expect(results.get(tmpDir)?.error).toContain("Could not inspect CA certificate");
+      } finally {
+        fs.chmodSync(tmpDir, 0o700);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    }
+  );
 
   it("skips a directory when ca.pem is absent", () => {
     const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-trust-missing-"));
