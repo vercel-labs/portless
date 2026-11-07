@@ -153,7 +153,7 @@ Only the last `/` segment of the branch is used by default. Set `worktree.prefix
 
 ### Bypassing portless
 
-Set `PORTLESS=0` to run the command directly without the proxy:
+Set `PORTLESS=0` to run the command directly without the proxy. Commands such as `portless get` and `portless list` still run normally:
 
 ```bash
 PORTLESS=0 pnpm dev   # Bypasses proxy, uses default port
@@ -375,8 +375,10 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child    |
 | `portless --help` / `-h`                          | Show help                                                      |
-| `portless run --help`                             | Show help for a subcommand (also: alias, hosts, clean)         |
+| `portless <command> --help` / `-h`                | Print command help without running it                          |
 | `portless --version` / `-v`                       | Show version                                                   |
+
+`--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
 **Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
