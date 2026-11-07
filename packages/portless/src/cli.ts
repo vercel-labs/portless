@@ -135,7 +135,7 @@ import {
 } from "./cli-utils.js";
 import {
   attemptCATrustRemovalForCleanup,
-  collectStateDirsForCleanup,
+  collectStateDirsForCleanupWithFailures,
   isCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
@@ -2699,7 +2699,8 @@ async function handleClean(args: string[]): Promise<void> {
     return;
   }
 
-  const stateDirs = collectStateDirsForCleanup();
+  const collectedStateDirs = collectStateDirsForCleanupWithFailures();
+  const stateDirs = collectedStateDirs.dirs;
   console.error("Clean will:");
   console.error("  Stop the proxy");
   console.error("  Remove the startup service if installed");
@@ -2708,6 +2709,11 @@ async function handleClean(args: string[]): Promise<void> {
     `  Delete known state files in: ${stateDirs.join(", ") || "no existing state directories"}`
   );
   console.error(`  Remove the portless block from ${HOSTS_DISPLAY}`);
+  for (const failed of collectedStateDirs.failures) {
+    console.error(
+      colors.yellow(`  Cannot resolve state directory: ${failed}. It will be left alone.`)
+    );
+  }
 
   if (!parsed.has("--yes") && !parsed.has("-y")) {
     if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.CI) {
@@ -2720,7 +2726,7 @@ async function handleClean(args: string[]): Promise<void> {
     }
   }
 
-  let problems = 0;
+  let problems = collectedStateDirs.failures.length;
   const serviceResult = tryUninstallService(getEntryScript());
   if (serviceResult.removed) {
     console.log(colors.green("Removed startup service."));

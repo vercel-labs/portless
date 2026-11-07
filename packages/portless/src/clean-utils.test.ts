@@ -5,6 +5,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanup,
+  collectStateDirsForCleanupWithFailures,
   isCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
@@ -25,18 +26,44 @@ describe("collectStateDirsForCleanup", () => {
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
-  it.skipIf(process.platform === "win32")("ignores a symlinked state directory", () => {
-    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-link-"));
-    const target = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-target-"));
-    const link = path.join(tmp, "state");
-    fs.symlinkSync(target, link, "dir");
-    process.env.PORTLESS_STATE_DIR = link;
+  it.skipIf(process.platform === "win32")(
+    "resolves a symlinked state directory and cleans its physical target",
+    () => {
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-link-"));
+      const target = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-target-"));
+      const link = path.join(tmp, "state");
+      const canonical = fs.realpathSync(target);
+      fs.symlinkSync(target, link, "dir");
+      process.env.PORTLESS_STATE_DIR = link;
+      try {
+        expect(isCleanableStateDir(link)).toBe(false);
+        const dirs = collectStateDirsForCleanup();
+        expect(dirs).toContain(canonical);
+        expect(dirs).not.toContain(link);
+
+        fs.writeFileSync(path.join(canonical, "routes.json"), "[]");
+        fs.writeFileSync(path.join(canonical, "keep.txt"), "keep");
+        expect(removePortlessStateFiles(canonical)).toEqual([]);
+        expect(fs.existsSync(path.join(canonical, "routes.json"))).toBe(false);
+        expect(fs.readFileSync(path.join(canonical, "keep.txt"), "utf-8")).toBe("keep");
+      } finally {
+        fs.rmSync(tmp, { recursive: true, force: true });
+        fs.rmSync(target, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it("reports an existing configured path that is not a directory", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-file-"));
+    const configured = path.join(tmp, "state");
+    fs.writeFileSync(configured, "not a directory");
+    process.env.PORTLESS_STATE_DIR = configured;
     try {
-      expect(isCleanableStateDir(link)).toBe(false);
-      expect(collectStateDirsForCleanup()).not.toContain(link);
+      const collected = collectStateDirsForCleanupWithFailures();
+      expect(collected.dirs).not.toContain(configured);
+      expect(collected.failures).toContain(configured);
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
-      fs.rmSync(target, { recursive: true, force: true });
     }
   });
 });
