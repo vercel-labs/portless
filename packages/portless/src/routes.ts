@@ -387,40 +387,43 @@ export class RouteStore {
       throw new Error("Invalid upstream configuration");
     }
     let killedPid: number | undefined;
-    this.mutateRoutes((routes) => {
-      if (!force && this.hasSkippedRoute(hostname)) {
-        throw new Error(
-          `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
-        );
-      }
-      const existing = findActiveRoute(routes, hostname);
-      const isAlias = existing?.pid === 0;
-      if (existing && existing.pid !== pid) {
-        if (!force) {
-          throw new RouteConflictError(hostname, existing.pid);
+    this.mutateRoutes(
+      (routes) => {
+        if (!force && this.hasSkippedRoute(hostname)) {
+          throw new Error(
+            `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
+          );
         }
-        // --force: kill the existing process before taking over; an alias has none
-        if (!isAlias) {
-          try {
-            process.kill(existing.pid, "SIGTERM");
-            killedPid = existing.pid;
-          } catch {
-            // Process may have exited between the check and the kill; non-fatal
+        const existing = findActiveRoute(routes, hostname);
+        const isAlias = existing?.pid === 0;
+        if (existing && existing.pid !== pid) {
+          if (!force) {
+            throw new RouteConflictError(hostname, existing.pid);
+          }
+          // --force: kill the existing process before taking over; an alias has none
+          if (!isAlias) {
+            try {
+              process.kill(existing.pid, "SIGTERM");
+              killedPid = existing.pid;
+            } catch {
+              // Process may have exited between the check and the kill; non-fatal
+            }
           }
         }
-      }
-      const kept = routes.filter((route) => route.hostname !== hostname || isStaleRoute(route));
-      kept.push({
-        hostname,
-        port,
-        pid,
-        registeredAt: Date.now(),
-        ...(upstream === undefined ? {} : { upstream }),
-      });
-      routes.length = 0;
-      routes.push(...kept);
-      return { value: undefined, changed: true };
-    }, force ? hostname : undefined);
+        const kept = routes.filter((route) => route.hostname !== hostname || isStaleRoute(route));
+        kept.push({
+          hostname,
+          port,
+          pid,
+          registeredAt: Date.now(),
+          ...(upstream === undefined ? {} : { upstream }),
+        });
+        routes.length = 0;
+        routes.push(...kept);
+        return { value: undefined, changed: true };
+      },
+      force ? hostname : undefined
+    );
     return killedPid;
   }
 
