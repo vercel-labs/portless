@@ -515,6 +515,65 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
+    it("includes upstream settings from real aliases in JSON", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-json-upstream-"));
+      const options = {
+        cwd: tmpDir,
+        env: {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_HTTPS: "0",
+          PORTLESS_SYNC_HOSTS: "0",
+          PORTLESS_TLD: "localhost",
+        },
+      };
+      try {
+        expect(
+          run(["alias", "tls", "7443", "--upstream", "https", "--tld", "localhost"], options).status
+        ).toBe(0);
+        expect(
+          run(
+            ["alias", "plain", "8080", "--upstream", "http://api.internal", "--tld", "localhost"],
+            options
+          ).status
+        ).toBe(0);
+        expect(
+          run(
+            [
+              "alias",
+              "authority",
+              "9443",
+              "--upstream",
+              "https://api.internal:8443",
+              "--tld",
+              "localhost",
+            ],
+            options
+          ).status
+        ).toBe(0);
+        expect(run(["alias", "direct", "5432", "--tld", "localhost"], options).status).toBe(0);
+
+        const result = run(["list", "--json"], options);
+        expect(result.status).toBe(0);
+        const listed = JSON.parse(result.stdout) as {
+          routes: Array<{ hostname: string; upstream?: { tls?: boolean; host?: string } }>;
+        };
+        const route = (hostname: string) =>
+          listed.routes.find((entry) => entry.hostname === hostname)!;
+        expect(route("tls.localhost").upstream).toEqual({ tls: true });
+        expect(route("plain.localhost").upstream).toEqual({
+          tls: false,
+          host: "api.internal",
+        });
+        expect(route("authority.localhost").upstream).toEqual({
+          tls: true,
+          host: "api.internal:8443",
+        });
+        expect(route("direct.localhost")).not.toHaveProperty("upstream");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("shows no active routes message when none registered", () => {
       // Note: the CLI discovers the state dir dynamically. We just verify
       // it doesn't crash and returns 0.
@@ -694,6 +753,89 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(
           failures.some((f: { message: string }) =>
             f.message.includes(`Port ${proxyPort} is in use, but it is not a portless proxy`)
+          )
+        ).toBe(true);
+      } finally {
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("flushes a large failed JSON report when stdout is paused", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-json-pipe-"));
+      const server = http.createServer((_req, res) => {
+        res.end("not portless");
+      });
+
+      try {
+        const proxyPort = await new Promise<number>((resolve) => {
+          server.listen(0, "127.0.0.1", () => {
+            const addr = server.address();
+            if (addr && typeof addr !== "string") {
+              resolve(addr.port);
+            }
+          });
+        });
+        fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.0.2.1\n");
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify(
+            Array.from({ length: 3000 }, (_, index) => ({
+              hostname: `route-${index}.localhost`,
+              port: 70000,
+              pid: 0,
+            }))
+          )
+        );
+
+        const env: Record<string, string | undefined> = { ...process.env };
+        delete env.PNPM_SCRIPT_SRC_DIR;
+        if (env.npm_command === "exec") delete env.npm_command;
+        Object.assign(env, {
+          NO_COLOR: "1",
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_PORT: proxyPort.toString(),
+          PORTLESS_HTTPS: "0",
+        });
+
+        const child = spawn(process.execPath, [CLI_PATH, "doctor", "--json"], {
+          env,
+          stdio: ["ignore", "pipe", "pipe"],
+        });
+        let stdout = "";
+        let stderr = "";
+        let paused = false;
+        child.stdout.setEncoding("utf-8");
+        child.stdout.on("data", (chunk: string) => {
+          stdout += chunk;
+          if (paused) return;
+          paused = true;
+          child.stdout.pause();
+          setTimeout(() => child.stdout.resume(), 300);
+        });
+        child.stderr.setEncoding("utf-8");
+        child.stderr.on("data", (chunk: string) => {
+          stderr += chunk;
+        });
+        const exit = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>(
+          (resolve, reject) => {
+            child.on("error", reject);
+            child.on("close", (code, signal) => resolve({ code, signal }));
+          }
+        );
+
+        const result = await exit;
+
+        expect(result).toEqual({ code: 1, signal: null });
+        expect(stderr).not.toContain('"findings"');
+        expect(Buffer.byteLength(stdout)).toBeGreaterThan(256 * 1024);
+        const report = JSON.parse(stdout);
+        expect(stdout.trim()).toBe(JSON.stringify(report));
+        expect(report.findings.length).toBeGreaterThanOrEqual(3000);
+        expect(report.summary.failures).toBeGreaterThan(0);
+        expect(
+          report.findings.some((finding: { message: string }) =>
+            finding.message.includes(`Port ${proxyPort} is in use, but it is not a portless proxy`)
           )
         ).toBe(true);
       } finally {

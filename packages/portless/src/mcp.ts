@@ -120,8 +120,10 @@ export const TOOLS: ToolDef[] = [
   tool(
     "list",
     "List routes",
-    "List active routes with their URLs, ports, PIDs, and uptime.",
-    { json: { type: "boolean", description: "Return routes as JSON." } },
+    "List active routes with their URLs, ports, PIDs, uptime, and upstream settings.",
+    {
+      json: { type: "boolean", description: "Return routes as JSON, including upstream settings." },
+    },
     [],
     {
       readOnlyHint: true,

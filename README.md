@@ -76,6 +76,9 @@ IP addresses are not sent as SNI. An
 change client-facing proxy TLS. Authorities accept only a hostname or IP address with an
 optional port, without credentials, paths, queries, fragments, or whitespace.
 
+`portless list --json` includes each route's `upstream` object when one is set, with the
+same `tls` and `host` values.
+
 Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
 certificate verification, so TLS does not authenticate backend identity, even through
 an SSH tunnel. Restart the proxy daemon after upgrading portless.

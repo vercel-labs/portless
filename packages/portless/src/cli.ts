@@ -1292,6 +1292,7 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: bo
       port: route.port,
       pid: route.pid,
       registeredAt: route.registeredAt,
+      ...(route.upstream ? { upstream: route.upstream } : {}),
       ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
       ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
       ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
@@ -2645,10 +2646,10 @@ function printListHelp(): void {
 ${colors.bold("portless list")} - Show active routes and their uptime.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless list")}
+  ${colors.cyan("portless list [--json]")}
 
 ${colors.bold("Options:")}
-  --json                 Print routes as JSON
+  --json                 Print routes as JSON, including upstream settings when set
   --help, -h             Show this help
 `);
 }
@@ -3370,7 +3371,7 @@ async function handleDoctor(args: string[]): Promise<void> {
         summary: { failures, warnings },
       })
     );
-    if (failures > 0) process.exit(1);
+    if (failures > 0) process.exitCode = 1;
     return;
   }
 
@@ -3382,7 +3383,8 @@ async function handleDoctor(args: string[]): Promise<void> {
     console.log(
       colors.red(`Summary: ${pluralize(failures, "failure")}, ${pluralize(warnings, "warning")}.`)
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log(colors.green(`Summary: 0 failures, ${pluralize(warnings, "warning")}.`));
 }
