@@ -24,6 +24,18 @@ const VALUE_FLAGS = new Set([
   "--parallel",
 ]);
 
+const BOOLEAN_FLAGS = new Set([
+  "--help",
+  "-h",
+  "--version",
+  "-v",
+  "--dry-run",
+  "--verbose",
+  "--no-ansi",
+  "--compatibility",
+  "--all-resources",
+]);
+
 /** Global flags portless replaces when it runs compose on the resolved model. */
 const REPLACED_FLAGS = new Set(["-f", "--file", "-p", "--project-name", "--project-directory"]);
 
@@ -59,12 +71,17 @@ export interface ComposeArgs {
   rest: string[];
 }
 
-/** Split `portless compose` arguments into global flags, subcommand, and the rest. */
+/**
+ * Split `portless compose` arguments into global flags, subcommand, and the
+ * rest. A `--` ends the wrapper's own flags, so the next argument is the
+ * subcommand.
+ */
 export function splitComposeArgs(args: readonly string[]): ComposeArgs {
   const globals: string[] = [];
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
+    if (arg === "--") return { globals, subcommand: args[i + 1], rest: args.slice(i + 2) };
     if (!arg.startsWith("-")) break;
     globals.push(arg);
     if (VALUE_FLAGS.has(arg) && i + 1 < args.length) {
@@ -75,6 +92,31 @@ export function splitComposeArgs(args: readonly string[]): ComposeArgs {
     }
   }
   return { globals, subcommand: args[i], rest: args.slice(i + 1) };
+}
+
+/**
+ * Report the first problem with a compose invocation's own global flags, or
+ * null when they all parse. Portless checks this before any docker work, so a
+ * typo is a usage error (exit 2) instead of a docker failure (exit 1).
+ */
+export function composeGlobalError(globals: readonly string[]): string | null {
+  for (let i = 0; i < globals.length; i++) {
+    const arg = globals[i]!;
+    const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const flag = eq === -1 ? arg : arg.slice(0, eq);
+    if (VALUE_FLAGS.has(flag)) {
+      if (eq !== -1) {
+        if (eq === arg.length - 1) return `${flag} requires a value.`;
+        continue;
+      }
+      if (i + 1 >= globals.length) return `${flag} requires a value.`;
+      i += 1;
+      continue;
+    }
+    if (!BOOLEAN_FLAGS.has(flag)) return `Unknown flag "${flag}" for portless compose.`;
+    if (eq !== -1) return `${flag} does not take a value.`;
+  }
+  return null;
 }
 
 /** Values of a global flag, in order. Handles `--flag=value`. */
