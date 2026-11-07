@@ -52,6 +52,7 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
+  isSameRouteRecord,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";
@@ -92,6 +93,7 @@ import {
   findPidsOnPort,
   findSelfDaemonizedListener,
   killOrphanedProcessGroup,
+  getProcessGroupId,
   getProcessStartTime,
   getProcessCommand,
   getDefaultPort,
@@ -2501,7 +2503,7 @@ async function handleClean(args: string[]): Promise<void> {
   }
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  const routesForClean = store.loadRoutesRaw();
+  const routesForClean = [...store.loadRoutesRaw(), ...store.loadOrphanedRoutes()];
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
@@ -2579,14 +2581,15 @@ function printPruneHelp(): void {
   console.log(`
 ${colors.bold("portless prune")} - Clean up routes left by crashed portless sessions.
 
-Finds routes whose owning portless process is gone. On macOS and Linux, it
-signals the recorded dev server process group only if its leader matches, or a
-previously recorded surviving member matches on retry. It removes stale routes
-and their Tailscale and tunnel shares. A group that still holds its port after
-SIGTERM keeps its route and shares; retry with --force.
-Unrelated port holders are reported, never killed. On Windows, process groups
-cannot be verified or signaled. Recorded ngrok and cloudflared tunnels are stopped
-only when their executable names match, including on Windows.
+Finds routes whose owning portless process is gone, including groups kept from
+an earlier run. On macOS and Linux, it signals the recorded dev server process
+group only if its leader matches, or a previously recorded surviving member
+matches on retry. It removes stale routes and their Tailscale and tunnel shares.
+A group that still holds its port after SIGTERM keeps its route and shares;
+retry with --force. A port holder that cannot be proven part of the recorded
+group is reported and kept, never killed. On Windows, process groups cannot be
+verified or signaled. Recorded ngrok and cloudflared tunnels are stopped only
+when their executable names match, including on Windows.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2608,18 +2611,32 @@ async function handlePrune(args: string[]): Promise<void> {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  const stale = store.findStaleRoutes();
-  if (stale.length === 0) {
+  const keptOrphans = store.loadOrphanedRoutes();
+  const stale: RouteMapping[] = [];
+  for (const route of store.findStaleRoutes()) {
+    if (keptOrphans.some((record) => isSameRouteRecord(record, route))) {
+      // An interrupted move can leave the same record in both files.
+      store.removeStaleRoute(route.hostname, route.pid);
+      continue;
+    }
+    stale.push(route);
+  }
+  if (stale.length === 0 && keptOrphans.length === 0) {
     console.log("No orphaned routes found.");
     return;
   }
+  const entries = [
+    ...stale.map((route) => ({ route, orphan: false })),
+    ...keptOrphans.map((route) => ({ route, orphan: true })),
+  ];
+  const liveHostnames = new Set(store.loadRoutes().map((route) => route.hostname));
 
   let pruned = 0;
   let skipped = 0;
   const signal = forceKill ? "SIGKILL" : "SIGTERM";
   const killedGroups = new Set<number>();
   const survivingGroups = new Set<number>();
-  for (const route of stale) {
+  for (const { route } of entries) {
     const pgid = route.childPgid;
     if (
       pgid &&
@@ -2632,7 +2649,7 @@ async function handlePrune(args: string[]): Promise<void> {
     }
   }
 
-  for (const route of stale) {
+  for (const { route, orphan } of entries) {
     const pgid = route.childPgid;
     const signaled = pgid !== undefined && killedGroups.has(pgid);
     if (signaled) {
@@ -2642,45 +2659,55 @@ async function handlePrune(args: string[]): Promise<void> {
     }
     const holders = findPidsOnPort(route.port);
     const held = holders.length > 0 || (await isPortListening(route.port));
-    const groupHolder =
-      signaled &&
-      holders.find((pid) => {
-        const result = spawnSync("ps", ["-o", "pgid=", "-p", String(pid)], {
-          encoding: "utf-8",
-          timeout: 2000,
-        });
-        return result.status === 0 && Number(result.stdout.trim()) === pgid;
-      });
+    // A shared process group is evidence about the holder, not proof it is
+    // ours: group ids get reused once their leader is gone.
+    const groupMember = holders.find(
+      (pid) => pgid !== undefined && getProcessGroupId(pid) === pgid
+    );
     const groupHoldsPort =
-      signaled &&
+      pgid !== undefined &&
       held &&
-      ((groupHolder !== false && groupHolder !== undefined) ||
-        (holders.length === 0 && getProcessStartTime(pgid) === route.childStartTime));
+      (groupMember !== undefined ||
+        (signaled && holders.length === 0 && getProcessStartTime(pgid) === route.childStartTime));
     if (groupHoldsPort) {
-      if (groupHolder) {
-        const startTime = getProcessStartTime(groupHolder);
-        if (startTime) store.recordStaleOrphan(route, groupHolder, startTime);
+      const memberStartTime =
+        signaled && groupMember !== undefined ? getProcessStartTime(groupMember) : null;
+      const stored =
+        memberStartTime !== null && groupMember !== undefined
+          ? store.keepOrphanedRoute(route, { pid: groupMember, startTime: memberStartTime })
+          : store.keepOrphanedRoute(route);
+      if (!stored) {
+        console.log(
+          `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
+        );
+        skipped++;
+        continue;
       }
-      survivingGroups.add(pgid);
+      if (signaled && pgid !== undefined) survivingGroups.add(pgid);
       skipped++;
       console.log(
-        `  ${route.hostname} :${route.port} - process group ${pgid} did not exit; route kept. Retry with portless prune --force`
+        signaled
+          ? `  ${route.hostname} :${route.port} - process group ${pgid} did not exit; route kept. Retry with portless prune --force`
+          : `  ${route.hostname} :${route.port} - process ${groupMember} is in process group ${pgid} but could not be verified; route kept and nothing was killed`
       );
       continue;
-    } else if (!store.removeStaleRoute(route.hostname, route.pid)) {
+    }
+    const removed = orphan
+      ? store.removeOrphanedRoute(route)
+      : store.removeStaleRoute(route.hostname, route.pid);
+    if (!removed) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
       );
       skipped++;
       continue;
-    } else {
-      pruned++;
-      const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
-      console.log(
-        `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
-      );
     }
-    if (route.tailscaleHttpsPort) {
+    pruned++;
+    const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
+    console.log(
+      `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
+    );
+    if (route.tailscaleHttpsPort && !liveHostnames.has(route.hostname)) {
       try {
         unregisterTailscale(route);
         console.log(
