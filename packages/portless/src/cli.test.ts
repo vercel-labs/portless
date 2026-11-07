@@ -74,6 +74,8 @@ type HostsFileMockOptions = {
   sudoStatus?: number;
   stateDir: string;
   failPrivilegedCleanup?: boolean;
+  failCAAlways?: boolean;
+  sudoRunsCommand?: boolean;
   extraEnv?: Record<string, string | undefined>;
 };
 
@@ -106,6 +108,7 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "const originalWriteFileSync = fs.writeFileSync;",
         "const originalUnlinkSync = fs.unlinkSync;",
         "const originalRmSync = fs.rmSync;",
+        "const originalExistsSync = fs.existsSync;",
         "const originalSpawnSync = childProcess.spawnSync;",
         "const originalExecFileSync = childProcess.execFileSync;",
         'const hostsPath = process.platform === "win32"',
@@ -116,13 +119,20 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "const capture = { writes: [], sudo: null, sudoCalls: [] };",
         "const elevated = () => Boolean(process.env.PORTLESS_INTERNAL_CLEAN_STEPS);",
         'const failUntilElevated = process.env.PORTLESS_TEST_FAIL_PRIVILEGED === "1";',
-        "const stateDir = process.env.PORTLESS_STATE_DIR",
-        "  ? path.resolve(process.env.PORTLESS_STATE_DIR)",
-        "  : null;",
+        "const stateDirs = (() => {",
+        "  const raw = process.env.PORTLESS_INTERNAL_CLEAN_DIRS;",
+        "  if (raw) {",
+        "    try {",
+        "      return JSON.parse(raw).map((entry) => path.resolve(String(entry)));",
+        "    } catch {",
+        "      return [];",
+        "    }",
+        "  }",
+        "  return process.env.PORTLESS_STATE_DIR ? [path.resolve(process.env.PORTLESS_STATE_DIR)] : [];",
+        "})();",
         "const isStatePath = (file) => {",
-        "  if (!stateDir) return false;",
         "  const resolved = path.resolve(String(file));",
-        "  return resolved === stateDir || resolved.startsWith(stateDir + path.sep);",
+        "  return stateDirs.some((dir) => resolved === dir || resolved.startsWith(dir + path.sep));",
         "};",
         "const denied = (message) => {",
         "  const error = new Error(message);",
@@ -130,17 +140,23 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "  return error;",
         "};",
         "fs.unlinkSync = function (file, ...rest) {",
-        '  if (failUntilElevated && !elevated() && isStatePath(file)) throw denied("state file removal denied");',
+        "  if (failUntilElevated && !elevated() && isStatePath(file) && originalExistsSync.call(this, file)) {",
+        '    throw denied("state file removal denied");',
+        "  }",
         "  return originalUnlinkSync.call(this, file, ...rest);",
         "};",
         "fs.rmSync = function (file, ...rest) {",
-        '  if (failUntilElevated && !elevated() && isStatePath(file)) throw denied("state file removal denied");',
+        "  if (failUntilElevated && !elevated() && isStatePath(file) && originalExistsSync.call(this, file)) {",
+        '    throw denied("state file removal denied");',
+        "  }",
         "  return originalRmSync.call(this, file, ...rest);",
         "};",
         "childProcess.execFileSync = function (command, ...rest) {",
         "  const update = /^update-ca-(certificates|trust)$/.test(String(command));",
         "  if (failUntilElevated && update) {",
-        '    if (!elevated()) throw denied("CA update denied");',
+        '    if (!elevated() || process.env.PORTLESS_TEST_FAIL_CA_ALWAYS === "1") {',
+        '      throw denied("CA update denied");',
+        "    }",
         '    return "";',
         "  }",
         "  return originalExecFileSync.call(this, command, ...rest);",
@@ -172,6 +188,9 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         '  if (command !== "sudo") return originalSpawnSync.call(this, command, commandArgs, spawnOptions);',
         "  capture.sudo = { command, args: commandArgs };",
         "  capture.sudoCalls.push(capture.sudo);",
+        '  if (process.env.PORTLESS_TEST_SUDO_RUNS === "1") {',
+        "    return originalSpawnSync.call(this, commandArgs[0], commandArgs.slice(1), spawnOptions);",
+        "  }",
         '  return { status: Number(process.env.PORTLESS_TEST_HOSTS_SUDO_STATUS || "1") };',
         "};",
         "syncBuiltinESMExports();",
@@ -191,6 +210,8 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         PORTLESS_TEST_HOSTS_UID: String(options.uid ?? 0),
         PORTLESS_TEST_HOSTS_SUDO_STATUS: String(options.sudoStatus ?? 1),
         PORTLESS_TEST_FAIL_PRIVILEGED: options.failPrivilegedCleanup ? "1" : "0",
+        PORTLESS_TEST_FAIL_CA_ALWAYS: options.failCAAlways ? "1" : "0",
+        PORTLESS_TEST_SUDO_RUNS: options.sudoRunsCommand ? "1" : "0",
         ...options.extraEnv,
         NODE_OPTIONS: `--require=${preloadPath}`,
       },
@@ -297,7 +318,12 @@ async function getFreePort(): Promise<number> {
 
 async function startMockProxy(
   dir: string,
-  options: { acknowledgeHostsSync?: boolean; port?: number; sigtermDelayMs?: number } = {}
+  options: {
+    acknowledgeHostsSync?: boolean;
+    port?: number;
+    sigtermDelayMs?: number;
+    pidFileOnSigterm?: string;
+  } = {}
 ): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
   const port = options.port ?? (await getFreePort());
   const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
@@ -322,9 +348,11 @@ async function startMockProxy(
       '  res.end("ok");',
       "});",
       `server.listen(${port}, "127.0.0.1");`,
-      options.sigtermDelayMs
-        ? `process.on("SIGTERM", () => setTimeout(() => server.close(() => process.exit(0)), ${options.sigtermDelayMs}));`
-        : 'process.on("SIGTERM", () => server.close(() => process.exit(0)));',
+      options.pidFileOnSigterm
+        ? `process.on("SIGTERM", () => { require("node:fs").writeFileSync(${JSON.stringify(options.pidFileOnSigterm)}, "999999"); server.close(() => process.exit(0)); });`
+        : options.sigtermDelayMs
+          ? `process.on("SIGTERM", () => setTimeout(() => server.close(() => process.exit(0)), ${options.sigtermDelayMs}));`
+          : 'process.on("SIGTERM", () => server.close(() => process.exit(0)));',
     ]
       .filter(Boolean)
       .join("\n") + "\n"
@@ -2706,6 +2734,9 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(result.capture.sudoCalls).toHaveLength(1);
           const sudoArgs = result.capture.sudoCalls[0]!.args;
           expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files,hosts");
+          expect(sudoArgs).toContain(`PORTLESS_INTERNAL_CLEAN_DIRS=${JSON.stringify([stateDir])}`);
+          expect(sudoArgs).not.toContain("PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY=1");
+          expect(sudoArgs.some((arg) => arg.startsWith("PORTLESS_STATE_DIR="))).toBe(false);
           expect(sudoArgs.slice(-2)).toEqual(["clean", "--yes"]);
           expect(sudoArgs.join(" ")).not.toContain("service");
           expect(sudoArgs.join(" ")).not.toContain("prune");
@@ -2741,6 +2772,7 @@ describe("CLI", { timeout: 15_000 }, () => {
               PORTLESS_PORT: String(await getFreePort()),
               PORTLESS_HTTPS: "0",
               PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files,hosts",
+              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
             },
           });
 
@@ -2751,6 +2783,228 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
           expect(fs.readFileSync(path.join(stateDir, "keep.txt"), "utf-8")).toBe("keep");
           expect(result.capture.content).not.toContain("portless-start");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "retries file cleanup when CA trust removal is the only failure",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-only-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            failPrivilegedCleanup: true,
+            stateDir,
+            uid: 1000,
+            sudoStatus: 0,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.capture.sudoCalls).toHaveLength(1);
+          const sudoArgs = result.capture.sudoCalls[0]!.args;
+          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "removes preserved CA identity after a successful elevated trust retry",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-elevated-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            failPrivilegedCleanup: true,
+            sudoRunsCommand: true,
+            stateDir,
+            uid: 1000,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status, result.stdout + result.stderr).toBe(0);
+          expect(result.capture.sudoCalls).toHaveLength(1);
+          expect(fs.existsSync(path.join(stateDir, "ca.pem"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "ca.trust-refresh-pending"))).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps proxy identity when the proxy cannot be stopped",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-hung-proxy-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        const proxy = await startMockProxy(stateDir, { sigtermDelayMs: 6000 });
+        try {
+          fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(proxy.child.pid));
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+          fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            failPrivilegedCleanup: true,
+            stateDir,
+            uid: 1000,
+            sudoStatus: 0,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(proxy.port),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain("Proxy did not stop within");
+          expect(fs.readFileSync(path.join(stateDir, "proxy.pid"), "utf-8")).toBe(
+            String(proxy.child.pid)
+          );
+          expect(fs.readFileSync(path.join(stateDir, "proxy.port"), "utf-8")).toBe(
+            String(proxy.port)
+          );
+          expect(result.capture.sudoCalls).toHaveLength(1);
+          const sudoArgs = result.capture.sudoCalls[0]!.args;
+          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=files");
+          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY=1");
+        } finally {
+          if (proxy.child.exitCode === null) {
+            proxy.child.kill("SIGKILL");
+            await new Promise<void>((resolve) => proxy.child.once("exit", () => resolve()));
+          }
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      15_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "does not erase a proxy that restarted while stopping",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-restarted-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        const pidPath = path.join(stateDir, "proxy.pid");
+        const proxy = await startMockProxy(stateDir, { pidFileOnSigterm: pidPath });
+        try {
+          fs.writeFileSync(pidPath, String(proxy.child.pid));
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 0,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(proxy.port),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain("Proxy PID changed");
+          expect(fs.readFileSync(pidPath, "utf-8")).toBe("999999");
+          expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(true);
+        } finally {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "refuses a symlinked approved directory in elevated cleanup",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-elevated-link-"));
+        const target = path.join(tmpDir, "target");
+        const link = path.join(tmpDir, "state-link");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(target);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(target, "routes.json"), "[]");
+        fs.symlinkSync(target, link, "dir");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            failPrivilegedCleanup: true,
+            stateDir: link,
+            uid: 1000,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_INTERNAL_CLEAN_STEPS: "files",
+              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([link]),
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.capture.sudoCalls).toEqual([]);
+          expect(fs.readFileSync(path.join(target, "routes.json"), "utf-8")).toBe("[]");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "preserves CA identity when elevated trust removal still fails",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-failed-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+        fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+        fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
+        try {
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            failPrivilegedCleanup: true,
+            failCAAlways: true,
+            stateDir,
+            uid: 1000,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files",
+              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
+          expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
         } finally {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }

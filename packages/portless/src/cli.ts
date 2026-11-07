@@ -5,7 +5,7 @@ declare const __VERSION__: string;
 import colors from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
   type ComposeContainers,
@@ -136,6 +136,7 @@ import {
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanup,
+  isCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
 import {
@@ -200,19 +201,15 @@ const EXIT_TIMEOUT_MS = 2000;
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 
-/** Time (ms) allowed for a proxy process to release its listener after SIGTERM. */
 const PROXY_STOP_TIMEOUT_MS = 5000;
-
-/** Poll interval (ms) while waiting for a proxy listener to close. */
 const PROXY_STOP_POLL_MS = 50;
-
-/** Internal env var carrying the allowlisted cleanup steps for a sudo retry. */
 const CLEAN_ELEVATED_STEPS_ENV = "PORTLESS_INTERNAL_CLEAN_STEPS";
+const CLEAN_ELEVATED_DIRS_ENV = "PORTLESS_INTERNAL_CLEAN_DIRS";
+const CLEAN_ELEVATED_PRESERVE_PROXY_ENV = "PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY";
 
 /** Cleanup steps that may be retried with elevation. */
 type CleanupStep = "ca" | "files" | "hosts";
 
-/** Order in which elevated cleanup steps run. */
 const CLEANUP_STEP_ORDER: readonly CleanupStep[] = ["ca", "files", "hosts"];
 
 type ProxyConfigExplicitness = {
@@ -1158,11 +1155,60 @@ function sudoStopOrHint(port: number): boolean {
   return false;
 }
 
-/** Wait until the proxy listener stops answering, returning false on timeout. */
-async function waitForProxyToClose(proxyPort: number, timeoutMs: number): Promise<boolean> {
+/** Read a state file, returning null only when it does not exist. */
+function readStateFile(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf-8").trim();
+  } catch (err: unknown) {
+    if (isErrnoException(err) && err.code === "ENOENT") return null;
+    throw err;
+  }
+}
+
+/** Remove a state file only while its contents still match the expected value. */
+function removeStateFileIfMatches(file: string, expected: string): boolean {
+  const current = readStateFile(file);
+  if (current === null) return true;
+  if (current !== expected) return false;
+  try {
+    fs.unlinkSync(file);
+  } catch (err: unknown) {
+    if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+  }
+  return true;
+}
+
+/** Whether a live PID is still running rather than a zombie or dead entry. */
+function isProcessRunning(pid: number): boolean {
+  if (!isPidAlive(pid)) return false;
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+      return state !== "Z" && state !== "X";
+    }
+    if (process.platform === "darwin") {
+      const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+        encoding: "utf-8",
+        timeout: 2000,
+      }).trim();
+      return !state.startsWith("Z");
+    }
+  } catch {
+    return false;
+  }
+  return true;
+}
+
+/** Wait until the recorded PID exits and its listener closes. */
+async function waitForProxyToClose(
+  proxyPort: number,
+  pid: number,
+  timeoutMs: number
+): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   for (;;) {
-    if (!(await isProxyRunning(proxyPort))) return true;
+    if (!isProcessRunning(pid) && !(await isProxyRunning(proxyPort))) return true;
     if (Date.now() >= deadline) return false;
     await new Promise((resolve) => setTimeout(resolve, PROXY_STOP_POLL_MS));
   }
@@ -1181,16 +1227,33 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       if (pid !== null) {
         try {
           process.kill(pid, "SIGTERM");
-          if (!(await waitForProxyToClose(proxyPort, PROXY_STOP_TIMEOUT_MS))) {
+          if (!(await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS))) {
             console.error(
               colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`)
             );
             return false;
           }
-          try {
-            fs.unlinkSync(store.portFilePath);
-          } catch {
-            // Port file may already be absent; non-fatal
+          if (fs.existsSync(pidPath)) {
+            console.error(
+              colors.red(
+                `Proxy PID file changed to ${readStateFile(pidPath)}; leaving it in place.`
+              )
+            );
+            return false;
+          }
+          if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
+            console.error(
+              colors.red(
+                `Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`
+              )
+            );
+            return false;
+          }
+          if (await isProxyRunning(proxyPort)) {
+            console.error(
+              colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`)
+            );
+            return false;
           }
           writeTlsMarker(store.dir, false);
           writeCustomCertMarker(store.dir, false);
@@ -1281,19 +1344,32 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     }
 
     process.kill(pid, "SIGTERM");
-    if (!(await waitForProxyToClose(proxyPort, PROXY_STOP_TIMEOUT_MS))) {
+    if (!(await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS))) {
       console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
       return false;
     }
-    try {
-      fs.unlinkSync(pidPath);
-    } catch (err: unknown) {
-      if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+    const storedPid = readStateFile(pidPath);
+    if (storedPid !== null && storedPid !== String(pid)) {
+      console.error(colors.red(`Proxy PID changed to ${storedPid}; leaving it in place.`));
+      return false;
     }
-    try {
-      fs.unlinkSync(store.portFilePath);
-    } catch {
-      // Port file may already be removed; non-fatal
+    if (storedPid !== null && !removeStateFileIfMatches(pidPath, String(pid))) {
+      console.error(colors.red("Proxy PID file changed while stopping; leaving it in place."));
+      return false;
+    }
+    if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
+      console.error(
+        colors.red(
+          `Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`
+        )
+      );
+      return false;
+    }
+    if (await isProxyRunning(proxyPort)) {
+      console.error(
+        colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`)
+      );
+      return false;
     }
     writeTlsMarker(store.dir, false);
     writeCustomCertMarker(store.dir, false);
@@ -2468,28 +2544,67 @@ function parseCleanupSteps(value: string | undefined): CleanupStep[] | null {
   return CLEANUP_STEP_ORDER.filter((step) => requested.has(step));
 }
 
+/** Parse the exact state directories approved by the parent clean invocation. */
+function parseCleanupDirs(value: string | undefined): string[] {
+  if (!value) return [];
+  const parsed: unknown = JSON.parse(value);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((entry) => typeof entry !== "string" || !path.isAbsolute(entry))
+  ) {
+    throw new Error("Invalid cleanup directories");
+  }
+  return [...new Set(parsed)];
+}
+
 function cleanupStepLabel(step: CleanupStep): string {
   if (step === "ca") return "CA trust removal";
   if (step === "files") return "state files";
   return "hosts file";
 }
 
+/** Remove allowlisted state files and return every path that remains. */
+function removeStateFilesForCleanup(
+  stateDirs: string[],
+  failedCAStateDirs: Set<string>,
+  preserveProxyRuntime: boolean
+): string[] {
+  const failures = new Set<string>();
+  for (const stateDir of stateDirs) {
+    const removed = removePortlessStateFiles(stateDir, {
+      preserveCAIdentity: failedCAStateDirs.has(stateDir),
+      preserveProxyRuntime,
+    });
+    for (const file of removed) failures.add(file);
+  }
+  return [...failures];
+}
+
 /** Run only the allowlisted cleanup steps requested for an elevated retry. */
-function runElevatedCleanupSteps(steps: CleanupStep[]): number {
-  const stateDirs = collectStateDirsForCleanup();
-  let problems = 0;
+function runElevatedCleanupSteps(
+  steps: CleanupStep[],
+  stateDirs: string[],
+  preserveProxyRuntime: boolean
+): number {
+  const cleanableDirs = stateDirs.filter(isCleanableStateDir);
+  let problems = stateDirs.length - cleanableDirs.length;
+  const failedCAStateDirs = new Set<string>();
 
   if (steps.includes("ca")) {
-    for (const [, result] of attemptCATrustRemovalForCleanup(stateDirs, untrustCA)) {
-      if (!result.removed) problems++;
+    for (const [stateDir, result] of attemptCATrustRemovalForCleanup(cleanableDirs, untrustCA)) {
+      if (!result.removed) failedCAStateDirs.add(stateDir);
     }
+    problems += failedCAStateDirs.size;
   }
 
   if (steps.includes("files")) {
-    problems += stateDirs.flatMap((stateDir) =>
-      removePortlessStateFiles(stateDir, {
-        preserveCAIdentity: fs.existsSync(path.join(stateDir, "ca.pem")) && isCATrusted(stateDir),
-      })
+    const preserveCAIdentity = steps.includes("ca")
+      ? failedCAStateDirs
+      : new Set(cleanableDirs.filter((stateDir) => isCATrusted(stateDir)));
+    problems += removeStateFilesForCleanup(
+      cleanableDirs,
+      preserveCAIdentity,
+      preserveProxyRuntime
     ).length;
   }
 
@@ -2500,24 +2615,26 @@ function runElevatedCleanupSteps(steps: CleanupStep[]): number {
 
 /**
  * Retry only the failed privileged cleanup steps under sudo. The elevated
- * process receives the same state directories through the environment and
- * runs the internal allowlist instead of the full clean command.
+ * process receives the exact approved state directories and runs the internal
+ * allowlist instead of the full clean command.
  */
-function runElevatedCleanup(steps: CleanupStep[]): void {
+function runElevatedCleanup(
+  steps: CleanupStep[],
+  stateDirs: string[],
+  preserveProxyRuntime: boolean
+): void {
   if (steps.length === 0) return;
   const labels = steps.map(cleanupStepLabel).join(", ");
   console.log(colors.yellow(`Cleanup needs elevated privileges. Requesting sudo for ${labels}...`));
-  const envArgs = collectPortlessEnvArgs().filter(
-    (entry) => !entry.startsWith(`${CLEAN_ELEVATED_STEPS_ENV}=`)
-  );
   const home = process.env.HOME;
   const result = spawnSync(
     "sudo",
     [
       "env",
-      ...envArgs,
       ...(home ? [`HOME=${home}`] : []),
       `${CLEAN_ELEVATED_STEPS_ENV}=${steps.join(",")}`,
+      `${CLEAN_ELEVATED_DIRS_ENV}=${JSON.stringify(stateDirs)}`,
+      ...(preserveProxyRuntime ? [`${CLEAN_ELEVATED_PRESERVE_PROXY_ENV}=1`] : []),
       process.execPath,
       getEntryScript(),
       "clean",
@@ -2568,7 +2685,12 @@ async function handleClean(args: string[]): Promise<void> {
 
   const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
   if (requestedCleanupSteps) {
-    process.exitCode = runElevatedCleanupSteps(requestedCleanupSteps) > 0 ? 1 : 0;
+    const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
+    const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
+    process.exitCode =
+      runElevatedCleanupSteps(requestedCleanupSteps, approvedDirs, preserveProxyRuntime) > 0
+        ? 1
+        : 0;
     return;
   }
 
@@ -2620,12 +2742,15 @@ async function handleClean(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  if (!(await stopProxy(store, port, tls))) {
+  let proxyStopped = await stopProxy(store, port, tls);
+  if (!proxyStopped) {
     problems++;
   } else if (await isProxyRunning(port, tls)) {
     console.error(colors.red(`Proxy is still running on port ${port}. Stop it and retry clean.`));
+    proxyStopped = false;
     problems++;
   }
+  const preserveProxyRuntime = !proxyStopped;
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
   const routesForClean = store.loadRoutesRaw();
@@ -2649,23 +2774,29 @@ async function handleClean(args: string[]): Promise<void> {
     if (!untrustResult.removed) failedCAStateDirs.add(stateDir);
   }
 
-  let stateFailures = stateDirs.flatMap((stateDir) =>
-    removePortlessStateFiles(stateDir, { preserveCAIdentity: failedCAStateDirs.has(stateDir) })
+  let stateFailures = removeStateFilesForCleanup(
+    stateDirs,
+    failedCAStateDirs,
+    preserveProxyRuntime
   );
   let hostsCleaned = cleanHostsFile();
 
   const retrySteps: CleanupStep[] = [];
   if (failedCAStateDirs.size > 0) retrySteps.push("ca");
-  if (stateFailures.length > 0) retrySteps.push("files");
+  if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
   if (!hostsCleaned) retrySteps.push("hosts");
   if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
-    runElevatedCleanup(retrySteps);
+    runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
     for (const stateDir of [...failedCAStateDirs]) {
-      if (!fs.existsSync(path.join(stateDir, "ca.pem")) || !isCATrusted(stateDir)) {
-        failedCAStateDirs.delete(stateDir);
-      }
+      if (!isCATrusted(stateDir)) failedCAStateDirs.delete(stateDir);
     }
-    stateFailures = stateFailures.filter((file) => fs.existsSync(file));
+    if (retrySteps.includes("ca") || retrySteps.includes("files")) {
+      stateFailures = removeStateFilesForCleanup(
+        stateDirs,
+        failedCAStateDirs,
+        preserveProxyRuntime
+      );
+    }
     if (!hostsCleaned) hostsCleaned = cleanHostsFile();
   }
 
