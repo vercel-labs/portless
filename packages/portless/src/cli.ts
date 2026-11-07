@@ -2273,7 +2273,6 @@ ${colors.bold("Options:")}
   --force                       Kill the existing process and take over its route
   --name <name>                 Set the app name or bypass command dispatch
   --app-port <number>           Use a fixed port for the app
-  --prefix <label>              Set the worktree prefix for run (empty disables it)
   --                            Stop flag parsing and pass remaining arguments to the app
 
 ${colors.bold("Environment variables:")}
@@ -2288,6 +2287,7 @@ ${colors.bold("Environment variables:")}
 Precedence: flags override PORTLESS_* variables, which override portless.json.
 Auto-start reuses the proxy's saved settings unless a flag or variable changes them.
 Proxy options: portless proxy --help
+Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
 `);
   process.exit(0);
@@ -4530,7 +4530,8 @@ async function handleDefaultMulti(
     process.exit(1);
   }
 
-  const scriptName = globalScript ?? loaded?.config.script ?? "dev";
+  const configScript = loaded?.config.script ?? "dev";
+  const scriptName = globalScript ?? configScript;
 
   // Infer the monorepo project name for use as the base domain.
   // Config name > common npm scope > workspace root inference.
@@ -4598,7 +4599,7 @@ async function handleDefaultMulti(
       worktree: mergeWorktreeConfig(rootOverride?.worktree, leafWorktree),
     };
 
-    const effectiveScript = appOverride.script ?? scriptName;
+    const effectiveScript = globalScript ?? appOverride.script ?? configScript;
     const scriptValue = pkg.scripts[effectiveScript];
     if (!scriptValue) continue;
 
