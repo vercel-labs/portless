@@ -277,7 +277,7 @@ Adds the portless certificate authority to your system trust store. Required onc
 portless clean
 ```
 
-Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed. If trust-store removal fails, portless keeps its CA certificate and key so a later `portless clean` can retry.
+Stops the proxy if it is running, removes the startup service and portless CA from the OS trust store when installed, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed. If trust-store removal fails, portless keeps its CA certificate and key so a later `portless clean` can retry.
 
 ## Prune orphans
 
@@ -286,9 +286,9 @@ portless prune
 portless prune --force
 ```
 
-Finds and kills orphaned dev server processes left behind by crashed portless sessions. When the CLI is killed with `kill -9` or crashes, child dev servers may survive and continue holding their ports. This command checks routes whose owning process is dead but whose port is still in use, terminates the orphans, and removes the stale route entries. Use `--force` to send SIGKILL instead of SIGTERM.
+Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time. If the group still holds the port after SIGTERM, prune keeps the route and its shares and records a surviving listener so you can retry with `portless prune --force`, which verifies that listener and sends SIGKILL. When the group leader is already gone, a port holder in the recorded group cannot be verified, so prune keeps the route and its shares without signaling it. Prune reports unrelated port holders without killing them.
 
-On macOS and Linux, prune stops the whole process group portless started for the route, including processes that do not hold the port. A group is only signaled when its leader still has the start time portless recorded at spawn, so a reused PID is never targeted. `portless run` does the same cleanup on startup for routes whose session died.
+On Windows, prune cannot verify or signal process groups. It removes stale routes and Tailscale shares and reports any port holders. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. `portless run` also attempts to stop recorded orphaned process groups on startup.
 
 ## Proxy control
 

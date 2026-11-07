@@ -256,7 +256,9 @@ describe("RouteStore", () => {
 
     it("prunes dead supported routes without removing skipped entries", () => {
       seed();
-      expect(store.pruneStaleRoutes()).toEqual([stale]);
+      const dead = store.findStaleRoutes();
+      expect(dead).toEqual([stale]);
+      expect(store.removeStaleRoute(dead[0]!.hostname, dead[0]!.pid)).toBe(true);
       expect(disk()).toEqual(
         expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
       );
@@ -495,6 +497,112 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].pid).toBe(newOwnerPid);
+    });
+  });
+
+  describe("stale recovery records", () => {
+    const deadPid = 999999;
+    const staleRoute = {
+      hostname: "stale.localhost",
+      port: 4310,
+      pid: deadPid,
+      childPgid: 4242,
+      childStartTime: "leader-start",
+      tailscaleHttpsPort: 8443,
+      ngrokPid: 5151,
+      registeredAt: Date.now() - 60_000,
+    };
+
+    const writeRoutes = (routes: unknown[]) =>
+      fs.writeFileSync(path.join(tmpDir, "routes.json"), JSON.stringify(routes));
+    const readRaw = () =>
+      JSON.parse(fs.readFileSync(path.join(tmpDir, "routes.json"), "utf-8")) as Array<{
+        hostname: string;
+        pid: number;
+        port: number;
+        orphanPid?: number;
+        orphanStartTime?: string;
+        ngrokUrl?: string;
+      }>;
+
+    it("keeps a stale record out of the active view", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(store.loadRoutes()).toEqual([]);
+      expect(store.loadRoutesRaw()).toEqual([staleRoute]);
+      expect(store.findStaleRoutes()).toEqual([staleRoute]);
+    });
+
+    it("keeps the record through add, update, transfer and remove of other routes", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+      store.updateRoute("other.localhost", { ngrokUrl: "https://other.ngrok.app" });
+      expect(store.transferRoute("other.localhost", process.pid, process.ppid)).toBe(true);
+      store.removeRoute("other.localhost", process.ppid);
+
+      expect(readRaw()).toEqual([staleRoute]);
+      expect(store.loadRoutes()).toEqual([]);
+    });
+
+    it("keeps the record when the same hostname is registered again", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(() => store.addRoute("stale.localhost", 4999, process.pid)).not.toThrow();
+
+      expect(store.loadRoutes()).toHaveLength(1);
+      expect(store.loadRoutes()[0]!.port).toBe(4999);
+      expect(readRaw()).toHaveLength(2);
+      expect(readRaw()[0]).toEqual(staleRoute);
+    });
+
+    it("updates the live entry, not the stale record, for a shared hostname", () => {
+      store.ensureDir();
+      const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
+      writeRoutes([staleRoute, live]);
+
+      store.updateRoute("stale.localhost", { ngrokUrl: "https://live.ngrok.app" });
+
+      const raw = readRaw();
+      expect(raw[0]).toEqual(staleRoute);
+      expect(raw[1]).toEqual({ ...live, ngrokUrl: "https://live.ngrok.app" });
+    });
+
+    it("records a verified member only on the matching stale record", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(store.recordStaleOrphan({ ...staleRoute, childStartTime: "other" }, 4343, "m")).toBe(
+        false
+      );
+      expect(store.recordStaleOrphan(staleRoute, 4343, "member-start")).toBe(true);
+
+      expect(readRaw()).toEqual([
+        { ...staleRoute, orphanPid: 4343, orphanStartTime: "member-start" },
+      ]);
+    });
+
+    it("removes only the dead owner's record", () => {
+      store.ensureDir();
+      const second = { ...staleRoute, hostname: "second.localhost", port: 4311 };
+      writeRoutes([staleRoute, second]);
+
+      expect(store.removeStaleRoute("stale.localhost", 111111)).toBe(false);
+      expect(store.removeStaleRoute("stale.localhost", deadPid)).toBe(true);
+      expect(readRaw()).toEqual([second]);
+    });
+
+    it("drops stale entries without recovery data on the next write", () => {
+      store.ensureDir();
+      const plain = { hostname: "plain.localhost", port: 4312, pid: deadPid, registeredAt: 1 };
+      writeRoutes([plain]);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+
+      expect(readRaw().map((route) => route.hostname)).toEqual(["other.localhost"]);
     });
   });
 

@@ -6,7 +6,12 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { canBindProxyPort, getProxyBindTargets } from "./cli-utils.js";
+import {
+  canBindProxyPort,
+  findPidsOnPort,
+  getProcessStartTime,
+  getProxyBindTargets,
+} from "./cli-utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_PROOF_HEADER,
@@ -571,6 +576,395 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(lines.some((line) => line.trim() === "Host: api.internal")).toBe(true);
         expect(row("legacy.localhost")).toMatch(/ {2}\(pid \d+\)$/);
       } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("prune", () => {
+    it("stops only verified Windows tunnel executables", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-win-tunnels-"));
+      const preload = path.join(tmpDir, "windows.cjs");
+      const capture = path.join(tmpDir, "capture.json");
+      try {
+        fs.writeFileSync(
+          preload,
+          [
+            'const fs = require("node:fs");',
+            'const cp = require("node:child_process");',
+            'const { syncBuiltinESMExports } = require("node:module");',
+            'Object.defineProperty(process, "platform", { value: "win32" });',
+            'const names = { 71001: "NGROK.EXE\\r\\n", 71002: "Cloudflared.exe\\r\\n", 71003: "other.exe\\r\\n" };',
+            "const calls = { queries: [], signals: [] };",
+            "cp.execFileSync = (command, args, options) => {",
+            '  if (command !== "powershell.exe") throw new Error("unexpected lookup: " + command);',
+            "  calls.queries.push({ command, args, options });",
+            "  const pid = args.at(-1).match(/ProcessId = (\\d+)/)?.[1];",
+            '  if (!(pid in names)) throw new Error("process unavailable");',
+            "  return names[pid];",
+            "};",
+            "process.kill = (pid, signal) => {",
+            '  if (signal === "SIGTERM" && pid >= 71001 && pid <= 71004) {',
+            "    calls.signals.push(pid); return true;",
+            "  }",
+            '  throw Object.assign(new Error("not found"), { code: "ESRCH" });',
+            "};",
+            "syncBuiltinESMExports();",
+            `process.on("exit", () => fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify(calls)));`,
+          ].join("\n")
+        );
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "verified.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              ngrokPid: 71001,
+              cloudflarePid: 71002,
+            },
+            {
+              hostname: "unverified.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              ngrokPid: 71003,
+              cloudflarePid: 71004,
+            },
+          ])
+        );
+        const result = run(["prune"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, NODE_OPTIONS: `--require=${preload}` },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        const calls = JSON.parse(fs.readFileSync(capture, "utf-8"));
+        expect(calls.signals).toEqual([71001, 71002]);
+        expect(calls.queries).toHaveLength(4);
+        expect(calls.queries[0]).toMatchObject({
+          command: "powershell.exe",
+          args: [
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            expect.stringContaining("ProcessId = 71001"),
+          ],
+          options: { windowsHide: true, timeout: expect.any(Number) },
+        });
+        expect(result.stdout).toContain("verified.localhost - stopped ngrok tunnel");
+        expect(result.stdout).toContain("verified.localhost - stopped Cloudflare tunnel");
+        expect(result.stdout).not.toContain("unverified.localhost - stopped");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps a surviving orphan for prune --force",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-retry-"));
+        const child = spawn(
+          "sh",
+          [
+            "-c",
+            '"$1" -e "$2"',
+            "sh",
+            process.execPath,
+            'process.on("SIGTERM",()=>{});require("net").createServer().listen(0,"127.0.0.1",function(){console.log(this.address().port)})',
+          ],
+          {
+            detached: true,
+            stdio: ["ignore", "pipe", "ignore"],
+          }
+        );
+        const tunnels: ReturnType<typeof spawn>[] = [];
+        const tailscaleLog = path.join(tmpDir, "tailscale.log");
+        fs.writeFileSync(
+          path.join(tmpDir, "tailscale"),
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
+          { mode: 0o755 }
+        );
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
+          PATH: `${tmpDir}${path.delimiter}${process.env.PATH}`,
+        };
+        try {
+          for (const binary of ["ngrok", "cloudflared"]) {
+            const binaryPath = path.join(tmpDir, binary);
+            fs.copyFileSync(process.execPath, binaryPath);
+            const tunnel = spawn(
+              binaryPath,
+              [
+                "-e",
+                `process.title=${JSON.stringify(binary)};setInterval(()=>{},1000);console.log("ready")`,
+              ],
+              {
+                stdio: ["ignore", "pipe", "ignore"],
+              }
+            );
+            tunnels.push(tunnel);
+            await new Promise<void>((resolve, reject) => {
+              tunnel.once("error", reject);
+              tunnel.stdout!.once("data", () => resolve());
+            });
+          }
+          const port = await new Promise<number>((resolve, reject) => {
+            child.once("error", reject);
+            child.stdout.once("data", (data) => resolve(Number(data.toString().trim())));
+          });
+          const childPgid = child.pid!;
+          const childStartTime = getProcessStartTime(childPgid);
+          expect(childStartTime).toBeTruthy();
+          const routesPath = path.join(tmpDir, "routes.json");
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "retry.localhost",
+                port,
+                pid: 999999,
+                childPgid,
+                childStartTime,
+                tailscaleHttpsPort: 8443,
+                ngrokPid: tunnels[0]!.pid,
+                cloudflarePid: tunnels[1]!.pid,
+              },
+            ])
+          );
+          const readRaw = () =>
+            JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
+          const first = run(["prune"], { env });
+          expect(first.status).toBe(0);
+          expect(first.stdout).toContain("did not exit");
+          expect(first.stdout).toContain("portless prune --force");
+          expect(readRaw()).toEqual([
+            expect.objectContaining({
+              hostname: "retry.localhost",
+              port,
+              childPgid,
+              orphanPid: findPidsOnPort(port)[0],
+              orphanStartTime: expect.any(String),
+            }),
+          ]);
+          expect(fs.existsSync(tailscaleLog)).toBe(false);
+          for (const tunnel of tunnels) expect(() => process.kill(tunnel.pid!, 0)).not.toThrow();
+          expect(first.stdout).not.toContain("stopped");
+          const other = run(["alias", "unrelated.localhost", String(await getFreePort())], { env });
+          expect(other.status, other.stderr).toBe(0);
+          expect(readRaw().filter((route) => route.pid === 999999)).toHaveLength(1);
+          const second = run(["prune", "--force"], { env });
+          expect(second.status).toBe(0);
+          expect(readRaw().filter((route) => route.pid === 999999)).toEqual([]);
+          expect(findPidsOnPort(port)).toEqual([]);
+          expect(fs.readFileSync(tailscaleLog, "utf-8")).toContain("serve --yes --https=8443 off");
+          expect(second.stdout).toContain("stopped ngrok tunnel");
+          expect(second.stdout).toContain("stopped Cloudflare tunnel");
+          expect(readRaw()).toEqual([
+            expect.objectContaining({ hostname: "unrelated.localhost", pid: 0 }),
+          ]);
+          for (const tunnel of tunnels) {
+            if (tunnel.exitCode === null && tunnel.signalCode === null) {
+              await new Promise<void>((resolve) => tunnel.once("exit", () => resolve()));
+            }
+            expect(() => process.kill(tunnel.pid!, 0)).toThrow();
+          }
+        } finally {
+          for (const tunnel of tunnels) tunnel.kill("SIGKILL");
+          try {
+            process.kill(-child.pid!, "SIGKILL");
+          } catch {
+            child.kill("SIGKILL");
+          }
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      15_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps a route whose group leader exited before the first prune",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-leader-gone-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const readRaw = () =>
+          JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
+        const deadRecords = () => readRaw().filter((route) => route.pid === 999999);
+        const helperScript = `require("net").createServer().listen(Number(process.argv[1]),"127.0.0.1",()=>{setInterval(()=>{},1000)})`;
+        const port = await getFreePort();
+        const leader = spawn(
+          "sh",
+          ["-c", '"$1" -e "$2" "$3" &', "sh", process.execPath, helperScript, String(port)],
+          { detached: true, stdio: "ignore" }
+        );
+        const leaderPid = leader.pid!;
+        const leaderStartTime = getProcessStartTime(leaderPid);
+        const env = { PORTLESS_STATE_DIR: tmpDir };
+        try {
+          await new Promise<void>((resolve) => leader.once("exit", () => resolve()));
+          let holderPid: number | undefined;
+          for (let i = 0; i < 100 && holderPid === undefined; i++) {
+            holderPid = findPidsOnPort(port)[0];
+            if (holderPid === undefined) await new Promise((r) => setTimeout(r, 50));
+          }
+          expect(holderPid).toBeDefined();
+          expect(leaderStartTime).toBeTruthy();
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "leader-gone.localhost",
+                port,
+                pid: 999999,
+                childPgid: leaderPid,
+                childStartTime: leaderStartTime,
+                tailscaleHttpsPort: 8443,
+                registeredAt: Date.now() - 60_000,
+              },
+            ])
+          );
+
+          expect(
+            run(["alias", "early.localhost", String(await getFreePort())], { env }).status
+          ).toBe(0);
+          expect(deadRecords()).toEqual([
+            expect.objectContaining({
+              hostname: "leader-gone.localhost",
+              port,
+              childPgid: leaderPid,
+              childStartTime: leaderStartTime,
+              tailscaleHttpsPort: 8443,
+            }),
+          ]);
+          expect(run(["list"], { env }).stdout).not.toContain("leader-gone.localhost");
+
+          const first = run(["prune"], { env });
+          expect(first.status, first.stderr).toBe(0);
+          expect(first.stdout).toContain("could not be verified");
+          expect(first.stdout).toContain("nothing was killed");
+          expect(first.stdout).not.toContain("tailscale");
+          expect(deadRecords()).toHaveLength(1);
+          expect(deadRecords()[0].orphanPid).toBeUndefined();
+          expect(findPidsOnPort(port)).toEqual([holderPid]);
+
+          const forced = run(["prune", "--force"], { env });
+          expect(forced.status, forced.stderr).toBe(0);
+          expect(forced.stdout).toContain("nothing was killed");
+          expect(deadRecords()).toHaveLength(1);
+          expect(findPidsOnPort(port)).toEqual([holderPid]);
+
+          expect(
+            run(["alias", "add-other.localhost", String(await getFreePort())], { env }).status
+          ).toBe(0);
+          expect(
+            run(["alias", "leader-gone.localhost", String(await getFreePort())], { env }).status
+          ).toBe(0);
+          expect(deadRecords()).toHaveLength(1);
+          const afterAliases = run(["prune", "--force"], { env });
+          expect(afterAliases.status, afterAliases.stderr).toBe(0);
+          expect(afterAliases.stdout).toContain("could not be verified");
+          expect(findPidsOnPort(port)).toEqual([holderPid]);
+          expect(deadRecords()).toHaveLength(1);
+          expect(readRaw()).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({ hostname: "leader-gone.localhost", pid: 0 }),
+            ])
+          );
+
+          process.kill(holderPid!, "SIGKILL");
+          for (let i = 0; i < 100 && findPidsOnPort(port).length > 0; i++) {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          const resolved = run(["prune", "--force"], { env });
+          expect(resolved.status, resolved.stderr).toBe(0);
+          expect(resolved.stdout).toContain("route removed");
+          expect(deadRecords()).toEqual([]);
+        } finally {
+          try {
+            process.kill(-leaderPid, "SIGKILL");
+          } catch {
+            // already gone
+          }
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
+
+    it("leaves a tailscale serve alone while a live route owns its port", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-tailscale-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const tailscaleLog = path.join(tmpDir, "tailscale.log");
+      fs.writeFileSync(
+        path.join(tmpDir, "tailscale"),
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\n',
+        { mode: 0o755 }
+      );
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
+        PATH: `${tmpDir}${path.delimiter}${process.env.PATH}`,
+      };
+      const staleOnPort = async (httpsPort: number, liveHttpsPort?: number) => {
+        fs.writeFileSync(
+          routesPath,
+          JSON.stringify([
+            {
+              hostname: "dead.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              tailscaleHttpsPort: httpsPort,
+              registeredAt: Date.now() - 60_000,
+            },
+            {
+              hostname: "live.localhost",
+              port: await getFreePort(),
+              pid: 0,
+              ...(liveHttpsPort === undefined ? {} : { tailscaleHttpsPort: liveHttpsPort }),
+              registeredAt: Date.now(),
+            },
+          ])
+        );
+        const result = run(["prune"], { env });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain("route removed");
+        return fs.existsSync(tailscaleLog) ? fs.readFileSync(tailscaleLog, "utf-8") : "";
+      };
+      try {
+        expect(await staleOnPort(8443, 8443)).toBe("");
+        fs.rmSync(tailscaleLog, { force: true });
+        expect(await staleOnPort(8443)).toContain("serve --yes --https=8443 off");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("removes a stale route without killing an unrelated process on its port", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-safe-"));
+      const listener = net.createServer();
+      try {
+        await new Promise<void>((resolve, reject) => {
+          listener.once("error", reject);
+          listener.listen(0, "127.0.0.1", resolve);
+        });
+        const address = listener.address();
+        if (!address || typeof address === "string")
+          throw new Error("Listener address unavailable");
+        const route = {
+          hostname: "stale.localhost",
+          port: address.port,
+          pid: 999999,
+          registeredAt: Date.now() - 60_000,
+        };
+        const routesPath = path.join(tmpDir, "routes.json");
+        fs.writeFileSync(routesPath, JSON.stringify([route]));
+
+        const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+        expect(first.status).toBe(0);
+        expect(first.stdout).toContain("still holds the port and was not killed");
+        expect(listener.listening).toBe(true);
+        expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
+      } finally {
+        if (listener.listening)
+          await new Promise<void>((resolve) => listener.close(() => resolve()));
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
@@ -1975,6 +2369,66 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("clean subcommand", () => {
+    it.skipIf(process.platform === "win32")(
+      "clean --yes removes a leftover routes.lock directory",
+      async ({ skip }) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-lock-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        const bin = path.join(tmpDir, "bin");
+        try {
+          let hostsWritable = true;
+          try {
+            fs.accessSync("/etc/hosts", fs.constants.W_OK);
+          } catch {
+            hostsWritable = false;
+          }
+          if (
+            fs.existsSync("/tmp/portless") ||
+            hostsWritable ||
+            fs.readFileSync("/etc/hosts", "utf-8").includes("# portless-start")
+          )
+            skip();
+          fs.mkdirSync(path.join(stateDir, "routes.lock"), { recursive: true });
+          fs.mkdirSync(home);
+          fs.mkdirSync(bin);
+          fs.symlinkSync(process.execPath, path.join(bin, "node"));
+          fs.writeFileSync(path.join(stateDir, "routes.json"), "not json");
+          const result = run(["clean", "--yes"], {
+            env: {
+              HOME: home,
+              PORTLESS_STATE_DIR: stateDir,
+              PATH: bin,
+              PORTLESS_PORT: String(await getFreePort()),
+              PORTLESS_HTTPS: "0",
+              NODE_OPTIONS: undefined,
+            },
+          });
+          expect(result.status, result.stderr).toBe(0);
+          expect(fs.existsSync(path.join(stateDir, "routes.lock"))).toBe(false);
+          expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it("refuses non-interactive cleanup without confirmation", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-confirm-"));
+      try {
+        const routes = path.join(tmpDir, "routes.json");
+        fs.writeFileSync(routes, "[]");
+        const { status, stderr } = run(["clean"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, HOME: tmpDir, USERPROFILE: tmpDir },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("portless clean --yes");
+        expect(fs.readFileSync(routes, "utf-8")).toBe("[]");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("prints help with --help", () => {
       const { status, stdout } = run(["clean", "--help"]);
       expect(status).toBe(0);

@@ -343,7 +343,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
-| `portless prune`                                  | Kill orphaned dev server groups; `run` also does it on start   |
+| `portless prune`                                  | Remove stale routes and shares; stop matching process groups   |
 | `portless prune --force`                          | Kill orphans with SIGKILL instead of SIGTERM                   |
 | `portless proxy start`                            | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
 | `portless proxy start --no-tls`                   | Start without HTTPS (plain HTTP on port 80)                    |
@@ -383,6 +383,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless --help` / `-h`                          | Show help                                                      |
 | `portless <command> --help` / `-h`                | Print command help without running it                          |
 | `portless --version` / `-v`                       | Show version                                                   |
+
+`portless prune` keeps a surviving process group's route and shares so you can retry with `portless prune --force`, and keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
 
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
@@ -505,7 +507,7 @@ This adds the portless local CA to your system trust store. After that, restart 
 portless clean
 ```
 
-Stops the proxy if needed, removes the portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. May require `sudo` on macOS/Linux. If trust-store removal fails, portless retains its CA certificate and key so a later `portless clean` can safely retry.
+Stops the proxy if needed, removes the startup service and portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. May require `sudo` on macOS/Linux. If trust-store removal fails, portless retains its CA certificate and key so a later `portless clean` can safely retry.
 
 ### Proxy loop (508 Loop Detected)
 

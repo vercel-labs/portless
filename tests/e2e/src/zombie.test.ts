@@ -445,7 +445,7 @@ describe("portless prune", () => {
     }
   });
 
-  it("kills orphaned processes and removes stale routes", async () => {
+  it("removes stale routes without killing unrelated listeners", async () => {
     if (isWindows) return;
 
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-prune-"));
@@ -484,7 +484,8 @@ describe("portless prune", () => {
       JSON.stringify([{ hostname: "orphan-test.localhost", port: ORPHAN_PORT, pid: deadPid }])
     );
 
-    expect(findPidsOnPort(ORPHAN_PORT).length).toBeGreaterThan(0);
+    const listenerPid = orphanServer.pid!;
+    expect(findPidsOnPort(ORPHAN_PORT)).toContain(listenerPid);
 
     const result = spawnSync(process.execPath, [CLI_PATH, "prune"], {
       env: {
@@ -498,11 +499,10 @@ describe("portless prune", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("orphan-test.localhost");
-    expect(result.stdout).toContain("killed");
-    expect(result.stdout).toContain("Pruned 1 stale route");
-
-    await sleep(1000);
-    expect(findPidsOnPort(ORPHAN_PORT)).toEqual([]);
+    expect(result.stdout).toContain(`PID ${listenerPid} still holds the port and was not killed`);
+    expect(result.stdout).toContain("Pruned 1 stale route, killed 0 orphaned processes");
+    expect(isAlive(listenerPid)).toBe(true);
+    expect(findPidsOnPort(ORPHAN_PORT)).toContain(listenerPid);
 
     const routesAfter = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
     expect(routesAfter).toEqual([]);

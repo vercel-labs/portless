@@ -1446,10 +1446,28 @@ export function getProcessStartTime(pid: number): string | null {
   }
 }
 
-/** Read the executable name of a process. Returns null on Windows or when it cannot be read. */
+/** Read the executable name of a process, without the Windows .exe suffix. Returns null if unreadable. */
 export function getProcessCommand(pid: number): string | null {
-  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
+    if (isWindows) {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop).Name`,
+        ],
+        { encoding: "utf-8", windowsHide: true, timeout: PID_LOOKUP_TIMEOUT_MS }
+      );
+      return (
+        output
+          .trim()
+          .replace(/\.exe$/i, "")
+          .toLowerCase() || null
+      );
+    }
     const output = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
@@ -1461,24 +1479,35 @@ export function getProcessCommand(pid: number): string | null {
 }
 
 /**
- * Kill a process group left behind by a portless session that died without
- * cleaning up. The group is only signaled while its leader is alive, still
- * leads the group, and has the start time recorded at spawn, so a recycled PID
- * is not targeted. Returns true when the signal was sent.
+ * Read the process group a live pid belongs to. Groups outlive their leader, so
+ * a match here is evidence about a process, never proof it belongs to us.
+ * Returns null on Windows or when the process is gone.
  */
-export function killOrphanedProcessGroup(
-  pgid: number,
-  startTime: string | undefined,
-  signal: NodeJS.Signals = "SIGTERM"
-): boolean {
-  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
+export function getProcessGroupId(pid: number): number | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pgid)], {
+    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
     });
-    if (Number(output.trim()) !== pgid) return false;
-    if (getProcessStartTime(pgid) !== startTime) return false;
+    const pgid = Number(output.trim());
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Signal a process group only while its recorded member and start time still match. */
+export function killOrphanedProcessGroup(
+  pgid: number,
+  startTime: string | undefined,
+  signal: NodeJS.Signals = "SIGTERM",
+  identityPid = pgid
+): boolean {
+  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
+  try {
+    if (getProcessGroupId(identityPid) !== pgid) return false;
+    if (getProcessStartTime(identityPid) !== startTime) return false;
     process.kill(-pgid, signal);
     return true;
   } catch {
@@ -2296,13 +2325,13 @@ export function injectPackageScriptFrameworkFlags(
 export function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output: process.stderr,
   });
   return new Promise((resolve) => {
     rl.on("close", () => resolve(""));
     rl.question(question, (answer) => {
-      rl.close();
       resolve(answer.trim().toLowerCase());
+      rl.close();
     });
   });
 }
