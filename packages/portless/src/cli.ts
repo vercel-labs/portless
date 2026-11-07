@@ -2099,17 +2099,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
 function printHelp(): void {
   console.log(`
-${colors.bold("portless")} - Replace port numbers with stable, named .localhost URLs. For humans and agents.
-
-Eliminates port conflicts, memorizing port numbers, and cookie/storage
-clashes by giving each dev server a stable .localhost URL.
-
-${colors.bold("Install:")}
-  ${colors.cyan("npm install -g portless")}          Global (recommended)
-  ${colors.cyan("npm install -D portless")}          Project dev dependency
-
-${colors.bold("Requirements:")}
-  Node.js 24+
+${colors.bold("portless")} - Run dev servers at stable .localhost URLs.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless")}                         Run dev script through proxy
@@ -2117,20 +2107,20 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless run")}                     Same as above
   ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
-  ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
+  ${colors.cyan("portless proxy start")}             Start the proxy
   ${colors.cyan("portless proxy stop")}              Stop the proxy
   ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
-  ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
-  ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
+  ${colors.cyan("portless get <name>")}              Print URL for a service
+  ${colors.cyan("portless alias <name> <port>")}     Register a static route
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
-  ${colors.cyan("portless compose up [args...]")}    Run a Docker Compose project with a route per service
+  ${colors.cyan("portless compose up [args...]")}    Run a Docker Compose project
   ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
-  ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
-  ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
-  ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
+  ${colors.cyan("portless clean")}                   Remove portless state and trust entry
+  ${colors.cyan("portless prune")}                   Kill orphaned dev servers
+  ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
 Every command accepts --help or -h, which only prints help. After run <cmd>,
@@ -2138,195 +2128,40 @@ compose <subcommand>, or --, they belong to the wrapped command.
 Value flags for run and named apps accept both --flag <value> and --flag=<value>.
 
 ${colors.bold("Examples:")}
-  portless                            # Run dev script through proxy
-  portless                            # From monorepo root: start all apps
-  portless --script start             # Run "start" script instead of "dev"
-  portless myapp next dev             # -> https://myapp.localhost
-  portless run next dev               # -> https://<project>.localhost
-  portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
-  portless service install            # Start HTTPS proxy on OS startup
-  portless service install --lan      # Persist LAN mode in the startup service
-  portless service install --wildcard # Persist wildcard routing in the startup service
-  portless get backend                # -> https://backend.localhost
-  portless doctor                     # Check proxy, routes, DNS, and CA trust
-  portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
-  portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
-  portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
-
-${colors.bold("Configuration (portless.json):")}
-  Optional. Portless works out of the box by running the "dev" script
-  from package.json. Use portless.json to override defaults.
-
-  Override name:   { "name": "myapp" }
-  Override script: { "name": "myapp", "script": "start" }
-  Monorepo:        { "apps": { "apps/web": { "name": "myapp" } } }
-  Turborepo:       Workspace roots use Turbo when turbo.json or turbo.jsonc is readable
-                   Set { "turbo": false } to use direct spawning
-
-${colors.bold("In package.json:")}
-  {
-    "scripts": {
-      "dev": "next dev"
-    }
-  }
-  Then run: portless
-  Or:       portless run
-  Or:       portless run next dev
-
-${colors.bold("How it works:")}
-  1. Start the proxy once (HTTPS on port 443 by default, auto-elevates with sudo)
-  2. Run your apps - they auto-start the proxy and register automatically
-     (apps get a random port in the 4000-4999 range via PORT)
-  3. Access via https://<name>.localhost
-  4. .localhost domains auto-resolve to 127.0.0.1
-  5. Frameworks that ignore PORT (Vite, VitePlus, VitePress, Astro, React
-     Router, Angular, Expo, React Native, Wrangler) get --port and, when
-     needed, --host flags injected automatically (--ip for Wrangler),
-     including through a package script whose command starts with the
-     framework. Only server commands (dev, serve, preview, start, a bare
-     vite, or vite [root]) get them; build, optimize, test and the like
-     reject them, and an invocation portless cannot classify is left alone
-     too. Expo --localhost, --lan and --tunnel modes are preserved while
-     the assigned port is still injected.
-     Portless also leaves a script alone when it is
-     compound (&&, |, ;), ends in a # comment, ends its own option list with
-     --, is env-prefixed (NODE_ENV=production vite), delegates to another
-     script, or is invoked with runner flags before the script name
-     (bun run --bun dev); set the port in those yourself
-  6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
-  7. Proxy errors (404, 421 misdirected, 502, 508) are an HTML page for browsers and JSON
-     ({"error","upstream","message"}) for clients that do not accept text/html
-  Elevated proxy processes keep the invoking user's ~/.portless state directory.
-
-${colors.bold("HTTP/2 + HTTPS (default):")}
-  HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
-  WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441
-  extended CONNECT), so dev server HMR works through the proxy.
-  On first use, portless generates a local CA and adds it to your
-  system trust store. No browser warnings. Disable with --no-tls.
-  On WSL, portless also adds the CA to the Windows user certificate store.
-  Linux containers on a WSL2 host use only the Linux trust store.
-
-${colors.bold("LAN mode:")}
-  Use --lan to make services accessible from other devices (phones,
-  tablets) on the same WiFi network via mDNS (.local domains).
-  Normal mode binds only to 127.0.0.1 and ::1.
-  LAN mode binds to 0.0.0.0 and ::.
-  Useful for testing React Native / Expo apps on real devices.
-  Expo keeps Metro's default LAN host behavior in this mode.
-  Auto-detected LAN IPs follow network changes automatically.
-  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  All proxy settings are persisted and reused on auto-start unless
-  overridden by explicit flags or env vars.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
-  If a proxy is already running with different explicit LAN/TLS/TLD settings,
-  stop it first.
-  ${colors.cyan("portless proxy start --lan")}
-  ${colors.cyan("portless proxy start --lan --https")}
-  ${colors.cyan("portless proxy start --lan --ip 192.168.1.42")}
-
-${colors.bold("Tailscale sharing:")}
-  Use --tailscale to share your dev server with teammates on your tailnet.
-  Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
-  8444, etc.) so no basePath configuration is needed.
-  Use --funnel to expose your dev server to the public internet via
-  Tailscale Funnel. Requires Tailscale CLI to be installed and connected,
-  with Tailscale HTTPS certificates enabled. Funnel must also be enabled
-  on your tailnet.
-  ${colors.cyan("portless myapp --tailscale next dev")}
-  ${colors.cyan("portless myapp --funnel next dev")}
-
-${colors.bold("ngrok sharing:")}
-  Use --ngrok to expose your dev server to the public internet with ngrok.
-  Requires the ngrok CLI to be installed and authenticated.
-  ${colors.cyan("portless myapp --ngrok next dev")}
-
-${colors.bold("Proxy connections:")}
-  IPv4 and IPv6 loopback connect in parallel; the first success wins.
-  Apps listening on both may see an extra connection close without a request.
-  Connection errors include each loopback address and error code.
+  portless
+  portless run next dev
+  portless --script start
+  portless myapp next dev
+  portless run --prefix pr-42 next dev
+  portless myapp --tailscale next dev
 
 ${colors.bold("Options:")}
-  run [--name <name>] [--prefix <label>] <cmd>
-                                Infer project name and add a worktree prefix
-  --script <name>               Run a specific package.json script (default: dev)
-  -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
-                                Standard ports auto-elevate with sudo when the bind needs root
-                                Failed elevation exits nonzero without changing ports
-                                unless --unprivileged is set
-  --unprivileged                Take a port below 1024 without sudo: bind the wildcard
-                                address and accept loopback peers only. Serves plain
-                                HTTP on port 80 unless --https is also given, and
-                                never writes the hosts file. Remembered after
-                                stop; PORTLESS_UNPRIVILEGED=0 switches back
-  --no-tls                      Disable HTTPS (use plain HTTP on port 80)
-  --https                       Enable HTTPS (default, accepted for compatibility)
-  --lan                         Enable LAN mode (mDNS .local, for real device testing)
-  --ip <address>                Pin a specific LAN IP (disables auto-follow; use with --lan)
-  --cert <path>                 Use a custom TLS certificate
-  --key <path>                  Use a custom TLS private key
-  --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
-  --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
-  --state-dir <path>            Use a custom state directory with service install
-  --app-port <number>           Use a fixed port for the app (skip auto-assignment)
-  --tailscale                   Share the app on your Tailscale network (tailnet)
+  --script <name>               Select a package.json script in zero-argument mode
+  --lan                         Enable LAN access for app commands
+  --ip <address>                Pin the LAN IP (implies --lan)
+  --tailscale                   Share the app on your tailnet
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
-  --cloudflare                  Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
+  --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
   --force                       Kill the existing process and take over its route
-  --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
-  --                            Stop flag parsing; everything after is passed to the child
+  --name <name>                 Set the app name or bypass command dispatch
+  --app-port <number>           Use a fixed port for the app
+  --                            Stop flag parsing and pass remaining arguments to the app
 
 ${colors.bold("Environment variables:")}
-  PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
-  PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
-  PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
-  PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
-  PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
-  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
-  PORTLESS_PREFIX=<label>       Override the worktree label; an empty value disables it
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
-  PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
-  PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
-  PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
-  PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
-  PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
-  PORTLESS_CLOUDFLARE=1         Share apps publicly via Cloudflare (same as --cloudflare)
-  PORTLESS_STATE_DIR=<path>     Override the state directory
-  PORTLESS=0                    Run app commands directly without proxy
+  PORTLESS=0                    Run app commands directly without the proxy
+  PORTLESS_PORT=<number>        Set the default proxy port
+  PORTLESS_APP_PORT=<number>    Set a fixed port for the app
+  PORTLESS_HTTPS=0              Disable HTTPS for the proxy
+  PORTLESS_LAN=1                Enable LAN mode
+  PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
+  PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
 
-${colors.bold("Child process environment:")}
-  PORT                          Ephemeral port the child should listen on
-  HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
-  PORTLESS_URL                  Primary public URL of the app
-  PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
-  PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
-  PORTLESS_NGROK_URL            ngrok URL of the app (when --ngrok is active)
-  PORTLESS_CLOUDFLARE_URL       Cloudflare URL of the app (when --cloudflare is active)
-  NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
-
-${colors.bold("Safari / DNS:")}
-  .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
-  Safari relies on the system DNS resolver, which may not handle them.
-  Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If a route
-  hostname will not resolve, the command that registered it warns instead of
-  failing silently. Manual sync reconciles the managed entries with current routes,
-  removes stale entries when there are no routes, and requires a successful read
-  before writing. Every write is verified; a failed verification uses the normal
-  hosts sync failure path. To sync manually:
-    ${colors.cyan("portless hosts sync")}
-  Clean up later with:
-    ${colors.cyan("portless hosts clean")}
-
-${colors.bold("Skip portless:")}
-  PORTLESS=0 pnpm dev           # Runs command directly without proxy
-
-${colors.bold("Reserved names:")}
-  run, get, alias, compose, hosts, list, doctor, trust, clean, prune, proxy, service, mcp are subcommands and
-  cannot be used as app names directly. Use "portless run" to infer the name,
-  or "portless --name <name>" to force any name including reserved ones.
+Precedence: flags override PORTLESS_* variables, which override portless.json.
+Auto-start reuses the proxy's saved settings unless a flag or variable changes them.
+Proxy options: portless proxy --help
+Run options: portless run --help
+Run portless <command> --help or visit https://portless.sh for details.
 `);
   process.exit(0);
 }
@@ -2958,9 +2793,9 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Auto-sync:")}
-  The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
-  PORTLESS_SYNC_HOSTS=0. If a route hostname will not resolve, the command that
-  registered it warns instead of failing silently.
+  The proxy updates ${HOSTS_DISPLAY} for route hostnames by default.
+  Disable hosts sync with PORTLESS_SYNC_HOSTS=0. If a route hostname
+  will not resolve, the command that registered it warns instead of failing.
 
 ${colors.bold("Safety:")}
   Sync removes stale entries when there are no routes. It requires a successful
@@ -3462,8 +3297,12 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --no-tls")}       Start without HTTPS (port 80)
   ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
-  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
-  ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
+  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (also --port)
+  ${colors.cyan("portless proxy start --unprivileged")}  Port 80 without sudo (443 with --https); plain HTTP unless --https
+  ${colors.cyan("portless proxy start --https")}        Serve HTTPS, even with --unprivileged or PORTLESS_HTTPS=0
+  ${colors.cyan("portless proxy start --cert <path> --key <path>")}  Use a custom certificate and key
+  ${colors.cyan("portless proxy start --lan --ip <address>")}  Pin the LAN IP
+  ${colors.cyan("portless proxy start --skip-trust")}   Do not add the CA to the system trust store
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
@@ -3479,6 +3318,10 @@ ${colors.bold("LAN mode (--lan):")}
   --ip to pin one.
   Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
   Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+
+${colors.bold("Unprivileged mode (--unprivileged):")}
+  Binds without sudo, installs nothing, and never writes the hosts file.
+  Stopped proxies keep the mode; use PORTLESS_UNPRIVILEGED=0 to switch back.
 `);
 }
 
@@ -3548,7 +3391,7 @@ async function handleProxy(args: string[]): Promise<void> {
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
   const hasHttpsFlag = startFlags.has("--https");
-  const hasNoTls = startFlags.has("--no-tls") || isHttpsEnvDisabled();
+  const hasNoTls = startFlags.has("--no-tls") || (!hasHttpsFlag && isHttpsEnvDisabled());
   const wantHttps = !hasNoTls;
 
   let customCertPath = startFlags.value("--cert") ?? null;
@@ -4161,7 +4004,7 @@ async function handleDefaultSingle(
     tlds,
     false,
     { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    appConfig?.appPort,
+    appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
     lanIp
   );
@@ -4369,7 +4212,8 @@ async function handleDefaultMulti(
     process.exit(1);
   }
 
-  const scriptName = globalScript ?? loaded?.config.script ?? "dev";
+  const configScript = loaded?.config.script ?? "dev";
+  const scriptName = globalScript ?? configScript;
 
   // Infer the monorepo project name for use as the base domain.
   // Config name > common npm scope > workspace root inference.
@@ -4437,7 +4281,7 @@ async function handleDefaultMulti(
       worktree: mergeWorktreeConfig(rootOverride?.worktree, leafWorktree),
     };
 
-    const effectiveScript = appOverride.script ?? scriptName;
+    const effectiveScript = globalScript ?? appOverride.script ?? configScript;
     const scriptValue = pkg.scripts[effectiveScript];
     if (!scriptValue) continue;
 

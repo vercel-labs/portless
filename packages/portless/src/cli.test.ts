@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -390,19 +391,38 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
-      expect(stdout).toContain("run [--name <name>]");
       expect(stdout).toContain("portless doctor");
-      expect(stdout).toContain("--port");
-      expect(stdout).toContain("-p");
-      expect(stdout).toContain("--foreground");
-      expect(stdout).toContain("PORTLESS_STATE_DIR");
-      expect(stdout).toContain("PORTLESS_URL");
+      expect(stdout).not.toContain("--prefix <label>");
+      expect(stdout).toContain("Run options: portless run --help");
+      expect(run(["run", "--help"]).stdout).toContain("--prefix <label>");
+      expect(stdout).not.toContain("--port");
+      expect(stdout).not.toContain("--foreground");
+      expect(stdout).toContain("Proxy options: portless proxy --help");
+      expect(stdout).toContain("PORTLESS_APP_PORT");
+      expect(stdout).toContain("PORTLESS_LAN");
+      expect(stdout).toContain("PORTLESS_PREFIX");
       expect(stdout).toContain("--ngrok");
-      expect(stdout).toContain("PORTLESS_NGROK");
-      expect(stdout).toContain("PORTLESS_NGROK_URL");
       expect(stdout).toContain("--cloudflare");
-      expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
+    });
+
+    it("keeps proxy startup options in proxy help", () => {
+      const { status, stdout } = run(["proxy", "--help"]);
+      expect(status).toBe(0);
+      for (const flag of [
+        "--port",
+        "--https",
+        "--no-tls",
+        "--cert",
+        "--key",
+        "--foreground",
+        "--tld",
+        "--wildcard",
+        "--unprivileged",
+        "--skip-trust",
+      ]) {
+        expect(stdout).toContain(flag);
+      }
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -3648,6 +3668,61 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
     }, 30_000);
 
+    it.each(["daemon", "foreground"])(
+      "serves HTTPS with --https even when PORTLESS_HTTPS=0 (%s)",
+      async (mode) => {
+        const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-home-"));
+        let child: ReturnType<typeof spawn> | undefined;
+        try {
+          const env = {
+            ...proxyEnv(),
+            HOME: homeDir,
+            USERPROFILE: homeDir,
+          };
+          const args = ["proxy", "start", "--https", "--skip-trust", "-p", String(testPort)];
+          if (mode === "foreground") {
+            child = spawn(process.execPath, [CLI_PATH, ...args, "--foreground"], {
+              env: {
+                ...process.env,
+                ...env,
+                NO_COLOR: "1",
+                PNPM_SCRIPT_SRC_DIR: undefined,
+                npm_command: undefined,
+              },
+              stdio: "ignore",
+            });
+          } else {
+            const start = run(args, { env });
+            expect(start.status, start.stdout + start.stderr).toBe(0);
+          }
+          await waitForHttpHeader(testPort, "X-Portless", "1");
+
+          const header = await new Promise<string | string[] | undefined>((resolve, reject) => {
+            const req = https.get(
+              {
+                hostname: "127.0.0.1",
+                port: testPort,
+                rejectUnauthorized: false,
+                timeout: 2000,
+              },
+              (res) => {
+                res.resume();
+                resolve(res.headers["x-portless"]);
+              }
+            );
+            req.on("error", reject);
+            req.on("timeout", () => req.destroy(new Error("HTTPS request timed out")));
+          });
+          expect(header).toBe("1");
+        } finally {
+          if (child) await stopChild(child);
+          run(["proxy", "stop"], { env: proxyEnv() });
+          fs.rmSync(homeDir, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
     it("never writes the hosts file in unprivileged mode", async () => {
       const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -3834,6 +3909,60 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("hello");
     });
+
+    it("bare portless gives the app PORTLESS_APP_PORT over portless.json appPort", async () => {
+      const proxyPort = await getFreePort();
+      const configPort = await getFreePort();
+      let envPort = await getFreePort();
+      while (envPort === configPort || envPort === proxyPort) envPort = await getFreePort();
+      const proxyEnv = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: String(proxyPort),
+        PORTLESS_HTTPS: "0",
+      };
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "node dev.cjs" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "dev.cjs"),
+        [
+          'const fs = require("node:fs");',
+          'const http = require("node:http");',
+          "const server = http.createServer();",
+          'server.listen(Number(process.env.PORT), "127.0.0.1", () => {',
+          '  fs.writeFileSync("port.json", JSON.stringify({',
+          "    envPort: Number(process.env.PORT),",
+          "    boundPort: server.address().port,",
+          "  }));",
+          "  server.close();",
+          "});",
+        ].join("\n") + "\n"
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "test-app", appPort: configPort })
+      );
+      try {
+        const start = run(["proxy", "start"], { env: proxyEnv });
+        expect(start.status, start.stdout + start.stderr).toBe(0);
+
+        const result = run([], {
+          cwd: tmpDir,
+          env: { ...proxyEnv, PORTLESS_APP_PORT: String(envPort) },
+        });
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(JSON.parse(fs.readFileSync(path.join(tmpDir, "port.json"), "utf-8"))).toEqual({
+          envPort,
+          boundPort: envPort,
+        });
+      } finally {
+        run(["proxy", "stop"], { env: proxyEnv });
+      }
+    }, 30_000);
 
     // Run the CLI against a fake package-manager binary (shim) that records
     // the args and env it was invoked with, so package-script flag forwarding
@@ -4305,7 +4434,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("--tailscale");
       expect(stdout).toContain("--funnel");
-      expect(stdout).toContain("PORTLESS_TAILSCALE");
     });
 
     it("fails with actionable message when tailscale is not installed", () => {
@@ -4361,8 +4489,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
       expect(stdout).toContain("--ngrok");
-      expect(stdout).toContain("PORTLESS_NGROK");
-      expect(stdout).toContain("PORTLESS_NGROK_URL");
     });
 
     it("fails with actionable message when ngrok is not installed", () => {
@@ -4545,6 +4671,94 @@ describe("CLI", { timeout: 15_000 }, () => {
           run(["proxy", "stop"], {
             env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" },
           });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+  });
+
+  describe("multi-app script selection", () => {
+    // Skipped on Windows for the same reason as the multi-app worktree test:
+    // multi-app mode spawns the package manager, and spawn("npm") fails there.
+    it.skipIf(process.platform === "win32")(
+      "lets --script override a per-app script and keeps the app script otherwise",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-script-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-script-state-"));
+        const marks = path.join(root, "marks.txt");
+        const readMarks = () => fs.readFileSync(marks, "utf-8").split("\n").filter(Boolean).sort();
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          // Both apps pin "start": web in the root apps map, api in its own
+          // portless config. Neither may beat an explicit --script.
+          fs.writeFileSync(
+            path.join(root, "portless.json"),
+            JSON.stringify({ apps: { "packages/web": { script: "start", proxy: false } } })
+          );
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "mark.cjs"),
+              `require("node:fs").appendFileSync(process.env.MARK_FILE, "${name}:" + process.argv[2] + "\\n");\n`
+            );
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                version: "0.0.0",
+                scripts: { dev: "node mark.cjs dev", start: "node mark.cjs start" },
+                portless: { proxy: false, ...(name === "api" ? { script: "start" } : {}) },
+              })
+            );
+          }
+
+          // Strip parent-only npm/pnpm vars so the spawned `npm run <script>` is
+          // real npm, not the vitest runner's pnpm (npm_execpath).
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.NO_COLOR = "1";
+          childEnv.MARK_FILE = marks;
+          delete childEnv.PORTLESS_PREFIX;
+
+          const runWorkspace = (args: string[]) => {
+            fs.writeFileSync(marks, "");
+            const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
+              encoding: "utf-8",
+              timeout: 45_000,
+              cwd: root,
+              env: childEnv,
+            });
+            return {
+              status: result.status,
+              marks: readMarks(),
+              output: `${result.stdout}${result.stderr}`,
+            };
+          };
+
+          const flagged = runWorkspace(["--script", "dev"]);
+          expect(flagged.marks, flagged.output).toEqual(["api:dev", "web:dev"]);
+          expect(flagged.status, flagged.output).toBe(0);
+
+          const bare = runWorkspace([]);
+          expect(bare.marks, bare.output).toEqual(["api:start", "web:start"]);
+          expect(bare.status, bare.output).toBe(0);
+        } finally {
           fs.rmSync(root, { recursive: true, force: true });
           fs.rmSync(stateDir, { recursive: true, force: true });
         }
