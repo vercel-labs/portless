@@ -260,7 +260,9 @@ describe("RouteStore", () => {
 
     it("prunes dead supported routes without removing skipped entries", () => {
       seed();
-      expect(store.pruneStaleRoutes()).toEqual([stale]);
+      const dead = store.findStaleRoutes();
+      expect(dead).toEqual([stale]);
+      expect(store.removeStaleRoute(dead[0]!.hostname, dead[0]!.pid)).toBe(true);
       expect(disk()).toEqual(
         expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
       );
