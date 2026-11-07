@@ -37,6 +37,11 @@ const PROXY_RUNTIME_FILES = new Set([
   "proxy.log",
   "proxy.hosts-sync-token",
   "proxy.hosts-sync-token.tmp",
+  "proxy.tls",
+  "proxy.custom-cert",
+  "proxy.tld",
+  "proxy.tlds",
+  "proxy.lan",
 ]);
 
 export type RemovePortlessStateFilesOptions = {
