@@ -1478,6 +1478,25 @@ export function getProcessCommand(pid: number): string | null {
   }
 }
 
+/**
+ * Read the process group a live pid belongs to. Groups outlive their leader, so
+ * a match here is evidence about a process, never proof it belongs to us.
+ * Returns null on Windows or when the process is gone.
+ */
+export function getProcessGroupId(pid: number): number | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  try {
+    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    const pgid = Number(output.trim());
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Signal a process group only while its recorded member and start time still match. */
 export function killOrphanedProcessGroup(
   pgid: number,
@@ -1487,11 +1506,7 @@ export function killOrphanedProcessGroup(
 ): boolean {
   if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
   try {
-    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(identityPid)], {
-      encoding: "utf-8",
-      timeout: PID_LOOKUP_TIMEOUT_MS,
-    });
-    if (Number(output.trim()) !== pgid) return false;
+    if (getProcessGroupId(identityPid) !== pgid) return false;
     if (getProcessStartTime(identityPid) !== startTime) return false;
     process.kill(-pgid, signal);
     return true;

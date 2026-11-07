@@ -85,6 +85,17 @@ function isValidRoute(value: unknown): value is RouteMapping {
   );
 }
 
+/** Whether two entries describe the same route and the same recorded process group. */
+export function isSameRouteRecord(a: RouteMapping, b: RouteMapping): boolean {
+  return (
+    a.hostname === b.hostname &&
+    a.port === b.port &&
+    a.pid === b.pid &&
+    a.childPgid === b.childPgid &&
+    a.childStartTime === b.childStartTime
+  );
+}
+
 /**
  * Thrown when a route is already registered by a live process and --force was
  * not specified. With --force, the existing process is killed instead.
@@ -114,6 +125,7 @@ export class RouteStore {
   /** The state directory path. */
   readonly dir: string;
   private readonly routesPath: string;
+  private readonly orphansPath: string;
   private readonly lockPath: string;
   readonly pidPath: string;
   readonly portFilePath: string;
@@ -122,6 +134,7 @@ export class RouteStore {
   constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
     this.dir = dir;
     this.routesPath = path.join(dir, "routes.json");
+    this.orphansPath = path.join(dir, "orphans.json");
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
     this.portFilePath = path.join(dir, "proxy.port");
@@ -208,7 +221,9 @@ export class RouteStore {
    * Load routes from disk, filtering out stale entries whose owning process
    * is no longer alive. Stale-route cleanup is only persisted when the caller
    * already holds the lock (i.e. inside addRoute/removeRoute) to avoid
-   * unprotected concurrent writes.
+   * unprotected concurrent writes. Stale entries that carry a verified orphan
+   * member move to the orphan store instead of being dropped, so a route write
+   * cannot destroy retry data before `prune` reads it.
    */
   loadRoutes(persistCleanup = false): RouteMapping[] {
     if (!fs.existsSync(this.routesPath)) {
@@ -231,12 +246,22 @@ export class RouteStore {
       if (routes.length !== parsed.length) {
         this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
       }
+      const isStale = (route: RouteMapping) => route.pid !== 0 && !this.isProcessAlive(route.pid);
       // Filter out stale routes whose owning process is no longer alive
-      const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
-      if (persistCleanup && alive.length !== routes.length) {
+      const stale = routes.filter(isStale);
+      const alive = routes.filter((route) => !isStale(route));
+      if (persistCleanup && stale.length > 0) {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.
         try {
+          const recoverable = stale.filter((route) => route.orphanPid !== undefined);
+          if (recoverable.length > 0) {
+            const orphans = this.readRouteFile(this.orphansPath);
+            for (const route of recoverable) {
+              if (!orphans.some((entry) => isSameRouteRecord(entry, route))) orphans.push(route);
+            }
+            this.saveOrphans(orphans);
+          }
           this.saveRoutes(alive);
         } catch {
           // Write may fail (permissions); non-fatal
@@ -285,6 +310,40 @@ export class RouteStore {
     } catch (err) {
       fs.rmSync(tempPath, { force: true });
       throw err;
+    }
+  }
+
+  private saveOrphans(routes: RouteMapping[]): void {
+    fs.writeFileSync(this.orphansPath, JSON.stringify(routes, null, 2), { mode: FILE_MODE });
+    fixOwnership(this.orphansPath);
+  }
+
+  private readRouteFile(file: string): RouteMapping[] {
+    if (!fs.existsSync(file)) {
+      return [];
+    }
+    try {
+      const raw = fs.readFileSync(file, "utf-8");
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        this.onWarning?.(`Corrupted routes file (invalid JSON): ${file}`);
+        return [];
+      }
+      if (!Array.isArray(parsed)) {
+        this.onWarning?.(`Corrupted routes file (expected array): ${file}`);
+        return [];
+      }
+      const routes = parsed.filter(isValidRoute);
+      if (routes.length !== parsed.length) {
+        this.onWarning?.(`Skipped invalid route entries in ${file}`);
+      }
+      return routes;
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.onWarning?.(`Could not read routes file: ${message}`);
+      return [];
     }
   }
 
@@ -363,32 +422,16 @@ export class RouteStore {
    * but whose dev server may still be holding a port.
    */
   loadRoutesRaw(): RouteMapping[] {
-    if (!fs.existsSync(this.routesPath)) {
-      return [];
-    }
-    try {
-      const raw = fs.readFileSync(this.routesPath, "utf-8");
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        this.onWarning?.(`Corrupted routes file (invalid JSON): ${this.routesPath}`);
-        return [];
-      }
-      if (!Array.isArray(parsed)) {
-        this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
-        return [];
-      }
-      const routes = parsed.filter(isValidRoute);
-      if (routes.length !== parsed.length) {
-        this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
-      }
-      return routes;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.onWarning?.(`Could not read routes file: ${message}`);
-      return [];
-    }
+    return this.readRouteFile(this.routesPath);
+  }
+
+  /**
+   * Load the orphan records that `prune` kept for a later retry. They live
+   * apart from the live routes so routing, name registration and route writes
+   * never see them.
+   */
+  loadOrphanedRoutes(): RouteMapping[] {
+    return this.readRouteFile(this.orphansPath);
   }
 
   /** Return routes whose owners are dead without removing them from storage. */
@@ -406,24 +449,52 @@ export class RouteStore {
     }
   }
 
-  /** Save a surviving group member only if the stale route is unchanged. */
-  recordStaleOrphan(route: RouteMapping, orphanPid: number, orphanStartTime: string): boolean {
+  /**
+   * Keep a route whose owner is gone for a later `prune` retry, moving it out
+   * of the live route file so a later add, update or takeover cannot drop it.
+   * `member` pins a group member that prune verified this run, and is never
+   * recorded for a group whose identity was not proven.
+   */
+  keepOrphanedRoute(route: RouteMapping, member?: { pid: number; startTime: string }): boolean {
     this.ensureDir();
     if (!this.acquireLock()) throw new Error("Failed to acquire route lock");
     try {
-      const routes = this.loadRoutesRaw();
-      const current = routes.find(
-        (entry) =>
-          entry.hostname === route.hostname &&
-          entry.pid === route.pid &&
-          entry.childPgid === route.childPgid &&
-          entry.childStartTime === route.childStartTime &&
-          !this.isProcessAlive(entry.pid)
-      );
-      if (!current) return false;
-      current.orphanPid = orphanPid;
-      current.orphanStartTime = orphanStartTime;
-      this.saveRoutes(routes);
+      const routes = this.readRouteFile(this.routesPath);
+      const index = routes.findIndex((entry) => isSameRouteRecord(entry, route));
+      if (index !== -1 && this.isProcessAlive(routes[index]!.pid)) return false;
+      const orphans = this.readRouteFile(this.orphansPath);
+      let record = orphans.find((entry) => isSameRouteRecord(entry, route));
+      if (!record) {
+        if (index === -1) return false;
+        record = { ...route };
+        orphans.push(record);
+      }
+      if (member) {
+        record.orphanPid = member.pid;
+        record.orphanStartTime = member.startTime;
+      }
+      this.saveOrphans(orphans);
+      if (index !== -1) {
+        routes.splice(index, 1);
+        this.saveRoutes(routes);
+      }
+      return true;
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /** Remove one orphan record only while it still matches the one prune saw. */
+  removeOrphanedRoute(route: RouteMapping): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      const orphans = this.readRouteFile(this.orphansPath);
+      const remaining = orphans.filter((entry) => !isSameRouteRecord(entry, route));
+      if (remaining.length === orphans.length) return false;
+      this.saveOrphans(remaining);
       return true;
     } finally {
       this.releaseLock();

@@ -522,6 +522,120 @@ describe("RouteStore", () => {
     });
   });
 
+  describe("orphan records", () => {
+    const deadPid = 999999;
+    const staleRoute = {
+      hostname: "stale.localhost",
+      port: 4310,
+      pid: deadPid,
+      childPgid: 4242,
+      childStartTime: "start-of-group-leader",
+      tailscaleHttpsPort: 8443,
+      ngrokPid: 5151,
+      registeredAt: Date.now() - 60_000,
+    };
+
+    const readOrphans = () =>
+      JSON.parse(fs.readFileSync(path.join(tmpDir, "orphans.json"), "utf-8"));
+
+    it("moves a stale route out of the live route file", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([staleRoute]));
+
+      expect(store.keepOrphanedRoute(staleRoute)).toBe(true);
+
+      expect(store.loadRoutes()).toEqual([]);
+      expect(store.loadRoutesRaw()).toEqual([]);
+      expect(store.loadOrphanedRoutes()).toEqual([staleRoute]);
+    });
+
+    it("moves recovery data aside when a writer cleans the route file", () => {
+      const recovered = { ...staleRoute, orphanPid: 4343, orphanStartTime: "member-start" };
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([recovered]));
+
+      store.addRoute("other.localhost", 4001, process.pid);
+
+      expect(store.loadRoutes().map((route) => route.hostname)).toEqual(["other.localhost"]);
+      expect(store.loadRoutesRaw().map((route) => route.hostname)).toEqual(["other.localhost"]);
+      expect(store.loadOrphanedRoutes()).toEqual([recovered]);
+      expect(store.keepOrphanedRoute(recovered)).toBe(true);
+      expect(store.loadOrphanedRoutes()).toEqual([recovered]);
+    });
+
+    it("still drops stale routes without recovery data", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([staleRoute]));
+
+      store.addRoute("other.localhost", 4001, process.pid);
+
+      expect(store.loadRoutesRaw().map((route) => route.hostname)).toEqual(["other.localhost"]);
+    });
+
+    it("keeps the record when a later route write cleans stale entries", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([staleRoute]));
+      expect(store.keepOrphanedRoute(staleRoute)).toBe(true);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+      store.updateRoute("other.localhost", { ngrokUrl: "https://other.ngrok.app" });
+      store.removeRoute("other.localhost", process.pid);
+
+      expect(store.loadOrphanedRoutes()).toEqual([staleRoute]);
+    });
+
+    it("keeps the record when the same hostname is registered again", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([staleRoute]));
+      expect(store.keepOrphanedRoute(staleRoute)).toBe(true);
+
+      store.addRoute("stale.localhost", 4999, process.pid);
+
+      expect(store.loadRoutes()).toHaveLength(1);
+      expect(store.loadRoutes()[0]!.port).toBe(4999);
+      expect(store.loadOrphanedRoutes()).toEqual([staleRoute]);
+    });
+
+    it("records a verified member and keeps it across a retry without one", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([staleRoute]));
+      expect(store.keepOrphanedRoute(staleRoute, { pid: 4343, startTime: "member-start" })).toBe(
+        true
+      );
+      expect(readOrphans()).toEqual([
+        { ...staleRoute, orphanPid: 4343, orphanStartTime: "member-start" },
+      ]);
+
+      const kept = store.loadOrphanedRoutes()[0]!;
+      expect(store.keepOrphanedRoute(kept)).toBe(true);
+      expect(store.loadOrphanedRoutes()).toEqual([
+        { ...staleRoute, orphanPid: 4343, orphanStartTime: "member-start" },
+      ]);
+    });
+
+    it("refuses to keep a route whose owner is alive or that is gone", () => {
+      store.addRoute("live.localhost", 4001, process.pid);
+      const live = store.loadRoutesRaw()[0]!;
+
+      expect(store.keepOrphanedRoute(live)).toBe(false);
+      expect(store.keepOrphanedRoute(staleRoute)).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, "orphans.json"))).toBe(false);
+    });
+
+    it("removes only the matching record", () => {
+      store.ensureDir();
+      const second = { ...staleRoute, hostname: "second.localhost", port: 4311 };
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([staleRoute, second]));
+      expect(store.keepOrphanedRoute(staleRoute)).toBe(true);
+      expect(store.keepOrphanedRoute(second)).toBe(true);
+
+      expect(store.removeOrphanedRoute({ ...staleRoute, childStartTime: "different" })).toBe(false);
+      expect(store.loadOrphanedRoutes()).toHaveLength(2);
+      expect(store.removeOrphanedRoute(staleRoute)).toBe(true);
+      expect(store.loadOrphanedRoutes()).toEqual([second]);
+    });
+  });
+
   describe("transferRoute", () => {
     it("moves a route to another pid while the caller owns it", () => {
       store.addRoute("myapp.localhost", 4001, process.pid);
