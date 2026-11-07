@@ -5163,14 +5163,14 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   fs.writeFileSync(files.model, JSON.stringify(plan.model, null, 2), { mode: 0o600 });
   fixOwnership(files.model, files.ports);
 
-  console.log(colors.bold(`\nportless compose ${plan.project}\n`));
+  console.error(colors.bold(`\nportless compose ${plan.project}\n`));
   for (const k of plan.kept) {
     const where = k.published ? `host port ${k.published}` : "an ephemeral port";
     const verb = k.dropped ? "drops" : "keeps";
     console.error(colors.gray(`  ${k.service}:${k.target} ${verb} ${where} (${k.reason})`));
   }
   if (plan.routes.length === 0) {
-    console.log(colors.yellow("No published HTTP ports found. Nothing to route."));
+    console.error(colors.yellow("No published HTTP ports found. Nothing to route."));
   }
 
   const upArgs = buildUpArgs({
@@ -5214,7 +5214,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
       }
       conflicts.delete(primary);
       registered.set(primary, port);
-      console.log(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
+      console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
     }
     return true;
   };
@@ -5222,7 +5222,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   if (detached) {
     const code = await spawnDockerCompose(upArgs).exited;
     if (code === 0) {
-      console.log("");
+      console.error("");
       if (!sync()) {
         console.warn(
           colors.yellow(
