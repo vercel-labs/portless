@@ -248,6 +248,7 @@ function defaultProxyConfig(
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
   persistedUnprivileged: boolean;
+  persistedHttps: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -313,9 +314,10 @@ function resolveProxyConfig(options: {
     : options.persistedUnprivileged;
 
   // Unprivileged mode promises no prompt of any kind, and trusting a
-  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
+  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for,
+  // either now or by the stopped proxy whose remembered mode it resumes.
   if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
-    config.useHttps = false;
+    config.useHttps = !options.explicit.unprivileged && options.persistedHttps;
   }
 
   if (!config.lanMode) {
@@ -1102,10 +1104,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetPersistedProxySettings(store.dir);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1138,6 +1137,18 @@ function sudoStopOrHint(port: number): void {
   }
 }
 
+/**
+ * Forget the settings a stopped proxy ran with. Unprivileged mode stays
+ * remembered for auto-start and serves plain HTTP unless HTTPS was asked for,
+ * so its HTTPS choice is kept with it.
+ */
+function resetPersistedProxySettings(dir: string): void {
+  if (!readUnprivilegedMarker(dir)) writeTlsMarker(dir, false);
+  writeCustomCertMarker(dir, false);
+  writeTldFile(dir, DEFAULT_TLD);
+  writeLanMarker(dir, null);
+}
+
 async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
   const pidPath = store.pidPath;
 
@@ -1156,10 +1167,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           } catch {
             // Port file may already be absent; non-fatal
           }
-          writeTlsMarker(store.dir, false);
-          writeCustomCertMarker(store.dir, false);
-          writeTldFile(store.dir, DEFAULT_TLD);
-          writeLanMarker(store.dir, null);
+          resetPersistedProxySettings(store.dir);
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
@@ -1197,10 +1205,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     if (isNaN(pid)) {
       console.error(colors.red("Corrupted PID file. Removing it."));
       fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
+      resetPersistedProxySettings(store.dir);
       return;
     }
 
@@ -1219,10 +1224,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       } catch {
         // Port file may already be absent; non-fatal
       }
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
+      resetPersistedProxySettings(store.dir);
       return;
     }
 
@@ -1237,10 +1239,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       );
       console.log(colors.yellow("Removing stale PID file."));
       fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
+      resetPersistedProxySettings(store.dir);
       return;
     }
 
@@ -1251,10 +1250,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     } catch {
       // Port file may already be removed; non-fatal
     }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetPersistedProxySettings(store.dir);
     console.log(colors.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
@@ -1335,6 +1331,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
     persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
+    persistedHttps: readTlsMarker(resolveStateDir()),
     explicit,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
@@ -3572,6 +3569,7 @@ ${colors.bold("LAN mode (--lan):")}
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
     persistedUnprivileged: readUnprivilegedMarker(stateDir),
+    persistedHttps: readTlsMarker(stateDir),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
