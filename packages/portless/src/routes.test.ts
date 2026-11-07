@@ -556,7 +556,23 @@ describe("RouteStore", () => {
       expect(store.loadRoutes()).toHaveLength(1);
       expect(store.loadRoutes()[0]!.port).toBe(4999);
       expect(readRaw()).toHaveLength(2);
-      expect(readRaw()[0]).toEqual(staleRoute);
+      expect(readRaw()[0]).toMatchObject({
+        hostname: "stale.localhost",
+        port: 4999,
+        pid: process.pid,
+      });
+      expect(readRaw()[1]).toEqual(staleRoute);
+    });
+
+    it("returns the active entry first for a legacy file with a stale record first", () => {
+      store.ensureDir();
+      const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
+      writeRoutes([staleRoute, live]);
+
+      expect(store.loadRoutesRaw()).toEqual([live, staleRoute]);
+      expect(store.loadRoutesRaw().find((route) => route.hostname === "stale.localhost")).toEqual(
+        live
+      );
     });
 
     it("updates the live entry, not the stale record, for a shared hostname", () => {
@@ -567,8 +583,8 @@ describe("RouteStore", () => {
       store.updateRoute("stale.localhost", { ngrokUrl: "https://live.ngrok.app" });
 
       const raw = readRaw();
-      expect(raw[0]).toEqual(staleRoute);
-      expect(raw[1]).toEqual({ ...live, ngrokUrl: "https://live.ngrok.app" });
+      expect(raw[0]).toEqual({ ...live, ngrokUrl: "https://live.ngrok.app" });
+      expect(raw[1]).toEqual(staleRoute);
     });
 
     it("records a verified member only on the matching stale record", () => {

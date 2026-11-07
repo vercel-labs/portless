@@ -119,6 +119,20 @@ function retainStaleRecords(routes: RouteMapping[]): RouteMapping[] {
   return routes.filter((route) => !isStaleRoute(route) || hasRecoveryData(route));
 }
 
+/**
+ * Put every active entry before stale recovery records, preserving relative
+ * order within each group. Readers and on-disk consumers use the first entry
+ * for a hostname, so an active route must never follow a closed generation.
+ */
+function orderActiveFirst(routes: RouteMapping[]): RouteMapping[] {
+  const active: RouteMapping[] = [];
+  const stale: RouteMapping[] = [];
+  for (const route of routes) {
+    (isStaleRoute(route) ? stale : active).push(route);
+  }
+  return [...active, ...stale];
+}
+
 /** The entry a reader or a takeover means by a hostname: the live one. */
 function findActiveRoute(routes: RouteMapping[], hostname: string): RouteMapping | undefined {
   return routes.find((route) => route.hostname === hostname && !isStaleRoute(route));
@@ -326,9 +340,13 @@ export class RouteStore {
         !("hostname" in value) ||
         value.hostname !== replaceSkippedHostname
     );
-    fs.writeFileSync(this.routesPath, JSON.stringify([...routes, ...skipped], null, 2), {
-      mode: FILE_MODE,
-    });
+    fs.writeFileSync(
+      this.routesPath,
+      JSON.stringify([...orderActiveFirst(routes), ...skipped], null, 2),
+      {
+        mode: FILE_MODE,
+      }
+    );
     fixOwnership(this.routesPath);
   }
 
@@ -349,7 +367,7 @@ export class RouteStore {
         this.onWarning?.(`Corrupted routes file (expected array): ${file}`);
         return [];
       }
-      const routes = parsed.filter(isValidRoute);
+      const routes = orderActiveFirst(parsed.filter(isValidRoute));
       if (routes.length !== parsed.length) {
         this.onWarning?.(`Skipped invalid route entries in ${file}`);
       }
@@ -419,10 +437,10 @@ export class RouteStore {
   }
 
   /**
-   * Load all routes from disk without filtering out dead PIDs. Used by
-   * `portless prune` to discover stale entries whose owning CLI is gone
-   * but whose dev server may still be holding a port, and by startup and
-   * doctor views that must see recovery records.
+   * Load all valid routes without filtering out dead PIDs, with active entries
+   * before stale recovery records. Used by `portless prune` to discover stale
+   * entries whose owning CLI is gone but whose dev server may still hold a
+   * port, and by startup and doctor views that must see recovery records.
    */
   loadRoutesRaw(): RouteMapping[] {
     return this.readRouteFile(this.routesPath);

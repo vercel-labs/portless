@@ -200,6 +200,21 @@ const EXIT_TIMEOUT_MS = 2000;
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
 
+/** Time (ms) allowed for a proxy process to release its listener after SIGTERM. */
+const PROXY_STOP_TIMEOUT_MS = 5000;
+
+/** Poll interval (ms) while waiting for a proxy listener to close. */
+const PROXY_STOP_POLL_MS = 50;
+
+/** Internal env var carrying the allowlisted cleanup steps for a sudo retry. */
+const CLEAN_ELEVATED_STEPS_ENV = "PORTLESS_INTERNAL_CLEAN_STEPS";
+
+/** Cleanup steps that may be retried with elevation. */
+type CleanupStep = "ca" | "files" | "hosts";
+
+/** Order in which elevated cleanup steps run. */
+const CLEANUP_STEP_ORDER: readonly CleanupStep[] = ["ca", "files", "hosts"];
+
 type ProxyConfigExplicitness = {
   useHttps: boolean;
   customCert: boolean;
@@ -1127,21 +1142,33 @@ function startProxyServer(
 // Commands
 // ---------------------------------------------------------------------------
 
-function sudoStopOrHint(port: number): void {
+function sudoStopOrHint(port: number): boolean {
   if (!isWindows) {
     if (!sudoStop(port)) {
       console.error(colors.red("Failed to stop proxy with sudo."));
       console.error(colors.blue("Try manually:"));
       console.error(colors.cyan(`  portless proxy stop -p ${port}`));
+      return false;
     }
-  } else {
-    console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
-    console.error(colors.blue("Stop it with:"));
-    console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+    return true;
+  }
+  console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
+  console.error(colors.blue("Stop it with:"));
+  console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+  return false;
+}
+
+/** Wait until the proxy listener stops answering, returning false on timeout. */
+async function waitForProxyToClose(proxyPort: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!(await isProxyRunning(proxyPort))) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, PROXY_STOP_POLL_MS));
   }
 }
 
-async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
+async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<boolean> {
   const pidPath = store.pidPath;
 
   if (!fs.existsSync(pidPath)) {
@@ -1154,6 +1181,12 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       if (pid !== null) {
         try {
           process.kill(pid, "SIGTERM");
+          if (!(await waitForProxyToClose(proxyPort, PROXY_STOP_TIMEOUT_MS))) {
+            console.error(
+              colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`)
+            );
+            return false;
+          }
           try {
             fs.unlinkSync(store.portFilePath);
           } catch {
@@ -1164,22 +1197,23 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
           writeTldFile(store.dir, DEFAULT_TLD);
           writeLanMarker(store.dir, null);
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
+          return true;
         } catch (err: unknown) {
           if (isErrnoException(err) && err.code === "EPERM") {
-            sudoStopOrHint(proxyPort);
-          } else {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error(colors.red(`Failed to stop proxy: ${message}`));
-            console.error(colors.blue("Check if the process is still running:"));
-            console.error(
-              colors.cyan(
-                isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
-              )
-            );
+            return sudoStopOrHint(proxyPort);
           }
+          const message = err instanceof Error ? err.message : String(err);
+          console.error(colors.red(`Failed to stop proxy: ${message}`));
+          console.error(colors.blue("Check if the process is still running:"));
+          console.error(
+            colors.cyan(
+              isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+            )
+          );
+          return false;
         }
       } else if (!isWindows && process.getuid?.() !== 0) {
-        sudoStopOrHint(proxyPort);
+        return sudoStopOrHint(proxyPort);
       } else {
         console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
         console.error(colors.blue("Try manually:"));
@@ -1188,11 +1222,11 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
             isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
           )
         );
+        return false;
       }
-    } else {
-      console.log(colors.yellow("Proxy is not running."));
     }
-    return;
+    console.log(colors.yellow("Proxy is not running."));
+    return true;
   }
 
   try {
@@ -1204,7 +1238,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
-      return;
+      return true;
     }
 
     // Check if the process is still alive before trying to kill it
@@ -1212,8 +1246,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       process.kill(pid, 0);
     } catch (err: unknown) {
       if (isErrnoException(err) && err.code === "EPERM") {
-        sudoStopOrHint(proxyPort);
-        return;
+        return sudoStopOrHint(proxyPort);
       }
       console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
       fs.unlinkSync(pidPath);
@@ -1226,7 +1259,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
-      return;
+      return true;
     }
 
     // Verify the process is actually running a proxy on the expected port.
@@ -1244,11 +1277,19 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
       writeLanMarker(store.dir, null);
-      return;
+      return true;
     }
 
     process.kill(pid, "SIGTERM");
-    fs.unlinkSync(pidPath);
+    if (!(await waitForProxyToClose(proxyPort, PROXY_STOP_TIMEOUT_MS))) {
+      console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
+      return false;
+    }
+    try {
+      fs.unlinkSync(pidPath);
+    } catch (err: unknown) {
+      if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+    }
     try {
       fs.unlinkSync(store.portFilePath);
     } catch {
@@ -1259,19 +1300,20 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     writeTldFile(store.dir, DEFAULT_TLD);
     writeLanMarker(store.dir, null);
     console.log(colors.green("Proxy stopped."));
+    return true;
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      sudoStopOrHint(proxyPort);
-    } else {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(colors.red(`Failed to stop proxy: ${message}`));
-      console.error(colors.blue("Check if the process is still running:"));
-      console.error(
-        colors.cyan(
-          isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
-        )
-      );
+      return sudoStopOrHint(proxyPort);
     }
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(colors.red(`Failed to stop proxy: ${message}`));
+    console.error(colors.blue("Check if the process is still running:"));
+    console.error(
+      colors.cyan(
+        isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+      )
+    );
+    return false;
   }
 }
 
@@ -2413,6 +2455,81 @@ async function handleTrust(args: string[] = []): Promise<void> {
   process.exit(1);
 }
 
+/** Parse the internal allowlist of cleanup steps requested by a sudo retry. */
+function parseCleanupSteps(value: string | undefined): CleanupStep[] | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const requested = new Set(trimmed.split(",").map((step) => step.trim()));
+  for (const step of requested) {
+    if (!CLEANUP_STEP_ORDER.includes(step as CleanupStep)) {
+      throw new Error(`Unknown cleanup step: ${step}`);
+    }
+  }
+  return CLEANUP_STEP_ORDER.filter((step) => requested.has(step));
+}
+
+function cleanupStepLabel(step: CleanupStep): string {
+  if (step === "ca") return "CA trust removal";
+  if (step === "files") return "state files";
+  return "hosts file";
+}
+
+/** Run only the allowlisted cleanup steps requested for an elevated retry. */
+function runElevatedCleanupSteps(steps: CleanupStep[]): number {
+  const stateDirs = collectStateDirsForCleanup();
+  let problems = 0;
+
+  if (steps.includes("ca")) {
+    for (const [, result] of attemptCATrustRemovalForCleanup(stateDirs, untrustCA)) {
+      if (!result.removed) problems++;
+    }
+  }
+
+  if (steps.includes("files")) {
+    problems += stateDirs.flatMap((stateDir) =>
+      removePortlessStateFiles(stateDir, {
+        preserveCAIdentity: fs.existsSync(path.join(stateDir, "ca.pem")) && isCATrusted(stateDir),
+      })
+    ).length;
+  }
+
+  if (steps.includes("hosts") && !cleanHostsFile()) problems++;
+
+  return problems;
+}
+
+/**
+ * Retry only the failed privileged cleanup steps under sudo. The elevated
+ * process receives the same state directories through the environment and
+ * runs the internal allowlist instead of the full clean command.
+ */
+function runElevatedCleanup(steps: CleanupStep[]): void {
+  if (steps.length === 0) return;
+  const labels = steps.map(cleanupStepLabel).join(", ");
+  console.log(colors.yellow(`Cleanup needs elevated privileges. Requesting sudo for ${labels}...`));
+  const envArgs = collectPortlessEnvArgs().filter(
+    (entry) => !entry.startsWith(`${CLEAN_ELEVATED_STEPS_ENV}=`)
+  );
+  const home = process.env.HOME;
+  const result = spawnSync(
+    "sudo",
+    [
+      "env",
+      ...envArgs,
+      ...(home ? [`HOME=${home}`] : []),
+      `${CLEAN_ELEVATED_STEPS_ENV}=${steps.join(",")}`,
+      process.execPath,
+      getEntryScript(),
+      "clean",
+      "--yes",
+    ],
+    { stdio: "inherit", timeout: SUDO_SPAWN_TIMEOUT_MS }
+  );
+  if (result.error) {
+    console.error(colors.red(`Could not run sudo: ${result.error.message}`));
+  }
+}
+
 function printCleanHelp(): void {
   console.log(`
 ${colors.bold("portless clean")} - Remove portless artifacts from this machine.
@@ -2427,8 +2544,10 @@ Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
 fails, the CA certificate and key are retained so clean can safely retry.
 
-macOS/Linux may prompt for sudo when the proxy, trust store, or ${HOSTS_DISPLAY}
-require elevated privileges. On Windows, run as Administrator if needed.
+On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
+or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
+steps against the same allowlisted state directories. On Windows, run as
+Administrator if needed.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless clean")}
@@ -2446,6 +2565,12 @@ async function handleClean(args: string[]): Promise<void> {
     { "--yes": "boolean", "-y": "boolean" },
     0
   );
+
+  const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
+  if (requestedCleanupSteps) {
+    process.exitCode = runElevatedCleanupSteps(requestedCleanupSteps) > 0 ? 1 : 0;
+    return;
+  }
 
   const stateDirs = collectStateDirsForCleanup();
   console.error("Clean will:");
@@ -2495,8 +2620,9 @@ async function handleClean(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  await stopProxy(store, port, tls);
-  if (await isProxyRunning(port, tls)) {
+  if (!(await stopProxy(store, port, tls))) {
+    problems++;
+  } else if (await isProxyRunning(port, tls)) {
     console.error(colors.red(`Proxy is still running on port ${port}. Stop it and retry clean.`));
     problems++;
   }
@@ -2520,23 +2646,43 @@ async function handleClean(args: string[]): Promise<void> {
   const failedCAStateDirs = new Set<string>();
   const caRemovalResults = attemptCATrustRemovalForCleanup(stateDirs, untrustCA);
   for (const [stateDir, untrustResult] of caRemovalResults) {
-    if (untrustResult.removed) {
+    if (!untrustResult.removed) failedCAStateDirs.add(stateDir);
+  }
+
+  let stateFailures = stateDirs.flatMap((stateDir) =>
+    removePortlessStateFiles(stateDir, { preserveCAIdentity: failedCAStateDirs.has(stateDir) })
+  );
+  let hostsCleaned = cleanHostsFile();
+
+  const retrySteps: CleanupStep[] = [];
+  if (failedCAStateDirs.size > 0) retrySteps.push("ca");
+  if (stateFailures.length > 0) retrySteps.push("files");
+  if (!hostsCleaned) retrySteps.push("hosts");
+  if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
+    runElevatedCleanup(retrySteps);
+    for (const stateDir of [...failedCAStateDirs]) {
+      if (!fs.existsSync(path.join(stateDir, "ca.pem")) || !isCATrusted(stateDir)) {
+        failedCAStateDirs.delete(stateDir);
+      }
+    }
+    stateFailures = stateFailures.filter((file) => fs.existsSync(file));
+    if (!hostsCleaned) hostsCleaned = cleanHostsFile();
+  }
+
+  for (const [stateDir, untrustResult] of caRemovalResults) {
+    if (!failedCAStateDirs.has(stateDir)) {
       console.log(colors.green("Removed local CA from the system trust store."));
     } else {
-      failedCAStateDirs.add(stateDir);
       problems++;
       console.warn(
         colors.yellow(
           `Could not remove CA from trust store: ${untrustResult.error ?? "unknown error"}\n` +
-            `Try: sudo portless clean (Linux), or delete the certificate manually.`
+            `Delete the certificate manually, then rerun clean.`
         )
       );
     }
   }
 
-  const stateFailures = stateDirs.flatMap((stateDir) =>
-    removePortlessStateFiles(stateDir, { preserveCAIdentity: failedCAStateDirs.has(stateDir) })
-  );
   for (const file of stateFailures) {
     console.warn(colors.yellow(`Could not remove state file: ${file}`));
   }
@@ -2550,15 +2696,8 @@ async function handleClean(args: string[]): Promise<void> {
     );
   }
 
-  if (cleanHostsFile()) {
+  if (hostsCleaned) {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
-  } else if (!isWindows && process.getuid?.() !== 0) {
-    if (!runHostsCleanWithSudo()) {
-      console.error(
-        colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless hosts clean`)
-      );
-      problems++;
-    }
   } else {
     console.warn(
       colors.yellow(
@@ -3516,13 +3655,13 @@ async function handleProxy(args: string[]): Promise<void> {
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(colors.yellow(msg)),
       });
-      await stopProxy(store, explicitPort, false);
+      if (!(await stopProxy(store, explicitPort, false))) process.exitCode = 1;
     } else {
       const { dir, port, tls } = await discoverState();
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(colors.yellow(msg)),
       });
-      await stopProxy(store, port, tls);
+      if (!(await stopProxy(store, port, tls))) process.exitCode = 1;
     }
     return;
   }
