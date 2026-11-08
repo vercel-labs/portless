@@ -9,10 +9,23 @@ import {
   isCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
+import { LEGACY_SYSTEM_STATE_DIR } from "./cli-utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
   return { ...actual, statSync: vi.fn(actual.statSync) };
+});
+
+vi.mock("./cli-utils.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./cli-utils.js")>();
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = join(tmpdir(), `portless-clean-defaults-${process.pid}`);
+  return {
+    ...actual,
+    USER_STATE_DIR: join(root, "user"),
+    LEGACY_SYSTEM_STATE_DIR: join(root, "legacy"),
+  };
 });
 
 describe("collectStateDirsForCleanup", () => {
@@ -53,6 +66,37 @@ describe("collectStateDirsForCleanup", () => {
         expect(fs.readFileSync(path.join(canonical, "keep.txt"), "utf-8")).toBe("keep");
       } finally {
         fs.rmSync(tmp, { recursive: true, force: true });
+        fs.rmSync(target, { recursive: true, force: true });
+      }
+    }
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "leaves a symlinked legacy system state directory and its target alone",
+    () => {
+      delete process.env.PORTLESS_STATE_DIR;
+      const target = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-legacy-target-"));
+      const untrust = vi.fn(() => ({ removed: true }));
+      try {
+        fs.writeFileSync(path.join(target, "routes.json"), "[]");
+        fs.writeFileSync(path.join(target, "ca.pem"), "certificate");
+        fs.mkdirSync(path.join(target, "host-certs"));
+        fs.writeFileSync(path.join(target, "host-certs", "x.pem"), "x");
+        fs.rmSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, force: true });
+        fs.mkdirSync(path.dirname(LEGACY_SYSTEM_STATE_DIR), { recursive: true });
+        fs.symlinkSync(target, LEGACY_SYSTEM_STATE_DIR, "dir");
+
+        const { dirs } = collectStateDirsForCleanupWithFailures();
+        for (const dir of dirs) removePortlessStateFiles(dir);
+        attemptCATrustRemovalForCleanup(dirs, untrust);
+
+        expect(dirs).not.toContain(fs.realpathSync(target));
+        expect(untrust).not.toHaveBeenCalled();
+        expect(fs.readFileSync(path.join(target, "routes.json"), "utf-8")).toBe("[]");
+        expect(fs.existsSync(path.join(target, "ca.pem"))).toBe(true);
+        expect(fs.existsSync(path.join(target, "host-certs", "x.pem"))).toBe(true);
+      } finally {
+        fs.rmSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, force: true });
         fs.rmSync(target, { recursive: true, force: true });
       }
     }

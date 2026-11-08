@@ -70,17 +70,17 @@ export type CollectedStateDirs = {
 };
 
 /**
- * Canonicalize existing state directories before cleanup so a configured
- * symlink is cleaned through its physical target. Paths that cannot be
- * canonicalized or are not directories are reported as failures.
+ * Canonicalize configured state directories and report invalid paths.
+ * Skip symlinked legacy system directories rather than cleaning their targets.
  */
 export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
   const dirs = new Set<string>();
   const failures = new Set<string>();
-  const add = (d: string | undefined) => {
+  const add = (d: string | undefined, allowSymlink = true) => {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
+    if (!allowSymlink && !isCleanableStateDir(resolved)) return;
     let canonical: string;
     try {
       canonical = fs.realpathSync(resolved);
@@ -96,7 +96,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
     dirs.add(canonical);
   };
   add(USER_STATE_DIR);
-  add(LEGACY_SYSTEM_STATE_DIR);
+  add(LEGACY_SYSTEM_STATE_DIR, false);
   add(process.env.PORTLESS_STATE_DIR);
   return { dirs: [...dirs], failures: [...failures] };
 }
