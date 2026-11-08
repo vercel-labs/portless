@@ -64,6 +64,7 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
+  isPortFree,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";
@@ -97,7 +98,6 @@ import {
   WAIT_FOR_PROXY_INTERVAL_MS,
   WAIT_FOR_PROXY_MAX_ATTEMPTS,
   discoverState,
-  findFreePort,
   findPidOnPort,
   guardWindowsOrphans,
   findPidsOnPort,
@@ -662,38 +662,6 @@ function isUnavailableIpv6Bind(err: NodeJS.ErrnoException, host: string): boolea
   return host.includes(":") && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL");
 }
 
-function addRoutes(
-  store: RouteStore,
-  hostnames: readonly string[],
-  port: number,
-  pid: number,
-  force = false,
-  upstream?: AliasUpstream
-): number[] {
-  store.recoverCorruptRoutesFile();
-  const registered: string[] = [];
-  const killedPids: number[] = [];
-  try {
-    for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force, upstream);
-      registered.push(hostname);
-      if (killedPid !== undefined) {
-        killedPids.push(killedPid);
-      }
-    }
-  } catch (err) {
-    for (const hostname of registered) {
-      try {
-        store.removeRoute(hostname, pid);
-      } catch {
-        // Non-fatal rollback cleanup.
-      }
-    }
-    throw err;
-  }
-  return [...new Set(killedPids)];
-}
-
 /**
  * Try to stop every recorded process group once, keyed by group id. Routes that
  * share a group share one outcome and contribute all of their recorded
@@ -824,16 +792,6 @@ function printTunnelHint(t: ProcessTunnel, message: string): void {
   } else if (t.binary === "ngrok" && message.includes("authentication is not configured")) {
     console.error(colors.blue("Configure ngrok authentication:"));
     console.error(colors.cyan("  ngrok config add-authtoken <token>"));
-  }
-}
-
-function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?: number): void {
-  for (const hostname of hostnames) {
-    try {
-      store.removeRoute(hostname, ownerPid);
-    } catch {
-      // Non-fatal cleanup.
-    }
   }
 }
 
@@ -1947,19 +1905,24 @@ async function runApp(
     }
   }
 
-  const port = desiredPort ?? (await findFreePort());
-  if (desiredPort) {
-    console.error(colors.green(`  Using port ${port} (fixed)`));
-  } else {
-    console.error(colors.green(`  Using port ${port}`));
-  }
-
   await stopOrphanedProcessGroups(store);
 
-  // Register route (--force kills the existing owner if any)
-  let killedPids: number[] = [];
+  let port: number;
+  let killedPids: number[];
   try {
-    killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    const registration = await store.register({
+      hostnames,
+      pid: process.pid,
+      port: desiredPort,
+      force,
+    });
+    port = registration.port;
+    killedPids = registration.killedPids;
+    if (desiredPort) {
+      console.error(colors.green(`  Using port ${port} (fixed)`));
+    } else {
+      console.error(colors.green(`  Using port ${port}`));
+    }
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
     if (err instanceof RouteConflictError) {
@@ -2107,7 +2070,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        removeRoutes(store, hostnames, process.pid);
+        store.remove(hostnames, process.pid);
       } catch {
         // Best-effort cleanup; non-fatal
       }
@@ -2210,7 +2173,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        removeRoutes(store, hostnames, process.pid);
+        store.remove(hostnames, process.pid);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -2886,9 +2849,7 @@ async function handleClean(args: string[]): Promise<void> {
 
   console.log(colors.cyan("Stopping proxy if it is running..."));
   const { dir, port, tls } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   let proxyStopped = await stopProxy(store, port, tls);
   if (!proxyStopped) {
     problems++;
@@ -2900,9 +2861,9 @@ async function handleClean(args: string[]): Promise<void> {
   const preserveProxyRuntime = !proxyStopped;
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  let routesForClean: ReturnType<RouteStore["loadRoutes"]> = [];
   try {
-    routesForClean = store.untrustedReason() ? [] : store.loadRoutesRaw();
+    routesForClean = store.untrustedReason() ? [] : store.loadRoutes({ includeStale: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
@@ -3047,9 +3008,7 @@ async function handlePrune(args: string[]): Promise<void> {
   );
 
   const { dir } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
 
   const unsafe = store.untrustedReason();
   if (unsafe) {
@@ -3157,9 +3116,7 @@ async function handlePrune(args: string[]): Promise<void> {
 async function handleList(args: string[]): Promise<void> {
   const json = parseCommandArgs("list", args.slice(1), { "--json": "boolean" }, 0).has("--json");
   const { dir, port, tls } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   listRoutes(store, port, tls, json);
 }
 
@@ -3396,13 +3353,23 @@ async function handleAlias(args: string[]): Promise<void> {
       process.exit(1);
     }
     // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
-    removeRoutes(store, aliases, 0);
+    try {
+      store.remove(aliases, 0);
+    } catch (error) {
+      void error;
+    }
     console.log(colors.green(`Removed alias: ${aliases.join(", ")}`));
     return;
   }
 
   const hostnames = buildHostnames(aliasName!, tlds, targetTlds);
-  addRoutes(store, hostnames, port!, 0, parsed.has("--force"), upstream);
+  await store.register({
+    hostnames,
+    pid: 0,
+    port: port!,
+    force: parsed.has("--force"),
+    upstream,
+  });
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
   // Awaited: this command exits, and a warning printed after exit reaches nobody.
   await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
@@ -3458,9 +3425,7 @@ async function handleHosts(args: string[]): Promise<void> {
   }
 
   const { dir } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
 
   const unsafe = store.untrustedReason();
   if (unsafe) {
@@ -3630,9 +3595,7 @@ async function handleDoctor(args: string[]): Promise<void> {
     };
   }
 
-  const store = new RouteStore(state.dir, {
-    onWarning: (msg) => add("warn", msg),
-  });
+  const store = new RouteStore(state.dir, { onWarning: (msg) => add("warn", msg) });
   const hasPortFile = fs.existsSync(store.portFilePath);
   const configuredTls = hasPortFile ? state.tls : !isHttpsEnvDisabled();
   const configuredPort = hasPortFile ? state.port : getDefaultPort(configuredTls);
@@ -3800,9 +3763,9 @@ async function handleDoctor(args: string[]): Promise<void> {
     add("info", "HTTPS is disabled for the current proxy state.");
   }
 
-  let rawRoutes: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  let rawRoutes: RouteMapping[] = [];
   try {
-    rawRoutes = store.loadRoutesRaw();
+    rawRoutes = store.loadRoutes({ includeStale: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     add("fail", `Could not read routes: ${message}`);
@@ -4010,15 +3973,11 @@ async function handleProxy(args: string[]): Promise<void> {
 
     if (explicitPort !== undefined) {
       const dir = resolveStateDir(explicitPort);
-      const store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(msg)),
-      });
+      const store = new RouteStore(dir);
       if (!(await stopProxy(store, explicitPort, false))) process.exitCode = 1;
     } else {
       const { dir, port, tls } = await discoverState();
-      const store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(msg)),
-      });
+      const store = new RouteStore(dir);
       if (!(await stopProxy(store, port, tls))) process.exitCode = 1;
     }
     return;
@@ -4695,9 +4654,7 @@ async function handleDefaultSingle(
   });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   await runApp(
     store,
     port,
@@ -4805,13 +4762,13 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${name}] ${msg}`)),
     });
 
-    appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app, tlds);
+    store.recoverCorruptRoutesFile();
+    appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
 
-    addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
@@ -4865,7 +4822,12 @@ async function spawnProxiedApp(
           // Best-effort; the routes are removed below.
         })
         .finally(() => {
-          removeRoutes(capturedStore, capturedHostnames, process.pid);
+          try {
+            capturedStore.remove(capturedHostnames, process.pid);
+          } catch {
+            resolve();
+            return;
+          }
           resolve();
         });
     });
@@ -5159,9 +5121,7 @@ async function runWithTurbo(
   taskApps: MultiAppEntry[],
   extraArgs: string[] = []
 ): Promise<void> {
-  const store = new RouteStore(stateDir, {
-    onWarning: (msg: string) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(stateDir);
 
   const manifest: Record<string, ManifestEntry> = {};
   const routes: { hostnames: string[] }[] = [];
@@ -5174,13 +5134,13 @@ async function runWithTurbo(
       continue;
     }
 
-    const appPort = app.appPort ?? (await findFreePort());
     const hostnames = buildHostnames(app, tlds);
+    store.recoverCorruptRoutesFile();
+    const appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
 
-    addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 
@@ -5255,7 +5215,11 @@ async function runWithTurbo(
     }, SIGKILL_TIMEOUT_MS).unref();
 
     for (const { hostnames } of routes) {
-      removeRoutes(store, hostnames, process.pid);
+      try {
+        store.remove(hostnames, process.pid);
+      } catch {
+        continue;
+      }
     }
   };
 
@@ -5290,8 +5254,6 @@ async function runWithDirectSpawn(
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
   const routeSettlements: Promise<void>[] = [];
 
-  // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
-  // a port, so parallel spawning could cause port collisions.
   for (const app of proxiedApps) {
     const { child, displayUrl, route, settled } = await spawnProxiedApp(
       app,
@@ -5343,7 +5305,11 @@ async function runWithDirectSpawn(
     }, SIGKILL_TIMEOUT_MS).unref();
 
     for (const { store, hostnames } of routeEntries) {
-      removeRoutes(store, hostnames, process.pid);
+      try {
+        store.remove(hostnames, process.pid);
+      } catch {
+        continue;
+      }
     }
   };
 
@@ -5421,9 +5387,7 @@ async function handleRunMode(
   const worktree = resolveWorktreeNaming({ config: appConfig?.worktree, override });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   await runApp(
     store,
     port,
@@ -5474,9 +5438,7 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
   buildHostnames(nameInput, [DEFAULT_TLD]);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   await runApp(
     store,
     port,
@@ -5635,7 +5597,11 @@ async function composeDown(args: string[], globals: string[], input?: string): P
   const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
   store.recoverCorruptRoutesFile();
   const aliases = store.loadRoutes().filter((r) => r.pid === 0);
-  removeRoutes(store, staleAliases(aliases, project, tlds, after));
+  try {
+    store.remove(staleAliases(aliases, project, tlds, after));
+  } catch (error) {
+    void error;
+  }
   if (after.ports.size === 0) {
     // The resolved model can hold env_file values; drop it with the project.
     const files = composeStatePaths(dir, project);
@@ -5715,13 +5681,6 @@ function assertUniqueProjectLabel(stateDir: string, project: string): void {
   }
 }
 
-function isPortFree(port: number): Promise<boolean> {
-  return findFreePort(port, port).then(
-    () => true,
-    () => false
-  );
-}
-
 /** Ports saved by every other compose project in the state dir. */
 function reservedComposePorts(stateDir: string, project: string): Set<number> {
   const dir = path.join(stateDir, "compose");
@@ -5782,7 +5741,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
     state = { ...state, tlds: running.tlds, lanMode: running.lanMode, lanIp: running.lanIp };
   }
   const { dir, port: proxyPort, tls, tlds, lanMode } = state;
-  const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+  const store = new RouteStore(dir);
 
   const project = source.name;
   const files = composeStatePaths(dir, project);
@@ -5837,40 +5796,55 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
 
   // Register the routes of running services. Ports are fixed, so this only
   // picks up services as they start.
-  const sync = (): boolean => {
-    const containers = readComposeContainers(["-p", plan.project]);
-    if (!containers) return false;
-    for (const route of plan.routes) {
-      const port = routePort(route, containers);
-      const primary = route.hostnames[0]!;
-      if (port === undefined || registered.get(primary) === port) continue;
+  let syncInFlight = false;
+  let syncPromise: Promise<boolean> | undefined;
+  const sync = async (): Promise<boolean> => {
+    if (syncInFlight) return syncPromise ?? true;
+    syncInFlight = true;
+    syncPromise = (async () => {
       try {
-        // Aliases from an earlier up -d are ours to replace; a live process is not.
-        addRoutes(store, route.hostnames, port, ownerPid, isAliasConflict(store, primary));
-      } catch (err) {
-        if (!(err instanceof RouteConflictError)) throw err;
-        if (!conflicts.has(primary)) {
-          console.error(
-            colors.red(
-              `Error: ${primary} is already registered by another process (PID ${err.existingPid}). Stop it, or rename the service with portless.name.`
-            )
-          );
+        const containers = readComposeContainers(["-p", plan.project]);
+        if (!containers) return false;
+        for (const route of plan.routes) {
+          const port = routePort(route, containers);
+          const primary = route.hostnames[0]!;
+          if (port === undefined || registered.get(primary) === port) continue;
+          try {
+            await store.register({
+              hostnames: route.hostnames,
+              pid: ownerPid,
+              port,
+              force: isAliasConflict(store, primary),
+            });
+          } catch (err) {
+            if (!(err instanceof RouteConflictError)) throw err;
+            if (!conflicts.has(primary)) {
+              console.error(
+                colors.red(
+                  `Error: ${primary} is already registered by another process (PID ${err.existingPid}). Stop it, or rename the service with portless.name.`
+                )
+              );
+            }
+            conflicts.add(primary);
+            continue;
+          }
+          conflicts.delete(primary);
+          registered.set(primary, port);
+          console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
         }
-        conflicts.add(primary);
-        continue;
+        return true;
+      } finally {
+        syncInFlight = false;
       }
-      conflicts.delete(primary);
-      registered.set(primary, port);
-      console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
-    }
-    return true;
+    })();
+    return syncPromise;
   };
 
   if (detached) {
     const code = await spawnDockerCompose(upArgs).exited;
     if (code === 0) {
       console.error("");
-      if (!sync()) {
+      if (!(await sync())) {
         console.warn(
           colors.yellow(
             "Could not read the project's containers, so no routes were registered. Run portless compose up -d again."
@@ -5888,18 +5862,26 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   const { child, exited } = spawnDockerCompose(upArgs);
   let reported = false;
   const timer = setInterval(() => {
-    sync();
-    if (!reported && registered.size > 0) {
-      reported = true;
-      void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
-    }
+    void sync().then(() => {
+      if (!reported && registered.size > 0) {
+        reported = true;
+        void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+      }
+    });
   }, 1000);
   // Ctrl+C reaches compose through the process group; wait for it to stop.
   process.on("SIGINT", () => {});
   process.on("SIGTERM", () => child.kill("SIGTERM"));
   const code = await exited;
   clearInterval(timer);
-  for (const route of plan.routes) removeRoutes(store, route.hostnames, process.pid);
+  if (syncInFlight && syncPromise) await syncPromise;
+  for (const route of plan.routes) {
+    try {
+      store.remove(route.hostnames, process.pid);
+    } catch {
+      continue;
+    }
+  }
   fs.rmSync(files.model, { force: true });
   process.exit(code);
 }
