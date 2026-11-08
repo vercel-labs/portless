@@ -6192,5 +6192,56 @@ describe("CLI", { timeout: 15_000 }, () => {
       },
       45_000
     );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments to a root script that does not run Turbo",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-root-script-"));
+        const markFile = path.join(root, "marks.txt");
+
+        const writeRoot = (packageManager: string) => {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-root-script",
+              private: true,
+              packageManager,
+              workspaces: ["packages/*"],
+              scripts: { dev: "node mark-root.cjs" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "mark-root.cjs"),
+            [
+              'const fs = require("node:fs");',
+              "fs.appendFileSync(process.env.MARK_FILE, `root:${JSON.stringify(process.argv.slice(2))}\\n`);",
+            ].join("\n") + "\n"
+          );
+        };
+
+        try {
+          writeRoot("npm@10.0.0");
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+
+          const npmResult = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(npmResult.status, npmResult.output).toBe(0);
+          expect(readMarks(markFile), npmResult.output).toEqual([["root", args]]);
+
+          fs.rmSync(markFile, { force: true });
+          writeRoot("pnpm@11.1.3");
+          const pnpmResult = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(pnpmResult.status, pnpmResult.output).toBe(0);
+          expect(readMarks(markFile), pnpmResult.output).toEqual([["root", args]]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
   });
 });

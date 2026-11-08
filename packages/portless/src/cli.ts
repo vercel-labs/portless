@@ -160,6 +160,7 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScriptCommand,
+  resolveScript,
   scriptRunCommand,
   packageManagerExec,
   hasScript,
@@ -4855,7 +4856,12 @@ async function runWithTurbo(
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
-  const turboPassThrough = extraArgs.length > 0 ? ["--", ...extraArgs] : [];
+  const rootScriptIsTurbo =
+    useRootScript && path.basename(resolveScript(scriptName, wsRoot)?.[0] ?? "") === "turbo";
+  const turboPassThrough =
+    (!useRootScript || rootScriptIsTurbo) && extraArgs.length > 0
+      ? ["--", ...extraArgs]
+      : extraArgs;
   const turboArgs = useRootScript
     ? scriptRunCommand(pm, scriptName, wsRoot, turboPassThrough)
     : packageManagerExec(pm, ["turbo", "run", scriptName, ...turboPassThrough]);
