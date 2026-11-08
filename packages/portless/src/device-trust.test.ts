@@ -42,12 +42,12 @@ afterAll(async () => {
 
 describe("detectPlatform", () => {
   it.each([
-    [IPHONE, "ios"],
-    ["Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)", "ios"],
-    [ANDROID, "android"],
-    [MAC, "other"],
-    [undefined, "other"],
-  ])("%s is %s", (userAgent, platform) => {
+    ["an iPhone", IPHONE, "ios"],
+    ["an iPad", "Mozilla/5.0 (iPad; CPU OS 17_0 like Mac OS X)", "ios"],
+    ["an Android phone", ANDROID, "android"],
+    ["a Mac", MAC, "other"],
+    ["no user agent", undefined, "other"],
+  ])("detects %s as %s", (_device, userAgent, platform) => {
     expect(detectPlatform(userAgent)).toBe(platform);
   });
 });
@@ -97,10 +97,10 @@ describe("mobileconfig", () => {
 
 describe("createDeviceTrustHandler", () => {
   it.each([
-    [IPHONE, "portless-ca.mobileconfig", "Certificate Trust Settings"],
-    [ANDROID, "portless-ca.crt", "CA certificate"],
-    [MAC, "portless-ca.pem", "Always Trust"],
-  ])("serves %s the steps for its platform", async (userAgent, file, step) => {
+    ["an iPhone", IPHONE, "portless-ca.mobileconfig", "Certificate Trust Settings"],
+    ["an Android phone", ANDROID, "portless-ca.crt", "CA certificate"],
+    ["a Mac", MAC, "portless-ca.pem", "Always Trust"],
+  ])("serves %s the steps for its platform", async (_device, userAgent, file, step) => {
     const res = await fetch(`${origin}/${TOKEN}/`, { headers: { "user-agent": userAgent } });
     const page = await res.text();
     expect(res.status).toBe(200);
