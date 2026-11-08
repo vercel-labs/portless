@@ -265,6 +265,7 @@ const OMITTED_COMMANDS: Record<string, string> = {
   "portless mcp": "the MCP server itself",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",
+  "portless trust --device": "serves the CA in the foreground for ten minutes",
   "portless clean": "may prompt for sudo",
   "portless hosts sync": "may prompt for sudo",
   "portless hosts clean": "may prompt for sudo",

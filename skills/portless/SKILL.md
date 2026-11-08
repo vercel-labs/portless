@@ -251,6 +251,8 @@ portless proxy start --lan --ip 192.168.1.42
 
 Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start again, it stays in LAN mode. All proxy settings (port, TLS, TLDs, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
+With HTTPS, a device needs the portless CA to load `.local` apps without warnings. `portless trust --device` prints a QR code and the CA's SHA-256 fingerprint, and serves the CA certificate (never its key) over plain HTTP on the LAN address at a one-time path for ten minutes. The page offers a configuration profile on iOS (install it in Settings, then turn on full trust under General > About > Certificate Trust Settings), the certificate on Android (install it from Settings by searching for "CA certificate", then restart Chrome), and PEM elsewhere. It runs in the foreground, so a person has to scan the code.
+
 LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling).
 
 - **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
@@ -336,6 +338,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 | `portless list`                                   | Show active routes and uptime                                  |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
+| `portless trust --device`                         | Trust the local CA on a phone or other device (QR code)        |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
 | `portless prune`                                  | Kill orphaned dev server groups; `run` also does it on start   |
 | `portless prune --force`                          | Kill orphans with SIGKILL instead of SIGTERM                   |
