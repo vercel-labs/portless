@@ -243,7 +243,12 @@ export class RouteStore {
     while (Date.now() < deadline) {
       try {
         fs.mkdirSync(this.lockPath);
-        fs.writeFileSync(path.join(this.lockPath, "owner"), JSON.stringify({ pid: process.pid }));
+        try {
+          fs.writeFileSync(path.join(this.lockPath, "owner"), JSON.stringify({ pid: process.pid }));
+        } catch (writeError) {
+          fs.rmSync(this.lockPath, { recursive: true, force: true });
+          throw writeError;
+        }
         return true;
       } catch (err: unknown) {
         if (!isErrnoException(err)) return false;
