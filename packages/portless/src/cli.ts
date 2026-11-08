@@ -933,7 +933,8 @@ function startProxyServer(
   };
 
   try {
-    watcher = fs.watch(routesPath, () => {
+    watcher = fs.watch(store.dir, (_event, filename) => {
+      if (filename && filename !== path.basename(routesPath)) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
     });
