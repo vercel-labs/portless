@@ -1,9 +1,10 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import * as net from "node:net";
 import * as os from "node:os";
-import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
+import { pathToFileURL } from "node:url";
 import { RouteStore, RouteConflictError } from "./routes.js";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -51,9 +52,7 @@ describe("RouteStore", () => {
 
     it("calls onWarning for invalid JSON", () => {
       const warnings: string[] = [];
-      const warnStore = new RouteStore(tmpDir, {
-        onWarning: (msg) => warnings.push(msg),
-      });
+      const warnStore = new RouteStore(tmpDir, (msg) => warnings.push(msg));
       warnStore.ensureDir();
       fs.writeFileSync(warnStore.getRoutesPath(), "not json");
       warnStore.loadRoutes();
@@ -63,9 +62,7 @@ describe("RouteStore", () => {
 
     it("calls onWarning when routes file is not an array", () => {
       const warnings: string[] = [];
-      const warnStore = new RouteStore(tmpDir, {
-        onWarning: (msg) => warnings.push(msg),
-      });
+      const warnStore = new RouteStore(tmpDir, (msg) => warnings.push(msg));
       warnStore.ensureDir();
       fs.writeFileSync(warnStore.getRoutesPath(), JSON.stringify({ not: "array" }));
       warnStore.loadRoutes();
@@ -133,7 +130,6 @@ describe("RouteStore", () => {
     });
 
     it("filters out routes with dead PIDs", () => {
-      // Use a PID that is guaranteed not to exist
       const deadPid = 999999;
       const routes = [
         { hostname: "alive.localhost", port: 4001, pid: process.pid },
@@ -146,38 +142,7 @@ describe("RouteStore", () => {
       expect(loaded[0].hostname).toBe("alive.localhost");
     });
 
-    it("does not persist cleanup when persistCleanup is false (default)", () => {
-      const deadPid = 999999;
-      const routes = [
-        { hostname: "alive.localhost", port: 4001, pid: process.pid },
-        { hostname: "dead.localhost", port: 4002, pid: deadPid },
-      ];
-      store.ensureDir();
-      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
-      store.loadRoutes();
-
-      // Re-read the file directly; stale entries should still be on disk
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-      expect(raw).toHaveLength(2);
-    });
-
-    it("persists cleaned-up routes when persistCleanup is true", () => {
-      const deadPid = 999999;
-      const routes = [
-        { hostname: "alive.localhost", port: 4001, pid: process.pid },
-        { hostname: "dead.localhost", port: 4002, pid: deadPid },
-      ];
-      store.ensureDir();
-      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
-      store.loadRoutes(true);
-
-      // Re-read the file directly to verify it was cleaned up
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-      expect(raw).toHaveLength(1);
-      expect(raw[0].hostname).toBe("alive.localhost");
-    });
-
-    it("keeps routes whose process exists but cannot be signaled (EPERM)", () => {
+    it("keeps routes whose process exists but cannot be signaled (EPERM)", async () => {
       const deniedPid = 999998;
       const realKill = process.kill.bind(process);
       const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
@@ -191,12 +156,10 @@ describe("RouteStore", () => {
         store.ensureDir();
         fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
 
-        expect(store.loadRoutes(true).map((r) => r.hostname)).toEqual(["denied.localhost"]);
-        const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-        expect(raw).toHaveLength(1);
-        expect(() => store.addRoute("denied.localhost", 4002, process.pid)).toThrow(
-          RouteConflictError
-        );
+        expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["denied.localhost"]);
+        await expect(
+          store.register({ hostnames: ["denied.localhost"], pid: process.pid, port: 4002 })
+        ).rejects.toThrow(RouteConflictError);
       } finally {
         kill.mockRestore();
       }
@@ -228,12 +191,12 @@ describe("RouteStore", () => {
       return JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
     }
 
-    it("preserves skipped entries while adding, updating, transferring and removing valid routes", () => {
+    it("preserves skipped entries while adding, updating, transferring and removing valid routes", async () => {
       seed();
       expect(store.loadRoutes()).toEqual([alias, owned]);
-      expect(store.loadRoutesRaw()).toEqual([alias, owned, stale]);
+      expect(store.loadRoutes({ includeStale: true })).toEqual([alias, owned, stale]);
 
-      store.addRoute("new.localhost", 4006, 0, false, { tls: true });
+      await store.register({ hostnames: ["new.localhost"], pid: 0, port: 4006, upstream: { tls: true } });
       expect(disk()).toEqual(
         expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
       );
@@ -241,7 +204,7 @@ describe("RouteStore", () => {
       store.updateRoute("owned.localhost", { ngrokUrl: "https://example.test" });
       expect(disk()).toContainEqual({ ...owned, ngrokUrl: "https://example.test" });
       expect(store.transferRoute("owned.localhost", process.pid, process.ppid)).toBe(true);
-      store.removeRoute("alias.localhost", 0);
+      store.remove(["alias.localhost"], 0);
 
       expect(disk()).toEqual(expect.arrayContaining([unsupported, malformed, incomplete]));
       expect(disk()).not.toContainEqual(alias);
@@ -267,13 +230,13 @@ describe("RouteStore", () => {
 
     it.each([unsupported, malformed, incomplete])(
       "requires force to replace a skipped hostname",
-      (entry) => {
+      async (entry) => {
         seed();
-        expect(() => store.addRoute(entry.hostname, 4444, 0)).toThrow(
-          "has an invalid or unsupported stored route. Use --force to replace it."
-        );
+        await expect(
+          store.register({ hostnames: [entry.hostname], pid: 0, port: 4444 })
+        ).rejects.toThrow("has an invalid or unsupported stored route. Use --force to replace it.");
         expect(disk()).toContainEqual(entry);
-        store.addRoute(entry.hostname, 4444, 0, true);
+        await store.register({ hostnames: [entry.hostname], pid: 0, port: 4444, force: true });
         const matching = (disk() as { hostname?: string }[]).filter(
           (route) => route.hostname === entry.hostname
         );
@@ -283,49 +246,48 @@ describe("RouteStore", () => {
       }
     );
 
-    it("continues to reject invalid new upstreams without changing the file", () => {
+    it("continues to reject invalid new upstreams without changing the file", async () => {
       seed();
-      expect(() =>
-        store.addRoute("new.localhost", 4444, 0, false, { tls: "yes" } as never)
-      ).toThrow("Invalid upstream configuration");
+      await expect(
+        store.register({
+          hostnames: ["new.localhost"],
+          pid: 0,
+          port: 4444,
+          upstream: { tls: "yes" } as never,
+        })
+      ).rejects.toThrow("Invalid upstream configuration");
       expect(disk()).toEqual([unsupported, malformed, incomplete, alias, owned, stale]);
     });
   });
 
-  describe("saveRoutes (via addRoute)", () => {
-    it("persists routes to file", () => {
-      store.addRoute("test.localhost", 4123, process.pid);
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-      expect(raw).toHaveLength(1);
-      expect(raw[0].hostname).toBe("test.localhost");
-      expect(raw[0].port).toBe(4123);
-      expect(raw[0].pid).toBe(process.pid);
-    });
-
-    it("creates directory if it does not exist", () => {
+  describe("register", () => {
+    it("creates the state directory if it does not exist", async () => {
       const nested = path.join(tmpDir, "nested");
       const s = new RouteStore(nested);
-      s.addRoute("test.localhost", 4001, process.pid);
+      await s.register({ hostnames: ["test.localhost"], pid: process.pid, port: 4001 });
       expect(fs.existsSync(s.getRoutesPath())).toBe(true);
     });
-  });
 
-  describe("addRoute", () => {
-    it("persists and reloads upstream settings and clears them on replacement", () => {
+    it("persists and reloads upstream settings and clears them on replacement", async () => {
       const upstream = { tls: true, host: "api.internal:8443" };
-      store.addRoute("api.localhost", 4001, 0, false, upstream);
+      await store.register({ hostnames: ["api.localhost"], pid: 0, port: 4001, upstream });
       const saved = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(saved[0].upstream).toEqual(upstream);
       expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toEqual(upstream);
 
-      store.addRoute("api.localhost", 4002, 0, true);
+      await store.register({ hostnames: ["api.localhost"], pid: 0, port: 4002, force: true });
       expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toBeUndefined();
     });
 
-    it("adds a route to empty store", () => {
+    it("adds a route to empty store", async () => {
       const before = Date.now();
-      store.addRoute("myapp.localhost", 4001, process.pid);
+      const { port } = await store.register({
+        hostnames: ["myapp.localhost"],
+        pid: process.pid,
+        port: 4001,
+      });
       const after = Date.now();
+      expect(port).toBe(4001);
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0]).toEqual({
@@ -338,17 +300,17 @@ describe("RouteStore", () => {
       expect(routes[0].registeredAt).toBeLessThanOrEqual(after);
     });
 
-    it("replaces existing route with same hostname", () => {
-      store.addRoute("myapp.localhost", 4001, process.pid);
-      store.addRoute("myapp.localhost", 4002, process.pid);
+    it("replaces existing route with same hostname", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4001 });
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4002 });
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].port).toBe(4002);
     });
 
-    it("preserves other routes when adding", () => {
-      store.addRoute("app1.localhost", 4001, process.pid);
-      store.addRoute("app2.localhost", 4002, process.pid);
+    it("preserves other routes when adding", async () => {
+      await store.register({ hostnames: ["app1.localhost"], pid: process.pid, port: 4001 });
+      await store.register({ hostnames: ["app2.localhost"], pid: process.pid, port: 4002 });
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(2);
       const hostnames = routes.map((r) => r.hostname).sort();
@@ -356,7 +318,7 @@ describe("RouteStore", () => {
     });
   });
 
-  describe("addRoute with force", () => {
+  describe("register with force", () => {
     function spawnSleeper(): number {
       const child = spawn("node", ["-e", "setTimeout(()=>{},60000)"], {
         detached: true,
@@ -375,73 +337,71 @@ describe("RouteStore", () => {
       }
     }
 
-    it("throws RouteConflictError without --force when route is owned by another live process", () => {
+    function stop(pid: number): void {
+      try {
+        process.kill(pid, "SIGTERM");
+      } catch {
+        // already dead
+      }
+    }
+
+    it("throws RouteConflictError without --force when route is owned by another live process", async () => {
       const otherPid = spawnSleeper();
       try {
-        store.addRoute("app.localhost", 4001, otherPid);
-        expect(() => store.addRoute("app.localhost", 4002, process.pid)).toThrow(
-          RouteConflictError
-        );
+        await store.register({ hostnames: ["app.localhost"], pid: otherPid, port: 4001 });
+        await expect(
+          store.register({ hostnames: ["app.localhost"], pid: process.pid, port: 4002 })
+        ).rejects.toThrow(RouteConflictError);
       } finally {
-        try {
-          process.kill(otherPid, "SIGTERM");
-        } catch {
-          // already dead
-        }
+        stop(otherPid);
       }
     });
 
-    it("kills the existing process and returns its PID when --force is used", async () => {
+    it("kills the existing process with --force and replaces its route", async () => {
       const otherPid = spawnSleeper();
       try {
-        store.addRoute("app.localhost", 4001, otherPid);
-        const killedPid = store.addRoute("app.localhost", 4002, process.pid, true);
-        expect(killedPid).toBe(otherPid);
-        // Wait for signal delivery
-        await new Promise((r) => setTimeout(r, 200));
-        expect(isAlive(otherPid)).toBe(false);
-      } finally {
-        try {
-          process.kill(otherPid, "SIGTERM");
-        } catch {
-          // already dead
-        }
-      }
-    });
-
-    it("replaces the route when --force kills the existing process", () => {
-      const otherPid = spawnSleeper();
-      try {
-        store.addRoute("app.localhost", 4001, otherPid);
-        store.addRoute("app.localhost", 4002, process.pid, true);
+        await store.register({ hostnames: ["app.localhost"], pid: otherPid, port: 4001 });
+        const { killedPids } = await store.register({
+          hostnames: ["app.localhost"],
+          pid: process.pid,
+          port: 4002,
+          force: true,
+        });
+        expect(killedPids).toEqual([otherPid]);
         const routes = store.loadRoutes();
         expect(routes).toHaveLength(1);
         expect(routes[0].port).toBe(4002);
         expect(routes[0].pid).toBe(process.pid);
+        await new Promise((r) => setTimeout(r, 200));
+        expect(isAlive(otherPid)).toBe(false);
       } finally {
-        try {
-          process.kill(otherPid, "SIGTERM");
-        } catch {
-          // already dead
-        }
+        stop(otherPid);
       }
     });
 
-    it("refuses to replace a static alias without --force", () => {
-      store.addRoute("db.localhost", 5432, 0);
-      expect(() => store.addRoute("db.localhost", 4002, process.pid)).toThrow(
+    it("refuses to replace a static alias without --force", async () => {
+      await store.register({ hostnames: ["db.localhost"], pid: 0, port: 5432 });
+      await expect(
+        store.register({ hostnames: ["db.localhost"], pid: process.pid, port: 4002 })
+      ).rejects.toThrow(
         '"db.localhost" is a static alias. Use --force to replace it; re-add the alias with "portless alias" afterwards.'
       );
     });
 
-    it("replaces a static alias with --force without sending any signal", () => {
+    it("replaces a static alias with --force without sending any signal", async () => {
       const realKill = process.kill.bind(process);
       const kill = vi
         .spyOn(process, "kill")
         .mockImplementation((pid, signal) => (signal ? true : realKill(pid, signal)));
       try {
-        store.addRoute("db.localhost", 5432, 0);
-        expect(store.addRoute("db.localhost", 4002, process.pid, true)).toBeUndefined();
+        await store.register({ hostnames: ["db.localhost"], pid: 0, port: 5432 });
+        const { killedPids } = await store.register({
+          hostnames: ["db.localhost"],
+          pid: process.pid,
+          port: 4002,
+          force: true,
+        });
+        expect(killedPids).toEqual([]);
         expect(kill.mock.calls.filter(([, signal]) => signal)).toEqual([]);
         const routes = store.loadRoutes();
         expect(routes).toHaveLength(1);
@@ -450,53 +410,25 @@ describe("RouteStore", () => {
         kill.mockRestore();
       }
     });
-
-    it("returns undefined when no conflicting process exists", () => {
-      const killedPid = store.addRoute("app.localhost", 4001, process.pid, true);
-      expect(killedPid).toBeUndefined();
-    });
   });
 
-  describe("removeRoute", () => {
-    it("removes an existing route", () => {
-      store.addRoute("myapp.localhost", 4001, process.pid);
-      store.removeRoute("myapp.localhost");
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(0);
-    });
-
-    it("does not fail when removing non-existent route", () => {
-      store.addRoute("myapp.localhost", 4001, process.pid);
-      expect(() => store.removeRoute("other.localhost")).not.toThrow();
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
-    });
-
-    it("preserves other routes when removing", () => {
-      store.addRoute("app1.localhost", 4001, process.pid);
-      store.addRoute("app2.localhost", 4002, process.pid);
-      store.removeRoute("app1.localhost");
+  describe("remove", () => {
+    it("removes the given hostnames and leaves the rest", async () => {
+      await store.register({ hostnames: ["app1.localhost"], pid: process.pid, port: 4001 });
+      await store.register({ hostnames: ["app2.localhost"], pid: process.pid, port: 4002 });
+      store.remove(["app1.localhost", "never-registered.localhost"]);
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].hostname).toBe("app2.localhost");
     });
 
-    it("removes the route when the caller still owns it", () => {
-      store.addRoute("myapp.localhost", 4001, process.pid);
-      store.removeRoute("myapp.localhost", process.pid);
-      expect(store.loadRoutes()).toHaveLength(0);
-    });
-
-    it("does not remove a route the caller no longer owns (post --force takeover)", () => {
-      // Simulate the state right after a --force takeover: the route is owned
-      // by another live process. The killed process's exit cleanup (passing
-      // its own pid) must not deregister the new owner's route.
+    it("does not remove a route the caller no longer owns (post --force takeover)", async () => {
       const newOwnerPid = process.ppid;
-      store.addRoute("myapp.localhost", 4002, newOwnerPid);
-      store.removeRoute("myapp.localhost", process.pid);
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
-      expect(routes[0].pid).toBe(newOwnerPid);
+      await store.register({ hostnames: ["myapp.localhost"], pid: newOwnerPid, port: 4002 });
+      store.remove(["myapp.localhost"], process.pid);
+      expect(store.loadRoutes()[0].pid).toBe(newOwnerPid);
+      store.remove(["myapp.localhost"], newOwnerPid);
+      expect(store.loadRoutes()).toHaveLength(0);
     });
   });
 
@@ -530,28 +462,27 @@ describe("RouteStore", () => {
       writeRoutes([staleRoute]);
 
       expect(store.loadRoutes()).toEqual([]);
-      expect(store.loadRoutesRaw()).toEqual([staleRoute]);
-      expect(store.findStaleRoutes()).toEqual([staleRoute]);
+      expect(store.loadRoutes({ includeStale: true })).toEqual([staleRoute]);
     });
 
-    it("keeps the record through add, update, transfer and remove of other routes", () => {
+    it("keeps the record through register, update, transfer and remove of other routes", async () => {
       store.ensureDir();
       writeRoutes([staleRoute]);
 
-      store.addRoute("other.localhost", 4001, process.pid);
+      await store.register({ hostnames: ["other.localhost"], pid: process.pid, port: 4001 });
       store.updateRoute("other.localhost", { ngrokUrl: "https://other.ngrok.app" });
       expect(store.transferRoute("other.localhost", process.pid, process.ppid)).toBe(true);
-      store.removeRoute("other.localhost", process.ppid);
+      store.remove(["other.localhost"], process.ppid);
 
       expect(readRaw()).toEqual([staleRoute]);
       expect(store.loadRoutes()).toEqual([]);
     });
 
-    it("keeps the record when the same hostname is registered again", () => {
+    it("keeps the record when the same hostname is registered again", async () => {
       store.ensureDir();
       writeRoutes([staleRoute]);
 
-      expect(() => store.addRoute("stale.localhost", 4999, process.pid)).not.toThrow();
+      await store.register({ hostnames: ["stale.localhost"], pid: process.pid, port: 4999 });
 
       expect(store.loadRoutes()).toHaveLength(1);
       expect(store.loadRoutes()[0]!.port).toBe(4999);
@@ -569,10 +500,9 @@ describe("RouteStore", () => {
       const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
       writeRoutes([staleRoute, live]);
 
-      expect(store.loadRoutesRaw()).toEqual([live, staleRoute]);
-      expect(store.loadRoutesRaw().find((route) => route.hostname === "stale.localhost")).toEqual(
-        live
-      );
+      const all = store.loadRoutes({ includeStale: true });
+      expect(all).toEqual([live, staleRoute]);
+      expect(all.find((route) => route.hostname === "stale.localhost")).toEqual(live);
     });
 
     it("updates the live entry, not the stale record, for a shared hostname", () => {
@@ -611,20 +541,20 @@ describe("RouteStore", () => {
       expect(readRaw()).toEqual([second]);
     });
 
-    it("drops stale entries without recovery data on the next write", () => {
+    it("drops stale entries without recovery data on the next write", async () => {
       store.ensureDir();
       const plain = { hostname: "plain.localhost", port: 4312, pid: deadPid, registeredAt: 1 };
       writeRoutes([plain]);
 
-      store.addRoute("other.localhost", 4001, process.pid);
+      await store.register({ hostnames: ["other.localhost"], pid: process.pid, port: 4001 });
 
       expect(readRaw().map((route) => route.hostname)).toEqual(["other.localhost"]);
     });
   });
 
   describe("transferRoute", () => {
-    it("moves a route to another pid while the caller owns it", () => {
-      store.addRoute("myapp.localhost", 4001, process.pid);
+    it("moves a route to another pid while the caller owns it", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4001 });
       expect(store.transferRoute("myapp.localhost", process.pid, process.ppid)).toBe(true);
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
@@ -632,8 +562,8 @@ describe("RouteStore", () => {
       expect(routes[0].port).toBe(4001);
     });
 
-    it("drops sharing URLs, whose tunnels stop with the previous owner", () => {
-      store.addRoute("myapp.localhost", 4001, process.pid);
+    it("drops sharing URLs, whose tunnels stop with the previous owner", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4001 });
       store.updateRoute("myapp.localhost", {
         ngrokUrl: "https://abc.ngrok.app",
         ngrokPid: 123,
@@ -654,57 +584,33 @@ describe("RouteStore", () => {
       expect(route.tailscaleFunnel).toBeUndefined();
     });
 
-    it("does not move a route owned by another pid", () => {
-      store.addRoute("myapp.localhost", 4001, process.ppid);
+    it("does not move a route owned by another pid", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.ppid, port: 4001 });
       expect(store.transferRoute("myapp.localhost", process.pid, 1)).toBe(false);
       expect(store.loadRoutes()[0].pid).toBe(process.ppid);
     });
   });
 
-  describe("locking (via concurrent addRoute)", () => {
-    it.each([
-      ["win32", "EPERM", true],
-      ["linux", "EPERM", false],
-      ["win32", "EACCES", false],
-    ])("handles %s lock creation error %s", (platform, code, retries) => {
-      const originalPlatform = process.platform;
-      const mkdir = vi.mocked(fs.mkdirSync);
-      mkdir.mockImplementationOnce(() => {
-        throw Object.assign(new Error("lock creation failed"), { code });
-      });
-      Object.defineProperty(process, "platform", { value: platform });
-      try {
-        if (retries) {
-          store.addRoute("retry.localhost", 4001, process.pid);
-          expect(store.loadRoutes()).toEqual([
-            expect.objectContaining({ hostname: "retry.localhost", port: 4001, pid: process.pid }),
-          ]);
-          expect(fs.existsSync(path.join(tmpDir, "routes.lock"))).toBe(false);
-        } else {
-          expect(() => store.addRoute("retry.localhost", 4001, process.pid)).toThrow(
-            "Failed to acquire route lock"
-          );
-          expect(fs.existsSync(store.getRoutesPath())).toBe(false);
-        }
-      } finally {
-        Object.defineProperty(process, "platform", { value: originalPlatform });
-        mkdir.mockReset();
+  describe("concurrent register and lock ownership", () => {
+    const lockPath = () => path.join(tmpDir, "routes.lock");
+    const ownerPath = () => path.join(lockPath(), "owner");
+
+    function writeLock(pid: number | undefined, ageMs = 0): void {
+      fs.mkdirSync(lockPath(), { recursive: true });
+      if (pid !== undefined) fs.writeFileSync(ownerPath(), JSON.stringify({ pid }));
+      if (ageMs > 0) {
+        const when = new Date(Date.now() - ageMs);
+        fs.utimesSync(lockPath(), when, when);
       }
-    });
+    }
 
-    it("handles stale lock by recovering and completing the operation", () => {
-      store.ensureDir();
-      const lockPath = path.join(tmpDir, "routes.lock");
-      fs.mkdirSync(lockPath);
-      const staleTime = new Date(Date.now() - 11_000);
-      fs.utimesSync(lockPath, staleTime, staleTime);
-      expect(() => store.addRoute("test.localhost", 4001, process.pid)).not.toThrow();
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
-      expect(routes[0].hostname).toBe("test.localhost");
-    });
+    async function exitedPid(): Promise<number> {
+      const child = spawn(process.execPath, ["-e", ""], { stdio: "ignore" });
+      await new Promise((resolve) => child.on("exit", resolve));
+      return child.pid!;
+    }
 
-    it("handles many parallel addRoute calls without lock errors", async () => {
+    it("gives each of 20 concurrent processes its own port", async () => {
       const count = 20;
       const scriptPath = path.join(tmpDir, "worker.mjs");
       const pkgDir = path.resolve(import.meta.dirname, "..");
@@ -713,112 +619,180 @@ describe("RouteStore", () => {
         scriptPath,
         [
           `import { RouteStore } from ${JSON.stringify(importUrl)};`,
-          `const [dir, hostname, port] = process.argv.slice(2);`,
+          `const [dir, hostname] = process.argv.slice(2);`,
           `const store = new RouteStore(dir);`,
-          `try { store.addRoute(hostname, Number(port), process.pid); console.log("ok"); }`,
-          `catch (e) { console.log("error:" + e.message); process.exit(1); }`,
+          `try {`,
+          `  const { port } = await store.register({ hostnames: [hostname], pid: process.pid });`,
+          `  console.log("ok:" + port);`,
+          `} catch (e) { console.log("error:" + e.message); process.exit(1); }`,
           `process.stdin.resume();`,
         ].join("\n")
       );
 
-      const children: ReturnType<typeof spawn>[] = [];
-      const ready: Promise<{
-        code: number | null;
-        stdout: string;
-        stderr: string;
-        signal?: NodeJS.Signals | null;
-      }>[] = [];
-      for (let i = 0; i < count; i++) {
-        const child = spawn(
-          process.execPath,
-          [scriptPath, tmpDir, `app${i}.localhost`, String(4000 + i)],
-          { stdio: ["pipe", "pipe", "pipe"] }
-        );
-        children.push(child);
-        ready.push(
-          new Promise((resolve) => {
-            let stdout = "";
-            let stderr = "";
-            child.stderr!.on("data", (d: Buffer) => {
-              stderr += d.toString();
+      const occupied: net.Server[] = [];
+      try {
+        for (let port = 4023; port <= 4999; port++) {
+          const server = net.createServer();
+          await new Promise<void>((resolve) => {
+            server.once("error", () => resolve());
+            server.listen(port, "127.0.0.1", () => {
+              occupied.push(server);
+              resolve();
             });
-            child.stdout!.on("data", (d: Buffer) => {
-              stdout += d.toString();
-              if (stdout.trim() === "ok") {
-                resolve({ code: null, stdout: stdout.trim(), stderr: stderr.trim() });
-              }
-            });
-            child.on("error", (error) => {
-              resolve({ code: null, stdout: stdout.trim(), stderr: error.message });
-            });
-            child.on("close", (code, signal) =>
-              resolve({ code, signal, stdout: stdout.trim(), stderr: stderr.trim() })
-            );
+          });
+        }
+
+        const children = Array.from({ length: count }, (_, i) =>
+          spawn(process.execPath, [scriptPath, tmpDir, `app${i}.localhost`], {
+            stdio: ["pipe", "pipe", "pipe"],
           })
         );
+        const outcomes = await Promise.all(
+          children.map(
+            (child) =>
+              new Promise<string>((resolve) => {
+                let out = "";
+                child.stdout!.on("data", (data: Buffer) => {
+                  out += data.toString();
+                  if (out.includes("\n")) resolve(out.trim());
+                });
+                child.on("close", (code) => resolve(out.trim() || `exit:${code}`));
+              })
+          )
+        );
+        for (const child of children) child.stdin!.end();
+
+        expect(outcomes.filter((outcome) => !outcome.startsWith("ok:"))).toEqual([]);
+        const saved = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8")) as {
+          port: number;
+        }[];
+        expect(saved).toHaveLength(count);
+        expect(new Set(saved.map((route) => route.port)).size).toBe(count);
+      } finally {
+        for (const server of occupied) server.close();
       }
+    }, 60_000);
 
-      const outcomes = await Promise.all(ready);
-      const failures = outcomes.filter((o) => !o.stdout.startsWith("ok"));
-
-      for (const child of children) {
-        child.stdin!.end();
+    it.each([
+      ["win32", "EPERM", true],
+      ["linux", "EPERM", false],
+      ["win32", "EACCES", false],
+    ])("handles %s lock creation error %s", async (platform, code, retries) => {
+      const mkdir = vi.mocked(fs.mkdirSync);
+      const realMkdir = mkdir.getMockImplementation()!;
+      const originalPlatform = process.platform;
+      mkdir.mockImplementationOnce(() => {
+        throw Object.assign(new Error("lock creation failed"), { code });
+      });
+      Object.defineProperty(process, "platform", { value: platform });
+      const register = store.register({
+        hostnames: ["retry.localhost"],
+        pid: process.pid,
+        port: 4001,
+      });
+      try {
+        if (retries) {
+          await expect(register).resolves.toEqual({ port: 4001, killedPids: [] });
+          expect(store.loadRoutes()).toEqual([
+            expect.objectContaining({ hostname: "retry.localhost", port: 4001 }),
+          ]);
+          expect(fs.existsSync(lockPath())).toBe(false);
+        } else {
+          await expect(register).rejects.toThrow("Failed to acquire route lock");
+          expect(fs.existsSync(store.getRoutesPath())).toBe(false);
+        }
+      } finally {
+        Object.defineProperty(process, "platform", { value: originalPlatform });
+        mkdir.mockReset();
+        mkdir.mockImplementation(realMkdir);
       }
+    });
 
-      expect(failures).toEqual([]);
+    it("never allocates a port a live alias holds", async () => {
+      const aliases = Array.from({ length: 999 }, (_, i) => ({
+        hostname: `alias-${4001 + i}.localhost`,
+        port: 4001 + i,
+        pid: 0,
+      }));
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(aliases));
 
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-      expect(raw).toHaveLength(count);
+      const { port } = await store.register({ hostnames: ["app.localhost"], pid: process.pid });
+      expect(port).toBe(4000);
+      expect(store.loadRoutes().find((route) => route.hostname === "app.localhost")?.port).toBe(
+        4000
+      );
+    }, 60_000);
 
-      const hostnames = raw.map((r: { hostname: string }) => r.hostname).sort();
-      const expected = Array.from({ length: count }, (_, i) => `app${i}.localhost`).sort();
-      expect(hostnames).toEqual(expected);
+    it("does not reclaim a lock held by a live process", async () => {
+      writeLock(process.pid, 20_000);
+      await expect(
+        store.register({ hostnames: ["waiting.localhost"], pid: process.pid, port: 4001 })
+      ).rejects.toThrow("Failed to acquire route lock");
+      expect(store.loadRoutes()).toEqual([]);
+    }, 40_000);
+
+    it("reclaims a lock whose holder is dead", async () => {
+      writeLock(await exitedPid(), 20_000);
+      const { port } = await store.register({
+        hostnames: ["recovered.localhost"],
+        pid: process.pid,
+        port: 4001,
+      });
+      expect(port).toBe(4001);
+      expect(store.loadRoutes().map((route) => route.hostname)).toEqual(["recovered.localhost"]);
+    }, 30_000);
+
+    it("reclaims a lock with no owner file", async () => {
+      writeLock(undefined, 20_000);
+      const { port } = await store.register({
+        hostnames: ["recovered.localhost"],
+        pid: process.pid,
+        port: 4001,
+      });
+      expect(port).toBe(4001);
+      expect(store.loadRoutes().map((route) => route.hostname)).toEqual(["recovered.localhost"]);
     }, 30_000);
 
     it("survives sustained lock contention that defeats a naive retry strategy", async () => {
       store.ensureDir();
-      const lockPath = path.join(tmpDir, "routes.lock");
-
-      // A child process holds the lock for 1.5s, simulating a slow writer on
-      // a loaded machine. The old strategy (20 retries * 50ms = 1s budget)
-      // would time out; exponential backoff with a larger budget survives.
-      const holdMs = 1500;
       const holder = spawn(
         process.execPath,
         [
           "-e",
           [
             `const fs = require("fs");`,
-            `const lockPath = ${JSON.stringify(lockPath)};`,
+            `const path = require("path");`,
+            `const lockPath = ${JSON.stringify(lockPath())};`,
             `fs.mkdirSync(lockPath, { recursive: true });`,
+            `fs.writeFileSync(path.join(lockPath, "owner"), JSON.stringify({ pid: process.pid }));`,
             `console.log("holding");`,
-            `setTimeout(() => { try { fs.rmSync(lockPath, { recursive: true }); } catch {} console.log("released"); }, ${holdMs});`,
+            `setTimeout(() => { try { fs.rmSync(lockPath, { recursive: true }); } catch {} }, 1500);`,
           ].join("\n"),
         ],
         { stdio: ["ignore", "pipe", "pipe"] }
       );
-
-      // Wait for the holder to acquire the lock
       await new Promise<void>((resolve) => {
-        holder.stdout!.on("data", (d: Buffer) => {
-          if (d.toString().includes("holding")) resolve();
+        holder.stdout!.on("data", (data: Buffer) => {
+          if (data.toString().includes("holding")) resolve();
         });
       });
 
-      // addRoute must wait for the lock to be released (>1.5s)
-      expect(() => store.addRoute("contended.localhost", 5000, process.pid)).not.toThrow();
+      const { port } = await store.register({
+        hostnames: ["contended.localhost"],
+        pid: process.pid,
+        port: 5000,
+      });
 
       holder.kill("SIGTERM");
-
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
-      expect(routes[0].hostname).toBe("contended.localhost");
+      expect(port).toBe(5000);
+      expect(store.loadRoutes().map((route) => route.hostname)).toEqual(["contended.localhost"]);
     }, 10_000);
   });
 
-  describe("tailscale metadata", () => {
-    it("persists and loads tailscale fields via updateRoute", () => {
-      store.addRoute("myapp.localhost", 4123, process.pid);
+  describe("route metadata", () => {
+    it("persists and loads tailscale fields via updateRoute", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4123 });
       store.updateRoute("myapp.localhost", {
         tailscaleUrl: "https://devbox.example.ts.net",
         tailscaleHttpsPort: 443,
@@ -830,8 +804,8 @@ describe("RouteStore", () => {
       expect(routes[0].tailscaleFunnel).toBeUndefined();
     });
 
-    it("persists funnel flag via updateRoute", () => {
-      store.addRoute("api.localhost", 4456, process.pid);
+    it("persists funnel flag via updateRoute", async () => {
+      await store.register({ hostnames: ["api.localhost"], pid: process.pid, port: 4456 });
       store.updateRoute("api.localhost", {
         tailscaleUrl: "https://devbox.example.ts.net:8443",
         tailscaleHttpsPort: 8443,
@@ -842,8 +816,8 @@ describe("RouteStore", () => {
       expect(routes[0].tailscaleFunnel).toBe(true);
     });
 
-    it("updateRoute keeps the original registeredAt", () => {
-      store.addRoute("myapp.localhost", 4123, process.pid);
+    it("updateRoute keeps the original registeredAt", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4123 });
       const registeredAt = store.loadRoutes()[0].registeredAt;
       store.updateRoute("myapp.localhost", {
         tailscaleUrl: "https://devbox.example.ts.net",
@@ -864,16 +838,8 @@ describe("RouteStore", () => {
       expect(store.loadRoutes()).toEqual(routes);
     });
 
-    it("loads routes without tailscale fields (backward compat)", () => {
-      store.addRoute("legacy.localhost", 4000, process.pid);
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
-      expect(routes[0].tailscaleUrl).toBeUndefined();
-      expect(routes[0].tailscaleHttpsPort).toBeUndefined();
-    });
-
-    it("updateRoute is a no-op for nonexistent hostname", () => {
-      store.addRoute("myapp.localhost", 4123, process.pid);
+    it("updateRoute is a no-op for nonexistent hostname", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4123 });
       store.updateRoute("noexist.localhost", {
         tailscaleUrl: "https://devbox.example.ts.net",
       });
@@ -881,41 +847,19 @@ describe("RouteStore", () => {
       expect(routes).toHaveLength(1);
       expect(routes[0].tailscaleUrl).toBeUndefined();
     });
-  });
 
-  describe("ngrok metadata", () => {
-    it("persists and loads ngrok fields via updateRoute", () => {
-      store.addRoute("myapp.localhost", 4123, process.pid);
+    it("persists, loads and clears ngrok fields via updateRoute", async () => {
+      await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4123 });
       store.updateRoute("myapp.localhost", {
         ngrokUrl: "https://abc123.ngrok.app",
         ngrokPid: 12345,
       });
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
+      let routes = store.loadRoutes();
       expect(routes[0].ngrokUrl).toBe("https://abc123.ngrok.app");
       expect(routes[0].ngrokPid).toBe(12345);
-    });
 
-    it("clears ngrok fields via updateRoute", () => {
-      store.addRoute("myapp.localhost", 4123, process.pid);
-      store.updateRoute("myapp.localhost", {
-        ngrokUrl: "https://abc123.ngrok.app",
-        ngrokPid: 12345,
-      });
-      store.updateRoute("myapp.localhost", {
-        ngrokUrl: null,
-        ngrokPid: null,
-      });
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
-      expect(routes[0].ngrokUrl).toBeUndefined();
-      expect(routes[0].ngrokPid).toBeUndefined();
-    });
-
-    it("loads routes without ngrok fields", () => {
-      store.addRoute("legacy.localhost", 4000, process.pid);
-      const routes = store.loadRoutes();
-      expect(routes).toHaveLength(1);
+      store.updateRoute("myapp.localhost", { ngrokUrl: null, ngrokPid: null });
+      routes = store.loadRoutes();
       expect(routes[0].ngrokUrl).toBeUndefined();
       expect(routes[0].ngrokPid).toBeUndefined();
     });
