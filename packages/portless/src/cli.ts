@@ -2899,12 +2899,14 @@ ${colors.bold("portless prune")} - Clean up routes left by crashed portless sess
 Finds routes whose owning portless process is gone, including groups kept from
 an earlier run. On macOS and Linux, it signals the recorded dev server process
 group only if its leader matches, or a previously recorded surviving member
-matches on retry. It removes stale routes and their Tailscale and tunnel shares.
-A group that still holds its port after SIGTERM keeps its route and shares;
-retry with --force. A port holder that cannot be proven part of the recorded
-group is reported and kept, never killed. On Windows, process groups cannot be
-verified or signaled. Recorded ngrok and cloudflared tunnels are stopped only
-when their executable names match, including on Windows.
+matches on retry. When the leader is already gone, it records the member holding
+the port and keeps the route for that retry. It removes stale routes and their
+Tailscale and tunnel shares. A group that still holds its port after SIGTERM
+keeps its route and shares; retry with --force. A port holder that cannot be
+proven part of the recorded group is reported and kept, never killed. On
+Windows, process groups cannot be verified or signaled. Recorded ngrok and
+cloudflared tunnels are stopped only when their executable names match,
+including on Windows.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2976,16 +2978,21 @@ async function handlePrune(args: string[]): Promise<void> {
       (groupMember !== undefined ||
         (signaled && holders.length === 0 && getProcessStartTime(pgid) === route.childStartTime));
     if (groupHoldsPort) {
-      if (signaled && groupMember !== undefined) {
-        const memberStartTime = getProcessStartTime(groupMember);
-        if (memberStartTime) store.recordStaleOrphan(route, groupMember, memberStartTime);
-      }
+      const memberStartTime = groupMember === undefined ? null : getProcessStartTime(groupMember);
+      const leaderGone = pgid !== undefined && getProcessStartTime(pgid) === null;
+      const recorded =
+        groupMember !== undefined &&
+        memberStartTime !== null &&
+        (signaled || leaderGone) &&
+        store.recordStaleOrphan(route, groupMember, memberStartTime);
       if (signaled && pgid !== undefined) survivingGroups.add(pgid);
       skipped++;
       console.log(
         signaled
           ? `  ${route.hostname} :${route.port} - process group ${pgid} did not exit; route kept. Retry with portless prune --force`
-          : `  ${route.hostname} :${route.port} - process ${groupMember} is in process group ${pgid} but could not be verified; route kept and nothing was killed`
+          : recorded
+            ? `  ${route.hostname} :${route.port} - process group ${pgid} outlived its leader; route kept and process ${groupMember} recorded. Retry with portless prune --force`
+            : `  ${route.hostname} :${route.port} - process ${groupMember} is in process group ${pgid} but could not be verified; route kept and nothing was killed`
       );
       continue;
     }

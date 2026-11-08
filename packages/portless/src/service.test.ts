@@ -18,6 +18,7 @@ vi.mock("node:fs", async (importOriginal) => {
     mkdirSync: vi.fn(),
     readFileSync: vi.fn(mod.readFileSync),
     rmSync: vi.fn(),
+    statSync: vi.fn(mod.statSync),
     writeFileSync: vi.fn(),
   };
 });
@@ -54,7 +55,8 @@ vi.mock("./cli-utils.js", async (importOriginal) => {
   };
 });
 
-const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+const { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } =
+  await import("node:fs");
 const { isMdnsSupported } = await import("./mdns.js");
 const { discoverState, isProxyRunning } = await import("./cli-utils.js");
 const actualCliUtils = await vi.importActual<typeof import("./cli-utils.js")>("./cli-utils.js");
@@ -89,6 +91,7 @@ afterEach(() => {
   vi.mocked(mkdirSync).mockRestore();
   vi.mocked(readFileSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
+  vi.mocked(statSync).mockRestore();
   vi.mocked(writeFileSync).mockRestore();
   vi.mocked(isMdnsSupported).mockReturnValue({ supported: true });
   vi.mocked(discoverState).mockReset();
@@ -526,6 +529,23 @@ describe("tryUninstallService", () => {
     expect(result.needsElevation).toBe(true);
     expect(rmSync).not.toHaveBeenCalled();
   });
+
+  it("keeps Windows service files when the task store cannot be read", () => {
+    setPlatform("win32");
+    vi.mocked(statSync).mockImplementation(() => {
+      const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+      err.code = "EACCES";
+      throw err;
+    });
+    const runner = vi.fn(() => ({ status: 1, stdout: "", stderr: "ERROR: Access is denied." }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.error).toContain("permission denied");
+    expect(runner).not.toHaveBeenCalled();
+    expect(rmSync).not.toHaveBeenCalled();
+  });
 });
 
 describe("handleService", () => {
@@ -802,6 +822,26 @@ describe("handleService", () => {
       recursive: true,
       force: true,
     });
+  });
+
+  it("keeps Windows service files when the registered task cannot be removed", async () => {
+    setPlatform("win32");
+    vi.mocked(statSync).mockReturnValue({} as never);
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 1,
+      stdout: "",
+      stderr: "ERROR: Access is denied.",
+    }));
+
+    await expect(
+      handleService(["service", "uninstall"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      })
+    ).rejects.toThrow("Access is denied.");
+
+    expect(rmSync).not.toHaveBeenCalled();
+    expect(logSpy.mock.calls.flat().join(" ")).not.toContain("uninstalled");
   });
 
   it("repeated Windows installs always register the PT0S task definition", async () => {

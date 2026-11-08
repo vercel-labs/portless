@@ -715,6 +715,21 @@ export function buildServiceSpec(options: {
   };
 }
 
+/**
+ * Whether the Windows scheduled task exists. The task store is checked because
+ * schtasks reports a missing task and a failed query with the same status; an
+ * unreadable store throws so callers keep the service files.
+ */
+function windowsTaskExists(taskName: string): boolean {
+  const taskPath = path.win32.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "Tasks",
+    taskName
+  );
+  return fs.statSync(taskPath, { throwIfNoEntry: false }) !== undefined;
+}
+
 function currentServiceSpec(
   entryScript: string,
   installConfig?: ServiceInstallConfig
@@ -1144,7 +1159,7 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
     fs.rmSync(spec.unitPath, { force: true });
     runOptional(runner, "systemctl", ["daemon-reload"]);
   } else {
-    if (runner("schtasks", spec.queryArgs).status === 0) {
+    if (windowsTaskExists(spec.taskName)) {
       runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
       runRemovalStep(runner, "schtasks", spec.deleteArgs);
     }
@@ -1179,8 +1194,7 @@ export function tryUninstallService(
       fs.rmSync(spec.unitPath, { force: true });
       runOptional(runner, "systemctl", ["daemon-reload"]);
     } else {
-      const query = runner("schtasks", ["/Query", "/TN", spec.taskName, "/FO", "LIST"]);
-      installed = query.status === 0;
+      installed = windowsTaskExists(spec.taskName);
       if (!installed) return { removed: false, installed: false };
       runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
       runRequired(runner, "schtasks", spec.deleteArgs);

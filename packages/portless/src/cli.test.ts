@@ -927,10 +927,12 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
-      "keeps a route whose group leader exited before the first prune",
+      "records a route whose group leader exited, then stops it on retry",
       async () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-leader-gone-"));
         const routesPath = path.join(tmpDir, "routes.json");
+        const tailscaleLog = path.join(tmpDir, "tailscale.log");
+        writeTailscaleShim(tmpDir);
         const readRaw = () =>
           JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
         const deadRecords = () => readRaw().filter((route) => route.pid === 999999);
@@ -943,7 +945,11 @@ describe("CLI", { timeout: 15_000 }, () => {
         );
         const leaderPid = leader.pid!;
         const leaderStartTime = getProcessStartTime(leaderPid);
-        const env = { PORTLESS_STATE_DIR: tmpDir };
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
+          PATH: `${tmpDir}${path.delimiter}${process.env.PATH}`,
+        };
         try {
           await new Promise<void>((resolve) => leader.once("exit", () => resolve()));
           let holderPid: number | undefined;
@@ -968,34 +974,23 @@ describe("CLI", { timeout: 15_000 }, () => {
             ])
           );
 
-          expect(
-            run(["alias", "early.localhost", String(await getFreePort())], { env }).status
-          ).toBe(0);
+          const first = run(["prune"], { env });
+          expect(first.status, first.stderr).toBe(0);
+          expect(first.stdout).toContain("outlived its leader");
+          expect(first.stdout).toContain(`process ${holderPid} recorded`);
+          expect(first.stdout).toContain("skipped 1 route");
+          expect(first.stdout).not.toContain("tailscale");
           expect(deadRecords()).toEqual([
             expect.objectContaining({
               hostname: "leader-gone.localhost",
               port,
               childPgid: leaderPid,
-              childStartTime: leaderStartTime,
-              tailscaleHttpsPort: 8443,
+              orphanPid: holderPid,
+              orphanStartTime: expect.any(String),
             }),
           ]);
-          expect(run(["list"], { env }).stdout).not.toContain("leader-gone.localhost");
-
-          const first = run(["prune"], { env });
-          expect(first.status, first.stderr).toBe(0);
-          expect(first.stdout).toContain("could not be verified");
-          expect(first.stdout).toContain("nothing was killed");
-          expect(first.stdout).not.toContain("tailscale");
-          expect(deadRecords()).toHaveLength(1);
-          expect(deadRecords()[0].orphanPid).toBeUndefined();
           expect(findPidsOnPort(port)).toEqual([holderPid]);
-
-          const forced = run(["prune", "--force"], { env });
-          expect(forced.status, forced.stderr).toBe(0);
-          expect(forced.stdout).toContain("nothing was killed");
-          expect(deadRecords()).toHaveLength(1);
-          expect(findPidsOnPort(port)).toEqual([holderPid]);
+          expect(fs.existsSync(tailscaleLog)).toBe(false);
 
           expect(
             run(["alias", "add-other.localhost", String(await getFreePort())], { env }).status
@@ -1004,25 +999,22 @@ describe("CLI", { timeout: 15_000 }, () => {
             run(["alias", "leader-gone.localhost", String(await getFreePort())], { env }).status
           ).toBe(0);
           expect(deadRecords()).toHaveLength(1);
-          const afterAliases = run(["prune", "--force"], { env });
-          expect(afterAliases.status, afterAliases.stderr).toBe(0);
-          expect(afterAliases.stdout).toContain("could not be verified");
-          expect(findPidsOnPort(port)).toEqual([holderPid]);
-          expect(deadRecords()).toHaveLength(1);
+
+          const retried = run(["prune", "--force"], { env });
+          expect(retried.status, retried.stderr).toBe(0);
+          expect(retried.stdout).toContain("killed process group");
+          expect(retried.stdout).toContain("route removed");
+          expect(deadRecords()).toEqual([]);
+          for (let i = 0; i < 100 && findPidsOnPort(port).length > 0; i++) {
+            await new Promise((r) => setTimeout(r, 50));
+          }
+          expect(findPidsOnPort(port)).toEqual([]);
+          expect(fs.readFileSync(tailscaleLog, "utf-8")).toContain("serve --yes --https=8443 off");
           expect(readRaw()).toEqual(
             expect.arrayContaining([
               expect.objectContaining({ hostname: "leader-gone.localhost", pid: 0 }),
             ])
           );
-
-          process.kill(holderPid!, "SIGKILL");
-          for (let i = 0; i < 100 && findPidsOnPort(port).length > 0; i++) {
-            await new Promise((r) => setTimeout(r, 50));
-          }
-          const resolved = run(["prune", "--force"], { env });
-          expect(resolved.status, resolved.stderr).toBe(0);
-          expect(resolved.stdout).toContain("route removed");
-          expect(deadRecords()).toEqual([]);
         } finally {
           try {
             process.kill(-leaderPid, "SIGKILL");
@@ -1094,6 +1086,8 @@ describe("CLI", { timeout: 15_000 }, () => {
           hostname: "stale.localhost",
           port: address.port,
           pid: 999999,
+          childPgid: 999999,
+          childStartTime: "leader-start",
           registeredAt: Date.now() - 60_000,
         };
         const routesPath = path.join(tmpDir, "routes.json");
@@ -1102,6 +1096,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
         expect(first.status).toBe(0);
         expect(first.stdout).toContain("still holds the port and was not killed");
+        expect(first.stdout).not.toContain("recorded");
         expect(listener.listening).toBe(true);
         expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
       } finally {
