@@ -3692,8 +3692,6 @@ ${colors.bold("LAN mode (--lan):")}
   via mDNS (.local domains). Useful for testing on real mobile devices.
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
-  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
 
 ${colors.bold("Unprivileged mode (--unprivileged):")}
   Binds without sudo, installs nothing, and never writes the hosts file.
