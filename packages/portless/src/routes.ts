@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 import colors from "./colors.js";
+import { PID_FILE, PORT_FILE, START_FILE } from "./proxy-state.js";
 import type { RouteInfo } from "./types.js";
 import {
   explainUnsafeStateDir,
@@ -230,9 +231,9 @@ export class RouteStore {
     this.dir = dir;
     this.routesPath = path.join(dir, "routes.json");
     this.lockPath = path.join(dir, "routes.lock");
-    this.pidPath = path.join(dir, "proxy.pid");
-    this.portFilePath = path.join(dir, "proxy.port");
-    this.startTimePath = path.join(dir, "proxy.start");
+    this.pidPath = path.join(dir, PID_FILE);
+    this.portFilePath = path.join(dir, PORT_FILE);
+    this.startTimePath = path.join(dir, START_FILE);
     this.onWarning = options?.onWarning ?? ((message) => console.warn(colors.yellow(message)));
   }
 

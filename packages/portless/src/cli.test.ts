@@ -5502,6 +5502,51 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
     });
 
+    it("preserves unprivileged HTTPS across restart and honors explicit HTTP", async () => {
+      const env = { ...proxyEnv(), PORTLESS_HTTPS: undefined };
+      const start = run(["proxy", "start", "--unprivileged", "--https"], { env });
+      expect(start.status, start.stdout + start.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const stop = run(["proxy", "stop"], { env });
+      expect(stop.status, stop.stdout + stop.stderr).toBe(0);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.start"))).toBe(false);
+
+      const restart = run(["proxy", "start"], { env });
+      expect(restart.status, restart.stdout + restart.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const header = await new Promise<string | string[] | undefined>((resolve, reject) => {
+        const req = https.get(
+          { hostname: "127.0.0.1", port: testPort, rejectUnauthorized: false, timeout: 2000 },
+          (res) => {
+            res.resume();
+            resolve(res.headers["x-portless"]);
+          }
+        );
+        req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error("HTTPS request timed out")));
+      });
+      expect(header).toBe("1");
+      expect(run(["proxy", "stop"], { env }).status).toBe(0);
+
+      const plain = run(["proxy", "start", "--no-tls"], { env });
+      expect(plain.status, plain.stdout + plain.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+    }, 30_000);
+
+    it("refuses a second proxy on another port in the same state directory", async () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status, start.stdout + start.stderr).toBe(0);
+      const pid = fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8");
+      const otherPort = await getFreePort();
+      const second = run(["proxy", "start", "-p", String(otherPort)], { env: proxyEnv() });
+      expect(second.status).toBe(1);
+      expect(second.stderr).toContain(`A proxy is already running on port ${testPort}`);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8")).toBe(pid);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.port"), "utf-8")).toBe(String(testPort));
+    });
+
     it("reads unprivileged mode from PORTLESS_UNPRIVILEGED", async () => {
       const start = run(["proxy", "start"], {
         env: { ...proxyEnv(), PORTLESS_UNPRIVILEGED: "1" },
