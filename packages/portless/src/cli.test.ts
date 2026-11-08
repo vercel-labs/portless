@@ -378,6 +378,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       [["prune", "--force", "--help"], "prune"],
       [["hosts", "sync", "--help"], "hosts"],
       [["service", "install", "--help"], "service"],
+      [["alias", "--help", "--bogus"], "alias"],
+      [["alias", "--remove", "--help"], "alias"],
     ])("prints help for %j without running the command", (args, command) => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
       try {
