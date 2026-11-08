@@ -1,21 +1,12 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
+import { PROXY_FILES } from "./proxy-state.js";
 
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
   "routes.json",
   "routes.lock",
-  "proxy.pid",
-  "proxy.port",
-  "proxy.log",
-  "proxy.tls",
-  "proxy.custom-cert",
-  "proxy.tld",
-  "proxy.tlds",
-  "proxy.lan",
-  "proxy.hosts-sync-token",
-  "proxy.hosts-sync-token.tmp",
   "ca.trusted",
   "ca.trust-refresh-pending",
   "ca-key.pem",
@@ -26,22 +17,12 @@ const PORTLESS_STATE_FILES = [
   "server-ext.cnf",
   "ca.srl",
   "cloudflared.yml",
-] as const;
+  ...PROXY_FILES,
+];
 
 const HOST_CERTS_DIR = "host-certs";
 const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem", "ca.trust-refresh-pending"]);
-const PROXY_RUNTIME_FILES = new Set([
-  "proxy.pid",
-  "proxy.port",
-  "proxy.log",
-  "proxy.hosts-sync-token",
-  "proxy.hosts-sync-token.tmp",
-  "proxy.tls",
-  "proxy.custom-cert",
-  "proxy.tld",
-  "proxy.tlds",
-  "proxy.lan",
-]);
+const PROXY_RUNTIME_FILES = new Set(PROXY_FILES);
 
 export type RemovePortlessStateFilesOptions = {
   preserveCAIdentity?: boolean;

@@ -6,12 +6,11 @@ import { spawnSync } from "node:child_process";
 import { ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import {
   buildProxyStartConfig,
-  DEFAULT_TLD,
   discoverState,
   getProtocolPort,
   isProxyRunning,
-  parseTldList,
 } from "./cli-utils.js";
+import { DEFAULT_TLD, parseTldList } from "./proxy-state.js";
 import { isMdnsSupported } from "./mdns.js";
 import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
 import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
