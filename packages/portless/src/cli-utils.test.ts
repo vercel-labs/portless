@@ -10,7 +10,6 @@ import {
   augmentedPath,
   buildProxyStartConfig,
   canBindWithoutRoot,
-  DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
   LEGACY_SYSTEM_STATE_DIR,
@@ -37,23 +36,12 @@ import {
   syncHostsWithWarning,
   listenOnProxyInterface,
   parsePidFromNetstat,
-  parseTldList,
-  readLanMarker,
-  readPersistedProxyState,
-  readUnprivilegedMarker,
-  readTldFromDir,
-  readTldsFromDir,
   resolveStateDir,
-  validateTld,
-  writeLanMarker,
-  writeTldFile,
-  writeTldsFile,
-  writeTlsMarker,
   ownedProcessIds,
   getProcessStartTime,
   killOrphanedProcessGroup,
-  writeUnprivilegedMarker,
 } from "./cli-utils.js";
+import { DEFAULT_TLD, ProxyState, parseTldList, validateTld } from "./proxy-state.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
     expect(getProxyBindTargets(false)).toEqual([
@@ -272,13 +260,8 @@ describe("isPortListening", () => {
 });
 
 describe("resolveStateDir", () => {
-  it("returns user dir for all ports", () => {
-    expect(resolveStateDir(80)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(443)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(1023)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
+  it("returns the user dir", () => {
+    expect(resolveStateDir()).toBe(USER_STATE_DIR);
   });
 
   it.skipIf(process.platform === "win32")(
@@ -295,7 +278,7 @@ describe("resolveStateDir", () => {
 
         const sudoModule = await import("./cli-utils.js");
         expect(sudoModule.USER_STATE_DIR).toBe(path.join(expectedHome, ".portless"));
-        expect(sudoModule.resolveStateDir(443)).toBe(path.join(expectedHome, ".portless"));
+        expect(sudoModule.resolveStateDir()).toBe(path.join(expectedHome, ".portless"));
       } finally {
         if (originalHome === undefined) delete process.env.HOME;
         else process.env.HOME = originalHome;
@@ -1832,12 +1815,6 @@ describe("resolveFrameworkBasename", () => {
   });
 });
 
-describe("DEFAULT_TLD", () => {
-  it("is localhost", () => {
-    expect(DEFAULT_TLD).toBe("localhost");
-  });
-});
-
 describe("getDefaultTld", () => {
   let originalEnv: string | undefined;
 
@@ -2014,7 +1991,7 @@ describe("buildProxyStartConfig", () => {
   });
 });
 
-describe("readLanMarker / writeLanMarker", () => {
+describe("discoverState LAN mode", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -2025,26 +2002,17 @@ describe("readLanMarker / writeLanMarker", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("writes and reads a LAN IP", () => {
-    writeLanMarker(tmpDir, "192.168.1.42");
-    expect(readLanMarker(tmpDir)).toBe("192.168.1.42");
-  });
-
-  it("removes the file when writing null", () => {
-    writeLanMarker(tmpDir, "192.168.1.42");
-    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(true);
-
-    writeLanMarker(tmpDir, null);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
-    expect(readLanMarker(tmpDir)).toBeNull();
-  });
-
   it("uses the LAN marker to remember LAN mode when the proxy is stopped", async () => {
     const prevStateDir = process.env.PORTLESS_STATE_DIR;
     try {
       fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-      writeTldFile(tmpDir, "local");
-      writeLanMarker(tmpDir, "192.168.1.42");
+      new ProxyState(tmpDir).publish({
+        tls: false,
+        customCert: false,
+        unprivileged: false,
+        lanIp: "192.168.1.42",
+        tlds: ["local"],
+      });
       process.env.PORTLESS_STATE_DIR = tmpDir;
 
       await expect(discoverState()).resolves.toMatchObject({
@@ -2060,66 +2028,6 @@ describe("readLanMarker / writeLanMarker", () => {
       } else {
         process.env.PORTLESS_STATE_DIR = prevStateDir;
       }
-    }
-  });
-});
-
-describe("readTldFromDir / writeTldFile", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tld-test-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("returns DEFAULT_TLD when file does not exist", () => {
-    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
-    expect(readTldsFromDir(tmpDir)).toEqual([DEFAULT_TLD]);
-  });
-
-  it("writes and reads a custom TLD", () => {
-    writeTldFile(tmpDir, "test");
-    expect(readTldFromDir(tmpDir)).toBe("test");
-    expect(readTldsFromDir(tmpDir)).toEqual(["test"]);
-  });
-
-  it("writes and reads multiple TLDs", () => {
-    writeTldsFile(tmpDir, ["localhost", "test"]);
-    expect(readTldFromDir(tmpDir)).toBe("localhost");
-    expect(readTldsFromDir(tmpDir)).toEqual(["localhost", "test"]);
-    expect(fs.readFileSync(path.join(tmpDir, "proxy.tld"), "utf-8")).toBe("localhost");
-  });
-
-  it("removes the file when writing the default TLD", () => {
-    writeTldFile(tmpDir, "test");
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(true);
-
-    writeTldFile(tmpDir, DEFAULT_TLD);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(false);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(false);
-    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
-  });
-
-  it("handles removing the default TLD file when it does not exist", () => {
-    writeTldFile(tmpDir, DEFAULT_TLD);
-    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
-  });
-
-  it("skips invalid persisted entries instead of resetting the whole list", () => {
-    const tooLong = "a".repeat(70);
-    fs.writeFileSync(
-      path.join(tmpDir, "proxy.tlds"),
-      JSON.stringify(["test", tooLong, "internal"])
-    );
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      expect(readTldsFromDir(tmpDir)).toEqual(["test", "internal"]);
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
     }
   });
 });
@@ -2210,96 +2118,6 @@ describe("validateTld", () => {
       expect(validateTld(tld)).toBeNull();
       expect(RISKY_TLDS.has(tld)).toBe(true);
     }
-  });
-});
-
-describe("readPersistedProxyState", () => {
-  let tmpDir: string;
-  let prevStateDir: string | undefined;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-persist-test-"));
-    prevStateDir = process.env.PORTLESS_STATE_DIR;
-    process.env.PORTLESS_STATE_DIR = tmpDir;
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    if (prevStateDir === undefined) {
-      delete process.env.PORTLESS_STATE_DIR;
-    } else {
-      process.env.PORTLESS_STATE_DIR = prevStateDir;
-    }
-  });
-
-  it("returns null when no state files exist", () => {
-    expect(readPersistedProxyState()).toBeNull();
-  });
-
-  it("reads port from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.port).toBe(1355);
-  });
-
-  it("reads TLS marker from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
-    writeTlsMarker(tmpDir, true);
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.tls).toBe(true);
-  });
-
-  it("reads TLD from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeTldFile(tmpDir, "test");
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.tld).toBe("test");
-    expect(state!.tlds).toEqual(["test"]);
-  });
-
-  it("reads TLD list from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeTldsFile(tmpDir, ["localhost", "test"]);
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.tld).toBe("localhost");
-    expect(state!.tlds).toEqual(["localhost", "test"]);
-  });
-
-  it("reads LAN mode from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeLanMarker(tmpDir, "192.168.1.10");
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.lanMode).toBe(true);
-  });
-
-  it("returns full previous config for a custom proxy setup", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeTlsMarker(tmpDir, true);
-    writeTldFile(tmpDir, "local");
-    writeLanMarker(tmpDir, "192.168.1.42");
-    const state = readPersistedProxyState();
-    expect(state).toEqual({
-      port: 1355,
-      tls: true,
-      tld: "local",
-      tlds: ["local"],
-      lanMode: true,
-      unprivileged: false,
-    });
-  });
-
-  it("does not infer LAN mode from a custom local TLD", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
-    expect(readPersistedProxyState()).toMatchObject({
-      tlds: ["local"],
-      lanMode: false,
-    });
   });
 });
 
@@ -2657,40 +2475,5 @@ describe("isUnprivilegedEnvEnabled", () => {
   it("is off when unset", () => {
     vi.stubEnv("PORTLESS_UNPRIVILEGED", undefined);
     expect(isUnprivilegedEnvEnabled()).toBe(false);
-  });
-});
-
-describe("readUnprivilegedMarker / writeUnprivilegedMarker", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-unpriv-marker-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("is absent by default", () => {
-    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
-  });
-
-  it("round-trips through write and remove", () => {
-    writeUnprivilegedMarker(tmpDir, true);
-    expect(readUnprivilegedMarker(tmpDir)).toBe(true);
-    writeUnprivilegedMarker(tmpDir, false);
-    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
-  });
-
-  it("is part of the persisted proxy state", () => {
-    vi.stubEnv("PORTLESS_STATE_DIR", tmpDir);
-    try {
-      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "8080");
-      expect(readPersistedProxyState()?.unprivileged).toBe(false);
-      writeUnprivilegedMarker(tmpDir, true);
-      expect(readPersistedProxyState()?.unprivileged).toBe(true);
-    } finally {
-      vi.unstubAllEnvs();
-    }
   });
 });
