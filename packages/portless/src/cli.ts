@@ -198,12 +198,6 @@ const chalk = colors;
 /** Display-friendly hosts file path. */
 const HOSTS_DISPLAY = isWindows ? "hosts file" : "/etc/hosts";
 
-/** Debounce delay (ms) for reloading routes after a file change. */
-const DEBOUNCE_MS = 100;
-
-/** Polling interval (ms) when fs.watch is unavailable. */
-const POLL_INTERVAL_MS = 3000;
-
 /** Grace period (ms) for connections to drain before force-exiting the proxy. */
 const EXIT_TIMEOUT_MS = 2000;
 
@@ -794,23 +788,7 @@ function startProxyServer(
     console.warn(chalk.yellow(`LAN mode disabled: ${reason}`));
   }
 
-  // Create empty routes file if it doesn't exist
-  const routesPath = store.getRoutesPath();
-  if (!fs.existsSync(routesPath)) {
-    fs.writeFileSync(routesPath, "[]", { mode: FILE_MODE });
-  }
-  try {
-    fs.chmodSync(routesPath, FILE_MODE);
-  } catch {
-    // May fail if file is owned by another user; non-fatal
-  }
-  fixOwnership(routesPath);
-
-  // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes = store.loadRoutes();
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let watcher: fs.FSWatcher | null = null;
-  let pollingInterval: ReturnType<typeof setInterval> | null = null;
+  let cachedRoutes: RouteMapping[];
 
   // Writing the hosts file needs root, which unprivileged mode never has, so
   // it does not try; `proxy start` refuses an explicit PORTLESS_SYNC_HOSTS=1.
@@ -906,16 +884,8 @@ function startProxyServer(
     }
   };
 
-  try {
-    watcher = fs.watch(routesPath, () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
-    });
-  } catch {
-    // fs.watch may not be supported; fall back to periodic polling
-    console.warn(colors.yellow("fs.watch unavailable; falling back to polling for route changes"));
-    pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
-  }
+  const stopWatchingRoutes = store.watch(reloadRoutes);
+  cachedRoutes = store.loadRoutes();
 
   if (autoSyncHosts) {
     syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
@@ -1067,12 +1037,8 @@ function startProxyServer(
   const cleanup = () => {
     if (exiting) return;
     exiting = true;
-    if (debounceTimer) clearTimeout(debounceTimer);
-    if (pollingInterval) clearInterval(pollingInterval);
+    stopWatchingRoutes();
     if (lanMonitor) lanMonitor.stop();
-    if (watcher) {
-      watcher.close();
-    }
     if (activeLanIp) cleanupMdns();
     closeAuxiliaryServers();
     try {

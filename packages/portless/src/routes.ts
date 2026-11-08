@@ -227,6 +227,37 @@ export class RouteStore {
     return this.routesPath;
   }
 
+  watch(onChange: () => void): () => void {
+    this.ensureDir();
+    if (!fs.existsSync(this.routesPath)) {
+      fs.writeFileSync(this.routesPath, "[]", { mode: FILE_MODE });
+    }
+    try {
+      fs.chmodSync(this.routesPath, FILE_MODE);
+    } catch {
+      void 0;
+    }
+    fixOwnership(this.routesPath);
+
+    let debounceTimer: ReturnType<typeof setTimeout> | null = null;
+    try {
+      const watcher = fs.watch(this.routesPath, () => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(onChange, 100);
+      });
+      return () => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        watcher.close();
+      };
+    } catch {
+      console.warn(
+        colors.yellow("fs.watch unavailable; falling back to polling for route changes")
+      );
+      const pollingInterval = setInterval(onChange, 3000);
+      return () => clearInterval(pollingInterval);
+    }
+  }
+
   // Locking
   // ---------------------------------------------------------------------------
 
