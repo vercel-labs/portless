@@ -10,7 +10,6 @@ import {
   augmentedPath,
   buildProxyStartConfig,
   canBindWithoutRoot,
-  BLOCKED_PORTS,
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
@@ -20,7 +19,6 @@ import {
   RISKY_TLDS,
   USER_STATE_DIR,
   discoverState,
-  findFreePort,
   getDefaultPort,
   getDefaultTld,
   getDefaultTlds,
@@ -163,74 +161,6 @@ describe("augmentedPath (issue #241)", () => {
     expect(entries[0]).toBe(localBin);
     expect(entries.at(-1)).toBe(nodeDir);
     expect(entries).not.toContain("");
-  });
-});
-
-describe("findFreePort", () => {
-  it.for(["127.0.0.1", "::1", "0.0.0.0", "::"])(
-    "skips a port held on %s (issue #288)",
-    async (host, { skip }) => {
-      const server = net.createServer();
-      const port = await new Promise<number | null>((resolve) => {
-        // Only a missing address family fails here: port 0 is always available.
-        server.once("error", () => resolve(null));
-        server.listen(0, host, () => resolve((server.address() as net.AddressInfo).port));
-      });
-      if (port === null) return skip();
-      try {
-        await expect(findFreePort(port, port)).rejects.toThrow("No free port found");
-      } finally {
-        await new Promise((resolve) => server.close(resolve));
-      }
-    }
-  );
-
-  it("returns a port in the default range", async () => {
-    const port = await findFreePort();
-    expect(port).toBeGreaterThanOrEqual(4000);
-    expect(port).toBeLessThanOrEqual(4999);
-  });
-
-  it("returns a port that is actually bindable", async () => {
-    const port = await findFreePort();
-    const server = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.listen(port, () => resolve());
-      server.on("error", reject);
-    });
-    server.close();
-  });
-
-  it("respects custom port range", async () => {
-    const port = await findFreePort(9000, 9010);
-    expect(port).toBeGreaterThanOrEqual(9000);
-    expect(port).toBeLessThanOrEqual(9010);
-  });
-
-  it("throws when no port is available in a tiny occupied range", async () => {
-    // Occupy a single-port range
-    const server = net.createServer();
-    await new Promise<void>((resolve) => server.listen(9999, () => resolve()));
-    try {
-      await expect(findFreePort(9999, 9999)).rejects.toThrow("No free port found");
-    } finally {
-      server.close();
-    }
-  });
-
-  it("throws when minPort > maxPort", async () => {
-    await expect(findFreePort(5000, 4000)).rejects.toThrow("minPort");
-  });
-
-  it("never returns a blocked port (WHATWG bad ports)", async () => {
-    for (let i = 0; i < 20; i++) {
-      const port = await findFreePort();
-      expect(BLOCKED_PORTS.has(port)).toBe(false);
-    }
-  });
-
-  it("skips a blocked port even when it is the only one in range", async () => {
-    await expect(findFreePort(4045, 4045)).rejects.toThrow("No free port found");
   });
 });
 
@@ -2642,7 +2572,11 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
 
 describe("canBindProxyPort", () => {
   it("returns true for a free unprivileged port", async () => {
-    const port = await findFreePort();
+    const server = net.createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve((server.address() as net.AddressInfo).port));
+    });
+    await new Promise((resolve) => server.close(resolve));
     await expect(canBindProxyPort(port, getProxyBindTargets(false))).resolves.toBe(true);
   });
 

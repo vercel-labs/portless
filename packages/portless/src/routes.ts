@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
+import colors from "./colors.js";
 import type { RouteInfo } from "./types.js";
 import { fixOwnership, isErrnoException, isProcessAlive as isPidAlive } from "./utils.js";
 
@@ -20,7 +21,33 @@ const LOCK_RETRY_CAP_MS = 100;
 export const FILE_MODE = 0o644;
 
 /** Directory permission mode for the state directory. */
-export const DIR_MODE = 0o755;
+const DIR_MODE = 0o755;
+
+const MIN_APP_PORT = 4000;
+const MAX_APP_PORT = 4999;
+const RANDOM_PORT_ATTEMPTS = 50;
+
+const BLOCKED_PORTS: ReadonlySet<number> = new Set([
+  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
+  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
+  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
+  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
+  6669, 6679, 6697, 10080,
+]);
+
+export async function isPortFree(port: number): Promise<boolean> {
+  for (const host of ["127.0.0.1", "::1", "0.0.0.0", "::"]) {
+    const free = await new Promise<boolean>((resolve) => {
+      const server = net.createServer();
+      server.once("error", (err: NodeJS.ErrnoException) => {
+        resolve(err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT");
+      });
+      server.listen(port, host, () => server.close(() => resolve(true)));
+    });
+    if (!free) return false;
+  }
+  return true;
+}
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
@@ -170,15 +197,18 @@ export class RouteStore {
   private readonly lockPath: string;
   readonly pidPath: string;
   readonly portFilePath: string;
-  private readonly onWarning: ((message: string) => void) | undefined;
+  private readonly onWarning: (message: string) => void;
 
-  constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
+  constructor(
+    dir: string,
+    onWarning: (message: string) => void = (message) => console.warn(colors.yellow(message))
+  ) {
     this.dir = dir;
     this.routesPath = path.join(dir, "routes.json");
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
     this.portFilePath = path.join(dir, "proxy.port");
-    this.onWarning = options?.onWarning;
+    this.onWarning = onWarning;
   }
 
   ensureDir(): void {
@@ -213,6 +243,12 @@ export class RouteStore {
     while (Date.now() < deadline) {
       try {
         fs.mkdirSync(this.lockPath);
+        try {
+          fs.writeFileSync(path.join(this.lockPath, "owner"), JSON.stringify({ pid: process.pid }));
+        } catch (writeError) {
+          fs.rmSync(this.lockPath, { recursive: true, force: true });
+          throw writeError;
+        }
         return true;
       } catch (err: unknown) {
         if (!isErrnoException(err)) return false;
@@ -220,8 +256,28 @@ export class RouteStore {
           try {
             const stat = fs.statSync(this.lockPath);
             if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
-              fs.rmSync(this.lockPath, { recursive: true });
-              continue;
+              let pid: unknown;
+              try {
+                const owner: unknown = JSON.parse(
+                  fs.readFileSync(path.join(this.lockPath, "owner"), "utf-8")
+                );
+                if (typeof owner === "object" && owner !== null && "pid" in owner) pid = owner.pid;
+              } catch {
+                void 0;
+              }
+              let reclaim =
+                typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0 || pid > 2147483647;
+              if (!reclaim && typeof pid === "number") {
+                try {
+                  process.kill(pid, 0);
+                } catch (error) {
+                  reclaim = isErrnoException(error) && error.code === "ESRCH";
+                }
+              }
+              if (reclaim) {
+                fs.rmSync(this.lockPath, { recursive: true });
+                continue;
+              }
             }
           } catch {
             continue;
@@ -241,7 +297,7 @@ export class RouteStore {
     try {
       fs.rmSync(this.lockPath, { recursive: true });
     } catch {
-      // Lock may already be removed; non-fatal
+      void 0;
     }
   }
 
@@ -250,30 +306,12 @@ export class RouteStore {
 
   /** Whether the process that owns `route` is still running. */
   isRouteOwnerAlive(route: RouteMapping): boolean {
-    return route.pid === 0 || this.isProcessAlive(route.pid);
+    return !isStaleRoute(route);
   }
 
-  private isProcessAlive(pid: number): boolean {
-    return pid === 0 || isPidAlive(pid);
-  }
-
-  /**
-   * Load the routes a caller should act on: entries whose portless process is
-   * still alive, plus aliases. Stale entries stay in the file for `prune`.
-   * With `persistCleanup` the caller holds the lock and ordinary stale entries
-   * are dropped from disk, while records with recovery data are kept.
-   */
-  loadRoutes(persistCleanup = false): RouteMapping[] {
+  loadRoutes(options?: { includeStale?: boolean }): RouteMapping[] {
     const routes = this.readRouteFile(this.routesPath);
-    const kept = retainStaleRecords(routes);
-    if (persistCleanup && kept.length !== routes.length) {
-      try {
-        this.saveRoutes(kept);
-      } catch {
-        // Write may fail (permissions); non-fatal
-      }
-    }
-    return kept.filter((route) => !isStaleRoute(route));
+    return options?.includeStale ? routes : routes.filter((route) => !isStaleRoute(route));
   }
 
   private withLock<T>(run: () => T): T {
@@ -295,12 +333,12 @@ export class RouteStore {
    */
   private mutateRoutes<T>(
     mutate: (routes: RouteMapping[]) => { value: T; changed: boolean },
-    replaceSkippedHostname?: string
+    replaceSkippedHostnames?: readonly string[]
   ): T {
     return this.withLock(() => {
       const routes = this.readRouteFile(this.routesPath);
       const outcome = mutate(routes);
-      if (outcome.changed) this.saveRoutes(retainStaleRecords(routes), replaceSkippedHostname);
+      if (outcome.changed) this.saveRoutes(retainStaleRecords(routes), replaceSkippedHostnames);
       return outcome.value;
     });
   }
@@ -331,14 +369,15 @@ export class RouteStore {
     );
   }
 
-  private saveRoutes(routes: RouteMapping[], replaceSkippedHostname?: string): void {
+  private saveRoutes(routes: RouteMapping[], replaceSkippedHostnames?: readonly string[]): void {
     const skipped = this.skippedRoutes().filter(
       (value) =>
-        replaceSkippedHostname === undefined ||
+        replaceSkippedHostnames === undefined ||
         typeof value !== "object" ||
         value === null ||
         !("hostname" in value) ||
-        value.hostname !== replaceSkippedHostname
+        typeof value.hostname !== "string" ||
+        !replaceSkippedHostnames.includes(value.hostname)
     );
     fs.writeFileSync(
       this.routesPath,
@@ -379,71 +418,79 @@ export class RouteStore {
     }
   }
 
-  /**
-   * Register a route. When `force` is true and the hostname is already claimed
-   * by another live process, that process is sent SIGTERM before the route is
-   * replaced. Returns the PID of the killed process (if any) so the caller can
-   * log it. A stale record for the same hostname is left for `prune`.
-   */
-  addRoute(
-    hostname: string,
-    port: number,
-    pid: number,
-    force = false,
-    upstream?: RouteInfo["upstream"]
-  ): number | undefined {
+  async register(input: {
+    hostnames: readonly string[];
+    pid: number;
+    port?: number;
+    force?: boolean;
+    upstream?: RouteInfo["upstream"];
+  }): Promise<{ port: number; killedPids: number[] }> {
+    const { pid, force, upstream } = input;
+    const hostnames = [...new Set(input.hostnames)];
     if (upstream !== undefined && !isValidUpstream(upstream)) {
       throw new Error("Invalid upstream configuration");
     }
-    let killedPid: number | undefined;
-    this.mutateRoutes(
-      (routes) => {
-        if (!force && this.hasSkippedRoute(hostname)) {
-          throw new Error(
-            `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
-          );
-        }
-        const existing = findActiveRoute(routes, hostname);
-        const isAlias = existing?.pid === 0;
-        if (existing && existing.pid !== pid) {
-          if (!force) {
-            throw new RouteConflictError(hostname, existing.pid);
-          }
-          // --force: kill the existing process before taking over; an alias has none
-          if (!isAlias) {
-            try {
-              process.kill(existing.pid, "SIGTERM");
-              killedPid = existing.pid;
-            } catch {
-              // Process may have exited between the check and the kill; non-fatal
+    const registerPort = (port: number): { port: number; killedPids: number[] } | undefined =>
+      this.mutateRoutes(
+        (routes) => {
+          const targets = new Set<number>();
+          for (const hostname of hostnames) {
+            if (!force && this.hasSkippedRoute(hostname)) {
+              throw new Error(
+                `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
+              );
+            }
+            const existing = findActiveRoute(routes, hostname);
+            if (existing && existing.pid !== pid) {
+              if (!force) throw new RouteConflictError(hostname, existing.pid);
+              if (existing.pid !== 0) targets.add(existing.pid);
             }
           }
-        }
-        const kept = routes.filter((route) => route.hostname !== hostname || isStaleRoute(route));
-        kept.push({
-          hostname,
-          port,
-          pid,
-          registeredAt: Date.now(),
-          ...(upstream === undefined ? {} : { upstream }),
-        });
-        routes.length = 0;
-        routes.push(...kept);
-        return { value: undefined, changed: true };
-      },
-      force ? hostname : undefined
-    );
-    return killedPid;
-  }
+          if (
+            input.port === undefined &&
+            routes.some((route) => route.port === port && !isStaleRoute(route))
+          ) {
+            return { value: undefined, changed: false };
+          }
+          const killedPids: number[] = [];
+          for (const target of targets) {
+            try {
+              process.kill(target, "SIGTERM");
+              killedPids.push(target);
+            } catch {
+              void 0;
+            }
+          }
+          const kept = routes.filter(
+            (route) => !hostnames.includes(route.hostname) || isStaleRoute(route)
+          );
+          for (const hostname of hostnames) {
+            kept.push({
+              hostname,
+              port,
+              pid,
+              registeredAt: Date.now(),
+              ...(upstream === undefined ? {} : { upstream }),
+            });
+          }
+          routes.length = 0;
+          routes.push(...kept);
+          return { value: { port, killedPids }, changed: true };
+        },
+        force ? hostnames : undefined
+      );
 
-  /**
-   * Load all valid routes without filtering out dead PIDs, with active entries
-   * before stale recovery records. Used by `portless prune` to discover stale
-   * entries whose owning CLI is gone but whose dev server may still hold a
-   * port, and by startup and doctor views that must see recovery records.
-   */
-  loadRoutesRaw(): RouteMapping[] {
-    return this.readRouteFile(this.routesPath);
+    if (input.port !== undefined) return registerPort(input.port)!;
+    for (let i = 0; i < RANDOM_PORT_ATTEMPTS + MAX_APP_PORT - MIN_APP_PORT + 1; i++) {
+      const port =
+        i < RANDOM_PORT_ATTEMPTS
+          ? MIN_APP_PORT + Math.floor(Math.random() * (MAX_APP_PORT - MIN_APP_PORT + 1))
+          : MIN_APP_PORT + i - RANDOM_PORT_ATTEMPTS;
+      if (BLOCKED_PORTS.has(port) || !(await isPortFree(port))) continue;
+      const result = registerPort(port);
+      if (result) return result;
+    }
+    throw new Error(`No free port found in range ${MIN_APP_PORT}-${MAX_APP_PORT}`);
   }
 
   /** Return routes whose owners are dead without removing them from storage. */
@@ -551,18 +598,11 @@ export class RouteStore {
     });
   }
 
-  /**
-   * Remove a route by hostname. When `ownerPid` is provided, the entry is
-   * only removed while it is still owned by that pid. Exit cleanups must
-   * pass their own pid: after a `--force` takeover the killed process would
-   * otherwise deregister the route the new owner just registered. Stale
-   * records are left for `prune`.
-   */
-  removeRoute(hostname: string, ownerPid?: number): void {
+  remove(hostnames: readonly string[], ownerPid?: number): void {
     this.mutateRoutes((routes) => {
       const kept = routes.filter(
         (route) =>
-          route.hostname !== hostname ||
+          !hostnames.includes(route.hostname) ||
           isStaleRoute(route) ||
           (ownerPid !== undefined && route.pid !== ownerPid)
       );

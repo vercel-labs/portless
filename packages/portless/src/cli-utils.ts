@@ -74,31 +74,6 @@ export const LEGACY_SYSTEM_STATE_DIR = isWindows
 /** Per-user state directory. All proxy state lives here regardless of port. */
 export const USER_STATE_DIR = path.join(resolveUserHome(), ".portless");
 
-/** Minimum app port when finding a free port. */
-const MIN_APP_PORT = 4000;
-
-/** Maximum app port when finding a free port. */
-const MAX_APP_PORT = 4999;
-
-/** Number of random port attempts before sequential scan. */
-const RANDOM_PORT_ATTEMPTS = 50;
-
-/**
- * Ports that browsers block for security reasons (WHATWG fetch spec "bad port"
- * list). Frameworks like Next.js also reject these. We skip them when
- * auto-selecting a port so the child process is never handed a port that the
- * browser will refuse to connect to.
- *
- * @see https://fetch.spec.whatwg.org/#port-blocking
- */
-export const BLOCKED_PORTS: ReadonlySet<number> = new Set([
-  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
-  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
-  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
-  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
-  6669, 6679, 6697, 10080,
-]);
-
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
 
@@ -1050,68 +1025,6 @@ export async function discoverState(): Promise<{
 // ---------------------------------------------------------------------------
 // Port utilities
 // ---------------------------------------------------------------------------
-
-/**
- * Addresses an app port must be free on. A bind on one address does not see a
- * listener on another (on macOS a hostless bind succeeds while 127.0.0.1 or
- * 0.0.0.0 holds the port), and the proxy dials apps on both loopbacks.
- */
-const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
-
-/**
- * Find a free port in the given range (default 4000-4999).
- * Tries random ports first for speed, then falls back to sequential scan.
- *
- * Note: There is an inherent TOCTOU race between verifying a port is free
- * and the child process actually binding to it. The random-first strategy
- * minimizes the window.
- */
-export async function findFreePort(
-  minPort = MIN_APP_PORT,
-  maxPort = MAX_APP_PORT
-): Promise<number> {
-  if (minPort > maxPort) {
-    throw new Error(`minPort (${minPort}) must be <= maxPort (${maxPort})`);
-  }
-
-  const isFreeOn = (port: number, host: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const server = net.createServer();
-      server.once("error", (err: NodeJS.ErrnoException) => {
-        // A missing address family (IPv4-only or IPv6-only host) cannot hold the port.
-        resolve(err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT");
-      });
-      server.listen(port, host, () => {
-        server.close(() => resolve(true));
-      });
-    });
-  };
-
-  // Probe sequentially: a dual-stack `::` bind collides with a concurrent `0.0.0.0` one.
-  const tryPort = async (port: number): Promise<boolean> => {
-    for (const host of APP_PORT_PROBE_HOSTS) {
-      if (!(await isFreeOn(port, host))) return false;
-    }
-    return true;
-  };
-
-  // Try random ports first
-  for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
-    const port = minPort + Math.floor(Math.random() * (maxPort - minPort + 1));
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
-      return port;
-    }
-  }
-
-  // Fall back to sequential
-  for (let port = minPort; port <= maxPort; port++) {
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
-      return port;
-    }
-  }
-
-  throw new Error(`No free port found in range ${minPort}-${maxPort}`);
-}
 
 /**
  * Check if a portless proxy is listening on the given port at 127.0.0.1.
