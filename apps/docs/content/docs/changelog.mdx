@@ -2,6 +2,24 @@
 title: "Changelog"
 ---
 
+## 0.17.0
+
+### New Features
+
+- **HTTPS alias backends**: Added `--upstream` to `portless alias` to route an alias to an HTTPS or HTTP service on loopback. `--upstream https` enables TLS and keeps the incoming Host header. `--upstream https://<host>[:<port>]` also sets Host to that authority and sends a DNS hostname as SNI, and `http://<host>[:<port>]` sets Host without TLS. Upstream TLS supports HTTP/1.1 backends and does not verify the backend certificate. Restart the proxy after upgrading. (#568)
+- **Worktree hostnames**: Added a `worktree` option to `portless.json` and the `package.json` `"portless"` key. `worktree.prefix: "branch"` uses the whole branch as the label, so `team-a/login` becomes `team-a-login`, and `worktree.hostnameTemplate` such as `tenant.{worktree}-{name}` replaces the whole hostname. Root values apply to every app in a workspace. Set the label directly with `portless run --prefix <label>` or `PORTLESS_PREFIX`, with `""` for none. Duplicate proxied hostnames fail before any app starts. (#548)
+- **Alias TLD selection**: Added `--tld` to `portless alias` and `portless alias --remove` to cover only selected configured TLDs. Repeat the flag or pass a comma-separated list. A missing or unconfigured TLD fails before any route changes. (#546)
+
+### Bug Fixes
+
+- **Alias and proxy stop flags**: Reject unknown flags for `portless alias` and `portless proxy stop`, and print usage for a trailing `--help`, before any route changes or the proxy stops. `portless alias --remove` removes only static routes and keeps routes owned by a running app. (#546)
+- **Loopback connections**: Connect to IPv4 and IPv6 loopback in parallel and use the first connection that succeeds, without a fallback timer, so an event-loop stall no longer drops a healthy connection. Proxy errors list each failed loopback address and its error code. (#545)
+- **Windows route lock**: Retry transient `EPERM` errors when creating the route lock on Windows instead of failing with `Failed to acquire route lock`. (#553)
+
+### Documentation
+
+- Simplified the README and moved reference content to the docs site. (#552)
+
 ## 0.16.0
 
 ### New Features
