@@ -431,51 +431,54 @@ export class RouteStore {
       throw new Error("Invalid upstream configuration");
     }
     const registerPort = (port: number): { port: number; killedPids: number[] } | undefined =>
-      this.mutateRoutes((routes) => {
-        const targets = new Set<number>();
-        for (const hostname of hostnames) {
-          if (!force && this.hasSkippedRoute(hostname)) {
-            throw new Error(
-              `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
-            );
+      this.mutateRoutes(
+        (routes) => {
+          const targets = new Set<number>();
+          for (const hostname of hostnames) {
+            if (!force && this.hasSkippedRoute(hostname)) {
+              throw new Error(
+                `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
+              );
+            }
+            const existing = findActiveRoute(routes, hostname);
+            if (existing && existing.pid !== pid) {
+              if (!force) throw new RouteConflictError(hostname, existing.pid);
+              if (existing.pid !== 0) targets.add(existing.pid);
+            }
           }
-          const existing = findActiveRoute(routes, hostname);
-          if (existing && existing.pid !== pid) {
-            if (!force) throw new RouteConflictError(hostname, existing.pid);
-            if (existing.pid !== 0) targets.add(existing.pid);
+          if (
+            input.port === undefined &&
+            routes.some((route) => route.port === port && !isStaleRoute(route))
+          ) {
+            return { value: undefined, changed: false };
           }
-        }
-        if (
-          input.port === undefined &&
-          routes.some((route) => route.port === port && !isStaleRoute(route))
-        ) {
-          return { value: undefined, changed: false };
-        }
-        const killedPids: number[] = [];
-        for (const target of targets) {
-          try {
-            process.kill(target, "SIGTERM");
-            killedPids.push(target);
-          } catch {
-            void 0;
+          const killedPids: number[] = [];
+          for (const target of targets) {
+            try {
+              process.kill(target, "SIGTERM");
+              killedPids.push(target);
+            } catch {
+              void 0;
+            }
           }
-        }
-        const kept = routes.filter(
-          (route) => !hostnames.includes(route.hostname) || isStaleRoute(route)
-        );
-        for (const hostname of hostnames) {
-          kept.push({
-            hostname,
-            port,
-            pid,
-            registeredAt: Date.now(),
-            ...(upstream === undefined ? {} : { upstream }),
-          });
-        }
-        routes.length = 0;
-        routes.push(...kept);
-        return { value: { port, killedPids }, changed: true };
-      }, force ? hostnames : undefined);
+          const kept = routes.filter(
+            (route) => !hostnames.includes(route.hostname) || isStaleRoute(route)
+          );
+          for (const hostname of hostnames) {
+            kept.push({
+              hostname,
+              port,
+              pid,
+              registeredAt: Date.now(),
+              ...(upstream === undefined ? {} : { upstream }),
+            });
+          }
+          routes.length = 0;
+          routes.push(...kept);
+          return { value: { port, killedPids }, changed: true };
+        },
+        force ? hostnames : undefined
+      );
 
     if (input.port !== undefined) return registerPort(input.port)!;
     for (let i = 0; i < RANDOM_PORT_ATTEMPTS + MAX_APP_PORT - MIN_APP_PORT + 1; i++) {

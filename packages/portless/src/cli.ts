@@ -4373,9 +4373,7 @@ async function spawnProxiedApp(
     store = new RouteStore(stateDir, (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)));
 
     hostnames = buildHostnames(app.name, tlds);
-    appPort = (
-      await store.register({ hostnames, pid: process.pid, port: app.appPort })
-    ).port;
+    appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
@@ -4719,9 +4717,7 @@ async function runWithTurbo(
     }
 
     const hostnames = buildHostnames(app.name, tlds);
-    const appPort = (
-      await store.register({ hostnames, pid: process.pid, port: app.appPort })
-    ).port;
+    const appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });

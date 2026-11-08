@@ -196,7 +196,12 @@ describe("RouteStore", () => {
       expect(store.loadRoutes()).toEqual([alias, owned]);
       expect(store.loadRoutes({ includeStale: true })).toEqual([alias, owned, stale]);
 
-      await store.register({ hostnames: ["new.localhost"], pid: 0, port: 4006, upstream: { tls: true } });
+      await store.register({
+        hostnames: ["new.localhost"],
+        pid: 0,
+        port: 4006,
+        upstream: { tls: true },
+      });
       expect(disk()).toEqual(
         expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
       );
