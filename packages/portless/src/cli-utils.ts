@@ -2500,7 +2500,8 @@ function resolveTurboScript(
   scriptName: string,
   packageDir: string,
   depth: number,
-  consumedSeparators: number
+  consumedSeparators: number,
+  inheritedSeparators = 0
 ): TurboRootForwarding {
   const raw = resolveScriptRaw(scriptName, packageDir);
   const commandArgs = resolveScript(scriptName, packageDir);
@@ -2510,7 +2511,9 @@ function resolveTurboScript(
   }
   const resolved = commandIndex(commandArgs);
   if (resolved && isTurboCommand(commandArgs[resolved.index], resolved.packageSpec)) {
-    const existing = commandArgs.slice(resolved.index + 1).filter((arg) => arg === "--").length;
+    const existing =
+      inheritedSeparators +
+      commandArgs.slice(resolved.index + 1).filter((arg) => arg === "--").length;
     return {
       kind: "forward",
       separators: Math.max(0, 1 + consumedSeparators + resolved.consumedSeparators - existing),
@@ -2530,7 +2533,8 @@ function resolveTurboScript(
         commandArgs[2]!,
         packageDir,
         1,
-        consumedSeparators + resolved.consumedSeparators + nestedConsumed
+        consumedSeparators + resolved.consumedSeparators + nestedConsumed,
+        commandArgs.slice(3).filter((arg) => arg === "--").length
       );
     }
   }

@@ -6076,18 +6076,33 @@ describe("CLI", { timeout: 15_000 }, () => {
     };
 
     const linkLocalTurbo = (root: string) => {
-      const repoModules = path.resolve(__dirname, "../../../node_modules");
+      const turboDir = path.resolve(__dirname, "../../../node_modules/turbo");
+      const pkg = JSON.parse(fs.readFileSync(path.join(turboDir, "package.json"), "utf8"));
+      const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin.turbo;
       fs.mkdirSync(path.join(root, "node_modules", ".bin"), { recursive: true });
-      fs.symlinkSync(
-        path.join(repoModules, ".bin", "turbo"),
-        path.join(root, "node_modules", ".bin", "turbo")
-      );
-      fs.symlinkSync(
-        path.join(repoModules, "turbo"),
-        path.join(root, "node_modules", "turbo"),
-        "dir"
-      );
+      fs.symlinkSync(path.join(turboDir, bin), path.join(root, "node_modules", ".bin", "turbo"));
+      fs.symlinkSync(turboDir, path.join(root, "node_modules", "turbo"), "dir");
     };
+
+    it.skipIf(process.platform === "win32")(
+      "links Turbo's real bin instead of the package-manager shim",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-turbo-bin-"));
+        try {
+          linkLocalTurbo(root);
+          const turboDir = path.resolve(__dirname, "../../../node_modules/turbo");
+          const pkg = JSON.parse(fs.readFileSync(path.join(turboDir, "package.json"), "utf8"));
+          const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin.turbo;
+          const link = path.join(root, "node_modules", ".bin", "turbo");
+          expect(fs.readlinkSync(link)).toBe(path.join(turboDir, bin));
+          const result = spawnSync(process.execPath, [link, "--version"], { encoding: "utf-8" });
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout.trim()).toBe(pkg.version);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      }
+    );
 
     it.skipIf(process.platform === "win32")(
       "passes arguments after -- to the single app script through the npm separator",
@@ -6247,6 +6262,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             packageManager: string;
             dev: string;
             scripts?: Record<string, string>;
+            fixed?: string[];
           }[] = [
             { packageManager: "npm@10.0.0", dev: "npx turbo dev" },
             { packageManager: "npm@10.0.0", dev: "npm exec turbo dev" },
@@ -6257,22 +6273,50 @@ describe("CLI", { timeout: 15_000 }, () => {
               dev: "npm run turbo-dev",
               scripts: { "turbo-dev": "turbo dev" },
             },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev -- --fixed" },
+              fixed: ["--fixed"],
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev -- --fixed" },
+              fixed: ["--fixed"],
+            },
             { packageManager: "pnpm@11.1.3", dev: "pnpm exec turbo dev" },
             {
               packageManager: "pnpm@11.1.3",
               dev: "pnpm run turbo-dev",
               scripts: { "turbo-dev": "turbo dev" },
             },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "pnpm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "pnpm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev -- --fixed" },
+              fixed: ["--fixed"],
+            },
           ];
 
-          for (const { packageManager, dev, scripts = {} } of cases) {
+          for (const { packageManager, dev, scripts = {}, fixed = [] } of cases) {
             writeRoot(packageManager, dev, scripts);
             fs.rmSync(markFile, { force: true });
             const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
             expect(result.status, `${dev}: ${result.output}`).toBe(0);
             expect(readMarks(markFile), `${dev}: ${result.output}`).toEqual([
-              ["api", args],
-              ["web", args],
+              ["api", [...fixed, ...args]],
+              ["web", [...fixed, ...args]],
             ]);
           }
         } finally {
