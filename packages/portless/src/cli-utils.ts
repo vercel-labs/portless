@@ -125,6 +125,12 @@ const COMMAND_SHUTDOWN_GRACE_MS = 5000;
 const COMMAND_SHUTDOWN_FORCE_MS = 10_000;
 const COMMAND_SHUTDOWN_POLL_MS = 50;
 
+/** How long (ms) to wait for a signaled process group to exit before reporting it as surviving. */
+const PROCESS_GROUP_EXIT_TIMEOUT_MS = 2000;
+
+/** Interval (ms) between process group exit polls. */
+const PROCESS_GROUP_POLL_MS = 100;
+
 type TrackedProcess = {
   pid: number;
   pgid: number;
@@ -1383,12 +1389,54 @@ export function findPidsOnPort(port: number): number[] {
 }
 
 function isProcessGroupAlive(groupId: number): boolean {
+  if (isWindows || !Number.isInteger(groupId) || groupId <= 1) return false;
   try {
     process.kill(-groupId, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/**
+ * PIDs of a process group that have not exited, or null where groups cannot be
+ * listed. Unreaped zombies are left out: they keep the group number alive but
+ * are not running.
+ */
+export function listProcessGroupMembers(groupId: number): number[] | null {
+  if (isWindows || !Number.isInteger(groupId) || groupId <= 1) return null;
+  try {
+    const output = execFileSync("ps", ["-e", "-o", "pid=,pgid=,stat="], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    const members: number[] = [];
+    for (const line of output.split("\n")) {
+      const [pid, group, stat] = line.trim().split(/\s+/);
+      if (Number(group) !== groupId || Number(pid) <= 1) continue;
+      if (stat?.startsWith("Z") === true) continue;
+      members.push(Number(pid));
+    }
+    return members;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a process group still has a running member. */
+function groupHasLiveMember(groupId: number): boolean {
+  const members = listProcessGroupMembers(groupId);
+  return members === null ? isProcessGroupAlive(groupId) : members.length > 0;
+}
+
+/** Whether this exact process instance is still a member of the group. */
+function isGroupMember(pid: number, startTime: string | undefined, groupId: number): boolean {
+  return (
+    startTime !== undefined &&
+    pid > 1 &&
+    getProcessGroupId(pid) === groupId &&
+    getProcessStartTime(pid) === startTime
+  );
 }
 
 /**
@@ -1497,22 +1545,79 @@ export function getProcessGroupId(pid: number): number | null {
   }
 }
 
-/** Signal a process group only while its recorded member and start time still match. */
-export function killOrphanedProcessGroup(
-  pgid: number,
-  startTime: string | undefined,
-  signal: NodeJS.Signals = "SIGTERM",
-  identityPid = pgid
-): boolean {
-  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
-  try {
-    if (getProcessGroupId(identityPid) !== pgid) return false;
-    if (getProcessStartTime(identityPid) !== startTime) return false;
-    process.kill(-pgid, signal);
-    return true;
-  } catch {
-    return false;
+/**
+ * How a recorded process group ended after a stop attempt. A group is only
+ * reported as stopped once it has no live member left, so a process that
+ * closes its port but keeps running is never reported as killed.
+ */
+export type ProcessGroupState = "gone" | "stopped" | "survived" | "unverified";
+
+export interface ProcessGroupStop {
+  state: ProcessGroupState;
+  /** Whether a signal reached the group. */
+  signaled: boolean;
+  /** A member that outlived the signal, recorded so a retry can verify it. */
+  survivor?: { pid: number; startTime: string };
+}
+
+/** The member to record for a retry: a live listener of the recorded port first, then any live member. */
+function pickGroupSurvivor(
+  groupId: number,
+  excluded: Set<number>,
+  port: number | undefined
+): { pid: number; startTime: string } | undefined {
+  const members = listProcessGroupMembers(groupId) ?? [];
+  const listeners =
+    port === undefined ? [] : findPidsOnPort(port).filter((pid) => members.includes(pid));
+  for (const pid of [...listeners, ...members]) {
+    if (excluded.has(pid)) continue;
+    const startTime = getProcessStartTime(pid);
+    if (startTime) return { pid, startTime };
   }
+  return undefined;
+}
+
+/**
+ * Try to stop a recorded process group. Every identity recorded for the group is
+ * tried, so one stale record cannot hide a valid one, and the group is signaled
+ * only while the recorded leader or a recorded member still matches, so a
+ * recycled group number is never signaled. The wait ends on real member exit,
+ * not on the port closing, and a survivor is a member still running after the
+ * signal, so a retry anchor is never a process that already exited.
+ */
+export async function stopProcessGroup(
+  groupId: number,
+  leaderStartTimes: (string | undefined)[],
+  recordedMembers: { pid: number; startTime: string | undefined }[],
+  signal: NodeJS.Signals = "SIGTERM",
+  options: { port?: number; timeoutMs?: number } = {}
+): Promise<ProcessGroupStop> {
+  if (!groupHasLiveMember(groupId)) return { state: "gone", signaled: false };
+  const proven =
+    leaderStartTimes.some((startTime) => isGroupMember(groupId, startTime, groupId)) ||
+    recordedMembers.some((member) => isGroupMember(member.pid, member.startTime, groupId));
+  if (!proven) return { state: "unverified", signaled: false };
+  let signaled = false;
+  try {
+    process.kill(-groupId, signal);
+    signaled = true;
+  } catch {
+    signaled = false;
+  }
+  const deadline = Date.now() + (options.timeoutMs ?? PROCESS_GROUP_EXIT_TIMEOUT_MS);
+  while (groupHasLiveMember(groupId)) {
+    if (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, PROCESS_GROUP_POLL_MS));
+      continue;
+    }
+    const excluded = new Set([groupId, ...recordedMembers.map((member) => member.pid)]);
+    return {
+      state: "survived",
+      signaled,
+      survivor: pickGroupSurvivor(groupId, excluded, options.port),
+    };
+  }
+  return { state: "stopped", signaled };
 }
 
 /**

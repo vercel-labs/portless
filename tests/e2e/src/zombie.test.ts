@@ -182,7 +182,7 @@ async function startCliApp(
   state: TestState,
   script = "server.js",
   extraEnv: Record<string, string> = {}
-): Promise<{ hostname: string; appPort: number }> {
+): Promise<{ hostname: string; appPort: number; logs: () => { stdout: string; stderr: string } }> {
   state.stateDir ??= fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-zombie-"));
 
   const baseEnv = {
@@ -257,7 +257,7 @@ async function startCliApp(
   const devPids = findPidsOnPort(state.appPort);
   expect(devPids.length).toBeGreaterThan(0);
 
-  return { hostname, appPort: state.appPort };
+  return { hostname, appPort: state.appPort, logs: () => ({ stdout, stderr }) };
 }
 
 describe("zombie process prevention", () => {
@@ -409,6 +409,46 @@ describe("orphaned process groups", () => {
 
     expect(await waitForPidToExit(pid, 5000)).toBe(true);
     expect(await waitForPortToClose(state.appPort!, 5000)).toBe(true);
+  });
+
+  it("reports an orphaned group that ignores SIGTERM and keeps it for a retry", async () => {
+    if (isWindows) return;
+
+    await startCliApp("orphan-stubborn", state, "stubborn-group.js");
+    const oldPort = state.appPort!;
+    state.cliChild!.kill("SIGKILL");
+    await waitForChildToExit(state.cliChild!, 5000);
+
+    const restarted = await startCliApp("orphan-stubborn", state, "server.js");
+    expect(restarted.logs().stderr).toMatch(
+      /Orphaned dev server \(process group \d+\) did not exit\. Run: portless prune --force/
+    );
+    expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
+
+    const routesPath = path.join(state.stateDir!, "routes.json");
+    const records = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+      port: number;
+      pid: number;
+      childPgid?: number;
+    }>;
+    const stale = records.filter((route) => route.port === oldPort && !isAlive(route.pid));
+    expect(stale).toHaveLength(1);
+    expect(stale[0]!.childPgid).toBeDefined();
+
+    const pruneResult = spawnSync(process.execPath, [CLI_PATH, "prune", "--force"], {
+      env: {
+        ...process.env,
+        PORTLESS_PORT: PROXY_PORT.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_STATE_DIR: state.stateDir,
+        NO_COLOR: "1",
+      },
+      encoding: "utf-8",
+      timeout: 15_000,
+    });
+    expect(pruneResult.status, pruneResult.stderr).toBe(0);
+    expect(pruneResult.stdout).toContain(`killed process group ${stale[0]!.childPgid} (SIGKILL)`);
+    expect(() => process.kill(stale[0]!.childPgid!, 0)).toThrow();
   });
 
   it("run stops the orphaned process group of a crashed session", async () => {

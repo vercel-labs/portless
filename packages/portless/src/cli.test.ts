@@ -319,6 +319,25 @@ async function getFreePort(): Promise<number> {
   }
 }
 
+/** SIGKILL a process group, ignoring one that has already exited. */
+function killGroup(pgid: number): void {
+  try {
+    process.kill(-pgid, "SIGKILL");
+  } catch {
+    return;
+  }
+}
+
+/** Whether a process still exists. */
+function isAlivePid(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function startMockProxy(
   dir: string,
   options: {
@@ -1021,6 +1040,287 @@ describe("CLI", { timeout: 15_000 }, () => {
           } catch {
             // already gone
           }
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps a group that ignores SIGTERM after it releases the port",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-port-closed-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const tailscaleLog = path.join(tmpDir, "tailscale.log");
+        writeTailscaleShim(tmpDir);
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_TEST_TAILSCALE_LOG: tailscaleLog,
+          PATH: `${tmpDir}${path.delimiter}${process.env.PATH}`,
+        };
+        const leader = spawn(
+          process.execPath,
+          [
+            "-e",
+            'const server = require("net").createServer().listen(0, "127.0.0.1", function () {' +
+              "console.log(this.address().port); });" +
+              'process.on("SIGTERM", () => server.close());' +
+              "setInterval(() => {}, 1000);",
+          ],
+          { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+        );
+        const childPgid = leader.pid!;
+        const childStartTime = getProcessStartTime(childPgid);
+        const readRaw = () =>
+          JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
+        try {
+          const port = await new Promise<number>((resolve, reject) => {
+            leader.once("error", reject);
+            leader.stdout!.once("data", (data) => resolve(Number(data.toString().trim())));
+          });
+          expect(childStartTime).toBeTruthy();
+          const registeredAt = Date.now() - 60_000;
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "stuck.localhost",
+                port,
+                pid: 999999,
+                childPgid,
+                childStartTime,
+                tailscaleHttpsPort: 8443,
+                registeredAt,
+              },
+              {
+                hostname: "stuck-alt.localhost",
+                port,
+                pid: 999999,
+                childPgid,
+                childStartTime,
+                registeredAt,
+              },
+            ])
+          );
+
+          const first = run(["prune"], { env });
+          expect(first.status, first.stderr).toBe(0);
+          expect(first.stdout).toContain("did not exit");
+          expect(first.stdout).not.toContain("killed process group");
+          expect(first.stdout).toContain(
+            "Pruned 0 stale routes, killed 0 orphaned processes, skipped 2 routes"
+          );
+          for (let i = 0; i < 100 && findPidsOnPort(port).length > 0; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          expect(findPidsOnPort(port)).toEqual([]);
+          expect(() => process.kill(childPgid, 0)).not.toThrow();
+          expect(readRaw()).toHaveLength(2);
+          expect(fs.existsSync(tailscaleLog)).toBe(false);
+
+          const forced = run(["prune", "--force"], { env });
+          expect(forced.status, forced.stderr).toBe(0);
+          expect(forced.stdout).toContain(`killed process group ${childPgid} (SIGKILL)`);
+          expect(forced.stdout).toContain("Pruned 2 stale routes, killed 1 orphaned process");
+          expect(readRaw()).toEqual([]);
+          expect(fs.readFileSync(tailscaleLog, "utf-8")).toContain("serve --yes --https=8443 off");
+        } finally {
+          killGroup(childPgid);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "records the member that outlived its leader after the port closed, then stops it",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-member-kept-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const readRaw = () =>
+          JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>;
+        const leader = spawn(
+          "sh",
+          [
+            "-c",
+            '"$1" -e "$2" & wait',
+            "sh",
+            process.execPath,
+            'const server = require("net").createServer().listen(0, "127.0.0.1", function () {' +
+              "console.log(this.address().port); });" +
+              'process.on("SIGTERM", () => server.close());' +
+              "setInterval(() => {}, 1000);",
+          ],
+          { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+        );
+        const childPgid = leader.pid!;
+        const childStartTime = getProcessStartTime(childPgid);
+        try {
+          const port = await new Promise<number>((resolve, reject) => {
+            leader.once("error", reject);
+            leader.stdout!.once("data", (data) => resolve(Number(data.toString().trim())));
+          });
+          expect(childStartTime).toBeTruthy();
+          const memberPid = findPidsOnPort(port)[0];
+          expect(memberPid).toBeDefined();
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "member-stuck.localhost",
+                port,
+                pid: 999999,
+                childPgid,
+                childStartTime,
+                registeredAt: Date.now() - 60_000,
+              },
+            ])
+          );
+
+          const first = run(["prune"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+          expect(first.status, first.stderr).toBe(0);
+          expect(first.stdout).toContain("did not exit");
+          expect(first.stdout).not.toContain("killed process group");
+          for (let i = 0; i < 100 && findPidsOnPort(port).length > 0; i++) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          expect(findPidsOnPort(port)).toEqual([]);
+          expect(readRaw()).toEqual([
+            expect.objectContaining({
+              hostname: "member-stuck.localhost",
+              childPgid,
+              orphanPid: memberPid,
+              orphanStartTime: expect.any(String),
+            }),
+          ]);
+          expect(() => process.kill(memberPid!, 0)).not.toThrow();
+
+          const forced = run(["prune", "--force"], { env: { PORTLESS_STATE_DIR: tmpDir } });
+          expect(forced.status, forced.stderr).toBe(0);
+          expect(forced.stdout).toContain(`killed process group ${childPgid} (SIGKILL)`);
+          expect(readRaw()).toEqual([]);
+          for (let i = 0; i < 100 && isAlivePid(memberPid!); i++) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          expect(isAlivePid(memberPid!)).toBe(false);
+        } finally {
+          killGroup(childPgid);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps a group it cannot verify and never kills it",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-unverified-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const pidFile = path.join(tmpDir, "member.pid");
+        const leader = spawn(
+          "sh",
+          [
+            "-c",
+            '"$1" -e "$2" & echo $! > "$3"',
+            "sh",
+            process.execPath,
+            "setInterval(() => {}, 1000)",
+            pidFile,
+          ],
+          { detached: true, stdio: "ignore" }
+        );
+        const childPgid = leader.pid!;
+        try {
+          await new Promise<void>((resolve) => leader.once("exit", () => resolve()));
+          const memberPid = Number(fs.readFileSync(pidFile, "utf-8"));
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "unverifiable.localhost",
+                port: await getFreePort(),
+                pid: 999999,
+                childPgid,
+                childStartTime: "Thu Jan  1 00:00:00 1970",
+                registeredAt: Date.now() - 60_000,
+              },
+            ])
+          );
+
+          for (const args of [["prune"], ["prune", "--force"]]) {
+            const result = run(args, { env: { PORTLESS_STATE_DIR: tmpDir } });
+            expect(result.status, result.stderr).toBe(0);
+            expect(result.stdout).toContain(`process group ${childPgid} could not be verified`);
+            expect(result.stdout).toContain("killed 0 orphaned processes");
+            expect(isAlivePid(memberPid)).toBe(true);
+            expect(
+              JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<Record<string, unknown>>
+            ).toEqual([expect.objectContaining({ hostname: "unverifiable.localhost", childPgid })]);
+          }
+        } finally {
+          killGroup(childPgid);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "never records a holder of a group whose leader identity still mismatches",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-recycled-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const leader = spawn(
+          process.execPath,
+          [
+            "-e",
+            'require("net").createServer().listen(0, "127.0.0.1", function () {' +
+              "console.log(this.address().port); });" +
+              "setInterval(() => {}, 1000);",
+          ],
+          { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+        );
+        const childPgid = leader.pid!;
+        try {
+          const port = await new Promise<number>((resolve, reject) => {
+            leader.once("error", reject);
+            leader.stdout!.once("data", (data) => resolve(Number(data.toString().trim())));
+          });
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "recycled.localhost",
+                port,
+                pid: 999999,
+                childPgid,
+                childStartTime: "Thu Jan  1 00:00:00 1970",
+                registeredAt: Date.now() - 60_000,
+              },
+            ])
+          );
+
+          for (const args of [["prune"], ["prune", "--force"]]) {
+            const result = run(args, { env: { PORTLESS_STATE_DIR: tmpDir } });
+            expect(result.status, result.stderr).toBe(0);
+            expect(result.stdout).toContain(`process group ${childPgid} could not be verified`);
+            expect(result.stdout).toContain("killed 0 orphaned processes");
+            expect(result.stdout).not.toContain("outlived its leader");
+            const routes = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<
+              Record<string, unknown>
+            >;
+            expect(routes).toHaveLength(1);
+            expect(routes[0]).toMatchObject({
+              hostname: "recycled.localhost",
+              childPgid,
+              childStartTime: "Thu Jan  1 00:00:00 1970",
+            });
+            expect(routes[0]).not.toHaveProperty("orphanPid");
+            expect(isAlivePid(childPgid)).toBe(true);
+            expect(findPidsOnPort(port)).toEqual([childPgid]);
+          }
+        } finally {
+          killGroup(childPgid);
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },

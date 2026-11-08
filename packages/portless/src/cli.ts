@@ -98,7 +98,8 @@ import {
   guardWindowsOrphans,
   findPidsOnPort,
   findSelfDaemonizedListener,
-  killOrphanedProcessGroup,
+  stopProcessGroup,
+  type ProcessGroupStop,
   getProcessGroupId,
   getProcessStartTime,
   getProcessCommand,
@@ -664,25 +665,75 @@ function addRoutes(
 }
 
 /**
+ * Try to stop every recorded process group once, keyed by group id. Routes that
+ * share a group share one outcome and contribute all of their recorded
+ * identities, so a stale record cannot hide a valid one. Groups are stopped in
+ * parallel so one surviving group does not delay the others.
+ */
+async function stopRecordedGroups(
+  routes: RouteMapping[],
+  signal: NodeJS.Signals
+): Promise<Map<number, ProcessGroupStop>> {
+  const groups = new Map<number, RouteMapping[]>();
+  for (const route of routes) {
+    if (route.childPgid === undefined) continue;
+    const group = groups.get(route.childPgid);
+    if (group) group.push(route);
+    else groups.set(route.childPgid, [route]);
+  }
+  const stopped = await Promise.all(
+    [...groups].map(async ([pgid, group]) => {
+      const stop = await stopProcessGroup(
+        pgid,
+        group.map((route) => route.childStartTime),
+        group.flatMap((route) =>
+          route.orphanPid === undefined
+            ? []
+            : [{ pid: route.orphanPid, startTime: route.orphanStartTime }]
+        ),
+        signal,
+        { port: group[0]!.port }
+      );
+      return [pgid, stop] as const;
+    })
+  );
+  return new Map(stopped);
+}
+
+/**
  * Stop dev servers left running by portless sessions that died without
  * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
  * the stored process group is the only remaining link to the orphaned tree.
+ * Shares stay while the group is still running, and a member that outlived
+ * SIGTERM is recorded so `prune --force` can retry it.
  */
-function stopOrphanedProcessGroups(store: RouteStore): void {
-  const seen = new Set<number>();
-  for (const route of store.loadRoutesRaw()) {
-    if (route.pid === 0 || isPidAlive(route.pid)) continue;
-    for (const t of stopRecordedTunnels(route, true)) {
-      const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
-      console.error(colors.yellow(message));
-    }
+async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
+  const orphaned = store
+    .loadRoutesRaw()
+    .filter((route) => route.pid !== 0 && !isPidAlive(route.pid));
+  const stops = await stopRecordedGroups(orphaned, "SIGTERM");
+  for (const route of orphaned) {
     const pgid = route.childPgid;
-    if (!pgid || seen.has(pgid)) continue;
-    seen.add(pgid);
-    if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
+    const stop = pgid === undefined ? undefined : stops.get(pgid);
+    if (stop?.survivor) store.recordStaleOrphan(route, stop.survivor.pid, stop.survivor.startTime);
+    if (stop !== undefined && stop.state !== "gone" && stop.state !== "stopped") {
+      console.error(
+        colors.yellow(
+          stop.state === "survived"
+            ? `Orphaned dev server (process group ${pgid}) did not exit. Run: portless prune --force`
+            : `Orphaned process group ${pgid} could not be verified; nothing was stopped. Run: portless prune`
+        )
+      );
+      continue;
+    }
+    if (stop?.state === "stopped") {
       console.error(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
+    }
+    for (const t of stopRecordedTunnels(route, true)) {
+      const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
+      console.error(colors.yellow(message));
     }
   }
 }
@@ -1757,7 +1808,7 @@ async function runApp(
     console.error(colors.green(`  Using port ${port}`));
   }
 
-  stopOrphanedProcessGroups(store);
+  await stopOrphanedProcessGroups(store);
 
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
@@ -2899,14 +2950,17 @@ ${colors.bold("portless prune")} - Clean up routes left by crashed portless sess
 Finds routes whose owning portless process is gone, including groups kept from
 an earlier run. On macOS and Linux, it signals the recorded dev server process
 group only if its leader matches, or a previously recorded surviving member
-matches on retry. When the leader is already gone, it records the member holding
-the port and keeps the route for that retry. It removes stale routes and their
-Tailscale and tunnel shares. A group that still holds its port after SIGTERM
-keeps its route and shares; retry with --force. A port holder that cannot be
-proven part of the recorded group is reported and kept, never killed. On
-Windows, process groups cannot be verified or signaled. Recorded ngrok and
-cloudflared tunnels are stopped only when their executable names match,
-including on Windows.
+matches on retry, and reports the group stopped only after every member has
+exited. A group that outlives the signal keeps its route and shares even after
+it closes its port, and the member that survived is recorded so a retry with
+--force can stop it. A group that cannot be verified is reported and kept,
+never signaled, except that a member holding its port while the recorded
+leader is gone is recorded so --force can retry it. Stale routes and their
+Tailscale and tunnel shares are removed only once the recorded group is gone. A
+port holder that cannot be proven part of the recorded group is reported and
+kept, never killed. On Windows, process groups cannot be verified or signaled.
+Recorded ngrok and cloudflared tunnels are stopped only when their executable
+names match, including on Windows.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2944,58 +2998,42 @@ async function handlePrune(args: string[]): Promise<void> {
   let pruned = 0;
   let skipped = 0;
   const signal = forceKill ? "SIGKILL" : "SIGTERM";
-  const killedGroups = new Set<number>();
-  const survivingGroups = new Set<number>();
+  const stops = await stopRecordedGroups(stale, signal);
   for (const route of stale) {
     const pgid = route.childPgid;
-    if (
-      pgid &&
-      !killedGroups.has(pgid) &&
-      (killOrphanedProcessGroup(pgid, route.childStartTime, signal) ||
-        (route.orphanPid !== undefined &&
-          killOrphanedProcessGroup(pgid, route.orphanStartTime, signal, route.orphanPid)))
-    ) {
-      killedGroups.add(pgid);
-    }
-  }
-
-  for (const route of stale) {
-    const pgid = route.childPgid;
-    const signaled = pgid !== undefined && killedGroups.has(pgid);
-    if (signaled) {
-      for (let i = 0; i < 20 && (await isPortListening(route.port)); i++) {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-    }
-    const holders = findPidsOnPort(route.port);
-    const held = holders.length > 0 || (await isPortListening(route.port));
-    const groupMember = holders.find(
-      (pid) => pgid !== undefined && getProcessGroupId(pid) === pgid
-    );
-    const groupHoldsPort =
-      pgid !== undefined &&
-      held &&
-      (groupMember !== undefined ||
-        (signaled && holders.length === 0 && getProcessStartTime(pgid) === route.childStartTime));
-    if (groupHoldsPort) {
-      const memberStartTime = groupMember === undefined ? null : getProcessStartTime(groupMember);
-      const leaderGone = pgid !== undefined && getProcessStartTime(pgid) === null;
-      const recorded =
-        groupMember !== undefined &&
-        memberStartTime !== null &&
-        (signaled || leaderGone) &&
-        store.recordStaleOrphan(route, groupMember, memberStartTime);
-      if (signaled && pgid !== undefined) survivingGroups.add(pgid);
+    const stop = pgid === undefined ? undefined : stops.get(pgid);
+    if (stop?.state === "survived") {
+      if (stop.survivor) store.recordStaleOrphan(route, stop.survivor.pid, stop.survivor.startTime);
       skipped++;
       console.log(
-        signaled
-          ? `  ${route.hostname} :${route.port} - process group ${pgid} did not exit; route kept. Retry with portless prune --force`
-          : recorded
-            ? `  ${route.hostname} :${route.port} - process group ${pgid} outlived its leader; route kept and process ${groupMember} recorded. Retry with portless prune --force`
-            : `  ${route.hostname} :${route.port} - process ${groupMember} is in process group ${pgid} but could not be verified; route kept and nothing was killed`
+        `  ${route.hostname} :${route.port} - process group ${pgid} did not exit${
+          forceKill
+            ? " after SIGKILL; route kept"
+            : "; route kept. Retry with portless prune --force"
+        }`
       );
       continue;
     }
+    if (stop?.state === "unverified") {
+      const leaderGone = pgid !== undefined && !isPidAlive(pgid);
+      const holder = leaderGone
+        ? findPidsOnPort(route.port).find((pid) => getProcessGroupId(pid) === pgid)
+        : undefined;
+      const holderStartTime = holder === undefined ? null : getProcessStartTime(holder);
+      const recorded =
+        holder !== undefined &&
+        holderStartTime !== null &&
+        store.recordStaleOrphan(route, holder, holderStartTime);
+      skipped++;
+      console.log(
+        recorded
+          ? `  ${route.hostname} :${route.port} - process group ${pgid} outlived its leader; route kept and process ${holder} recorded. Retry with portless prune --force`
+          : `  ${route.hostname} :${route.port} - process group ${pgid} could not be verified; route kept and nothing was killed`
+      );
+      continue;
+    }
+    const holders = findPidsOnPort(route.port);
+    const held = holders.length > 0 || (await isPortListening(route.port));
     if (!store.removeStaleRoute(route.hostname, route.pid)) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
@@ -3023,10 +3061,12 @@ async function handlePrune(args: string[]): Promise<void> {
     }
   }
 
-  for (const pgid of killedGroups) {
-    if (!survivingGroups.has(pgid)) console.log(`  killed process group ${pgid} (${signal})`);
+  let killed = 0;
+  for (const [pgid, stop] of stops) {
+    if (stop.state !== "stopped" || !stop.signaled) continue;
+    killed++;
+    console.log(`  killed process group ${pgid} (${signal})`);
   }
-  const killed = killedGroups.size - survivingGroups.size;
   const routeWord = pruned === 1 ? "route" : "routes";
   const procWord = killed === 1 ? "process" : "processes";
   const skippedSummary =
