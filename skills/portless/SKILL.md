@@ -64,7 +64,7 @@ portless -- --inspect  # -> runs "dev --inspect"
 pnpm dev        # -> works without portless, plain "next dev"
 ```
 
-Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts.
+Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. In Turbo mode, forwarding through a root script with shell operators or a comment exits 2; run `portless run turbo run <script> -- <args>` or make the root script a single Turbo command.
 
 Use an optional `portless.json` to override defaults (name, script, port):
 

@@ -9,7 +9,7 @@ import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
-import { resolveScript, resolveScriptRaw } from "./config.js";
+import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
 import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
@@ -2005,6 +2005,25 @@ type FrameworkInvocation = {
   separator?: string;
 };
 
+function skipRunnerPrefix(
+  commandArgs: string[],
+  start: number,
+  runner: PackageRunnerSpec
+): { index: number; separator: boolean } {
+  let index = start;
+  let separator = false;
+  while (index < commandArgs.length && commandArgs[index].startsWith("-")) {
+    const option = commandArgs[index];
+    index++;
+    if (option === "--") {
+      separator = true;
+      break;
+    }
+    if (!option.includes("=") && runner.valueFlags?.includes(option)) index++;
+  }
+  return { index, separator };
+}
+
 function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
   if (commandArgs.length === 0) return null;
 
@@ -2017,32 +2036,26 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
     const runner = PACKAGE_RUNNERS[first];
     if (!runner) return null;
 
-    let i = 1;
-    const skipRunnerOptions = () => {
-      while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
-        const option = commandArgs[i];
-        i++;
-        if (option === "--") {
-          runnerSeparator = true;
-          break;
-        }
-        if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
-      }
-    };
+    let skipped = skipRunnerPrefix(commandArgs, 1, runner);
+    runnerSeparator = skipped.separator;
+    let i = skipped.index;
 
     if (runner.subcommands.length > 0) {
-      skipRunnerOptions();
       if (i >= commandArgs.length) return null;
       if (!runner.subcommands.includes(commandArgs[i])) {
         const name = path.basename(commandArgs[i]);
         frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
       } else {
-        i++;
+        skipped = skipRunnerPrefix(commandArgs, i + 1, runner);
+        runnerSeparator ||= skipped.separator;
+        i = skipped.index;
       }
     }
 
     if (frameworkIndex === null) {
-      skipRunnerOptions();
+      skipped = skipRunnerPrefix(commandArgs, i, runner);
+      runnerSeparator ||= skipped.separator;
+      i = skipped.index;
       if (i >= commandArgs.length) return null;
       const name = path.basename(commandArgs[i]);
       frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
@@ -2096,6 +2109,99 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
  */
 function findFrameworkBasename(commandArgs: string[]): string | null {
   return parseFrameworkInvocation(commandArgs)?.basename ?? null;
+}
+
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function commandBasename(token: string): string {
+  const name = path.basename(token);
+  return isWindows ? name.toLowerCase().replace(/\.(cmd|exe|bat|com)$/, "") : name;
+}
+
+function skipEnvPrefix(commandArgs: string[], start: number): number {
+  let index = start;
+  for (;;) {
+    const arg = commandArgs[index];
+    if (arg === undefined) return index;
+    if (ENV_ASSIGNMENT.test(arg)) {
+      index++;
+      continue;
+    }
+    if (arg === "-i" || arg === "--ignore-environment" || arg === "--") {
+      index++;
+      continue;
+    }
+    if (arg === "-u" || arg === "--unset") {
+      index += 2;
+      continue;
+    }
+    if (arg.startsWith("--unset=")) {
+      index++;
+      continue;
+    }
+    return index;
+  }
+}
+
+function isPackageSpecRunner(name: string, subcommand?: string): boolean {
+  if (name === "npx" || name === "bunx" || name === "pnpx") return true;
+  if (name === "npm") return subcommand === "exec" || subcommand === "x";
+  if (name === "pnpm" || name === "yarn") return subcommand === "dlx";
+  return false;
+}
+
+function isTurboCommand(token: string, packageSpec: boolean): boolean {
+  const name = commandBasename(token);
+  return name === "turbo" || (packageSpec && !token.startsWith("@") && /^turbo@[^/]+$/.test(name));
+}
+
+function mentionsTurbo(commandArgs: string[]): boolean {
+  return commandArgs.some((arg) => {
+    const name = commandBasename(arg);
+    return name === "turbo" || /^turbo@[^/]+$/.test(name);
+  });
+}
+
+type CommandResolution = {
+  index: number;
+  consumedSeparators: number;
+  packageSpec: boolean;
+};
+
+function commandIndex(commandArgs: string[]): CommandResolution | null {
+  let i = 0;
+  let consumedSeparators = 0;
+  let packageSpec = false;
+  for (;;) {
+    while (i < commandArgs.length && ENV_ASSIGNMENT.test(commandArgs[i])) i++;
+    if (i >= commandArgs.length) return null;
+    const name = commandBasename(commandArgs[i]);
+    if (name === "env") {
+      i = skipEnvPrefix(commandArgs, i + 1);
+      continue;
+    }
+    if (name === "cross-env") {
+      i++;
+      continue;
+    }
+    const runner = PACKAGE_RUNNERS[name];
+    if (!runner) return { index: i, consumedSeparators, packageSpec };
+    const skipped = skipRunnerPrefix(commandArgs, i + 1, runner);
+    let subcommand: string | undefined;
+    if (
+      runner.subcommands.length > 0 &&
+      skipped.index < commandArgs.length &&
+      runner.subcommands.includes(commandArgs[skipped.index])
+    ) {
+      subcommand = commandArgs[skipped.index];
+      const afterSubcommand = skipRunnerPrefix(commandArgs, skipped.index + 1, runner);
+      if (name === "npm" && !afterSubcommand.separator) consumedSeparators++;
+      i = afterSubcommand.index;
+    } else {
+      i = skipped.index;
+    }
+    packageSpec = isPackageSpecRunner(name, subcommand);
+  }
 }
 
 /**
@@ -2383,6 +2489,59 @@ export function resolveFrameworkBasename(
   if (direct) return direct;
   const scriptTokens = resolvePackageScriptTokens(commandArgs, packageDir);
   return scriptTokens ? findFrameworkBasename(scriptTokens) : null;
+}
+
+export type TurboRootForwarding =
+  | { kind: "none" }
+  | { kind: "forward"; separators: number }
+  | { kind: "unsafe"; turbo: boolean };
+
+function resolveTurboScript(
+  scriptName: string,
+  packageDir: string,
+  depth: number,
+  consumedSeparators: number
+): TurboRootForwarding {
+  const raw = resolveScriptRaw(scriptName, packageDir);
+  const commandArgs = resolveScript(scriptName, packageDir);
+  if (!raw || !commandArgs) return { kind: "none" };
+  if (isUnsafeToAppendArgs(raw)) {
+    return { kind: "unsafe", turbo: mentionsTurbo(commandArgs) };
+  }
+  const resolved = commandIndex(commandArgs);
+  if (resolved && isTurboCommand(commandArgs[resolved.index], resolved.packageSpec)) {
+    const existing = commandArgs.slice(resolved.index + 1).filter((arg) => arg === "--").length;
+    return {
+      kind: "forward",
+      separators: Math.max(0, 1 + consumedSeparators + resolved.consumedSeparators - existing),
+    };
+  }
+  if (depth === 0 && resolved) {
+    const packageManager = commandBasename(commandArgs[0]);
+    const scriptTokens = resolvePackageScriptTokens(commandArgs, packageDir);
+    if (scriptTokens) {
+      const nestedConsumed =
+        packageManager === "npm" ||
+        packageManager === "bun" ||
+        (packageManager === "yarn" && isYarnClassic(packageDir))
+          ? 1
+          : 0;
+      return resolveTurboScript(
+        commandArgs[2]!,
+        packageDir,
+        1,
+        consumedSeparators + resolved.consumedSeparators + nestedConsumed
+      );
+    }
+  }
+  return { kind: "none" };
+}
+
+export function resolveTurboRootForwarding(
+  scriptName: string,
+  packageDir: string
+): TurboRootForwarding {
+  return resolveTurboScript(scriptName, packageDir, 0, 0);
 }
 
 /**

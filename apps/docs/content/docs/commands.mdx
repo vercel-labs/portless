@@ -17,7 +17,7 @@ portless --script start       # run "start" instead of "dev"
 portless -- --inspect         # pass arguments to the script
 ```
 
-Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts.
+Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. In Turbo mode, forwarding through a root script with shell operators or a comment exits 2; run the task directly or make the root script a single Turbo command.
 
 Use a `portless.json` to override defaults. See [Configuration](/configuration).
 

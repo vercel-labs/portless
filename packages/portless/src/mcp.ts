@@ -822,6 +822,7 @@ export function printMcpHelp(): void {
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",
       "to append CLI flags that are not typed into the tool schema.",
+      "Zero-arg run is CLI-only; Turbo mode exits 2 for forwarded arguments through a root script with shell operators or a comment.",
       "",
       "Environment:",
       "  PORTLESS_STATE_DIR  Directory for portless state.",

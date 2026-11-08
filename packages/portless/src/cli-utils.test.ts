@@ -32,6 +32,7 @@ import {
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
+  resolveTurboRootForwarding,
   isPortListening,
   isProxyRunning,
   reportHostsSync,
@@ -1899,6 +1900,149 @@ describe("resolveFrameworkBasename", () => {
     writeScripts({ dev: "node server.js" });
     expect(resolveFrameworkBasename(["bun", "run", "dev"], pkgDir)).toBeNull();
     expect(resolveFrameworkBasename(["node", "server.js"], pkgDir)).toBeNull();
+  });
+});
+
+describe("resolveTurboRootForwarding", () => {
+  let pkgDir: string;
+
+  beforeEach(() => {
+    pkgDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-turbo-root-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pkgDir, { recursive: true, force: true });
+  });
+
+  function writePackage(scripts: Record<string, string>, packageManager?: string) {
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "test-root",
+        ...(packageManager ? { packageManager } : {}),
+        scripts,
+      })
+    );
+  }
+
+  function resolve(
+    dev: string,
+    extraScripts: Record<string, string> = {},
+    packageManager?: string
+  ) {
+    writePackage({ dev, ...extraScripts }, packageManager);
+    return resolveTurboRootForwarding("dev", pkgDir);
+  }
+
+  it.each([
+    ["turbo dev", 1],
+    ["./node_modules/.bin/turbo dev", 1],
+    ["/opt/tools/turbo run dev --filter web", 1],
+    ["npx turbo dev", 1],
+    ["npx --yes -p turbo turbo dev", 1],
+    ["npx turbo@2 dev", 1],
+    ["npm exec turbo dev", 2],
+    ["npm exec -- turbo dev", 1],
+    ["npm exec turbo dev --", 1],
+    ["npm exec turbo@2 dev", 2],
+    ["env npm exec turbo dev", 2],
+    ["pnpm exec turbo dev", 1],
+    ["pnpm dlx turbo dev", 1],
+    ["pnpm dlx turbo@2 dev", 1],
+    ["bunx turbo dev", 1],
+    ["yarn turbo dev", 1],
+    ["yarn exec -- turbo dev", 1],
+    ["yarn dlx turbo@2 dev", 1],
+    ["FOO=bar turbo dev", 1],
+    ["env FOO=bar turbo dev", 1],
+    ["env -i turbo dev", 1],
+    ["env --ignore-environment turbo dev", 1],
+    ["env -i FOO=bar turbo dev", 1],
+    ["env -u FOO turbo dev", 1],
+    ["env --unset FOO turbo dev", 1],
+    ["env --unset=FOO turbo dev", 1],
+    ["env -u FOO npm exec turbo dev", 2],
+    ["env --ignore-environment -- turbo dev", 1],
+    ["cross-env NODE_ENV=test turbo dev", 1],
+    ["cross-env NODE_ENV=test npx turbo dev", 1],
+    ["turbo dev --", 0],
+    ["turbo dev -- --inspect", 0],
+    ["npx turbo dev --", 0],
+  ])("returns %i separator(s) for %s", (script, separators) => {
+    expect(resolve(script)).toEqual({ kind: "forward", separators });
+  });
+
+  it.each([
+    ["turbo dev && node mark.cjs", true],
+    ["turbo dev || exit 1", true],
+    ["turbo dev; node mark.cjs", true],
+    ["turbo dev | tee turbo.log", true],
+    ["turbo dev # note", true],
+    ["node mark.cjs && node mark.cjs", false],
+  ])("reports an unsafe %s", (script, turbo) => {
+    expect(resolve(script)).toEqual({ kind: "unsafe", turbo });
+  });
+
+  it.each([
+    "node mark.cjs",
+    "npx next dev",
+    "env node mark.cjs",
+    "pnpm exec next dev",
+    "npm run dev",
+    "npm run missing",
+    "turbo@2 dev",
+    "pnpm exec turbo@2 dev",
+    "yarn turbo@2 dev",
+    "env -u",
+    "env -u FOO",
+  ])("returns none for %s", (script) => {
+    expect(resolve(script)).toEqual({ kind: "none" });
+  });
+
+  it.each([
+    ["npm@10.0.0", "npm run turbo-dev", "turbo dev", 2],
+    ["pnpm@11.1.3", "pnpm run turbo-dev", "turbo dev", 1],
+    ["yarn@1.22.19", "yarn run turbo-dev", "turbo dev", 2],
+    ["yarn@4.0.0", "yarn run turbo-dev", "turbo dev", 1],
+    ["bun@1.4.4", "bun run turbo-dev", "turbo dev", 2],
+    ["npm@10.0.0", "npm run turbo-dev", "turbo dev --", 1],
+    ["npm@10.0.0", "npm run turbo-dev", "npx turbo@2 dev", 2],
+  ])("normalizes %s one level through %s", (packageManager, dev, nested, separators) => {
+    expect(resolve(dev, { "turbo-dev": nested }, packageManager)).toEqual({
+      kind: "forward",
+      separators,
+    });
+  });
+
+  it("reports an unsafe nested Turbo script", () => {
+    expect(
+      resolve("npm run turbo-dev", { "turbo-dev": "turbo dev && node mark.cjs" }, "npm@10.0.0")
+    ).toEqual({ kind: "unsafe", turbo: true });
+  });
+
+  it("returns none for a one-level non-Turbo script", () => {
+    expect(resolve("npm run turbo-dev", { "turbo-dev": "node mark.cjs" }, "npm@10.0.0")).toEqual({
+      kind: "none",
+    });
+  });
+
+  it("returns none beyond one level", () => {
+    expect(
+      resolve(
+        "npm run turbo-dev",
+        { "turbo-dev": "npm run deeper", deeper: "turbo dev" },
+        "npm@10.0.0"
+      )
+    ).toEqual({ kind: "none" });
+  });
+
+  it("returns none when the script is missing", () => {
+    writePackage({});
+    expect(resolveTurboRootForwarding("dev", pkgDir)).toEqual({ kind: "none" });
+  });
+
+  it.runIf(process.platform === "win32")("recognizes a turbo.cmd shim", () => {
+    expect(resolve("turbo.cmd dev")).toEqual({ kind: "forward", separators: 1 });
   });
 });
 

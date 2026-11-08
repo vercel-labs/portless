@@ -6075,6 +6075,20 @@ describe("CLI", { timeout: 15_000 }, () => {
       return { status: result.status, output: `${result.stdout}${result.stderr}` };
     };
 
+    const linkLocalTurbo = (root: string) => {
+      const repoModules = path.resolve(__dirname, "../../../node_modules");
+      fs.mkdirSync(path.join(root, "node_modules", ".bin"), { recursive: true });
+      fs.symlinkSync(
+        path.join(repoModules, ".bin", "turbo"),
+        path.join(root, "node_modules", ".bin", "turbo")
+      );
+      fs.symlinkSync(
+        path.join(repoModules, "turbo"),
+        path.join(root, "node_modules", "turbo"),
+        "dir"
+      );
+    };
+
     it.skipIf(process.platform === "win32")(
       "passes arguments after -- to the single app script through the npm separator",
       async () => {
@@ -6191,6 +6205,168 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       },
       45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments through wrapped Turbo root scripts",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-wrap-"));
+        const markFile = path.join(root, "marks.txt");
+
+        const writeRoot = (
+          packageManager: string,
+          dev: string,
+          extraScripts: Record<string, string> = {}
+        ) => {
+          const pnpm = packageManager.startsWith("pnpm");
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-wrap",
+              private: true,
+              packageManager,
+              ...(pnpm ? {} : { workspaces: ["packages/*"] }),
+              scripts: { dev, ...extraScripts },
+            })
+          );
+          const workspaceFile = path.join(root, "pnpm-workspace.yaml");
+          if (pnpm) fs.writeFileSync(workspaceFile, "packages:\n  - packages/*\n");
+          else fs.rmSync(workspaceFile, { force: true });
+        };
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          linkLocalTurbo(root);
+
+          const cases: {
+            packageManager: string;
+            dev: string;
+            scripts?: Record<string, string>;
+          }[] = [
+            { packageManager: "npm@10.0.0", dev: "npx turbo dev" },
+            { packageManager: "npm@10.0.0", dev: "npm exec turbo dev" },
+            { packageManager: "npm@10.0.0", dev: "npm exec turbo dev --" },
+            { packageManager: "npm@10.0.0", dev: "turbo dev --" },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            { packageManager: "pnpm@11.1.3", dev: "pnpm exec turbo dev" },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "pnpm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+          ];
+
+          for (const { packageManager, dev, scripts = {} } of cases) {
+            writeRoot(packageManager, dev, scripts);
+            fs.rmSync(markFile, { force: true });
+            const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+            expect(result.status, `${dev}: ${result.output}`).toBe(0);
+            expect(readMarks(markFile), `${dev}: ${result.output}`).toEqual([
+              ["api", args],
+              ["web", args],
+            ]);
+          }
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      90_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments through direct Turbo when the root has no script",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-direct-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-direct",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          linkLocalTurbo(root);
+
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([
+            ["api", args],
+            ["web", args],
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "rejects unsafe root scripts before forwarding arguments",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-unsafe-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+
+        const writeDev = (dev: string) => {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-unsafe",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev },
+            })
+          );
+        };
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+
+          for (const [dev, recovery] of [
+            ["turbo dev && node mark-root.cjs", "portless run turbo run dev -- --marker one"],
+            ["turbo dev # note", "portless run turbo run dev -- --marker one"],
+            ["node mark-root.cjs && node mark-root.cjs", "portless run <command> -- --marker one"],
+          ]) {
+            writeDev(dev);
+            fs.rmSync(markFile, { force: true });
+            const result = spawnCli(root, childEnv(markFile, {}), ["--", ...forwarded]);
+            expect(result.status, `${dev}: ${result.output}`).toBe(2);
+            expect(result.output, dev).toContain(
+              'Cannot forward arguments through the "dev" root script. It has shell operators or a comment.'
+            );
+            expect(result.output, dev).toContain(recovery);
+            expect(readMarks(markFile), result.output).toEqual([]);
+          }
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      30_000
     );
 
     it.skipIf(process.platform === "win32")(

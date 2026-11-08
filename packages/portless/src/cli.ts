@@ -114,6 +114,7 @@ import {
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
+  resolveTurboRootForwarding,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -160,7 +161,6 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScriptCommand,
-  resolveScript,
   scriptRunCommand,
   packageManagerExec,
   hasScript,
@@ -2307,6 +2307,8 @@ ${colors.bold("Usage:")}
 Every command accepts --help or -h, which only prints help. After run <cmd>,
 compose <subcommand>, or --, they belong to the wrapped command.
 Value flags for run and named apps accept both --flag <value> and --flag=<value>.
+Turbo mode exits 2 when forwarded arguments reach a root script with shell operators;
+run turbo directly or make the root script a single Turbo command.
 
 ${colors.bold("Examples:")}
   portless
@@ -4590,6 +4592,27 @@ async function handleDefaultMulti(
 
   const configScript = loaded?.config.script ?? "dev";
   const scriptName = globalScript ?? configScript;
+  const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
+
+  if (useTurbo && extraArgs.length > 0 && hasScript(scriptName, wsRoot)) {
+    const forwarding = resolveTurboRootForwarding(scriptName, wsRoot);
+    if (forwarding.kind === "unsafe") {
+      const forwarded = extraArgs.join(" ");
+      const hints = forwarding.turbo
+        ? [
+            `  Run the task directly: portless run turbo run ${scriptName} -- ${forwarded}`,
+            `  Or change the root "${scriptName}" script to a single command, such as "turbo ${scriptName}".`,
+          ]
+        : [
+            `  Run the command directly: portless run <command> -- ${forwarded}`,
+            `  Or change the root "${scriptName}" script to a single command.`,
+          ];
+      throw new UsageError(
+        `Cannot forward arguments through the "${scriptName}" root script. It has shell operators or a comment.`,
+        hints
+      );
+    }
+  }
 
   // Infer the monorepo project name for use as the base domain.
   // Config name > common npm scope > workspace root inference.
@@ -4770,8 +4793,6 @@ async function handleDefaultMulti(
     }
   }
 
-  const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
-
   if (useTurbo) {
     await runWithTurbo(
       wsRoot,
@@ -4856,11 +4877,15 @@ async function runWithTurbo(
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
-  const rootScriptIsTurbo =
-    useRootScript && path.basename(resolveScript(scriptName, wsRoot)?.[0] ?? "") === "turbo";
+  const forwarding = useRootScript ? resolveTurboRootForwarding(scriptName, wsRoot) : null;
+  const turboSeparators = useRootScript
+    ? forwarding?.kind === "forward"
+      ? forwarding.separators
+      : 0
+    : 1;
   const turboPassThrough =
-    (!useRootScript || rootScriptIsTurbo) && extraArgs.length > 0
-      ? ["--", ...extraArgs]
+    extraArgs.length > 0 && turboSeparators > 0
+      ? [...Array.from({ length: turboSeparators }, () => "--"), ...extraArgs]
       : extraArgs;
   const turboArgs = useRootScript
     ? scriptRunCommand(pm, scriptName, wsRoot, turboPassThrough)
