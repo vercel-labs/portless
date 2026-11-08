@@ -1062,13 +1062,15 @@ const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
  * Find a free port in the given range (default 4000-4999).
  * Tries random ports first for speed, then falls back to sequential scan.
  *
- * Note: There is an inherent TOCTOU race between verifying a port is free
- * and the child process actually binding to it. The random-first strategy
- * minimizes the window.
+ * The probe is released before the app binds the port, so a port can look
+ * free while another app is still booting on it. `exclude` skips ports that
+ * are already assigned to a route; RouteStore.claimAppPort passes them under
+ * the route lock so concurrent runs never pick the same port.
  */
 export async function findFreePort(
   minPort = MIN_APP_PORT,
-  maxPort = MAX_APP_PORT
+  maxPort = MAX_APP_PORT,
+  exclude: ReadonlySet<number> = new Set()
 ): Promise<number> {
   if (minPort > maxPort) {
     throw new Error(`minPort (${minPort}) must be <= maxPort (${maxPort})`);
@@ -1098,14 +1100,14 @@ export async function findFreePort(
   // Try random ports first
   for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
     const port = minPort + Math.floor(Math.random() * (maxPort - minPort + 1));
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
+    if (!BLOCKED_PORTS.has(port) && !exclude.has(port) && (await tryPort(port))) {
       return port;
     }
   }
 
   // Fall back to sequential
   for (let port = minPort; port <= maxPort; port++) {
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
+    if (!BLOCKED_PORTS.has(port) && !exclude.has(port) && (await tryPort(port))) {
       return port;
     }
   }

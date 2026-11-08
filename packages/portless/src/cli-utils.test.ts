@@ -201,6 +201,20 @@ describe("findFreePort", () => {
     server.close();
   });
 
+  it("skips excluded ports", async () => {
+    const exclude = new Set([9000, 9001, 9002, 9003, 9004]);
+    for (let i = 0; i < 20; i++) {
+      const port = await findFreePort(9000, 9005, exclude);
+      expect(port).toBe(9005);
+    }
+  });
+
+  it("throws when every port in the range is excluded", async () => {
+    await expect(findFreePort(9000, 9001, new Set([9000, 9001]))).rejects.toThrow(
+      "No free port found"
+    );
+  });
+
   it("respects custom port range", async () => {
     const port = await findFreePort(9000, 9010);
     expect(port).toBeGreaterThanOrEqual(9000);

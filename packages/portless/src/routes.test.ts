@@ -665,3 +665,136 @@ describe("RouteStore", () => {
     });
   });
 });
+
+describe("RouteStore.claimAppPort", () => {
+  let tmpDir: string;
+  let store: RouteStore;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-claim-test-"));
+    store = new RouteStore(tmpDir);
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  // Picks the lowest port from 4000 that is not taken.
+  const lowestFree = async (taken: ReadonlySet<number>) => {
+    let port = 4000;
+    while (taken.has(port)) port++;
+    return port;
+  };
+
+  it("does not pick a port held by another live app", async () => {
+    store.addRoute("other.localhost", 4000, process.pid);
+    const { port } = await store.claimAppPort(["app.localhost"], process.pid, lowestFree);
+    expect(port).toBe(4001);
+    expect(store.loadRoutes().find((r) => r.hostname === "app.localhost")?.port).toBe(4001);
+  });
+
+  it("does not pick a port an alias points at", async () => {
+    store.addRoute("db.localhost", 4000, 0);
+    const { port } = await store.claimAppPort(["app.localhost"], process.pid, lowestFree);
+    expect(port).toBe(4001);
+  });
+
+  it("registers every hostname of the app on one port", async () => {
+    const { port } = await store.claimAppPort(
+      ["app.localhost", "app.test"],
+      process.pid,
+      lowestFree
+    );
+    const routes = store.loadRoutes();
+    expect(routes.map((r) => [r.hostname, r.port])).toEqual([
+      ["app.localhost", port],
+      ["app.test", port],
+    ]);
+  });
+
+  it("does not exclude the app's own previous port", async () => {
+    store.addRoute("app.localhost", 4000, process.pid);
+    const { port } = await store.claimAppPort(["app.localhost"], process.pid, lowestFree);
+    expect(port).toBe(4000);
+    expect(store.loadRoutes()).toHaveLength(1);
+  });
+
+  it("reuses a port whose owner is dead", async () => {
+    store.ensureDir();
+    fs.writeFileSync(
+      store.getRoutesPath(),
+      JSON.stringify([{ hostname: "dead.localhost", port: 4000, pid: 999999 }])
+    );
+    const { port } = await store.claimAppPort(["app.localhost"], process.pid, lowestFree);
+    expect(port).toBe(4000);
+  });
+
+  it("throws RouteConflictError and writes nothing when a hostname is taken", async () => {
+    // A live process other than this one owns app.test; app.localhost is free.
+    const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"]);
+    try {
+      store.addRoute("app.test", 4005, owner.pid!);
+      await expect(
+        store.claimAppPort(["app.localhost", "app.test"], process.pid, lowestFree)
+      ).rejects.toBeInstanceOf(RouteConflictError);
+      expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["app.test"]);
+    } finally {
+      owner.kill();
+    }
+  });
+
+  it("gives concurrent processes different ports", async () => {
+    const count = 8;
+    const scriptPath = path.join(tmpDir, "claim-worker.mjs");
+    const pkgDir = path.resolve(import.meta.dirname, "..");
+    const importUrl = pathToFileURL(path.join(pkgDir, "dist", "index.js")).href;
+    // Each worker waits inside pick, as a real probe would, then takes the
+    // lowest port that is not taken. Without the lock they would all pick 4000.
+    fs.writeFileSync(
+      scriptPath,
+      [
+        `import { RouteStore } from ${JSON.stringify(importUrl)};`,
+        `const [dir, hostname] = process.argv.slice(2);`,
+        `const store = new RouteStore(dir);`,
+        `const pick = async (taken) => {`,
+        `  await new Promise((r) => setTimeout(r, 50));`,
+        `  let port = 4000;`,
+        `  while (taken.has(port)) port++;`,
+        `  return port;`,
+        `};`,
+        `const { port } = await store.claimAppPort([hostname], process.pid, pick);`,
+        `console.log("port:" + port);`,
+        `process.stdin.resume();`,
+      ].join("\n")
+    );
+
+    const children = Array.from({ length: count }, (_, i) =>
+      spawn(process.execPath, [scriptPath, tmpDir, `app${i}.localhost`], {
+        stdio: ["pipe", "pipe", "pipe"],
+      })
+    );
+    const ports = await Promise.all(
+      children.map(
+        (child) =>
+          new Promise<number>((resolve, reject) => {
+            let stdout = "";
+            let stderr = "";
+            child.stdout!.on("data", (d: Buffer) => {
+              stdout += d.toString();
+              const m = stdout.match(/port:(\d+)/);
+              if (m) resolve(Number(m[1]));
+            });
+            child.stderr!.on("data", (d: Buffer) => {
+              stderr += d.toString();
+            });
+            child.on("close", (code) => reject(new Error(`worker exited ${code}: ${stderr}`)));
+          })
+      )
+    );
+    for (const child of children) child.stdin!.end();
+
+    expect(new Set(ports).size).toBe(count);
+    const routes = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+    expect(new Set(routes.map((r: { port: number }) => r.port)).size).toBe(count);
+  }, 30_000);
+});
