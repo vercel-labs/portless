@@ -2016,6 +2016,17 @@ describe("resolveTurboRootForwarding", () => {
     ["yarn@1.22.19", "yarn run turbo-dev --", "turbo dev", 1],
     ["yarn@4.0.0", "yarn run turbo-dev", "turbo dev", 1],
     ["yarn@4.0.0", "yarn run turbo-dev --", "turbo dev", 0],
+    ["npm@10.0.0", "FOO=1 npm run turbo-dev", "turbo dev", 2],
+    ["npm@10.0.0", "FOO=1 npm run turbo-dev --", "turbo dev", 1],
+    ["npm@10.0.0", "FOO=1 npm run turbo-dev", "turbo dev -- --fixed", 1],
+    ["npm@10.0.0", "env FOO=1 npm run turbo-dev", "turbo dev", 2],
+    ["npm@10.0.0", "env -u FOO npm run turbo-dev", "turbo dev", 2],
+    ["npm@10.0.0", "env --unset=FOO npm run turbo-dev", "turbo dev", 2],
+    ["npm@10.0.0", "cross-env NODE_ENV=test npm run turbo-dev", "turbo dev", 2],
+    ["pnpm@11.1.3", "FOO=1 pnpm run turbo-dev", "turbo dev", 1],
+    ["bun@1.4.4", "FOO=1 bun run turbo-dev", "turbo dev", 2],
+    ["yarn@1.22.19", "FOO=1 yarn run turbo-dev", "turbo dev", 2],
+    ["yarn@4.0.0", "FOO=1 yarn run turbo-dev", "turbo dev", 1],
     ["npm@10.0.0", "npm run turbo-dev", "npx turbo@2 dev", 2],
   ])("normalizes %s one level through %s", (packageManager, dev, nested, separators) => {
     expect(resolve(dev, { "turbo-dev": nested }, packageManager)).toEqual({

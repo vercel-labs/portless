@@ -2163,6 +2163,7 @@ function mentionsTurbo(commandArgs: string[]): boolean {
 }
 
 type CommandResolution = {
+  commandStart: number;
   index: number;
   consumedSeparators: number;
   packageSpec: boolean;
@@ -2170,6 +2171,7 @@ type CommandResolution = {
 
 function commandIndex(commandArgs: string[]): CommandResolution | null {
   let i = 0;
+  let commandStart = -1;
   let consumedSeparators = 0;
   let packageSpec = false;
   for (;;) {
@@ -2184,8 +2186,9 @@ function commandIndex(commandArgs: string[]): CommandResolution | null {
       i++;
       continue;
     }
+    if (commandStart < 0) commandStart = i;
     const runner = PACKAGE_RUNNERS[name];
-    if (!runner) return { index: i, consumedSeparators, packageSpec };
+    if (!runner) return { commandStart, index: i, consumedSeparators, packageSpec };
     const skipped = skipRunnerPrefix(commandArgs, i + 1, runner);
     let subcommand: string | undefined;
     if (
@@ -2520,8 +2523,9 @@ function resolveTurboScript(
     };
   }
   if (depth === 0 && resolved) {
-    const packageManager = commandBasename(commandArgs[0]);
-    const scriptTokens = resolvePackageScriptTokens(commandArgs, packageDir);
+    const command = commandArgs.slice(resolved.commandStart);
+    const packageManager = commandBasename(command[0]!);
+    const scriptTokens = resolvePackageScriptTokens(command, packageDir);
     if (scriptTokens) {
       const nestedConsumed =
         packageManager === "npm" ||
@@ -2530,11 +2534,11 @@ function resolveTurboScript(
           ? 1
           : 0;
       return resolveTurboScript(
-        commandArgs[2]!,
+        command[2]!,
         packageDir,
         1,
         consumedSeparators + resolved.consumedSeparators + nestedConsumed,
-        commandArgs.slice(3).filter((arg) => arg === "--").length
+        command.slice(3).filter((arg) => arg === "--").length
       );
     }
   }

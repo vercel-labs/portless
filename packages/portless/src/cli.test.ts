@@ -6290,10 +6290,30 @@ describe("CLI", { timeout: 15_000 }, () => {
               scripts: { "turbo-dev": "turbo dev -- --fixed" },
               fixed: ["--fixed"],
             },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "FOO=1 npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "FOO=1 npm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "env FOO=1 npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
             { packageManager: "pnpm@11.1.3", dev: "pnpm exec turbo dev" },
             {
               packageManager: "pnpm@11.1.3",
               dev: "pnpm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "FOO=1 pnpm run turbo-dev",
               scripts: { "turbo-dev": "turbo dev" },
             },
             {
@@ -6324,6 +6344,57 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       },
       90_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the root script's environment when forwarding through a nested script",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-env-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-env",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev: "CUSTOM_ENV=root-value npm run turbo-dev", "turbo-dev": "turbo dev" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({
+              tasks: { dev: { cache: false, env: ["MARK_FILE", "CUSTOM_ENV"] } },
+            })
+          );
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            writeApp(dir, name, false);
+            fs.writeFileSync(
+              path.join(dir, "mark.cjs"),
+              [
+                'const fs = require("node:fs");',
+                'const pkg = require("./package.json");',
+                "fs.appendFileSync(process.env.MARK_FILE, `${pkg.name} env=${process.env.CUSTOM_ENV} args=${JSON.stringify(process.argv.slice(2))}\\n`);",
+              ].join("\n") + "\n"
+            );
+          }
+          linkLocalTurbo(root);
+
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...forwarded]);
+          expect(result.status, result.output).toBe(0);
+          expect(fs.readFileSync(markFile, "utf-8").trim().split("\n").sort()).toEqual([
+            `api env=root-value args=${JSON.stringify(forwarded)}`,
+            `web env=root-value args=${JSON.stringify(forwarded)}`,
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
     );
 
     it.skipIf(process.platform === "win32")(
