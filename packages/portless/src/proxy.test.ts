@@ -1413,6 +1413,53 @@ describe("createProxyServer", () => {
       expect(resets).toBeGreaterThan(0);
       expect(errors).toEqual([]);
     });
+
+    it("replays on a new connection when every pooled connection is stale", async () => {
+      // Answer the first request on a connection and reset the next one, which
+      // is what an idle close looks like when it crosses our write. Here both
+      // pooled connections do it.
+      const handled = new WeakSet<net.Socket>();
+      const warming: http.ServerResponse[] = [];
+      let resets = 0;
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          if (handled.has(req.socket)) {
+            resets++;
+            req.socket.resetAndDestroy();
+            return;
+          }
+          handled.add(req.socket);
+          if (req.url !== "/warm") return res.end("ok");
+          // Hold both warm-up answers so the pool opens two connections.
+          warming.push(res);
+          if (warming.length === 2) for (const pending of warming) pending.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const errors: string[] = [];
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: (msg) => errors.push(msg),
+        })
+      );
+      await listen(server);
+
+      await Promise.all([
+        request(server, { host: "myapp.localhost", path: "/warm" }),
+        request(server, { host: "myapp.localhost", path: "/warm" }),
+      ]);
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("ok");
+      expect(resets).toBe(1);
+      expect(errors).toEqual([]);
+    });
   });
 
   describe("X-Portless header", () => {
@@ -2417,6 +2464,54 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     route.upstream = { tls: true, host: "a.internal" };
     expect(JSON.parse((await get()).body)).toEqual({ sni: "a.internal", host: "a.internal" });
     expect(connections).toBe(2);
+  });
+
+  it("closes a replayed long-lived response when the proxy shuts down", async () => {
+    // Answer the first request on a connection and reset the next one, so the
+    // stream below is replayed on a new connection that stays open.
+    const handled = new WeakSet<net.Socket>();
+    let streamSocket: net.Socket | undefined;
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        if (handled.has(req.socket)) {
+          req.socket.resetAndDestroy();
+          return;
+        }
+        handled.add(req.socket);
+        if (req.url !== "/events") return res.end("ok");
+        streamSocket = req.socket;
+        res.writeHead(200, { "Content-Type": "text/event-stream" });
+        res.write("data: ready\n\n");
+      })
+    );
+    await listen(backend);
+    const routes: RouteInfo[] = [
+      { hostname: "api.localhost", port: (backend.address() as net.AddressInfo).port },
+    ];
+    const server = createProxyServer({
+      getRoutes: () => routes,
+      proxyPort: TEST_PROXY_PORT,
+      tls: { cert: tlsCert, key: tlsKey },
+      onError: () => {},
+    });
+    await listen(server);
+
+    await httpsRequest(server, { host: "api.localhost", path: "/warm" });
+    const events = https.get({
+      hostname: "127.0.0.1",
+      port: (server.address() as net.AddressInfo).port,
+      path: "/events",
+      headers: { host: "api.localhost" },
+      rejectUnauthorized: false,
+    });
+    events.on("error", () => {});
+    await new Promise<void>((resolve) => events.once("response", () => resolve()));
+    expect(streamSocket?.destroyed).toBe(false);
+
+    const streamClosed = new Promise<void>((resolve) => streamSocket!.once("close", resolve));
+    server.close();
+    await streamClosed;
+    events.destroy();
   });
 
   it("reports a TLS mismatch against a plaintext backend and recovers", async () => {
