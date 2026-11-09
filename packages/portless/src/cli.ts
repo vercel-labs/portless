@@ -108,6 +108,8 @@ import {
   isWildcardEnvEnabled,
   isLanEnvEnabled,
   isProxyRunning,
+  lanEffectiveTlds,
+  lanTlds,
   isWindows,
   killTree,
   listenOnProxyInterface,
@@ -298,7 +300,7 @@ function resolveProxyConfig(options: {
   }
 
   if (options.explicit.tlds) {
-    config.tlds = normalizeTlds(options.tlds);
+    config.tlds = config.lanMode ? lanTlds(options.tlds) : normalizeTlds(options.tlds);
     config.tld = primaryTld(config.tlds);
   }
 
@@ -324,8 +326,8 @@ function resolveProxyConfig(options: {
   }
 
   if (config.lanMode) {
-    config.tlds = ["local"];
-    config.tld = "local";
+    config.tlds = lanEffectiveTlds(config.tlds);
+    config.tld = primaryTld(config.tlds);
     if (!config.lanIpExplicit) {
       config.lanIp = null;
     }
@@ -836,10 +838,18 @@ function startProxyServer(
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
+  // Names under a TLD other than .local resolve on this machine only, so mDNS
+  // does not announce them.
+  const localOnlyTlds = tlds.filter((configuredTld) => configuredTld !== "local");
+  const announced = (hostname: string) =>
+    !localOnlyTlds.some((configuredTld) => hostname.endsWith(`.${configuredTld}`));
+
   const publishCachedRoutes = () => {
     if (!activeLanIp) return;
     for (const route of cachedRoutes) {
-      publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+      if (announced(route.hostname)) {
+        publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
+      }
     }
   };
 
@@ -904,6 +914,7 @@ function startProxyServer(
       if (activeLanIp) {
         const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
         for (const route of cachedRoutes) {
+          if (!announced(route.hostname)) continue;
           const previousPort = previousRoutes.get(route.hostname);
           if (previousPort === undefined) {
             publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
@@ -1562,11 +1573,14 @@ async function runApp(
   } else {
     const runningConfig = readCurrentProxyConfig(stateDir);
 
-    const mismatchMessages = getProxyConfigMismatchMessages(
-      desired.desiredConfig,
-      runningConfig,
-      desired.explicit
-    );
+    // An app's PORTLESS_TLD may name any TLD the running proxy serves, which
+    // becomes its primary TLD below; only one the proxy lacks is a mismatch.
+    const mismatchMessages = getProxyConfigMismatchMessages(desired.desiredConfig, runningConfig, {
+      ...desired.explicit,
+      tlds:
+        desired.explicit.tlds &&
+        desired.envTlds.some((envConfiguredTld) => !runningConfig.tlds.includes(envConfiguredTld)),
+    });
     if (mismatchMessages.length > 0) {
       printProxyConfigMismatch(proxyPort, desired.desiredConfig, mismatchMessages);
     }
@@ -1577,13 +1591,20 @@ async function runApp(
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
-  const hostnames = buildHostnames(name, tlds);
+  // PORTLESS_TLD picks the app's primary TLD, the one PORTLESS_URL uses, among
+  // those the running proxy serves.
+  const preferredTld = desired.explicit.tlds
+    ? desired.envTlds.find((envConfiguredTld) => tlds.includes(envConfiguredTld))
+    : undefined;
+  const hostnames = buildHostnames(
+    name,
+    preferredTld ? [preferredTld, ...tlds.filter((t) => t !== preferredTld)] : tlds
+  );
   const hostname = hostnames[0]!;
 
   if (
     desired.explicit.tlds &&
-    (desired.envTlds.some((envConfiguredTld, index) => envConfiguredTld !== tlds[index]) ||
-      desired.envTlds.length !== tlds.length)
+    desired.envTlds.some((envConfiguredTld) => !tlds.includes(envConfiguredTld))
   ) {
     console.warn(
       chalk.yellow(
@@ -1639,7 +1660,8 @@ async function runApp(
     console.log("");
   }
   if (lanIp) {
-    console.log(chalk.green(`  LAN -> ${finalUrl}`));
+    const lanUrl = allUrls.find((url) => new URL(url).hostname.endsWith(".local")) ?? finalUrl;
+    console.log(chalk.green(`  LAN -> ${lanUrl}`));
     console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
@@ -2283,7 +2305,7 @@ ${colors.bold("Options:")}
   --cert <path>                 Use a custom TLS certificate
   --key <path>                  Use a custom TLS private key
   --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
+  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more; with --lan, served beside .local
   --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
   --state-dir <path>            Use a custom state directory with service install
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
@@ -2301,7 +2323,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
-  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
+  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com); for an app, picks its PORTLESS_URL's TLD
   PORTLESS_PREFIX=<label>       Override the worktree label; an empty value disables it
   PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
   PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
@@ -3598,15 +3620,13 @@ ${colors.bold("LAN mode (--lan):")}
     stateDir = resolveStateDir(proxyPort);
   }
 
-  if (lanMode && tldFlagValues.length > 0) {
-    const userTlds = tldFlagValues.join(", ");
-    if (userTlds !== "local") {
-      console.warn(
-        chalk.yellow(
-          `Warning: --lan forces .local TLD (mDNS requirement). Ignoring --tld ${userTlds}.`
-        )
-      );
-    }
+  if (lanMode && tlds.length > 1) {
+    const localOnly = tlds.filter((configuredTld) => configuredTld !== "local");
+    console.log(
+      chalk.gray(
+        `-- LAN mode announces .local names over mDNS. ${formatTldList(localOnly)} names resolve on this machine only.`
+      )
+    );
   }
 
   for (const configuredTld of tlds) {
@@ -4462,11 +4482,11 @@ async function handleDefaultMulti(
       }
     };
     // A running proxy keeps its own TLDs; a stopped one starts with the same
-    // persisted/env merge ensureProxyRunning uses, with LAN normalized to .local.
+    // persisted/env merge ensureProxyRunning uses, with LAN normalized to include .local.
     let preflightTlds = tlds;
     if (!(await isProxyUp(port, tls))) {
       const { startConfig } = resolveProxyStart(multiDesired);
-      preflightTlds = startConfig.lanMode ? ["local"] : startConfig.tlds;
+      preflightTlds = startConfig.lanMode ? lanEffectiveTlds(startConfig.tlds) : startConfig.tlds;
     }
     checkHostnameCollisions(preflightTlds);
 

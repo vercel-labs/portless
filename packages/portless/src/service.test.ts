@@ -273,6 +273,31 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<key>PORTLESS_WILDCARD</key>");
   });
 
+  it.each([
+    [["--lan"], {}, ["local"]],
+    [["--lan", "--tld", "com"], {}, ["com", "local"]],
+    [["--lan", "--tld", "local", "--tld", "localhost"], {}, ["local", "localhost"]],
+    [["--lan"], { PORTLESS_TLD: "test" }, ["test", "local"]],
+  ])("serves %j %j in LAN mode as %j", (flags, env, tlds) => {
+    const config = parseServiceInstallConfig(["service", "install", ...flags], env);
+    expect(config).toMatchObject({ lanMode: true, tlds, tld: tlds[0] });
+  });
+
+  it("passes a LAN service's TLDs to the proxy it starts", () => {
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/local/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      uid: "501",
+      gid: "20",
+      installConfig: { lanMode: true, tlds: ["com"] },
+    });
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.plist).toContain("<key>PORTLESS_TLD</key>");
+    expect(spec.plist).toContain("<string>com,local</string>");
+  });
+
   it("defaults an unprivileged service to plain HTTP on port 80", () => {
     const config = parseServiceInstallConfig(["service", "install", "--unprivileged"], {});
     expect(config).toMatchObject({ unprivileged: true, useHttps: false, proxyPort: 80 });

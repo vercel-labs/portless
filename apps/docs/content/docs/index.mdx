@@ -126,7 +126,7 @@ portless myapp next dev
 # -> https://myapp.test
 ```
 
-When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
+When multiple TLDs are configured, `PORTLESS_URL` uses the first TLD. An app started with `PORTLESS_TLD` set to one of the running proxy's TLDs uses that TLD for `PORTLESS_URL` instead. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
 The `--tld` value accepts a lowercase DNS name such as `dev.example.com`, so a domain you own can be used as the "TLD":
 
@@ -138,7 +138,7 @@ portless myapp next dev
 
 This gives local URLs the same structure as production, which keeps OAuth redirect URIs, cross-subdomain cookies, and host-based routing working the same way in both environments. Strict OAuth providers such as Google and Apple reject `.localhost` and `.test` redirect URIs but accept a real domain, so `https://myapp.dev.example.com/api/auth/callback/google` works as a redirect URI. Each label must follow DNS rules: lowercase letters, digits, and interior hyphens, with at most 63 characters per label and 253 characters total. The full hostname (`app.TLD`) is also subject to the 253-character limit.
 
-A custom TLD is reachable only from the machine running the proxy, because outside LAN mode the proxy binds only to loopback. LAN mode serves apps under `.local` and ignores a custom `--tld`, so the two can't be combined.
+A custom TLD is reachable only from the machine running the proxy, because outside LAN mode the proxy binds only to loopback. In LAN mode the proxy serves the TLDs you pass with `--tld` beside `.local`, but advertises only the `.local` names over mDNS, so other devices reach those names alone ([LAN mode](/commands#lan-mode)).
 
 Recommended: `.test` (IANA-reserved, no collision risk). Avoid `.local` (conflicts with mDNS/Bonjour) and `.dev` (Google-owned, forces HTTPS via HSTS).
 

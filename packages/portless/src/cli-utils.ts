@@ -593,6 +593,23 @@ export function writeLanMarker(dir: string, ip: string | null): void {
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
 
+/**
+ * The TLDs a LAN mode proxy serves for the TLDs asked for: those, in their
+ * order, with `.local` added last when it is missing. Only `.local` names are
+ * announced over mDNS; names under the others resolve on this machine only.
+ */
+export function lanTlds(tlds: readonly string[] | undefined): string[] {
+  return [...new Set([...(tlds ?? []), "local"])];
+}
+
+/**
+ * A LAN mode proxy's TLDs from a list that is already resolved: kept when it
+ * includes `.local`, and `.local` alone otherwise (the default TLD).
+ */
+export function lanEffectiveTlds(tlds: readonly string[] | undefined): string[] {
+  return tlds?.includes("local") ? lanTlds(tlds) : ["local"];
+}
+
 /** TLDs that work but have known pitfalls worth warning about. */
 export const RISKY_TLDS = new Map<string, string>([
   ["local", "conflicts with mDNS/Bonjour on macOS"],
@@ -864,7 +881,9 @@ export function buildProxyStartConfig(options: {
   skipTrust?: boolean;
 }): { effectiveTld: string; effectiveTlds: string[]; args: string[] } {
   const requestedTlds = options.tlds && options.tlds.length > 0 ? [...options.tlds] : [options.tld];
-  const effectiveTlds = options.lanMode ? ["local"] : [...new Set(requestedTlds)];
+  const effectiveTlds = options.lanMode
+    ? lanEffectiveTlds(requestedTlds)
+    : [...new Set(requestedTlds)];
   const effectiveTld = effectiveTlds[0] ?? DEFAULT_TLD;
   const args: string[] = [];
 
@@ -893,6 +912,11 @@ export function buildProxyStartConfig(options: {
         args.push("--ip", options.lanIp);
       } else {
         args.push(INTERNAL_LAN_IP_FLAG, options.lanIp);
+      }
+    }
+    if (effectiveTlds.length > 1) {
+      for (const tld of effectiveTlds) {
+        args.push("--tld", tld);
       }
     }
   } else if (effectiveTlds.length > 1 || effectiveTld !== DEFAULT_TLD) {

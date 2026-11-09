@@ -1833,13 +1833,13 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
-    it.skipIf(process.platform === "win32")("warns when --lan and --tld are both provided", () => {
+    it.skipIf(process.platform === "win32")("keeps --tld beside .local in LAN mode", () => {
       // Use an empty PATH so the mDNS check fails early, causing the
       // process to exit without needing a running proxy server (spawnSync
       // blocks the parent event loop, preventing a fake server from responding).
       const emptyPath = fs.mkdtempSync(path.join(os.tmpdir(), "portless-empty-path-"));
       try {
-        const { status, stderr } = run(
+        const { status, stdout, stderr } = run(
           ["proxy", "start", "--lan", "--tld", "test", "--ip", "192.168.1.42"],
           {
             env: {
@@ -1850,8 +1850,10 @@ describe("CLI", { timeout: 15_000 }, () => {
           }
         );
         expect(status).toBe(1);
-        expect(stderr).toContain("--lan forces .local TLD");
-        expect(stderr).toContain("Ignoring --tld test");
+        expect(stdout).toContain(
+          "LAN mode announces .local names over mDNS. .test names resolve on this machine only."
+        );
+        expect(stderr).not.toContain("Ignoring --tld");
       } finally {
         fs.rmSync(emptyPath, { recursive: true, force: true });
       }
@@ -1930,6 +1932,51 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.rmSync(shimDir, { recursive: true, force: true });
       }
     });
+
+    it.each([
+      [{}, "mobile.local"],
+      [{ PORTLESS_TLD: "localhost" }, "mobile.localhost"],
+    ])(
+      "serves a LAN app under each TLD, PORTLESS_TLD %j picking %s for PORTLESS_URL",
+      async (env, host) => {
+        const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-lan-tld-shim-"));
+        const capturePath = path.join(shimDir, "capture.json");
+        let proxyChild: ReturnType<typeof spawn> | undefined;
+
+        try {
+          const proxy = await startMockProxy(tmpDir);
+          proxyChild = proxy.child;
+          fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+          fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
+          fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "local\nlocalhost\n");
+          fs.writeFileSync(path.join(tmpDir, "proxy.lan"), "192.168.1.42");
+          writeExpoShim(shimDir);
+
+          const { status, stdout } = run(
+            ["run", "--name", "mobile", "--app-port", "4567", "expo", "start"],
+            {
+              env: {
+                PATH: `${shimDir}${path.delimiter}${process.env.PATH ?? ""}`,
+                PORTLESS_STATE_DIR: tmpDir,
+                PORTLESS_TEST_CAPTURE_FILE: capturePath,
+                PORTLESS_HTTPS: "0",
+                ...env,
+              },
+            }
+          );
+
+          expect(status).toBe(0);
+          const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+            env: Record<string, string>;
+          };
+          expect(capture.env.PORTLESS_URL).toBe(`http://${host}:${proxy.port}`);
+          expect(stdout).toContain(`LAN -> http://mobile.local:${proxy.port}`);
+        } finally {
+          if (proxyChild) await stopChild(proxyChild);
+          fs.rmSync(shimDir, { recursive: true, force: true });
+        }
+      }
+    );
 
     it("checks a custom local TLD when no LAN marker exists", async () => {
       const shimDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-custom-local-shim-"));
