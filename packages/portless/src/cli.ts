@@ -1559,6 +1559,7 @@ function resolveProxyStart(desired: ProxyDesiredState): {
 } {
   const { explicit, desiredConfig } = desired;
   const persisted = readPersistedProxyState();
+  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
   const startConfig = { ...desiredConfig };
   let startPort: number | undefined;
 
@@ -1581,7 +1582,7 @@ function resolveProxyStart(desired: ProxyDesiredState): {
       startConfig.unprivileged = persisted.unprivileged;
     }
     const envPort = getDefaultPort(startConfig.useHttps);
-    if (persisted.port !== envPort) {
+    if (!configuredEnvPort && persisted.port !== envPort) {
       startPort = persisted.port;
     }
   }

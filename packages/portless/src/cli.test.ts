@@ -3950,6 +3950,54 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("persisted proxy port", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-port-marker-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("lets PORTLESS_PORT override the saved port after an unexpected exit", async () => {
+      const savedPort = await getFreePort();
+      const envPort = await getFreePort();
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), savedPort.toString());
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: envPort.toString(),
+        PORTLESS_HTTPS: "0",
+      };
+
+      try {
+        const { status, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        expect(status).toBe(0);
+        expect(stderr).toContain(`http://myapp.localhost:${envPort}`);
+      } finally {
+        run(["proxy", "stop", "-p", envPort.toString()], { env });
+      }
+    });
+
+    it("reuses the saved port after an unexpected exit without PORTLESS_PORT", async () => {
+      const savedPort = await getFreePort();
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), savedPort.toString());
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_HTTPS: "0",
+      };
+
+      try {
+        const { status, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        expect(status).toBe(0);
+        expect(stderr).toContain(`http://myapp.localhost:${savedPort}`);
+      } finally {
+        run(["proxy", "stop", "-p", savedPort.toString()], { env });
+      }
+    });
+  });
+
   describe("persisted LAN marker", () => {
     let tmpDir: string;
 

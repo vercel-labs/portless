@@ -361,7 +361,7 @@ portless proxy start
   </tbody>
 </table>
 
-When auto-starting, portless reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, so the next start uses the flags and environment variables it is given. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority.
+When auto-starting, portless reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, so the next start uses the flags and environment variables it is given. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority, so `PORTLESS_PORT` starts the proxy on that port instead of the saved one.
 
 ### Unprivileged mode
 
