@@ -146,6 +146,7 @@ import {
   collectStateDirsForCleanupWithFailures,
   isCleanableStateDir,
   removePortlessStateFiles,
+  type CATrustRemovalResult,
 } from "./clean-utils.js";
 import {
   getLocalNetworkIp,
@@ -1384,22 +1385,20 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       return true;
     }
 
-    // Verify the process is actually running a proxy on the expected port.
-    // If the PID was recycled by an unrelated process, the port won't be listening.
     // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
     if (!(await isProxyRunning(proxyPort))) {
-      console.log(
-        colors.yellow(
-          `PID file exists but port ${proxyPort} is not listening. The PID may have been recycled.`
-        )
+      console.error(
+        colors.red(`Could not verify that PID ${pid} is a proxy that stopped on port ${proxyPort}.`)
       );
-      console.log(colors.yellow("Removing stale PID file."));
-      fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return true;
+      console.error(colors.blue("It was not signaled, and its state and CA files are kept."));
+      if (!isWindows) {
+        console.error(
+          colors.cyan(
+            `If that process is the proxy and was suspended, resume it with: kill -CONT ${pid}`
+          )
+        );
+      }
+      return false;
     }
 
     process.kill(pid, "SIGTERM");
@@ -2648,7 +2647,8 @@ function removeStateFilesForCleanup(
   const failures = new Set<string>();
   for (const stateDir of stateDirs) {
     const removed = removePortlessStateFiles(stateDir, {
-      preserveCAIdentity: shouldPreserveCAIdentity(stateDir, failedCAStateDirs),
+      preserveCAIdentity:
+        preserveProxyRuntime || shouldPreserveCAIdentity(stateDir, failedCAStateDirs),
       preserveProxyRuntime,
     });
     for (const file of removed) failures.add(file);
@@ -2739,8 +2739,8 @@ fails, the CA certificate and key are retained so clean can safely retry.
 On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
 or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
 steps against the same allowlisted state directories. If the proxy cannot be
-confirmed stopped, its PID, port, and runtime marker files are kept. On Windows,
-run as Administrator if needed.
+confirmed stopped, its PID, port, runtime marker files, and CA files are kept
+and the CA stays trusted. On Windows, run as Administrator if needed.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless clean")}
@@ -2854,7 +2854,12 @@ async function handleClean(args: string[]): Promise<void> {
   }
 
   const failedCAStateDirs = new Set<string>();
-  const caRemovalResults = attemptCATrustRemovalForCleanup(stateDirs, untrustCA);
+  const caRemovalResults = proxyStopped
+    ? attemptCATrustRemovalForCleanup(stateDirs, untrustCA)
+    : new Map<string, CATrustRemovalResult>();
+  if (!proxyStopped) {
+    console.warn(colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed."));
+  }
   for (const [stateDir, untrustResult] of caRemovalResults) {
     if (!untrustResult.removed) failedCAStateDirs.add(stateDir);
   }

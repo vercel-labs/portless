@@ -161,6 +161,7 @@ export function removePortlessStateFiles(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(file);
     }
   }
+  if (options.preserveProxyRuntime) return failures;
   const hostCerts = path.join(dir, HOST_CERTS_DIR);
   try {
     const stat = fs.lstatSync(hostCerts);

@@ -338,6 +338,14 @@ function isAlivePid(pid: number): boolean {
   }
 }
 
+/** A PATH whose lsof fails, so socket owner lookups find nothing. */
+function failingLsofPath(dir: string): string {
+  const bin = path.join(dir, "bin");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "lsof"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  return `${bin}${path.delimiter}${process.env.PATH ?? ""}`;
+}
+
 async function startMockProxy(
   dir: string,
   options: {
@@ -3362,6 +3370,109 @@ describe("CLI", { timeout: 15_000 }, () => {
             proxy.child.kill("SIGKILL");
             await new Promise<void>((resolve) => proxy.child.once("exit", () => resolve()));
           }
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      15_000
+    );
+
+    for (const socketLookup of ["available", "unavailable"]) {
+      it.skipIf(process.platform === "win32")(
+        `keeps state and CA trust when a suspended proxy stops answering (${socketLookup} socket lookup)`,
+        async () => {
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-suspended-"));
+          const stateDir = path.join(tmpDir, "state");
+          const home = path.join(tmpDir, "home");
+          fs.mkdirSync(stateDir);
+          fs.mkdirSync(home);
+          const proxy = await startMockProxy(stateDir);
+          const pid = proxy.child.pid!;
+          try {
+            fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
+            fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+            fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+            fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+            fs.mkdirSync(path.join(stateDir, "host-certs"));
+            fs.writeFileSync(path.join(stateDir, "host-certs", "app.pem"), "certificate");
+            process.kill(pid, "SIGSTOP");
+
+            const result = runWithHostsFileMock(["clean", "--yes"], {
+              content: "",
+              stateDir,
+              uid: 1000,
+              sudoStatus: 1,
+              extraEnv: {
+                HOME: home,
+                PORTLESS_PORT: String(proxy.port),
+                PORTLESS_HTTPS: "0",
+                ...(socketLookup === "unavailable" ? { PATH: failingLsofPath(tmpDir) } : {}),
+              },
+            });
+
+            expect(result.status).toBe(1);
+            expect(result.stderr).toContain(`Could not verify that PID ${pid}`);
+            expect(result.stderr).toContain(`kill -CONT ${pid}`);
+            expect(result.stderr).toContain("Kept the CA in the trust store");
+            expect(result.capture.sudoCalls).toEqual([]);
+            for (const file of ["proxy.pid", "proxy.port", "ca.pem", "ca-key.pem"]) {
+              expect(fs.existsSync(path.join(stateDir, file))).toBe(true);
+            }
+            expect(fs.existsSync(path.join(stateDir, "host-certs", "app.pem"))).toBe(true);
+            expect(isAlivePid(pid)).toBe(true);
+          } finally {
+            if (proxy.child.exitCode === null) {
+              process.kill(pid, "SIGCONT");
+              proxy.child.kill("SIGKILL");
+              await new Promise<void>((resolve) => proxy.child.once("exit", () => resolve()));
+            }
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+          }
+        },
+        15_000
+      );
+    }
+
+    it.skipIf(process.platform === "win32")(
+      "keeps state and does not signal a live recorded PID that is not the proxy",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-unrelated-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        const port = await getFreePort();
+        const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          stdio: "ignore",
+        });
+        const pid = unrelated.pid!;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), String(port));
+          fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+          fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 1000,
+            sudoStatus: 1,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(port),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain(`Could not verify that PID ${pid}`);
+          expect(result.capture.sudoCalls).toEqual([]);
+          for (const file of ["proxy.pid", "ca.pem", "ca-key.pem"]) {
+            expect(fs.existsSync(path.join(stateDir, file))).toBe(true);
+          }
+          expect(isAlivePid(pid)).toBe(true);
+        } finally {
+          unrelated.kill("SIGKILL");
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },
