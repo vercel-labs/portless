@@ -4131,6 +4131,87 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe.skipIf(process.platform === "win32")("tunnel status streams", () => {
+    it.each([
+      {
+        name: "tailscale",
+        appArgs: ["--tailscale", "myapp"],
+        writeBinary: (dir: string) => {
+          fs.writeFileSync(
+            path.join(dir, "tailscale"),
+            [
+              "#!/bin/sh",
+              'case "$1" in',
+              "  version) echo 1.80.0 ;;",
+              '  status) printf \'%s\\n\' \'{"Self":{"DNSName":"portless-test.tail1234.ts.net.","Capabilities":["https"]}}\' ;;',
+              '  serve) if [ "$2" = status ]; then echo "{}"; fi ;;',
+              "esac",
+              "exit 0",
+              "",
+            ].join("\n"),
+            { mode: 0o755 }
+          );
+        },
+        tunnelLine: "Tailscale -> https://portless-test.tail1234.ts.net",
+        statusLine: "accessible from your tailnet",
+      },
+      {
+        name: "ngrok",
+        appArgs: ["--ngrok", "myapp"],
+        writeBinary: (dir: string) => {
+          fs.writeFileSync(
+            path.join(dir, "ngrok"),
+            [
+              "#!/bin/sh",
+              'case "$1" in',
+              "  version) echo 3.0.0 ;;",
+              "  http)",
+              '    echo "t=0 lvl=info msg=started-tunnel url=https://portless-test.ngrok-free.app"',
+              "    while true; do sleep 1; done ;;",
+              "esac",
+              "exit 0",
+              "",
+            ].join("\n"),
+            { mode: 0o755 }
+          );
+        },
+        tunnelLine: "ngrok -> https://portless-test.ngrok-free.app",
+        statusLine: "accessible from the public internet via ngrok",
+      },
+    ])(
+      "reports the $name tunnel on stderr and leaves child stdout alone",
+      async ({ appArgs, writeBinary, tunnelLine, statusLine }) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tunnel-streams-"));
+        const binDir = path.join(tmpDir, "bin");
+        fs.mkdirSync(binDir);
+        const proxy = await startMockProxy(tmpDir);
+        try {
+          fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+          writeBinary(binDir);
+          const sentinel = "child-stdout-sentinel";
+          const { status, stdout, stderr } = run(
+            [...appArgs, process.execPath, "-e", `process.stdout.write("${sentinel}\\n")`],
+            {
+              env: {
+                PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+                PORTLESS_STATE_DIR: tmpDir,
+                PORTLESS_HTTPS: "0",
+                PORTLESS: undefined,
+              },
+            }
+          );
+          expect(status).toBe(0);
+          expect(stdout).toBe(`${sentinel}\n`);
+          expect(stderr).toContain(tunnelLine);
+          expect(stderr).toContain(statusLine);
+        } finally {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+  });
+
   describe("--cloudflare flag", () => {
     it("fails with actionable message when cloudflared is not installed", () => {
       for (const [args, env] of [
