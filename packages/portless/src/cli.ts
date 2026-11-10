@@ -2379,6 +2379,21 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   };
 }
 
+/**
+ * The app name in named mode and whether a child command follows it. Reads the
+ * arguments before flags are validated, so a misspelled command is reported
+ * instead of its own flags.
+ */
+function readNamedArgs(args: readonly string[]): { name: string | undefined; hasCommand: boolean } {
+  const end = args.indexOf("--");
+  const flagRegion = end === -1 ? args : args.slice(0, end);
+  const words = flagRegion.filter(
+    (arg, i) => !arg.startsWith("-") && flagRegion[i - 1] !== "--app-port"
+  );
+  if (end !== -1) words.push(...args.slice(end + 1));
+  return { name: words[0], hasCommand: words.length > 1 };
+}
+
 // ---------------------------------------------------------------------------
 // Subcommand handlers
 // ---------------------------------------------------------------------------
@@ -5341,20 +5356,28 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   );
 }
 
+const NAMED_USAGE = [
+  "Usage:",
+  "  portless <name> <command...>",
+  "Example:",
+  "  portless myapp next dev",
+];
+
 async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
+  const { name, hasCommand } = readNamedArgs(args);
+  const suggestion = explicitName || hasCommand ? undefined : suggestCommand(name);
+  if (name && suggestion) {
+    throw new UsageError("No command provided.", [
+      `"${name}" is not a portless command. Did you mean:`,
+      `  portless ${suggestion}`,
+      ...NAMED_USAGE,
+    ]);
+  }
+
   const parsed = parseAppArgs(args);
 
   if (parsed.commandArgs.length === 0) {
-    const suggestion = explicitName ? undefined : suggestCommand(parsed.name);
-    throw new UsageError("No command provided.", [
-      ...(suggestion
-        ? [`"${parsed.name}" is not a portless command. Did you mean:`, `  portless ${suggestion}`]
-        : []),
-      "Usage:",
-      "  portless <name> <command...>",
-      "Example:",
-      "  portless myapp next dev",
-    ]);
+    throw new UsageError("No command provided.", NAMED_USAGE);
   }
 
   if (!parsed.appPort) {
