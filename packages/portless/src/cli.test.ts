@@ -2711,6 +2711,28 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
+    it.each([
+      [["--ip", "run", "echo", "ok"]],
+      [["--ip=notanip", "run", "echo", "ok"]],
+      [["--lan", "--ip", "myapp", "echo", "ok"]],
+    ])("rejects %j, whose --ip value is not an IP address", (args) => {
+      const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" }, cwd: tmpDir });
+      expect(status).toBe(2);
+      expect(stdout).toBe("");
+      expect(stderr).toContain("--ip requires an IP address");
+    });
+
+    it("accepts IPv4 and IPv6 values for --ip", () => {
+      for (const ip of ["192.168.1.42", "fe80::1"]) {
+        const { status, stdout } = run(["--ip", ip, "run", "echo", "ok"], {
+          env: { PORTLESS: "0" },
+          cwd: tmpDir,
+        });
+        expect(status).toBe(0);
+        expect(stdout.trim()).toBe("ok");
+      }
+    });
+
     it.skipIf(process.platform === "win32")("warns when --lan and --tld are both provided", () => {
       // Use an empty PATH so the mDNS check fails early, causing the
       // process to exit without needing a running proxy server (spawnSync

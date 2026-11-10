@@ -116,8 +116,9 @@ function readComposeGlobal(args: readonly string[], index: number): ComposeGloba
           : { flag, value, raw: [arg] };
       }
       const value = args[index + 1];
-      return value === undefined
-        ? { flag, raw: [arg], error: `${flag} requires a value.` }
+      if (value === undefined) return { flag, raw: [arg], error: `${flag} requires a value.` };
+      return value === ""
+        ? { flag, raw: [arg, value], error: `${flag} requires a value.` }
         : { flag, value, raw: [arg, value] };
     }
     if (BOOLEAN_FLAGS.has(flag)) {
@@ -134,8 +135,9 @@ function readComposeGlobal(args: readonly string[], index: number): ComposeGloba
   if (VALUE_FLAGS.has(flag)) {
     if (arg.length === 2) {
       const value = args[index + 1];
-      return value === undefined
-        ? { flag, raw: [arg], error: `${flag} requires a value.` }
+      if (value === undefined) return { flag, raw: [arg], error: `${flag} requires a value.` };
+      return value === ""
+        ? { flag, raw: [arg, value], error: `${flag} requires a value.` }
         : { flag, value, raw: [arg, value] };
     }
     const attached = arg.slice(2);
