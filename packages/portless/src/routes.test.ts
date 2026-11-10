@@ -743,6 +743,44 @@ describe("RouteStore.claimAppPort", () => {
     }
   });
 
+  it("does not hold the lock while picking", async () => {
+    // Another route operation in this process runs while pick awaits, as a
+    // sibling app's exit handler would. It must not wait for the claim, and
+    // the claim must not bring back the route it removed.
+    store.addRoute("gone.localhost", 4100, process.pid);
+    let removedAfterMs = -1;
+    const started = Date.now();
+    const pick = async (taken: ReadonlySet<number>) => {
+      await new Promise<void>((resolve) =>
+        setTimeout(() => {
+          store.removeRoute("gone.localhost", process.pid);
+          removedAfterMs = Date.now() - started;
+          resolve();
+        }, 20)
+      );
+      return lowestFree(taken);
+    };
+    await store.claimAppPort(["app.localhost"], process.pid, pick);
+    expect(removedAfterMs).toBeLessThan(2000);
+    expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["app.localhost"]);
+  });
+
+  it("picks again when another run claims the port first", async () => {
+    let calls = 0;
+    const pick = async (taken: ReadonlySet<number>) => {
+      calls++;
+      if (calls === 1) {
+        // Another run registers 4000 between this pick and the claim.
+        store.addRoute("other.localhost", 4000, process.pid);
+        return 4000;
+      }
+      return lowestFree(taken);
+    };
+    const { port } = await store.claimAppPort(["app.localhost"], process.pid, pick);
+    expect(calls).toBe(2);
+    expect(port).toBe(4001);
+  });
+
   it("gives concurrent processes different ports", async () => {
     const count = 8;
     const scriptPath = path.join(tmpDir, "claim-worker.mjs");

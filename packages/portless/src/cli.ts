@@ -616,9 +616,9 @@ function addRoutes(
 
 /**
  * Register `hostnames` for an app. A fixed `desiredPort` is registered as is.
- * Otherwise the port is picked and claimed in one step under the route lock,
- * skipping ports that other live routes already hold, so runs started together
- * never get the same port (#533).
+ * Otherwise the port is picked skipping ports that other live routes already
+ * hold, then claimed under the route lock, picking again if another run took it
+ * meanwhile, so runs started together never get the same port (#533).
  */
 async function registerAppRoutes(
   store: RouteStore,

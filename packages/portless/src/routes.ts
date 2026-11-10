@@ -248,16 +248,19 @@ export class RouteStore {
   }
 
   /**
-   * Pick an app port with `pick` and register `hostnames` on it, all under the
-   * route lock. `pick` receives the ports already assigned to other live routes
-   * (other apps and aliases) and must not return one of them.
+   * Pick an app port with `pick` and register `hostnames` on it. `pick`
+   * receives the ports already assigned to other live routes (other apps and
+   * aliases) and must not return one of them.
    *
    * findFreePort releases its probe before the app binds, so two runs started
    * together could otherwise pick the same port, and a dev server that keeps
    * running after `EADDRINUSE` would leave its route pointing at the other app
-   * (#533). Holding the lock from the pick until the routes are written makes
-   * the pick and the claim one step. The hostnames of one app (one per TLD)
-   * share its port, so they are not excluded.
+   * (#533). `pick` runs without the lock, since it awaits network probes and the
+   * lock is acquired synchronously by other route operations in this process.
+   * The routes are then reloaded under the lock: if another run claimed the
+   * port meanwhile, it joins the excluded set and `pick` runs again. Each retry
+   * excludes one more port, so the loop ends. The hostnames of one app (one per
+   * TLD) share its port, so they are not excluded.
    */
   async claimAppPort(
     hostnames: readonly string[],
@@ -266,24 +269,34 @@ export class RouteStore {
     force = false
   ): Promise<{ port: number; killedPids: number[] }> {
     this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
-      const routes = this.loadRoutes(true);
-      const taken = new Set(
-        routes.filter((r) => !hostnames.includes(r.hostname)).map((r) => r.port)
-      );
+    const isOther = (r: RouteMapping) => !hostnames.includes(r.hostname);
+    const taken = new Set(
+      this.loadRoutes()
+        .filter(isOther)
+        .map((r) => r.port)
+    );
+    for (;;) {
       const port = await pick(taken);
-      const killedPids: number[] = [];
-      for (const hostname of hostnames) {
-        const killedPid = this.putRoute(routes, hostname, port, pid, force);
-        if (killedPid !== undefined) killedPids.push(killedPid);
+      if (!this.acquireLock()) {
+        throw new Error("Failed to acquire route lock");
       }
-      this.saveRoutes(routes);
-      return { port, killedPids };
-    } finally {
-      this.releaseLock();
+      try {
+        const routes = this.loadRoutes(true);
+        const holders = routes.filter(isOther).map((r) => r.port);
+        if (holders.includes(port)) {
+          for (const p of holders) taken.add(p);
+          continue;
+        }
+        const killedPids: number[] = [];
+        for (const hostname of hostnames) {
+          const killedPid = this.putRoute(routes, hostname, port, pid, force);
+          if (killedPid !== undefined) killedPids.push(killedPid);
+        }
+        this.saveRoutes(routes);
+        return { port, killedPids };
+      } finally {
+        this.releaseLock();
+      }
     }
   }
 

@@ -1064,8 +1064,8 @@ const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
  *
  * The probe is released before the app binds the port, so a port can look
  * free while another app is still booting on it. `exclude` skips ports that
- * are already assigned to a route; RouteStore.claimAppPort passes them under
- * the route lock so concurrent runs never pick the same port.
+ * are already assigned to a route; RouteStore.claimAppPort passes them and
+ * rechecks the pick under the route lock so concurrent runs never share a port.
  */
 export async function findFreePort(
   minPort = MIN_APP_PORT,
