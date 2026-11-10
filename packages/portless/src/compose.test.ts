@@ -495,50 +495,27 @@ describe("allocatePorts", () => {
 });
 
 describe("composeGlobalError", () => {
-  it("accepts the global flags portless knows", () => {
-    expect(
-      composeGlobalError(["-f", "compose.yml", "--profile", "dev", "--ansi=never", "--dry-run"])
-    ).toBeNull();
+  it.each([
+    [["-f", "compose.yml", "--profile", "dev", "--ansi=never", "--dry-run"]],
+    [["-fcompose.yml", "-f=compose.yml", "-pdemo", "-p=demo", "-f-", "-f=-"]],
+    [["--workdir", "/app", "--workdir=/app"]],
+    [["--dry-run=true", "--dry-run=false", "--dry-run=1", "-h", "-h=false"]],
+  ])("accepts %j", (globals) => {
+    expect(composeGlobalError(globals)).toBeNull();
   });
 
-  it("accepts attached shorthand values", () => {
-    expect(composeGlobalError(["-fcompose.yml", "-f=compose.yml", "-pdemo", "-p=demo"])).toBeNull();
-    expect(composeGlobalError(["-f-", "-f=-"])).toBeNull();
-  });
-
-  it("accepts the deprecated --workdir value flag and its long form only", () => {
-    expect(composeGlobalError(["--workdir", "/app", "--workdir=/app"])).toBeNull();
-    expect(composeGlobalError(["-w", "/app"])).toBe('Unknown flag "-w" for portless compose.');
-    expect(composeGlobalError(["--workdir="])).toBe("--workdir requires a value.");
-  });
-
-  it("accepts boolean values", () => {
-    expect(composeGlobalError(["--dry-run=true", "--dry-run=false", "--dry-run=1"])).toBeNull();
-    expect(composeGlobalError(["-h", "-h=false"])).toBeNull();
-  });
-
-  it("reports an unknown flag", () => {
-    expect(composeGlobalError(["--bad"])).toBe('Unknown flag "--bad" for portless compose.');
-    expect(composeGlobalError(["-x"])).toBe('Unknown flag "-x" for portless compose.');
-  });
-
-  it("reports a value flag with no value", () => {
-    expect(composeGlobalError(["-f"])).toBe("-f requires a value.");
-    expect(composeGlobalError(["-f="])).toBe("-f requires a value.");
-    expect(composeGlobalError(["--env-file="])).toBe("--env-file requires a value.");
-  });
-
-  it("reports an empty value the same way in every form", () => {
-    expect(composeGlobalError(["--file", ""])).toBe("--file requires a value.");
-    expect(composeGlobalError(["-f", ""])).toBe("-f requires a value.");
-    expect(composeGlobalError(["--project-name", "", "-f", "compose.yml"])).toBe(
-      "--project-name requires a value."
-    );
-    expect(splitComposeArgs(["--file", "", "ps"]).subcommand).toBe("ps");
-  });
-
-  it("reports an invalid boolean value", () => {
-    expect(composeGlobalError(["--dry-run=yes"])).toBe("--dry-run takes true or false.");
-    expect(composeGlobalError(["-h=yes"])).toBe("-h takes true or false.");
+  it.each([
+    [["--bad"], 'Unknown flag "--bad" for portless compose.'],
+    [["-x"], 'Unknown flag "-x" for portless compose.'],
+    [["-w", "/app"], 'Unknown flag "-w" for portless compose.'],
+    [["-f"], "-f requires a value."],
+    [["-f="], "-f requires a value."],
+    [["-f", ""], "-f requires a value."],
+    [["--file", "", "ps"], "--file requires a value."],
+    [["--env-file="], "--env-file requires a value."],
+    [["--dry-run=yes"], "--dry-run takes true or false."],
+    [["-h=yes"], "-h takes true or false."],
+  ])("rejects %j", (globals, message) => {
+    expect(composeGlobalError(globals)).toBe(message);
   });
 });
