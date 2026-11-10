@@ -5,7 +5,39 @@ export function supportsColor(env: NodeJS.ProcessEnv, isTTY: boolean): boolean {
   return isTTY;
 }
 
-const enabled = supportsColor(process.env, !!(process.stdout.isTTY || process.stderr.isTTY));
+const streamColor = {
+  stdout: supportsColor(process.env, !!process.stdout.isTTY),
+  stderr: supportsColor(process.env, !!process.stderr.isTTY),
+};
+const enabled = streamColor.stdout || streamColor.stderr;
+
+const COLOR_CODES = new RegExp(String.raw`\x1b\[(?:1|2|22|31|33|39)m`, "g");
+
+/** Remove the color codes this module adds, leaving any other escape sequence in place. */
+export function stripColor(text: string): string {
+  return text.replace(COLOR_CODES, "");
+}
+
+/** Text for a direct write to stdout or stderr, colored only when that stream supports color. */
+export function colorFor(stream: "stdout" | "stderr", text: string): string {
+  return streamColor[stream] ? text : stripColor(text);
+}
+
+/** Make a console method print without color, for a stream that does not support it. */
+function printPlain(method: "log" | "info" | "error" | "warn"): void {
+  const print = console[method].bind(console);
+  console[method] = (...args: unknown[]) =>
+    print(...args.map((arg) => (typeof arg === "string" ? stripColor(arg) : arg)));
+}
+
+if (enabled && !streamColor.stdout) {
+  printPlain("log");
+  printPlain("info");
+}
+if (enabled && !streamColor.stderr) {
+  printPlain("error");
+  printPlain("warn");
+}
 
 const wrap = (open: string, close: string) => {
   if (!enabled) return (s: string) => s;
