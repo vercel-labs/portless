@@ -354,11 +354,15 @@ async function startMockProxy(
     port?: number;
     sigtermDelayMs?: number;
     pidFileOnSigterm?: string;
+    portlessHeader?: boolean;
   } = {}
 ): Promise<{ port: number; child: ReturnType<typeof spawn> }> {
   const port = options.port ?? (await getFreePort());
   const scriptPath = path.join(dir, `mock-proxy-${port}.cjs`);
-  const token = options.acknowledgeHostsSync !== false ? generateHostsSyncToken() : null;
+  const token =
+    options.acknowledgeHostsSync !== false && options.portlessHeader !== false
+      ? generateHostsSyncToken()
+      : null;
   if (token) writeHostsSyncToken(dir, token);
   fs.writeFileSync(
     scriptPath,
@@ -366,7 +370,7 @@ async function startMockProxy(
       'const http = require("node:http");',
       token ? 'const crypto = require("node:crypto");' : "",
       "const server = http.createServer((req, res) => {",
-      '  res.setHeader("X-Portless", "1");',
+      options.portlessHeader === false ? "" : '  res.setHeader("X-Portless", "1");',
       token
         ? `  const challenge = req.headers[${JSON.stringify(HOSTS_SYNC_AUTH_CHALLENGE_HEADER)}];
   if (typeof challenge === "string") {
@@ -389,14 +393,14 @@ async function startMockProxy(
       .join("\n") + "\n"
   );
   const child = spawn(process.execPath, [scriptPath], { stdio: "ignore" });
-  await waitForHttpHeader(port, "X-Portless", "1");
+  await waitForHttpHeader(port, "X-Portless", options.portlessHeader === false ? undefined : "1");
   return { port, child };
 }
 
 async function waitForHttpHeader(
   port: number,
   headerName: string,
-  expectedValue: string,
+  expectedValue: string | undefined,
   hostname = "127.0.0.1"
 ): Promise<void> {
   for (let i = 0; i < 50; i++) {
@@ -410,7 +414,9 @@ async function waitForHttpHeader(
         },
         (res) => {
           res.resume();
-          resolve(res.headers[headerName.toLowerCase()] === expectedValue);
+          resolve(
+            expectedValue === undefined || res.headers[headerName.toLowerCase()] === expectedValue
+          );
         }
       );
       req.on("error", () => resolve(false));
@@ -2252,6 +2258,41 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stderr).toContain("No command provided");
       expect(stderr).toContain("portless list");
     });
+
+    it.each([
+      ["a help flag", ["lsit", "--help"]],
+      ["an unknown flag", ["lsit", "--json"]],
+      ["a leading flag", ["--force", "lsit", "--help"]],
+      ["a leading sharing flag", ["--ngrok", "lsit", "--help"]],
+      ["a leading app port", ["--app-port", "3000", "lsit", "--help"]],
+    ])("suggests the command for a misspelled name followed by %s", (_case, args) => {
+      const { status, stderr } = run(args);
+      expect(status).toBe(2);
+      expect(stderr).toContain('"lsit" is not a portless command. Did you mean:');
+      expect(stderr).toContain("portless list");
+      expect(stderr).not.toContain("Unknown flag");
+    });
+
+    it("keeps a misspelled name as the app name when a command follows", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-named-typo-"));
+      try {
+        const { status, stderr } = run(["lst", "next", "dev"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(1);
+        expect(stderr).not.toContain("is not a portless command");
+        expect(stderr).toContain("Proxy is not running");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not suggest a command when --name sets the app name", () => {
+      const { status, stderr } = run(["--name", "lsit"]);
+      expect(status).toBe(2);
+      expect(stderr).toContain("No command provided");
+      expect(stderr).not.toContain("Did you mean");
+    });
   });
 
   describe("PORTLESS=0 bypass", () => {
@@ -3497,6 +3538,65 @@ describe("CLI", { timeout: 15_000 }, () => {
       15_000
     );
 
+    for (const identity of ["recorded", "legacy"] as const) {
+      it.skipIf(process.platform === "win32")(
+        `keeps state and CA trust when a live proxy does not answer the probe (${identity} identity)`,
+        async () => {
+          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-unresponsive-"));
+          const stateDir = path.join(tmpDir, "state");
+          const home = path.join(tmpDir, "home");
+          fs.mkdirSync(stateDir);
+          fs.mkdirSync(home);
+          const proxy = await startMockProxy(stateDir, { portlessHeader: false });
+          const pid = proxy.child.pid!;
+          const startTimePath = path.join(stateDir, "proxy.start");
+          try {
+            fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
+            fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+            if (identity === "recorded") {
+              const startTime = getProcessStartTime(pid);
+              expect(startTime).not.toBeNull();
+              fs.writeFileSync(startTimePath, startTime!);
+            }
+            fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
+            fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+            fs.mkdirSync(path.join(stateDir, "host-certs"));
+            fs.writeFileSync(path.join(stateDir, "host-certs", "app.pem"), "certificate");
+
+            const result = runWithHostsFileMock(["clean", "--yes"], {
+              content: "",
+              stateDir,
+              uid: 1000,
+              sudoStatus: 1,
+              extraEnv: {
+                HOME: home,
+                PORTLESS_PORT: String(proxy.port),
+                PORTLESS_HTTPS: "0",
+              },
+            });
+
+            expect(result.status, result.stdout + result.stderr).toBe(1);
+            expect(result.stderr).toContain(
+              `Proxy PID ${pid} is not responding on port ${proxy.port}`
+            );
+            expect(result.stderr).toContain("Kept the CA in the trust store");
+            expect(result.stderr).not.toContain("kill -CONT");
+            expect(result.capture.sudoCalls).toEqual([]);
+            for (const file of ["proxy.pid", "proxy.port", "ca.pem", "ca-key.pem"]) {
+              expect(fs.existsSync(path.join(stateDir, file))).toBe(true);
+            }
+            expect(fs.existsSync(startTimePath)).toBe(identity === "recorded");
+            expect(fs.existsSync(path.join(stateDir, "host-certs", "app.pem"))).toBe(true);
+            expect(isAlivePid(pid)).toBe(true);
+          } finally {
+            await stopChild(proxy.child);
+            fs.rmSync(tmpDir, { recursive: true, force: true });
+          }
+        },
+        15_000
+      );
+    }
+
     for (const socketLookup of ["available", "unavailable"]) {
       it.skipIf(process.platform === "win32")(
         `keeps state and CA trust when a suspended proxy stops answering (${socketLookup} socket lookup)`,
@@ -3531,7 +3631,11 @@ describe("CLI", { timeout: 15_000 }, () => {
             });
 
             expect(result.status).toBe(1);
-            expect(result.stderr).toContain(`Could not verify that PID ${pid}`);
+            expect(result.stderr).toContain(
+              socketLookup === "unavailable"
+                ? `Could not verify that PID ${pid} is the proxy on port ${proxy.port}`
+                : `Proxy PID ${pid} is not responding on port ${proxy.port}`
+            );
             expect(result.stderr).toContain(`kill -CONT ${pid}`);
             expect(result.stderr).toContain("Kept the CA in the trust store");
             expect(result.capture.sudoCalls).toEqual([]);
@@ -3596,6 +3700,106 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(isAlivePid(pid)).toBe(true);
         } finally {
           unrelated.kill("SIGKILL");
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      15_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "removes stale proxy state when the recorded start time belongs to another process",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-recycled-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        const port = await getFreePort();
+        const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          stdio: "ignore",
+        });
+        const pid = unrelated.pid!;
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 200));
+          expect(getProcessStartTime(pid)).not.toBe("Thu Jan  1 00:00:00 1970");
+          fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), String(port));
+          fs.writeFileSync(path.join(stateDir, "proxy.start"), "Thu Jan  1 00:00:00 1970");
+
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 1000,
+            sudoStatus: 1,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(port),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toContain(`PID ${pid} is not a proxy listening on port ${port}`);
+          expect(result.stdout).toContain("Removed stale proxy state");
+          expect(result.stderr).not.toContain("kill -CONT");
+          expect(result.capture.sudoCalls).toEqual([]);
+          for (const file of ["proxy.pid", "proxy.port", "proxy.start"]) {
+            expect(fs.existsSync(path.join(stateDir, file))).toBe(false);
+          }
+          expect(isAlivePid(pid)).toBe(true);
+        } finally {
+          unrelated.kill("SIGKILL");
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      15_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "removes stale proxy state when another process owns the proxy port",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-other-holder-"));
+        const stateDir = path.join(tmpDir, "state");
+        const home = path.join(tmpDir, "home");
+        fs.mkdirSync(stateDir);
+        fs.mkdirSync(home);
+        const owner = await startMockProxy(stateDir, { portlessHeader: false });
+        const ownerPid = owner.child.pid!;
+        const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+          stdio: "ignore",
+        });
+        const pid = unrelated.pid!;
+        try {
+          fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
+          fs.writeFileSync(path.join(stateDir, "proxy.port"), String(owner.port));
+
+          const result = runWithHostsFileMock(["clean", "--yes"], {
+            content: "",
+            stateDir,
+            uid: 1000,
+            sudoStatus: 1,
+            extraEnv: {
+              HOME: home,
+              PORTLESS_PORT: String(owner.port),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toContain(
+            `PID ${pid} is not a proxy listening on port ${owner.port}`
+          );
+          expect(result.stdout).toContain("Removed stale proxy state");
+          expect(result.stderr).not.toContain("kill -CONT");
+          expect(result.capture.sudoCalls).toEqual([]);
+          for (const file of ["proxy.pid", "proxy.port"]) {
+            expect(fs.existsSync(path.join(stateDir, file))).toBe(false);
+          }
+          expect(isAlivePid(pid)).toBe(true);
+          expect(isAlivePid(ownerPid)).toBe(true);
+        } finally {
+          unrelated.kill("SIGKILL");
+          await stopChild(owner.child);
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },

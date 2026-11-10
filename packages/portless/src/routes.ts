@@ -170,6 +170,7 @@ export class RouteStore {
   private readonly lockPath: string;
   readonly pidPath: string;
   readonly portFilePath: string;
+  readonly startTimePath: string;
   private readonly onWarning: ((message: string) => void) | undefined;
 
   constructor(dir: string, options?: { onWarning?: (message: string) => void }) {
@@ -178,6 +179,7 @@ export class RouteStore {
     this.lockPath = path.join(dir, "routes.lock");
     this.pidPath = path.join(dir, "proxy.pid");
     this.portFilePath = path.join(dir, "proxy.port");
+    this.startTimePath = path.join(dir, "proxy.start");
     this.onWarning = options?.onWarning;
   }
 

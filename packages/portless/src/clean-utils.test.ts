@@ -133,6 +133,8 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "ca.trusted"), "fingerprint");
     fs.writeFileSync(path.join(tmpDir, "ca.trust-refresh-pending"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
+    fs.writeFileSync(path.join(tmpDir, "proxy.start"), "1234");
+    fs.writeFileSync(path.join(tmpDir, "proxy.start.tmp"), "1234");
     fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
     fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-token"), "token");
@@ -149,6 +151,8 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "ca.trust-refresh-pending"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.custom-cert"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.start"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.start.tmp"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-token"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-token.tmp"))).toBe(false);
@@ -163,6 +167,7 @@ describe("removePortlessStateFiles", () => {
   it("preserves proxy runtime files while the proxy still owns them", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.pid"), "123");
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
+    fs.writeFileSync(path.join(tmpDir, "proxy.start"), "1234");
     fs.writeFileSync(path.join(tmpDir, "proxy.log"), "log");
     fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
@@ -175,6 +180,7 @@ describe("removePortlessStateFiles", () => {
 
     expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.port"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.start"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.log"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.custom-cert"))).toBe(true);

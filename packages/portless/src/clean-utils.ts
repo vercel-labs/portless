@@ -9,6 +9,8 @@ const PORTLESS_STATE_FILES = [
   "routes.lock",
   "proxy.pid",
   "proxy.port",
+  "proxy.start",
+  "proxy.start.tmp",
   "proxy.log",
   "proxy.tls",
   "proxy.custom-cert",
@@ -34,6 +36,8 @@ const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem", "ca.trust-refresh-pen
 const PROXY_RUNTIME_FILES = new Set([
   "proxy.pid",
   "proxy.port",
+  "proxy.start",
+  "proxy.start.tmp",
   "proxy.log",
   "proxy.hosts-sync-token",
   "proxy.hosts-sync-token.tmp",

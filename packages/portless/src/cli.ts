@@ -1137,6 +1137,7 @@ function startProxyServer(
       console.warn(colors.yellow("Could not publish hosts sync authorization."));
     }
     // Save PID and port once the server is actually listening
+    writeProxyStartTime(store);
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     writeTlsMarker(store.dir, isTls);
@@ -1144,7 +1145,7 @@ function startProxyServer(
     writeTldsFile(store.dir, tlds);
     writeLanMarker(store.dir, activeLanIp);
     writeUnprivilegedMarker(store.dir, unprivileged);
-    fixOwnership(store.dir, store.pidPath, store.portFilePath);
+    fixOwnership(store.dir, store.pidPath, store.portFilePath, store.startTimePath);
     console.log(
       colors.green(
         `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
@@ -1193,6 +1194,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
+    removeProxyIdentity(store);
     writeTlsMarker(store.dir, false);
     writeCustomCertMarker(store.dir, false);
     writeTldFile(store.dir, DEFAULT_TLD);
@@ -1278,8 +1280,7 @@ function isProcessRunning(pid: number): boolean {
 
 /**
  * Whether a live PID is suspended by SIGSTOP or a debugger. Returns null when
- * the platform or a failed lookup cannot report the state, so callers keep the
- * stored proxy state instead of guessing from the listening socket.
+ * the platform or a failed lookup cannot report the state.
  */
 function isProcessSuspended(pid: number): boolean | null {
   try {
@@ -1303,6 +1304,63 @@ function isProcessSuspended(pid: number): boolean | null {
   return null;
 }
 
+/** Record the listening proxy's start time, so a later stop can tell it from a recycled PID. */
+function writeProxyStartTime(store: RouteStore): void {
+  const startTime = getProcessStartTime(process.pid);
+  const tempPath = `${store.startTimePath}.tmp`;
+  const discardTemp = () => {
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      return;
+    }
+  };
+  try {
+    discardTemp();
+    if (startTime === null) {
+      fs.rmSync(store.startTimePath, { force: true });
+      return;
+    }
+    fs.writeFileSync(tempPath, startTime, { encoding: "utf-8", mode: FILE_MODE, flag: "wx" });
+    fixOwnership(tempPath);
+    fs.renameSync(tempPath, store.startTimePath);
+  } catch {
+    discardTemp();
+  }
+}
+
+/** Remove the recorded proxy identity once its process is confirmed gone. */
+function removeProxyIdentity(store: RouteStore): void {
+  try {
+    fs.rmSync(store.startTimePath, { force: true });
+    fs.rmSync(`${store.startTimePath}.tmp`, { force: true });
+  } catch {
+    return;
+  }
+}
+
+type ProxyIdentity = "proxy" | "recycled" | "unknown";
+
+/**
+ * Decide whether a live PID is the recorded proxy, from its recorded start time
+ * or, when none can be compared, from who holds the proxy port. Returns
+ * "unknown" when neither proves it, and callers must then keep the state.
+ */
+async function identifyRecordedProxy(
+  store: RouteStore,
+  pid: number,
+  proxyPort: number
+): Promise<ProxyIdentity> {
+  const recorded = readStateFile(store.startTimePath);
+  const live = getProcessStartTime(pid);
+  if (recorded !== null && live !== null) return recorded === live ? "proxy" : "recycled";
+  const holders = findPidsOnPort(proxyPort);
+  if (holders.includes(pid)) return "proxy";
+  if (holders.length > 0) return "recycled";
+  if (!(await isPortListening(proxyPort)) && isProcessSuspended(pid) !== true) return "recycled";
+  return "unknown";
+}
+
 /** Clear the port file and runtime markers once the proxy process is gone. */
 async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): Promise<boolean> {
   if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
@@ -1315,6 +1373,7 @@ async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): P
     console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
     return false;
   }
+  removeProxyIdentity(store);
   writeTlsMarker(store.dir, false);
   writeCustomCertMarker(store.dir, false);
   writeTldFile(store.dir, DEFAULT_TLD);
@@ -1402,6 +1461,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
     if (isNaN(pid)) {
       console.error(colors.red("Corrupted PID file. Removing it."));
       fs.unlinkSync(pidPath);
+      removeProxyIdentity(store);
       writeTlsMarker(store.dir, false);
       writeCustomCertMarker(store.dir, false);
       writeTldFile(store.dir, DEFAULT_TLD);
@@ -1418,6 +1478,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       }
       console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
       fs.unlinkSync(pidPath);
+      removeProxyIdentity(store);
       try {
         fs.unlinkSync(store.portFilePath);
       } catch {
@@ -1432,7 +1493,8 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
 
     // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
     if (!(await isProxyRunning(proxyPort))) {
-      if (isProcessSuspended(pid) === false) {
+      const identity = await identifyRecordedProxy(store, pid, proxyPort);
+      if (identity === "recycled") {
         if (!removeStateFileIfMatches(pidPath, String(pid))) {
           console.error(
             colors.red(`Proxy PID file changed to ${readStateFile(pidPath)}; leaving it in place.`)
@@ -1447,14 +1509,23 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
         );
         return true;
       }
-      console.error(
-        colors.red(`Could not verify that PID ${pid} is a proxy that stopped on port ${proxyPort}.`)
-      );
+      const suspended = !isWindows && isProcessSuspended(pid) === true;
+      if (identity === "proxy") {
+        console.error(colors.red(`Proxy PID ${pid} is not responding on port ${proxyPort}.`));
+      } else {
+        console.error(
+          colors.red(`Could not verify that PID ${pid} is the proxy on port ${proxyPort}.`)
+        );
+      }
       console.error(colors.blue("It was not signaled, and its state and CA files are kept."));
-      if (!isWindows) {
+      if (suspended) {
+        console.error(colors.cyan(`The process is suspended. Resume it with: kill -CONT ${pid}`));
+      } else if (identity === "proxy") {
         console.error(
           colors.cyan(
-            `If that process is the proxy and was suspended, resume it with: kill -CONT ${pid}`
+            `If it stays unresponsive, stop it with: ${
+              isWindows ? `taskkill /F /PID ${pid}` : `sudo kill ${pid}`
+            }`
           )
         );
       }
@@ -2310,6 +2381,21 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     name,
     commandArgs,
   };
+}
+
+/**
+ * The app name in named mode and whether a child command follows it. Reads the
+ * arguments before flags are validated, so a misspelled command is reported
+ * instead of its own flags.
+ */
+function readNamedArgs(args: readonly string[]): { name: string | undefined; hasCommand: boolean } {
+  const end = args.indexOf("--");
+  const flagRegion = end === -1 ? args : args.slice(0, end);
+  const words = flagRegion.filter(
+    (arg, i) => !arg.startsWith("-") && flagRegion[i - 1] !== "--app-port"
+  );
+  if (end !== -1) words.push(...args.slice(end + 1));
+  return { name: words[0], hasCommand: words.length > 1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -5145,20 +5231,28 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   );
 }
 
+const NAMED_USAGE = [
+  "Usage:",
+  "  portless <name> <command...>",
+  "Example:",
+  "  portless myapp next dev",
+];
+
 async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
+  const { name, hasCommand } = readNamedArgs(args);
+  const suggestion = explicitName || hasCommand ? undefined : suggestCommand(name);
+  if (name && suggestion) {
+    throw new UsageError("No command provided.", [
+      `"${name}" is not a portless command. Did you mean:`,
+      `  portless ${suggestion}`,
+      ...NAMED_USAGE,
+    ]);
+  }
+
   const parsed = parseAppArgs(args);
 
   if (parsed.commandArgs.length === 0) {
-    const suggestion = explicitName ? undefined : suggestCommand(parsed.name);
-    throw new UsageError("No command provided.", [
-      ...(suggestion
-        ? [`"${parsed.name}" is not a portless command. Did you mean:`, `  portless ${suggestion}`]
-        : []),
-      "Usage:",
-      "  portless <name> <command...>",
-      "Example:",
-      "  portless myapp next dev",
-    ]);
+    throw new UsageError("No command provided.", NAMED_USAGE);
   }
 
   if (!parsed.appPort) {
