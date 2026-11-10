@@ -13,9 +13,10 @@ describe("suggestCommand", () => {
 });
 
 describe("hasHelpFlag", () => {
-  it("recognizes help after the command and before a separator", () => {
+  it("recognizes help anywhere after the command word, including after a separator", () => {
     expect(hasHelpFlag(["get", "x", "--help"])).toBe(true);
-    expect(hasHelpFlag(["get", "--", "--help"])).toBe(false);
+    expect(hasHelpFlag(["get", "--", "--help"])).toBe(true);
+    expect(hasHelpFlag(["get", "--", "-h"])).toBe(true);
     expect(hasHelpFlag(["--help"])).toBe(false);
   });
 });
