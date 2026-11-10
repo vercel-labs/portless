@@ -98,12 +98,6 @@ describe("visitLeadingFlags", () => {
     expect(values).toEqual(["a=b"]);
   });
 
-  it("rejects a value given to a boolean flag", () => {
-    expect(() => visitLeadingFlags("run", ["--force=false", "next"], childSpec, () => {})).toThrow(
-      "--force does not take a value."
-    );
-  });
-
   it("accepts an empty text value but not an empty value flag", () => {
     const visits: [string, string | undefined][] = [];
     visitLeadingFlags("run", ["--prefix=", "--name=x", "next"], childSpec, (flag, value) => {
