@@ -19,6 +19,7 @@ const VALUE_FLAGS = new Set([
   "--profile",
   "--env-file",
   "--project-directory",
+  "--workdir",
   "--ansi",
   "--progress",
   "--parallel",
@@ -37,7 +38,14 @@ const BOOLEAN_FLAGS = new Set([
 ]);
 
 /** Global flags portless replaces when it runs compose on the resolved model. */
-const REPLACED_FLAGS = new Set(["-f", "--file", "-p", "--project-name", "--project-directory"]);
+const REPLACED_FLAGS = new Set([
+  "-f",
+  "--file",
+  "-p",
+  "--project-name",
+  "--project-directory",
+  "--workdir",
+]);
 
 /**
  * Container ports of common non-HTTP services. They keep their published port
@@ -69,6 +77,8 @@ export interface ComposeArgs {
   subcommand: string | undefined;
   /** Arguments after the subcommand. */
   rest: string[];
+  /** Arguments for docker compose: every argument except the wrapper's own `--`. */
+  dockerArgs: string[];
 }
 
 /** One decoded global compose flag and the raw arguments it spans. */
@@ -164,16 +174,26 @@ function decodeComposeGlobals(globals: readonly string[]): ComposeGlobal[] {
  */
 export function splitComposeArgs(args: readonly string[]): ComposeArgs {
   const globals: string[] = [];
+  let terminated = false;
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
-    if (arg === "--") return { globals, subcommand: args[i + 1], rest: args.slice(i + 2) };
+    if (arg === "--") {
+      terminated = true;
+      i++;
+      break;
+    }
     if (!arg.startsWith("-")) break;
     const global = readComposeGlobal(args, i);
     globals.push(...global.raw);
     i += global.raw.length;
   }
-  return { globals, subcommand: args[i], rest: args.slice(i + 1) };
+  return {
+    globals,
+    subcommand: args[i],
+    rest: args.slice(i + 1),
+    dockerArgs: terminated ? [...globals, ...args.slice(i)] : [...args],
+  };
 }
 
 /**
@@ -239,6 +259,7 @@ export function buildUpArgs(opts: {
     undefined;
   const projectDir =
     readGlobal(globals, ["--project-directory"]).pop() ??
+    readGlobal(globals, ["--workdir"]).pop() ??
     (firstFile && firstFile !== "-" ? path.dirname(path.resolve(opts.cwd, firstFile)) : opts.cwd);
   const kept: string[] = [];
   for (const global of decodeComposeGlobals(globals)) {

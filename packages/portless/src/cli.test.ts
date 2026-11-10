@@ -1433,6 +1433,58 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "drops a stale recovery record once its orphaned group and tunnel are gone",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-start-recovery-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const binaryPath = path.join(tmpDir, "ngrok");
+        fs.copyFileSync(process.execPath, binaryPath);
+        const tunnel = spawn(
+          binaryPath,
+          ["-e", 'process.title="ngrok";setInterval(() => {}, 1000)'],
+          { stdio: "ignore" }
+        );
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_PORT: String(await getFreePort()),
+          PORTLESS_HTTPS: "0",
+        };
+        try {
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "stale.localhost",
+                port: await getFreePort(),
+                pid: 999999,
+                childPgid: 999999,
+                childStartTime: "leader-start",
+                ngrokPid: tunnel.pid,
+                registeredAt: Date.now() - 60_000,
+              },
+            ])
+          );
+
+          const result = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stderr).toContain("Stopped orphaned ngrok tunnel");
+          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
+          await new Promise<void>((resolve) => {
+            if (tunnel.exitCode !== null || tunnel.signalCode !== null) resolve();
+            else tunnel.once("exit", () => resolve());
+          });
+          expect(isAlivePid(tunnel.pid!)).toBe(false);
+        } finally {
+          tunnel.kill("SIGKILL");
+          run(["proxy", "stop"], { env });
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
   });
 
   describe("doctor", () => {
@@ -2068,12 +2120,13 @@ describe("CLI", { timeout: 15_000 }, () => {
           const env = { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined };
           for (const [args, expected] of [
             [["compose", "ps", "--bad"], "compose ps --bad"],
-            [["compose", "--", "logs", "-n", "5"], "compose -- logs -n 5"],
+            [["compose", "--", "logs", "-n", "5"], "compose logs -n 5"],
             [["compose", "-f", "compose.dev.yml", "config"], "compose -f compose.dev.yml config"],
             [["compose", "-fcompose.dev.yml", "config"], "compose -fcompose.dev.yml config"],
             [["compose", "-f=compose.dev.yml", "ps"], "compose -f=compose.dev.yml ps"],
             [["compose", "-pdemo", "config"], "compose -pdemo config"],
             [["compose", "-p=demo", "ps"], "compose -p=demo ps"],
+            [["compose", "--workdir", "/app", "logs"], "compose --workdir /app logs"],
             [["compose", "--dry-run=true", "config"], "compose --dry-run=true config"],
             [["compose", "--help=false", "ps"], "compose --help=false ps"],
             [
@@ -2082,7 +2135,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             ],
             [
               ["compose", "-fcompose.dev.yml", "--", "logs", "-n", "5"],
-              "compose -fcompose.dev.yml -- logs -n 5",
+              "compose -fcompose.dev.yml logs -n 5",
             ],
           ] as const) {
             fs.rmSync(log, { force: true });
@@ -2091,6 +2144,34 @@ describe("CLI", { timeout: 15_000 }, () => {
             expect(stdout).toContain(`docker ${expected}`);
             expect(fs.readFileSync(log, "utf-8").trim()).toBe(expected);
           }
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the wrapper's -- off the docker down command",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-down-sep-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 0\n', {
+            mode: 0o755,
+          });
+          const { status } = run(["compose", "-f", "compose.yml", "--", "down"], {
+            env: {
+              PATH: `${tmpDir}:${process.env.PATH}`,
+              STUB_LOG: log,
+              PORTLESS: undefined,
+              PORTLESS_STATE_DIR: path.join(tmpDir, "state"),
+            },
+          });
+          expect(status).toBe(0);
+          const calls = fs.readFileSync(log, "utf-8").trim().split("\n");
+          expect(calls).toContain("compose -f compose.yml down");
+          expect(calls.some((call) => call.includes("-- down"))).toBe(false);
         } finally {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
@@ -2593,7 +2674,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.each([
       ["missing value", ["--upstream"], "--upstream requires a value"],
       ["flag used as value", ["--upstream", "--help"], "--upstream requires a value"],
-      ["equals form", ["--upstream=https://api.internal"], "separate value"],
       ["bare hostname", ["--upstream", "api.internal"], "Invalid --upstream value"],
       ["path", ["--upstream", "https://api.internal/path"], "Invalid --upstream value"],
       ["query", ["--upstream", "https://api.internal?key=value"], "Invalid --upstream value"],
@@ -2615,6 +2695,27 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(result.status).toBe(2);
         expect(result.stderr).toContain(message);
         expect(fs.existsSync(stateDir)).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("accepts --upstream=value like any other value flag", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-upstream-eq-"));
+      try {
+        const { status } = run(
+          ["alias", "api", "8080", "--upstream=http://api.internal", "--tld", "localhost"],
+          { env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" } }
+        );
+        expect(status).toBe(0);
+        const routes = JSON.parse(fs.readFileSync(path.join(tmpDir, "routes.json"), "utf-8")) as {
+          hostname: string;
+          upstream?: { tls?: boolean; host?: string };
+        }[];
+        expect(routes.find((route) => route.hostname === "api.localhost")?.upstream).toEqual({
+          tls: false,
+          host: "api.internal",
+        });
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -3453,7 +3554,7 @@ describe("CLI", { timeout: 15_000 }, () => {
     }
 
     it.skipIf(process.platform === "win32")(
-      "keeps state and does not signal a live recorded PID that is not the proxy",
+      "removes stale proxy state for a recycled PID without signaling it",
       async () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-unrelated-"));
         const stateDir = path.join(tmpDir, "state");
@@ -3469,8 +3570,8 @@ describe("CLI", { timeout: 15_000 }, () => {
           await new Promise((resolve) => setTimeout(resolve, 200));
           fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
           fs.writeFileSync(path.join(stateDir, "proxy.port"), String(port));
-          fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
-          fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+          fs.writeFileSync(path.join(stateDir, "proxy.tls"), "1");
+          fs.writeFileSync(path.join(stateDir, "proxy.lan"), "192.0.2.10");
 
           const result = runWithHostsFileMock(["clean", "--yes"], {
             content: "",
@@ -3484,11 +3585,13 @@ describe("CLI", { timeout: 15_000 }, () => {
             },
           });
 
-          expect(result.status).toBe(1);
-          expect(result.stderr).toContain(`Could not verify that PID ${pid}`);
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toContain(`PID ${pid} is not a proxy listening on port ${port}`);
+          expect(result.stdout).toContain("Removed stale proxy state");
+          expect(result.stderr).not.toContain("kill -CONT");
           expect(result.capture.sudoCalls).toEqual([]);
-          for (const file of ["proxy.pid", "ca.pem", "ca-key.pem"]) {
-            expect(fs.existsSync(path.join(stateDir, file))).toBe(true);
+          for (const file of ["proxy.pid", "proxy.port"]) {
+            expect(fs.existsSync(path.join(stateDir, file))).toBe(false);
           }
           expect(isAlivePid(pid)).toBe(true);
         } finally {

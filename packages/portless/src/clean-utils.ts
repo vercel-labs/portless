@@ -101,14 +101,6 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
   return { dirs: [...dirs], failures: [...failures] };
 }
 
-/**
- * Unique existing canonical state directories to consider for cleanup: user
- * dir, system dir, and PORTLESS_STATE_DIR when set.
- */
-export function collectStateDirsForCleanup(): string[] {
-  return collectStateDirsForCleanupWithFailures().dirs;
-}
-
 /** Attempt CA trust removal wherever cleanup finds a CA certificate. */
 export function attemptCATrustRemovalForCleanup(
   stateDirs: string[],
