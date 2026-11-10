@@ -1042,17 +1042,12 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
 
     it("keeps a misspelled name as the app name when a command follows", () => {
-      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-named-typo-"));
-      try {
-        const { status, stderr } = run(["lst", "next", "dev"], {
-          env: { PORTLESS_STATE_DIR: tmpDir },
-        });
-        expect(status).toBe(1);
-        expect(stderr).not.toContain("is not a portless command");
-        expect(stderr).toContain("Proxy is not running");
-      } finally {
-        fs.rmSync(tmpDir, { recursive: true, force: true });
-      }
+      expect(run(["lis@t"]).stderr).toContain("portless list");
+
+      const { status, stderr } = run(["lis@t", "echo", "test"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid hostname");
+      expect(stderr).not.toContain("is not a portless command");
     });
 
     it("does not suggest a command when --name sets the app name", () => {
