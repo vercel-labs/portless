@@ -23,13 +23,12 @@ export function isCommandName(word: string | undefined): word is CommandName {
   return word !== undefined && COMMAND_SET.has(word);
 }
 
-/** True when --help or -h appears after the command word and before any `--` separator. */
+/**
+ * True when --help or -h appears anywhere after the command word. Only for commands that
+ * do not wrap another command, where `--` has no wrapped arguments to protect.
+ */
 export function hasHelpFlag(args: readonly string[]): boolean {
-  for (const arg of args.slice(1)) {
-    if (arg === "--") return false;
-    if (arg === "--help" || arg === "-h") return true;
-  }
-  return false;
+  return args.slice(1).some((arg) => arg === "--help" || arg === "-h");
 }
 
 /** Edit distance where swapping two adjacent characters counts as one edit. */
