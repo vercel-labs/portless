@@ -2124,6 +2124,21 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   return { force, appPort, name, commandArgs: args.slice(i) };
 }
 
+/**
+ * The app name in named mode and whether a child command follows it. Reads the
+ * arguments before flags are validated, so a misspelled command is reported
+ * instead of its own flags.
+ */
+function readNamedArgs(args: readonly string[]): { name: string | undefined; hasCommand: boolean } {
+  const end = args.indexOf("--");
+  const flagRegion = end === -1 ? args : args.slice(0, end);
+  const words = flagRegion.filter(
+    (arg, i) => !arg.startsWith("-") && flagRegion[i - 1] !== "--app-port"
+  );
+  if (end !== -1) words.push(...args.slice(end + 1));
+  return { name: words[0], hasCommand: words.length > 1 };
+}
+
 // ---------------------------------------------------------------------------
 // Subcommand handlers
 // ---------------------------------------------------------------------------
@@ -4841,20 +4856,29 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   );
 }
 
+function printNamedUsage(): void {
+  console.error(colors.blue("Usage:"));
+  console.error(colors.cyan("  portless <name> <command...>"));
+  console.error(colors.blue("Example:"));
+  console.error(colors.cyan("  portless myapp next dev"));
+}
+
 async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
+  const { name, hasCommand } = readNamedArgs(args);
+  const suggestion = explicitName ? undefined : suggestCommand(name);
+  if (name && suggestion && !hasCommand) {
+    console.error(colors.red("Error: No command provided."));
+    console.error(colors.blue(`"${name}" is not a portless command. Did you mean:`));
+    console.error(colors.cyan(`  portless ${suggestion}`));
+    printNamedUsage();
+    process.exit(1);
+  }
+
   const parsed = parseAppArgs(args);
 
   if (parsed.commandArgs.length === 0) {
     console.error(colors.red("Error: No command provided."));
-    const suggestion = explicitName ? undefined : suggestCommand(parsed.name);
-    if (suggestion) {
-      console.error(colors.blue(`"${parsed.name}" is not a portless command. Did you mean:`));
-      console.error(colors.cyan(`  portless ${suggestion}`));
-    }
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless <name> <command...>"));
-    console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless myapp next dev"));
+    printNamedUsage();
     process.exit(1);
   }
 
