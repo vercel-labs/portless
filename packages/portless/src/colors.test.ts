@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { supportsColor } from "./colors.js";
+import { stripColor, supportsColor } from "./colors.js";
 
 describe("supportsColor", () => {
   it("follows TTY detection when no color variables are set", () => {
@@ -25,5 +25,12 @@ describe("supportsColor", () => {
   it("disables color for FORCE_COLOR=0 or false, even on a TTY", () => {
     expect(supportsColor({ FORCE_COLOR: "0" }, true)).toBe(false);
     expect(supportsColor({ FORCE_COLOR: "false" }, true)).toBe(false);
+  });
+});
+
+describe("stripColor", () => {
+  it("removes the codes portless adds and keeps other escape sequences", () => {
+    expect(stripColor("\x1b[31mError:\x1b[39m \x1b[1mbold\x1b[22m")).toBe("Error: bold");
+    expect(stripColor("\x1b[32mfrom the app\x1b[0m")).toBe("\x1b[32mfrom the app\x1b[0m");
   });
 });
