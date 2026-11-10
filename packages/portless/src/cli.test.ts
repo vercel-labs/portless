@@ -6614,8 +6614,14 @@ describe("CLI", { timeout: 15_000 }, () => {
           writeApp(path.join(root, "packages", "api"), "api", false);
 
           for (const [dev, recovery] of [
-            ["turbo dev && node mark-root.cjs", "portless run turbo run dev -- --marker one"],
-            ["turbo dev # note", "portless run turbo run dev -- --marker one"],
+            [
+              "turbo dev && node mark-root.cjs",
+              'Change the root "dev" script to a single command, such as "turbo dev"',
+            ],
+            [
+              "turbo dev # note",
+              'Change the root "dev" script to a single command, such as "turbo dev"',
+            ],
             ["node mark-root.cjs && node mark-root.cjs", "portless run <command> -- --marker one"],
           ]) {
             writeDev(dev);

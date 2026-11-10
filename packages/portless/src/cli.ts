@@ -4633,8 +4633,7 @@ async function handleDefaultMulti(
       const forwarded = extraArgs.join(" ");
       const hints = forwarding.turbo
         ? [
-            `  Run the task directly: portless run turbo run ${scriptName} -- ${forwarded}`,
-            `  Or change the root "${scriptName}" script to a single command, such as "turbo ${scriptName}".`,
+            `  Change the root "${scriptName}" script to a single command, such as "turbo ${scriptName}".`,
           ]
         : [
             `  Run the command directly: portless run <command> -- ${forwarded}`,
