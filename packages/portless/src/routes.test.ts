@@ -88,6 +88,40 @@ describe("RouteStore", () => {
       expect(loaded[0].hostname).toBe("valid.localhost");
     });
 
+    it("rejects malformed or unknown upstream fields while retaining valid routes", () => {
+      const valid = { hostname: "valid.localhost", port: 4001, pid: 0 };
+      const upstreams = [
+        null,
+        [],
+        "https",
+        { tls: "true" },
+        { host: 123 },
+        { host: "" },
+        { host: "api.internal:0" },
+        { host: "api.internal:65536" },
+        { host: "api.internal:000001" },
+        { host: "256.1.1.1" },
+        { host: "127.0.0" },
+        { host: "127.00.0.1" },
+        { host: "user@api.internal" },
+        { host: "api.internal/path" },
+        { host: "[not-ipv6]" },
+        { tls: true, extra: 1 },
+      ];
+      const routes = [
+        valid,
+        { ...valid, hostname: "tls.localhost", upstream: { tls: true, host: "api.internal:8443" } },
+        ...upstreams.map((upstream, index) => ({
+          ...valid,
+          hostname: `invalid${index}.localhost`,
+          upstream,
+        })),
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      expect(store.loadRoutes()).toEqual(routes.slice(0, 2));
+    });
+
     it("loads routes from file", () => {
       const routes = [{ hostname: "app.localhost", port: 4001, pid: process.pid }];
       store.ensureDir();
@@ -169,6 +203,93 @@ describe("RouteStore", () => {
     });
   });
 
+  describe("unsupported stored routes", () => {
+    const unsupported = {
+      hostname: "future.localhost",
+      port: 4001,
+      pid: 0,
+      upstream: { tls: true, futureOption: { value: 1 } },
+      extra: "preserve",
+    };
+    const malformed = { hostname: "malformed.localhost", port: 4002, pid: 0, upstream: null };
+    const incomplete = { hostname: "incomplete.localhost", upstream: { tls: true } };
+    const alias = { hostname: "alias.localhost", port: 4003, pid: 0 };
+    const owned = { hostname: "owned.localhost", port: 4004, pid: process.pid };
+    const stale = { hostname: "stale.localhost", port: 4005, pid: 999999 };
+
+    function seed(): void {
+      fs.writeFileSync(
+        store.getRoutesPath(),
+        JSON.stringify([unsupported, malformed, incomplete, alias, owned, stale])
+      );
+    }
+
+    function disk(): unknown[] {
+      return JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+    }
+
+    it("preserves skipped entries while adding, updating, transferring and removing valid routes", () => {
+      seed();
+      expect(store.loadRoutes()).toEqual([alias, owned]);
+      expect(store.loadRoutesRaw()).toEqual([alias, owned, stale]);
+
+      store.addRoute("new.localhost", 4006, 0, false, { tls: true });
+      expect(disk()).toEqual(
+        expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
+      );
+      expect(disk()).not.toContainEqual(stale);
+      store.updateRoute("owned.localhost", { ngrokUrl: "https://example.test" });
+      expect(disk()).toContainEqual({ ...owned, ngrokUrl: "https://example.test" });
+      expect(store.transferRoute("owned.localhost", process.pid, process.ppid)).toBe(true);
+      store.removeRoute("alias.localhost", 0);
+
+      expect(disk()).toEqual(expect.arrayContaining([unsupported, malformed, incomplete]));
+      expect(disk()).not.toContainEqual(alias);
+      expect(store.loadRoutes()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ hostname: "new.localhost", upstream: { tls: true } }),
+          expect.objectContaining({ hostname: "owned.localhost", pid: process.ppid }),
+        ])
+      );
+      expect(store.loadRoutes().map((route) => route.hostname)).not.toContain("future.localhost");
+    });
+
+    it("prunes dead supported routes without removing skipped entries", () => {
+      seed();
+      expect(store.pruneStaleRoutes()).toEqual([stale]);
+      expect(disk()).toEqual(
+        expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
+      );
+      expect(disk()).not.toContainEqual(stale);
+    });
+
+    it.each([unsupported, malformed, incomplete])(
+      "requires force to replace a skipped hostname",
+      (entry) => {
+        seed();
+        expect(() => store.addRoute(entry.hostname, 4444, 0)).toThrow(
+          "has an invalid or unsupported stored route. Use --force to replace it."
+        );
+        expect(disk()).toContainEqual(entry);
+        store.addRoute(entry.hostname, 4444, 0, true);
+        const matching = (disk() as { hostname?: string }[]).filter(
+          (route) => route.hostname === entry.hostname
+        );
+        expect(matching).toHaveLength(1);
+        expect(matching[0]).toMatchObject({ hostname: entry.hostname, port: 4444, pid: 0 });
+        expect(matching[0]).not.toHaveProperty("upstream");
+      }
+    );
+
+    it("continues to reject invalid new upstreams without changing the file", () => {
+      seed();
+      expect(() =>
+        store.addRoute("new.localhost", 4444, 0, false, { tls: "yes" } as never)
+      ).toThrow("Invalid upstream configuration");
+      expect(disk()).toEqual([unsupported, malformed, incomplete, alias, owned, stale]);
+    });
+  });
+
   describe("saveRoutes (via addRoute)", () => {
     it("persists routes to file", () => {
       store.addRoute("test.localhost", 4123, process.pid);
@@ -188,6 +309,17 @@ describe("RouteStore", () => {
   });
 
   describe("addRoute", () => {
+    it("persists and reloads upstream settings and clears them on replacement", () => {
+      const upstream = { tls: true, host: "api.internal:8443" };
+      store.addRoute("api.localhost", 4001, 0, false, upstream);
+      const saved = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+      expect(saved[0].upstream).toEqual(upstream);
+      expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toEqual(upstream);
+
+      store.addRoute("api.localhost", 4002, 0, true);
+      expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toBeUndefined();
+    });
+
     it("adds a route to empty store", () => {
       const before = Date.now();
       store.addRoute("myapp.localhost", 4001, process.pid);

@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
 import { fixOwnership, isErrnoException, isProcessAlive as isPidAlive } from "./utils.js";
@@ -48,6 +49,28 @@ type RouteMetadataPatch = {
   cloudflarePid?: number | null;
 };
 
+export function isValidUpstream(value: unknown): value is NonNullable<RouteInfo["upstream"]> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const upstream = value as Record<string, unknown>;
+  if (Object.keys(upstream).some((key) => key !== "tls" && key !== "host")) return false;
+  if ("tls" in upstream && typeof upstream.tls !== "boolean") return false;
+  if (!("host" in upstream)) return true;
+  if (typeof upstream.host !== "string" || !upstream.host) return false;
+  const authority = upstream.host;
+  const match = /^(\[[^\]]+\]|[^:]+)(?::([0-9]+))?$/.exec(authority);
+  if (!match) return false;
+  const hostname = match[1];
+  if (
+    match[2] !== undefined &&
+    (match[2].length > 5 || Number(match[2]) < 1 || Number(match[2]) > 65535)
+  )
+    return false;
+  if (hostname.startsWith("[")) return net.isIPv6(hostname.slice(1, -1));
+  if (/^[0-9.]+$/.test(hostname) && hostname.includes(".")) return net.isIPv4(hostname);
+  if (hostname.length > 253) return false;
+  return hostname.split(".").every((label) => /^(?!-)[a-z0-9-]{1,63}(?<!-)$/i.test(label));
+}
+
 /** Runtime check that a parsed JSON value is a valid RouteMapping. */
 function isValidRoute(value: unknown): value is RouteMapping {
   return (
@@ -55,7 +78,8 @@ function isValidRoute(value: unknown): value is RouteMapping {
     value !== null &&
     typeof (value as RouteMapping).hostname === "string" &&
     typeof (value as RouteMapping).port === "number" &&
-    typeof (value as RouteMapping).pid === "number"
+    typeof (value as RouteMapping).pid === "number" &&
+    (!("upstream" in value) || isValidUpstream((value as RouteMapping).upstream))
   );
 }
 
@@ -202,15 +226,16 @@ export class RouteStore {
         return [];
       }
       const routes: RouteMapping[] = parsed.filter(isValidRoute);
+      if (routes.length !== parsed.length) {
+        this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
+      }
       // Filter out stale routes whose owning process is no longer alive
       const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
       if (persistCleanup && alive.length !== routes.length) {
         // Persist the cleaned-up list so stale entries don't accumulate.
         // Only safe when caller holds the lock.
         try {
-          fs.writeFileSync(this.routesPath, JSON.stringify(alive, null, 2), {
-            mode: FILE_MODE,
-          });
+          this.saveRoutes(alive);
         } catch {
           // Write may fail (permissions); non-fatal
         }
@@ -221,8 +246,37 @@ export class RouteStore {
     }
   }
 
-  private saveRoutes(routes: RouteMapping[]): void {
-    fs.writeFileSync(this.routesPath, JSON.stringify(routes, null, 2), { mode: FILE_MODE });
+  private skippedRoutes(): unknown[] {
+    let raw: string;
+    try {
+      raw = fs.readFileSync(this.routesPath, "utf-8");
+    } catch (err) {
+      if (isErrnoException(err) && err.code === "ENOENT") return [];
+      throw err;
+    }
+    try {
+      const existing: unknown = JSON.parse(raw);
+      return Array.isArray(existing) ? existing.filter((value) => !isValidRoute(value)) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private saveRoutes(
+    routes: RouteMapping[],
+    replaceSkippedHostnames: readonly string[] = []
+  ): void {
+    const skipped = this.skippedRoutes().filter(
+      (value) =>
+        typeof value !== "object" ||
+        value === null ||
+        !("hostname" in value) ||
+        typeof value.hostname !== "string" ||
+        !replaceSkippedHostnames.includes(value.hostname)
+    );
+    fs.writeFileSync(this.routesPath, JSON.stringify([...routes, ...skipped], null, 2), {
+      mode: FILE_MODE,
+    });
     fixOwnership(this.routesPath);
   }
 
@@ -232,15 +286,24 @@ export class RouteStore {
    * replaced. Returns the PID of the killed process (if any) so the caller can
    * log it.
    */
-  addRoute(hostname: string, port: number, pid: number, force = false): number | undefined {
+  addRoute(
+    hostname: string,
+    port: number,
+    pid: number,
+    force = false,
+    upstream?: RouteInfo["upstream"]
+  ): number | undefined {
+    if (upstream !== undefined && !isValidUpstream(upstream)) {
+      throw new Error("Invalid upstream configuration");
+    }
     this.ensureDir();
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
     try {
       const routes = this.loadRoutes(true);
-      const killedPid = this.putRoute(routes, hostname, port, pid, force);
-      this.saveRoutes(routes);
+      const killedPid = this.putRoute(routes, hostname, port, pid, force, upstream);
+      this.saveRoutes(routes, force ? [hostname] : []);
       return killedPid;
     } finally {
       this.releaseLock();
@@ -292,7 +355,7 @@ export class RouteStore {
           const killedPid = this.putRoute(routes, hostname, port, pid, force);
           if (killedPid !== undefined) killedPids.push(killedPid);
         }
-        this.saveRoutes(routes);
+        this.saveRoutes(routes, force ? hostnames : []);
         return { port, killedPids };
       } finally {
         this.releaseLock();
@@ -301,18 +364,34 @@ export class RouteStore {
   }
 
   /**
-   * Put `hostname` -> `port` into `routes` in place. Throws RouteConflictError
-   * when another live process owns the hostname, unless `force` is set, in which
-   * case that process is sent SIGTERM. Returns the PID of the killed process.
-   * The caller holds the lock and saves `routes`.
+   * Put `hostname` -> `port` into `routes` in place. Throws when the stored
+   * routes hold an invalid entry for `hostname`, or RouteConflictError when
+   * another live process owns it, unless `force` is set, in which case that
+   * process is sent SIGTERM. Returns the PID of the killed process. The caller
+   * holds the lock and saves `routes`.
    */
   private putRoute(
     routes: RouteMapping[],
     hostname: string,
     port: number,
     pid: number,
-    force: boolean
+    force: boolean,
+    upstream?: RouteInfo["upstream"]
   ): number | undefined {
+    if (
+      !force &&
+      this.skippedRoutes().some(
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          "hostname" in value &&
+          value.hostname === hostname
+      )
+    ) {
+      throw new Error(
+        `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
+      );
+    }
     let killedPid: number | undefined;
     const existing = routes.find((r) => r.hostname === hostname);
     const isAlias = existing?.pid === 0;
@@ -333,7 +412,13 @@ export class RouteStore {
     for (let i = routes.length - 1; i >= 0; i--) {
       if (routes[i].hostname === hostname) routes.splice(i, 1);
     }
-    routes.push({ hostname, port, pid, registeredAt: Date.now() });
+    routes.push({
+      hostname,
+      port,
+      pid,
+      registeredAt: Date.now(),
+      ...(upstream === undefined ? {} : { upstream }),
+    });
     return killedPid;
   }
 
@@ -359,7 +444,11 @@ export class RouteStore {
         this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
         return [];
       }
-      return parsed.filter(isValidRoute);
+      const routes = parsed.filter(isValidRoute);
+      if (routes.length !== parsed.length) {
+        this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
+      }
+      return routes;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
       this.onWarning?.(`Could not read routes file: ${message}`);

@@ -406,6 +406,19 @@ describe("CLI", { timeout: 15_000 }, () => {
               registeredAt: Date.now() - 3 * 60 * 60 * 1000,
             },
             { hostname: "docker.localhost", port: 4002, pid: 0 },
+            {
+              hostname: "tls.localhost",
+              port: 4004,
+              pid: 0,
+              upstream: { tls: true, host: "api.internal:8443" },
+            },
+            {
+              hostname: "plain.localhost",
+              port: 4005,
+              pid: 0,
+              upstream: { tls: false, host: "api.internal" },
+            },
+            { hostname: "tls-default.localhost", port: 4006, pid: 0, upstream: { tls: true } },
             { hostname: "legacy.localhost", port: 4003, pid: process.pid },
           ])
         );
@@ -423,6 +436,11 @@ describe("CLI", { timeout: 15_000 }, () => {
         const row = (host: string) => lines.find((l) => l.includes(host))!.trimStart();
         expect(row("app.localhost")).toMatch(/ {2}\(pid \d+\) up 3h$/);
         expect(row("docker.localhost")).toMatch(/ {2}\(alias\)$/);
+        expect(row("tls.localhost")).toContain("https://localhost:4004");
+        expect(row("plain.localhost")).toContain("http://localhost:4005");
+        expect(row("tls-default.localhost")).toContain("https://localhost:4006");
+        expect(lines.some((line) => line.trim() === "Host: api.internal:8443")).toBe(true);
+        expect(lines.some((line) => line.trim() === "Host: api.internal")).toBe(true);
         expect(row("legacy.localhost")).toMatch(/ {2}\(pid \d+\)$/);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1021,6 +1039,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("portless alias");
       expect(stdout).toContain("--remove");
+      expect(stdout).toContain("--upstream");
+      expect(stdout).toContain("HTTP/1.1");
     });
 
     it("prints help with -h", () => {
@@ -1045,6 +1065,36 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["alias", "mydb", "notaport"]);
       expect(status).toBe(1);
       expect(stderr).toContain("Invalid port");
+    });
+
+    it.each([
+      ["missing value", ["--upstream"], "--upstream requires a value"],
+      ["flag used as value", ["--upstream", "--help"], "--upstream requires a value"],
+      ["equals form", ["--upstream=https://api.internal"], "separate value"],
+      ["bare hostname", ["--upstream", "api.internal"], "Invalid --upstream value"],
+      ["path", ["--upstream", "https://api.internal/path"], "Invalid --upstream value"],
+      ["query", ["--upstream", "https://api.internal?key=value"], "Invalid --upstream value"],
+      ["fragment", ["--upstream", "https://api.internal#fragment"], "Invalid --upstream value"],
+      ["credentials", ["--upstream", "https://user@api.internal"], "Invalid --upstream value"],
+      ["invalid port", ["--upstream", "http://api.internal:65536"], "Invalid --upstream value"],
+      [
+        "duplicate option",
+        ["--upstream", "https", "--upstream", "http://api.internal"],
+        "may be specified only once",
+      ],
+    ] as const)("rejects upstream %s before discovering state", (_case, args, message) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-upstream-"));
+      const stateDir = path.join(tmpDir, "state");
+      try {
+        const result = run(["alias", "api", "8080", ...args], {
+          env: { PORTLESS_STATE_DIR: stateDir },
+        });
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(message);
+        expect(fs.existsSync(stateDir)).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
 
     it("exits 1 without registering a route for a port with trailing text", () => {
@@ -1114,20 +1164,58 @@ describe("CLI", { timeout: 15_000 }, () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-tld-"));
       const routesPath = path.join(tmpDir, "routes.json");
       const env = { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" };
-      const hostnames = () =>
-        (JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{ hostname: string }>).map(
-          (route) => route.hostname
-        );
+      const routes = () =>
+        JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+          hostname: string;
+          upstream?: { tls?: boolean; host?: string };
+        }>;
+      const hostnames = () => routes().map((route) => route.hostname);
       try {
         fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\ndev\n");
-        const add = run(["alias", "mydb", "5432", "--tld", "localhost,test", "--tld", "test"], {
-          env,
-        });
+        const add = run(
+          [
+            "alias",
+            "mydb",
+            "5432",
+            "--upstream",
+            "https://api.internal:8443",
+            "--tld",
+            "localhost,test",
+            "--tld",
+            "test",
+          ],
+          { env }
+        );
         expect(add.status).toBe(0);
         expect(hostnames().sort()).toEqual(["mydb.localhost", "mydb.test"]);
+        expect(routes().find((route) => route.hostname === "mydb.localhost")?.upstream).toEqual({
+          tls: true,
+          host: "api.internal:8443",
+        });
+        const tlsOnly = run(
+          ["alias", "mytls", "7443", "--upstream", "https", "--tld", "localhost"],
+          { env }
+        );
+        const plain = run(
+          ["alias", "myplain", "8080", "--upstream", "http://api.internal", "--tld", "localhost"],
+          { env }
+        );
+        expect(tlsOnly.status).toBe(0);
+        expect(plain.status).toBe(0);
+        expect(routes().find((route) => route.hostname === "mytls.localhost")?.upstream).toEqual({
+          tls: true,
+        });
+        expect(routes().find((route) => route.hostname === "myplain.localhost")?.upstream).toEqual({
+          tls: false,
+          host: "api.internal",
+        });
         const remove = run(["alias", "--remove", "mydb", "--tld", "test"], { env });
         expect(remove.status).toBe(0);
-        expect(hostnames()).toEqual(["mydb.localhost"]);
+        expect(hostnames().sort()).toEqual([
+          "mydb.localhost",
+          "myplain.localhost",
+          "mytls.localhost",
+        ]);
 
         const invalidTlds: Array<[string[], string]> = [
           [["--tld", "test", "--tld", " "], "--tld requires a TLD value"],
@@ -1138,13 +1226,21 @@ describe("CLI", { timeout: 15_000 }, () => {
           const invalid = run(["alias", "mydb", "5432", ...args], { env });
           expect(invalid.status).toBe(1);
           expect(invalid.stderr).toContain(message);
-          expect(hostnames()).toEqual(["mydb.localhost"]);
+          expect(hostnames().sort()).toEqual([
+            "mydb.localhost",
+            "myplain.localhost",
+            "mytls.localhost",
+          ]);
         }
 
         const forceRemove = run(["alias", "--remove", "mydb", "--force"], { env });
         expect(forceRemove.status).toBe(1);
         expect(forceRemove.stderr).toContain('Unknown flag "--force"');
-        expect(hostnames()).toEqual(["mydb.localhost"]);
+        expect(hostnames().sort()).toEqual([
+          "mydb.localhost",
+          "myplain.localhost",
+          "mytls.localhost",
+        ]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }

@@ -76,6 +76,21 @@ describe("buildArgv", () => {
     ["alias_add", { name: "db", port: 5432, force: true }, ["alias", "db", "5432", "--force"]],
     [
       "alias_add",
+      { name: "db", port: 5432, upstream: "https" },
+      ["alias", "db", "5432", "--upstream", "https"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "https://api.internal:8443", tld: ["test"] },
+      ["alias", "db", "5432", "--upstream", "https://api.internal:8443", "--tld", "test"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "http://api.internal" },
+      ["alias", "db", "5432", "--upstream", "http://api.internal"],
+    ],
+    [
+      "alias_add",
       { name: "db", port: 5432, tld: ["test", "localhost"], force: true },
       ["alias", "db", "5432", "--tld", "test", "--tld", "localhost", "--force"],
     ],
@@ -107,6 +122,18 @@ describe("buildArgv", () => {
     expect(() => buildArgv("alias_add", { name: "db", port: 5432, tld: [] })).toThrow(
       expect.objectContaining({ code: -32602 })
     );
+  });
+
+  it.each([null, 123])("rejects upstream %j before launching the CLI", async (upstream) => {
+    expect(() => buildArgv("alias_add", { name: "db", port: 5432, upstream })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+    const res = await call(["core"], "tools/call", {
+      name: "alias_add",
+      arguments: { name: "db", port: 5432, upstream, cwd: "/definitely/not/a/real/dir" },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("upstream must be a string");
   });
 
   it("rejects --foreground for proxy start with -32602", () => {

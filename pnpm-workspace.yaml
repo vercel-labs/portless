@@ -1,6 +1,10 @@
 minimumReleaseAge: 2880
+# tsc-ts and its platform packages are Vercel Labs packages, exempt so the
+# type-check can use a just-released tsc-ts.
 minimumReleaseAgeExclude:
   - "@vercel/agent-readability@0.5.1"
+  - "tsc-ts"
+  - "@tsc-ts/*"
 
 allowBuilds:
   "@mongodb-js/zstd": false
