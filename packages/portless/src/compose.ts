@@ -102,60 +102,31 @@ function isBooleanTrue(value: string): boolean {
   return TRUE_VALUES.has(value);
 }
 
-/** Read one global compose flag at `index`, keeping the raw arguments it spans. */
+/**
+ * Read one global compose flag at `index`, keeping the raw arguments it spans.
+ * A value is attached with `--flag=value`, `-f=value`, or `-fvalue`, or follows
+ * as the next argument.
+ */
 function readComposeGlobal(args: readonly string[], index: number): ComposeGlobal {
   const arg = args[index]!;
-  if (arg.startsWith("--")) {
-    const eq = arg.indexOf("=");
-    const flag = eq === -1 ? arg : arg.slice(0, eq);
-    if (VALUE_FLAGS.has(flag)) {
-      if (eq !== -1) {
-        const value = arg.slice(eq + 1);
-        return value === ""
-          ? { flag, raw: [arg], error: `${flag} requires a value.` }
-          : { flag, value, raw: [arg] };
-      }
-      const value = args[index + 1];
-      if (value === undefined) return { flag, raw: [arg], error: `${flag} requires a value.` };
-      return value === ""
-        ? { flag, raw: [arg, value], error: `${flag} requires a value.` }
-        : { flag, value, raw: [arg, value] };
-    }
-    if (BOOLEAN_FLAGS.has(flag)) {
-      if (eq === -1) return { flag, raw: [arg] };
-      const value = arg.slice(eq + 1);
-      return isBooleanValue(value)
-        ? { flag, value, raw: [arg] }
-        : { flag, value, raw: [arg], error: `${flag} takes true or false.` };
-    }
-    return { flag, raw: [arg], error: `Unknown flag "${flag}" for portless compose.` };
-  }
+  const long = arg.startsWith("--");
+  const eq = long ? arg.indexOf("=") : -1;
+  const flag = long ? (eq === -1 ? arg : arg.slice(0, eq)) : arg.slice(0, 2);
+  const tail = long ? (eq === -1 ? undefined : arg.slice(eq)) : arg.slice(2) || undefined;
+  const attached = tail?.replace(/^=/, "");
 
-  const flag = arg.slice(0, 2);
   if (VALUE_FLAGS.has(flag)) {
-    if (arg.length === 2) {
-      const value = args[index + 1];
-      if (value === undefined) return { flag, raw: [arg], error: `${flag} requires a value.` };
-      return value === ""
-        ? { flag, raw: [arg, value], error: `${flag} requires a value.` }
-        : { flag, value, raw: [arg, value] };
-    }
-    const attached = arg.slice(2);
-    const value = attached.startsWith("=") ? attached.slice(1) : attached;
-    return value === ""
-      ? { flag, raw: [arg], error: `${flag} requires a value.` }
-      : { flag, value, raw: [arg] };
+    const value = attached ?? args[index + 1];
+    const raw = attached === undefined && value !== undefined ? [arg, value] : [arg];
+    return value ? { flag, value, raw } : { flag, raw, error: `${flag} requires a value.` };
   }
-  if (BOOLEAN_FLAGS.has(flag)) {
-    if (arg.length === 2) return { flag, raw: [arg] };
-    if (arg[2] === "=") {
-      const value = arg.slice(3);
-      return isBooleanValue(value)
-        ? { flag, value, raw: [arg] }
-        : { flag, value, raw: [arg], error: `${flag} takes true or false.` };
-    }
+  if (BOOLEAN_FLAGS.has(flag) && (tail === undefined || tail.startsWith("="))) {
+    if (attached === undefined || isBooleanValue(attached))
+      return { flag, value: attached, raw: [arg] };
+    return { flag, value: attached, raw: [arg], error: `${flag} takes true or false.` };
   }
-  return { flag: arg, raw: [arg], error: `Unknown flag "${arg}" for portless compose.` };
+  const name = long ? flag : arg;
+  return { flag: name, raw: [arg], error: `Unknown flag "${name}" for portless compose.` };
 }
 
 /** Decode a run of global compose flags in order. */
