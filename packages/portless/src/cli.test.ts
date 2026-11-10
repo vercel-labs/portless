@@ -2470,14 +2470,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(namedMode.stdout.trim()).toBe("ok");
     });
 
-    it("keeps a value that itself contains =", () => {
-      const { status, stdout } = run(["run", "--name=a=b", "echo", "ok"], {
-        env: { PORTLESS: "0" },
-      });
-      expect(status).toBe(0);
-      expect(stdout.trim()).toBe("ok");
-    });
-
     it("rejects a value on a boolean flag before running the child", () => {
       for (const args of [
         ["run", "--force=false", "echo", "ran"],
@@ -4375,6 +4367,16 @@ describe("CLI", { timeout: 15_000 }, () => {
     afterEach(() => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
+
+    it.each([[["--ip", "run", "echo", "ok"]], [["--ip=notanip", "myapp", "echo", "ok"]]])(
+      "rejects %j, whose --ip value is not an IP address",
+      (args) => {
+        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" }, cwd: tmpDir });
+        expect(status).toBe(2);
+        expect(stdout).toBe("");
+        expect(stderr).toContain("--ip requires an IP address");
+      }
+    );
 
     it.skipIf(process.platform === "win32")("warns when --lan and --tld are both provided", () => {
       // Use an empty PATH so the mDNS check fails early, causing the

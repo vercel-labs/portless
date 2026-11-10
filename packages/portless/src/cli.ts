@@ -5,6 +5,7 @@ declare const __VERSION__: string;
 import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isIP } from "node:net";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -5982,6 +5983,11 @@ async function main() {
       "  portless --lan --ip 192.168.1.42 run <command>",
     ]);
   } else if (typeof ipResult === "string") {
+    if (isIP(ipResult) === 0) {
+      throw new UsageError(`--ip requires an IP address, but got "${ipResult}".`, [
+        "  portless --lan --ip 192.168.1.42 run <command>",
+      ]);
+    }
     process.env.PORTLESS_LAN_IP = ipResult;
     process.env.PORTLESS_LAN = "1";
   }
