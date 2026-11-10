@@ -1402,6 +1402,41 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stderr).toContain("No command provided");
       expect(stderr).toContain("portless list");
     });
+
+    it.each([
+      ["a help flag", ["lsit", "--help"]],
+      ["an unknown flag", ["lsit", "--json"]],
+      ["a leading flag", ["--force", "lsit", "--help"]],
+      ["a leading sharing flag", ["--ngrok", "lsit", "--help"]],
+      ["a leading app port", ["--app-port", "3000", "lsit", "--help"]],
+    ])("suggests the command for a misspelled name followed by %s", (_case, args) => {
+      const { status, stderr } = run(args);
+      expect(status).toBe(2);
+      expect(stderr).toContain('"lsit" is not a portless command. Did you mean:');
+      expect(stderr).toContain("portless list");
+      expect(stderr).not.toContain("Unknown flag");
+    });
+
+    it("keeps a misspelled name as the app name when a command follows", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-named-typo-"));
+      try {
+        const { status, stderr } = run(["lst", "next", "dev"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(1);
+        expect(stderr).not.toContain("is not a portless command");
+        expect(stderr).toContain("Proxy is not running");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("does not suggest a command when --name sets the app name", () => {
+      const { status, stderr } = run(["--name", "lsit"]);
+      expect(status).toBe(2);
+      expect(stderr).toContain("No command provided");
+      expect(stderr).not.toContain("Did you mean");
+    });
   });
 
   describe("PORTLESS=0 bypass", () => {
