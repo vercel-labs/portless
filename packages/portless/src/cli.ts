@@ -2746,34 +2746,23 @@ function removeStateFilesForCleanup(
   return [...failures];
 }
 
-/** Run only the allowlisted cleanup steps requested for an elevated retry. */
-function runElevatedCleanupSteps(
-  steps: CleanupStep[],
+/** Run the given cleanup steps against the state directories and report what is left. */
+function runCleanupSteps(
+  steps: readonly CleanupStep[],
   stateDirs: string[],
   preserveProxyRuntime: boolean
-): number {
-  const cleanableDirs = stateDirs.filter(isCleanableStateDir);
-  let problems = stateDirs.length - cleanableDirs.length;
-  const failedCAStateDirs = new Set<string>();
-
-  if (steps.includes("ca")) {
-    for (const [stateDir, result] of attemptCATrustRemovalForCleanup(cleanableDirs, untrustCA)) {
-      if (!result.removed) failedCAStateDirs.add(stateDir);
-    }
-    problems += failedCAStateDirs.size;
-  }
-
-  if (steps.includes("files")) {
-    problems += removeStateFilesForCleanup(
-      cleanableDirs,
-      failedCAStateDirs,
-      preserveProxyRuntime
-    ).length;
-  }
-
-  if (steps.includes("hosts") && !cleanHostsFile()) problems++;
-
-  return problems;
+) {
+  const caResults = steps.includes("ca")
+    ? attemptCATrustRemovalForCleanup(stateDirs, untrustCA)
+    : new Map<string, CATrustRemovalResult>();
+  const failedCAStateDirs = new Set(
+    [...caResults].filter(([, result]) => !result.removed).map(([stateDir]) => stateDir)
+  );
+  const stateFailures = steps.includes("files")
+    ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime)
+    : [];
+  const hostsCleaned = !steps.includes("hosts") || cleanHostsFile();
+  return { caResults, failedCAStateDirs, stateFailures, hostsCleaned };
 }
 
 /**
@@ -2856,10 +2845,14 @@ async function handleClean(args: string[]): Promise<void> {
     }
     const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
     const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
-    process.exitCode =
-      runElevatedCleanupSteps(requestedCleanupSteps, approvedDirs, preserveProxyRuntime) > 0
-        ? 1
-        : 0;
+    const cleanableDirs = approvedDirs.filter(isCleanableStateDir);
+    const left = runCleanupSteps(requestedCleanupSteps, cleanableDirs, preserveProxyRuntime);
+    const clean =
+      cleanableDirs.length === approvedDirs.length &&
+      left.failedCAStateDirs.size === 0 &&
+      left.stateFailures.length === 0 &&
+      left.hostsCleaned;
+    process.exitCode = clean ? 0 : 1;
     return;
   }
 
@@ -2943,23 +2936,16 @@ async function handleClean(args: string[]): Promise<void> {
     }
   }
 
-  const failedCAStateDirs = new Set<string>();
-  const caRemovalResults = proxyStopped
-    ? attemptCATrustRemovalForCleanup(stateDirs, untrustCA)
-    : new Map<string, CATrustRemovalResult>();
   if (!proxyStopped) {
     console.warn(colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed."));
   }
-  for (const [stateDir, untrustResult] of caRemovalResults) {
-    if (!untrustResult.removed) failedCAStateDirs.add(stateDir);
-  }
-
-  let stateFailures = removeStateFilesForCleanup(
+  const outcome = runCleanupSteps(
+    proxyStopped ? CLEANUP_STEP_ORDER : ["files", "hosts"],
     stateDirs,
-    failedCAStateDirs,
     preserveProxyRuntime
   );
-  let hostsCleaned = cleanHostsFile();
+  const { caResults: caRemovalResults, failedCAStateDirs } = outcome;
+  let { stateFailures, hostsCleaned } = outcome;
 
   const retrySteps: CleanupStep[] = [];
   if (failedCAStateDirs.size > 0) retrySteps.push("ca");
