@@ -1192,11 +1192,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    removeProxyIdentity(store);
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetProxyMarkers(store);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1254,26 +1250,31 @@ function removeStateFileIfMatches(file: string, expected: string): boolean {
   return true;
 }
 
-/** Whether a live PID is still running rather than a zombie or dead entry. */
-function isProcessRunning(pid: number): boolean {
-  if (!isPidAlive(pid)) return false;
+/** The kernel's state letters for a live PID, or null when they cannot be read. */
+function readProcessState(pid: number): string | null {
   try {
     if (process.platform === "linux") {
       const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
-      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
-      return state !== "Z" && state !== "X";
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] || null;
     }
     if (process.platform === "darwin") {
       const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
         encoding: "utf-8",
         timeout: 2000,
-      }).trim();
-      return !state.startsWith("Z");
+      });
+      return state.trim() || null;
     }
   } catch {
-    return isPidAlive(pid);
+    return null;
   }
-  return true;
+  return null;
+}
+
+/** Whether a live PID is still running rather than a zombie or dead entry. */
+function isProcessRunning(pid: number): boolean {
+  if (!isPidAlive(pid)) return false;
+  const state = readProcessState(pid);
+  return state === null ? isPidAlive(pid) : !/^[ZX]/.test(state);
 }
 
 /**
@@ -1281,25 +1282,8 @@ function isProcessRunning(pid: number): boolean {
  * the platform or a failed lookup cannot report the state.
  */
 function isProcessSuspended(pid: number): boolean | null {
-  try {
-    if (process.platform === "linux") {
-      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
-      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
-      if (!state) return null;
-      return state === "T" || state === "t";
-    }
-    if (process.platform === "darwin") {
-      const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
-        encoding: "utf-8",
-        timeout: 2000,
-      }).trim();
-      if (!state) return null;
-      return state.startsWith("T");
-    }
-  } catch {
-    return null;
-  }
-  return null;
+  const state = readProcessState(pid);
+  return state === null ? null : /^[Tt]/.test(state);
 }
 
 /** Record the listening proxy's start time, so a later stop can tell it from a recycled PID. */
@@ -1327,14 +1311,19 @@ function writeProxyStartTime(store: RouteStore): void {
   }
 }
 
-/** Remove the recorded proxy identity once its process is confirmed gone. */
-function removeProxyIdentity(store: RouteStore): void {
-  try {
-    fs.rmSync(store.startTimePath, { force: true });
-    fs.rmSync(`${store.startTimePath}.tmp`, { force: true });
-  } catch {
-    return;
+/** Forget the recorded proxy identity and runtime settings once its process is gone. */
+function resetProxyMarkers(store: RouteStore): void {
+  for (const file of [store.startTimePath, `${store.startTimePath}.tmp`]) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      continue;
+    }
   }
+  writeTlsMarker(store.dir, false);
+  writeCustomCertMarker(store.dir, false);
+  writeTldFile(store.dir, DEFAULT_TLD);
+  writeLanMarker(store.dir, null);
 }
 
 type ProxyIdentity = "proxy" | "recycled" | "unknown";
@@ -1371,11 +1360,7 @@ async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): P
     console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
     return false;
   }
-  removeProxyIdentity(store);
-  writeTlsMarker(store.dir, false);
-  writeCustomCertMarker(store.dir, false);
-  writeTldFile(store.dir, DEFAULT_TLD);
-  writeLanMarker(store.dir, null);
+  resetProxyMarkers(store);
   return true;
 }
 
@@ -1393,157 +1378,138 @@ async function waitForProxyToClose(
   }
 }
 
-async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<boolean> {
-  const pidPath = store.pidPath;
+/** What the PID file and the proxy port say about the proxy to stop. */
+type RecordedProxy =
+  | { state: "stopped" | "corrupt" | "dead" | "forbidden" }
+  | { state: "unrecorded"; pid: number | null }
+  | { state: "running" | "recycled"; pid: number }
+  | { state: "unverified"; pid: number; identity: Exclude<ProxyIdentity, "recycled"> };
 
-  if (!fs.existsSync(pidPath)) {
-    // PID file is missing; check whether something is still listening.
-    // Use plain HTTP: the TLS proxy accepts it via byte-peeking, and this
-    // avoids false negatives from TLS handshake timeouts.
-    if (await isProxyRunning(proxyPort)) {
-      console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
-      const pid = findPidOnPort(proxyPort);
-      if (pid !== null) {
-        try {
-          process.kill(pid, "SIGTERM");
-          if (!(await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS))) {
-            console.error(
-              colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`)
-            );
-            return false;
-          }
-          if (fs.existsSync(pidPath)) {
-            console.error(
-              colors.red(
-                `Proxy PID file changed to ${readStateFile(pidPath)}; leaving it in place.`
-              )
-            );
-            return false;
-          }
-          if (!(await clearProxyStateAfterStop(store, proxyPort))) return false;
-          console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
-          return true;
-        } catch (err: unknown) {
-          if (isErrnoException(err) && err.code === "EPERM") {
-            return sudoStopOrHint(proxyPort);
-          }
-          const message = err instanceof Error ? err.message : String(err);
-          console.error(colors.red(`Failed to stop proxy: ${message}`));
-          console.error(colors.blue("Check if the process is still running:"));
+async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<RecordedProxy> {
+  if (!fs.existsSync(store.pidPath)) {
+    if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
+    return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
+  }
+  const pid = parseInt(fs.readFileSync(store.pidPath, "utf-8"), 10);
+  if (isNaN(pid)) return { state: "corrupt" };
+  try {
+    process.kill(pid, 0);
+  } catch (err: unknown) {
+    return { state: isErrnoException(err) && err.code === "EPERM" ? "forbidden" : "dead" };
+  }
+  if (await isProxyRunning(proxyPort)) return { state: "running", pid };
+  const identity = await identifyRecordedProxy(store, pid, proxyPort);
+  return identity === "recycled"
+    ? { state: "recycled", pid }
+    : { state: "unverified", pid, identity };
+}
+
+/** Signal a proxy process and wait for it and its listener to go away. */
+async function terminateProxy(proxyPort: number, pid: number): Promise<boolean> {
+  process.kill(pid, "SIGTERM");
+  if (await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS)) return true;
+  console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
+  return false;
+}
+
+/**
+ * Remove the PID file and clear the proxy state, unless another proxy has taken
+ * them over. `pid` is the recorded PID, or null when no PID file was recorded.
+ */
+async function forgetProxy(
+  store: RouteStore,
+  proxyPort: number,
+  pid: number | null
+): Promise<boolean> {
+  const unchanged =
+    pid === null
+      ? !fs.existsSync(store.pidPath)
+      : removeStateFileIfMatches(store.pidPath, String(pid));
+  if (unchanged) return clearProxyStateAfterStop(store, proxyPort);
+  console.error(
+    colors.red(`Proxy PID file changed to ${readStateFile(store.pidPath)}; leaving it in place.`)
+  );
+  return false;
+}
+
+async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<boolean> {
+  try {
+    const proxy = await readRecordedProxy(store, proxyPort);
+    switch (proxy.state) {
+      case "stopped":
+        console.log(colors.yellow("Proxy is not running."));
+        return true;
+      case "forbidden":
+        return sudoStopOrHint(proxyPort);
+      case "corrupt":
+        console.error(colors.red("Corrupted PID file. Removing it."));
+        fs.unlinkSync(store.pidPath);
+        resetProxyMarkers(store);
+        return true;
+      case "dead":
+        console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
+        fs.unlinkSync(store.pidPath);
+        fs.rmSync(store.portFilePath, { force: true });
+        resetProxyMarkers(store);
+        return true;
+      case "unrecorded": {
+        console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
+        if (proxy.pid === null) {
+          if (!isWindows && process.getuid?.() !== 0) return sudoStopOrHint(proxyPort);
+          console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
+          console.error(colors.blue("Try manually:"));
           console.error(
             colors.cyan(
-              isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+              isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
             )
           );
           return false;
         }
-      } else if (!isWindows && process.getuid?.() !== 0) {
-        return sudoStopOrHint(proxyPort);
-      } else {
-        console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
-        console.error(colors.blue("Try manually:"));
-        console.error(
-          colors.cyan(
-            isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
-          )
-        );
-        return false;
+        const stopped =
+          (await terminateProxy(proxyPort, proxy.pid)) &&
+          (await forgetProxy(store, proxyPort, null));
+        if (stopped) console.log(colors.green(`Killed process ${proxy.pid}. Proxy stopped.`));
+        return stopped;
       }
-    }
-    console.log(colors.yellow("Proxy is not running."));
-    return true;
-  }
-
-  try {
-    const pid = parseInt(fs.readFileSync(pidPath, "utf-8"), 10);
-    if (isNaN(pid)) {
-      console.error(colors.red("Corrupted PID file. Removing it."));
-      fs.unlinkSync(pidPath);
-      removeProxyIdentity(store);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return true;
-    }
-
-    // Check if the process is still alive before trying to kill it
-    try {
-      process.kill(pid, 0);
-    } catch (err: unknown) {
-      if (isErrnoException(err) && err.code === "EPERM") {
-        return sudoStopOrHint(proxyPort);
-      }
-      console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
-      fs.unlinkSync(pidPath);
-      removeProxyIdentity(store);
-      try {
-        fs.unlinkSync(store.portFilePath);
-      } catch {
-        // Port file may already be absent; non-fatal
-      }
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return true;
-    }
-
-    // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
-    if (!(await isProxyRunning(proxyPort))) {
-      const identity = await identifyRecordedProxy(store, pid, proxyPort);
-      if (identity === "recycled") {
-        if (!removeStateFileIfMatches(pidPath, String(pid))) {
-          console.error(
-            colors.red(`Proxy PID file changed to ${readStateFile(pidPath)}; leaving it in place.`)
-          );
-          return false;
-        }
-        if (!(await clearProxyStateAfterStop(store, proxyPort))) return false;
+      case "recycled":
+        if (!(await forgetProxy(store, proxyPort, proxy.pid))) return false;
         console.log(
           colors.yellow(
-            `PID ${pid} is not a proxy listening on port ${proxyPort}. Removed stale proxy state.`
+            `PID ${proxy.pid} is not a proxy listening on port ${proxyPort}. Removed stale proxy state.`
           )
         );
         return true;
-      }
-      const suspended = !isWindows && isProcessSuspended(pid) === true;
-      if (identity === "proxy") {
-        console.error(colors.red(`Proxy PID ${pid} is not responding on port ${proxyPort}.`));
-      } else {
+      case "unverified": {
+        const { pid, identity } = proxy;
         console.error(
-          colors.red(`Could not verify that PID ${pid} is the proxy on port ${proxyPort}.`)
-        );
-      }
-      console.error(colors.blue("It was not signaled, and its state and CA files are kept."));
-      if (suspended) {
-        console.error(colors.cyan(`The process is suspended. Resume it with: kill -CONT ${pid}`));
-      } else if (identity === "proxy") {
-        console.error(
-          colors.cyan(
-            `If it stays unresponsive, stop it with: ${
-              isWindows ? `taskkill /F /PID ${pid}` : `sudo kill ${pid}`
-            }`
+          colors.red(
+            identity === "proxy"
+              ? `Proxy PID ${pid} is not responding on port ${proxyPort}.`
+              : `Could not verify that PID ${pid} is the proxy on port ${proxyPort}.`
           )
         );
+        console.error(colors.blue("It was not signaled, and its state and CA files are kept."));
+        if (!isWindows && isProcessSuspended(pid) === true) {
+          console.error(colors.cyan(`The process is suspended. Resume it with: kill -CONT ${pid}`));
+        } else if (identity === "proxy") {
+          console.error(
+            colors.cyan(
+              `If it stays unresponsive, stop it with: ${
+                isWindows ? `taskkill /F /PID ${pid}` : `sudo kill ${pid}`
+              }`
+            )
+          );
+        }
+        return false;
       }
-      return false;
+      case "running": {
+        const stopped =
+          (await terminateProxy(proxyPort, proxy.pid)) &&
+          (await forgetProxy(store, proxyPort, proxy.pid));
+        if (stopped) console.log(colors.green("Proxy stopped."));
+        return stopped;
+      }
     }
-
-    process.kill(pid, "SIGTERM");
-    if (!(await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS))) {
-      console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
-      return false;
-    }
-    if (!removeStateFileIfMatches(pidPath, String(pid))) {
-      console.error(
-        colors.red(`Proxy PID changed to ${readStateFile(pidPath)}; leaving it in place.`)
-      );
-      return false;
-    }
-    if (!(await clearProxyStateAfterStop(store, proxyPort))) return false;
-    console.log(colors.green("Proxy stopped."));
-    return true;
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
       return sudoStopOrHint(proxyPort);

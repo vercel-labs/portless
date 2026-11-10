@@ -3871,7 +3871,7 @@ describe("CLI", { timeout: 15_000 }, () => {
           });
 
           expect(result.status).toBe(1);
-          expect(result.stderr).toContain("Proxy PID changed");
+          expect(result.stderr).toContain("Proxy PID file changed to 999999");
           expect(fs.readFileSync(pidPath, "utf-8")).toBe("999999");
           expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(true);
         } finally {
