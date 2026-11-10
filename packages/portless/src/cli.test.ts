@@ -502,6 +502,50 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
   });
 
+  describe("color per stream", () => {
+    const runWithTerminal = (terminal: "stdout" | "stderr", args: string[]) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-color-"));
+      try {
+        const preload = path.join(tmpDir, "terminal.cjs");
+        fs.writeFileSync(preload, `process.${terminal}.isTTY = true;\n`);
+        const env: Record<string, string | undefined> = {
+          ...process.env,
+          HOME: tmpDir,
+          USERPROFILE: tmpDir,
+          PORTLESS_STATE_DIR: tmpDir,
+        };
+        for (const name of ["NO_COLOR", "FORCE_COLOR", "PORTLESS", "PNPM_SCRIPT_SRC_DIR"]) {
+          delete env[name];
+        }
+        if (env.npm_command === "exec") delete env.npm_command;
+        return spawnSync(process.execPath, ["--require", preload, CLI_PATH, ...args], {
+          encoding: "utf-8",
+          timeout: 10_000,
+          env,
+          cwd: tmpDir,
+        });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    };
+
+    it("keeps color codes out of a redirected stderr when stdout is a terminal", () => {
+      const error = runWithTerminal("stdout", ["list", "--bogus"]);
+      expect(error.status).toBe(2);
+      expect(error.stderr).toContain("Unknown flag");
+      expect(error.stderr).not.toContain("\x1b[");
+      expect(runWithTerminal("stdout", ["--help"]).stdout).toContain("\x1b[1m");
+    });
+
+    it("keeps color codes out of a redirected stdout when stderr is a terminal", () => {
+      const help = runWithTerminal("stderr", ["--help"]);
+      expect(help.status).toBe(0);
+      expect(help.stdout).toContain("portless");
+      expect(help.stdout).not.toContain("\x1b[");
+      expect(runWithTerminal("stderr", ["list", "--bogus"]).stderr).toContain("\x1b[31m");
+    });
+  });
+
   describe("--version", () => {
     it("prints version and exits 0 with --version", () => {
       const { status, stdout } = run(["--version"]);

@@ -2,7 +2,7 @@
 
 declare const __VERSION__: string;
 
-import colors from "./colors.js";
+import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
@@ -4165,8 +4165,8 @@ function prefixStream(
 }
 
 function pipeOutput(child: ReturnType<typeof spawn>, prefix: string): void {
-  prefixStream(child.stdout, process.stdout, prefix);
-  prefixStream(child.stderr, process.stderr, prefix);
+  prefixStream(child.stdout, process.stdout, colorFor("stdout", prefix));
+  prefixStream(child.stderr, process.stderr, colorFor("stderr", prefix));
 }
 
 async function spawnProxiedApp(
