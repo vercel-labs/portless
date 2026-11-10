@@ -171,7 +171,7 @@ import {
   printServiceHelp,
   tryUninstallService,
 } from "./service.js";
-import { runMcp } from "./mcp.js";
+import { printMcpHelp, runMcp } from "./mcp.js";
 import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
 
 const chalk = colors;
@@ -5350,7 +5350,7 @@ const COMMANDS: Record<CommandName, CommandEntry> = {
   trust: { run: handleTrust, help: printTrustHelp },
   clean: { run: handleClean, help: printCleanHelp },
   prune: { run: handlePrune, help: printPruneHelp },
-  mcp: { run: (args) => runMcp(args.slice(1)) },
+  mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp },
 };
 
 async function main() {
