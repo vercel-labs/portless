@@ -3163,6 +3163,22 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("clean subcommand", () => {
+    let tmpDir: string;
+    let stateDir: string;
+    let home: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-"));
+      stateDir = path.join(tmpDir, "state");
+      home = path.join(tmpDir, "home");
+      fs.mkdirSync(stateDir);
+      fs.mkdirSync(home);
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
     it.skipIf(process.platform === "win32")(
       "clean --yes removes a leftover routes.lock directory",
       async ({ skip }) => {
@@ -3210,11 +3226,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.skipIf(process.platform === "win32")(
       "waits for the proxy listener to close before reporting success",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-stop-race-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         const proxy = await startMockProxy(stateDir, { sigtermDelayMs: 300 });
         try {
           fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(proxy.child.pid));
@@ -3235,95 +3246,76 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(result.stdout).not.toContain("still running");
         } finally {
           await stopChild(proxy.child);
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "retries only the failed CA, state-file, and hosts steps through sudo",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-retry-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
         fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
         fs.writeFileSync(path.join(stateDir, "keep.txt"), "keep");
-        try {
-          const result = runWithHostsFileMock(["clean", "--yes"], {
-            content: "# portless-start\n127.0.0.1 stale.localhost\n# portless-end\n",
-            writeMode: "privileged",
-            failPrivilegedCleanup: true,
-            stateDir,
-            uid: 1000,
-            sudoStatus: 1,
-            extraEnv: {
-              HOME: home,
-              PORTLESS_PORT: String(await getFreePort()),
-              PORTLESS_HTTPS: "0",
-            },
-          });
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "# portless-start\n127.0.0.1 stale.localhost\n# portless-end\n",
+          writeMode: "privileged",
+          failPrivilegedCleanup: true,
+          stateDir,
+          uid: 1000,
+          sudoStatus: 1,
+          extraEnv: {
+            HOME: home,
+            PORTLESS_PORT: String(await getFreePort()),
+            PORTLESS_HTTPS: "0",
+          },
+        });
 
-          expect(result.status).toBe(1);
-          expect(result.capture.sudoCalls).toHaveLength(1);
-          const sudoArgs = result.capture.sudoCalls[0]!.args;
-          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files,hosts");
-          expect(sudoArgs).toContain(`PORTLESS_INTERNAL_CLEAN_DIRS=${JSON.stringify([stateDir])}`);
-          expect(sudoArgs).not.toContain("PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY=1");
-          expect(sudoArgs.some((arg) => arg.startsWith("PORTLESS_STATE_DIR="))).toBe(false);
-          expect(sudoArgs.slice(-2)).toEqual(["clean", "--yes"]);
-          expect(sudoArgs.join(" ")).not.toContain("service");
-          expect(sudoArgs.join(" ")).not.toContain("prune");
-          expect(sudoArgs.join(" ")).not.toContain("--force");
-        } finally {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
+        expect(result.status).toBe(1);
+        expect(result.capture.sudoCalls).toHaveLength(1);
+        const sudoArgs = result.capture.sudoCalls[0]!.args;
+        expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files,hosts");
+        expect(sudoArgs).toContain(`PORTLESS_INTERNAL_CLEAN_DIRS=${JSON.stringify([stateDir])}`);
+        expect(sudoArgs).not.toContain("PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY=1");
+        expect(sudoArgs.some((arg) => arg.startsWith("PORTLESS_STATE_DIR="))).toBe(false);
+        expect(sudoArgs.slice(-2)).toEqual(["clean", "--yes"]);
+        expect(sudoArgs.join(" ")).not.toContain("service");
+        expect(sudoArgs.join(" ")).not.toContain("prune");
+        expect(sudoArgs.join(" ")).not.toContain("--force");
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "runs the elevated allowlist without calling sudo again",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-elevated-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
         fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
         fs.writeFileSync(path.join(stateDir, "keep.txt"), "keep");
-        try {
-          const result = runWithHostsFileMock(["clean", "--yes"], {
-            content: "# portless-start\n127.0.0.1 stale.localhost\n# portless-end\n",
-            writeMode: "privileged",
-            failPrivilegedCleanup: true,
-            stateDir,
-            uid: 1000,
-            extraEnv: {
-              HOME: home,
-              PORTLESS_PORT: String(await getFreePort()),
-              PORTLESS_HTTPS: "0",
-              PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files,hosts",
-              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
-            },
-          });
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "# portless-start\n127.0.0.1 stale.localhost\n# portless-end\n",
+          writeMode: "privileged",
+          failPrivilegedCleanup: true,
+          stateDir,
+          uid: 1000,
+          extraEnv: {
+            HOME: home,
+            PORTLESS_PORT: String(await getFreePort()),
+            PORTLESS_HTTPS: "0",
+            PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files,hosts",
+            PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
+          },
+        });
 
-          expect(result.status, result.stderr).toBe(0);
-          expect(result.capture.sudoCalls).toEqual([]);
-          expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
-          expect(fs.existsSync(path.join(stateDir, "ca.pem"))).toBe(false);
-          expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
-          expect(fs.readFileSync(path.join(stateDir, "keep.txt"), "utf-8")).toBe("keep");
-          expect(result.capture.content).not.toContain("portless-start");
-        } finally {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.capture.sudoCalls).toEqual([]);
+        expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "ca.pem"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
+        expect(fs.readFileSync(path.join(stateDir, "keep.txt"), "utf-8")).toBe("keep");
+        expect(result.capture.content).not.toContain("portless-start");
       }
     );
 
@@ -3363,11 +3355,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.skipIf(process.platform === "win32")(
       "requests CA and files retry when an approved state dir cannot be inspected",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-dir-denied-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
@@ -3400,119 +3387,89 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(fs.readFileSync(path.join(stateDir, "routes.json"), "utf-8")).toBe("[]");
         } finally {
           fs.chmodSync(stateDir, 0o700);
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "retries file cleanup when CA trust removal is the only failure",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-only-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
-        try {
-          const result = runWithHostsFileMock(["clean", "--yes"], {
-            content: "",
-            failPrivilegedCleanup: true,
-            stateDir,
-            uid: 1000,
-            sudoStatus: 1,
-            extraEnv: {
-              HOME: home,
-              PORTLESS_PORT: String(await getFreePort()),
-              PORTLESS_HTTPS: "0",
-            },
-          });
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "",
+          failPrivilegedCleanup: true,
+          stateDir,
+          uid: 1000,
+          sudoStatus: 1,
+          extraEnv: {
+            HOME: home,
+            PORTLESS_PORT: String(await getFreePort()),
+            PORTLESS_HTTPS: "0",
+          },
+        });
 
-          expect(result.status).toBe(1);
-          expect(result.capture.sudoCalls).toHaveLength(1);
-          const sudoArgs = result.capture.sudoCalls[0]!.args;
-          expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files");
-        } finally {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
+        expect(result.status).toBe(1);
+        expect(result.capture.sudoCalls).toHaveLength(1);
+        const sudoArgs = result.capture.sudoCalls[0]!.args;
+        expect(sudoArgs).toContain("PORTLESS_INTERNAL_CLEAN_STEPS=ca,files");
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "keeps CA identity when a failed sudo refresh leaves the retry marker",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-pending-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
-        try {
-          const result = runWithHostsFileMock(["clean", "--yes"], {
-            content: "",
-            failCAOnly: true,
-            stateDir,
-            uid: 1000,
-            sudoStatus: 1,
-            extraEnv: {
-              HOME: home,
-              PORTLESS_PORT: String(await getFreePort()),
-              PORTLESS_HTTPS: "0",
-            },
-          });
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "",
+          failCAOnly: true,
+          stateDir,
+          uid: 1000,
+          sudoStatus: 1,
+          extraEnv: {
+            HOME: home,
+            PORTLESS_PORT: String(await getFreePort()),
+            PORTLESS_HTTPS: "0",
+          },
+        });
 
-          expect(result.status).toBe(1);
-          expect(result.capture.sudoCalls).toHaveLength(1);
-          expect(result.stderr).toContain("Could not remove CA from trust store");
-          expect(result.stderr).toContain("Retained CA identity files");
-          expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
-          expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
-          expect(fs.readFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "utf-8")).toBe(
-            "1"
-          );
-        } finally {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
+        expect(result.status).toBe(1);
+        expect(result.capture.sudoCalls).toHaveLength(1);
+        expect(result.stderr).toContain("Could not remove CA from trust store");
+        expect(result.stderr).toContain("Retained CA identity files");
+        expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
+        expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
+        expect(fs.readFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "utf-8")).toBe("1");
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "removes preserved CA identity after a successful elevated trust retry",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-elevated-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
-        try {
-          const result = runWithHostsFileMock(["clean", "--yes"], {
-            content: "",
-            failPrivilegedCleanup: true,
-            sudoRunsCommand: true,
-            stateDir,
-            uid: 1000,
-            extraEnv: {
-              HOME: home,
-              PORTLESS_PORT: String(await getFreePort()),
-              PORTLESS_HTTPS: "0",
-            },
-          });
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "",
+          failPrivilegedCleanup: true,
+          sudoRunsCommand: true,
+          stateDir,
+          uid: 1000,
+          extraEnv: {
+            HOME: home,
+            PORTLESS_PORT: String(await getFreePort()),
+            PORTLESS_HTTPS: "0",
+          },
+        });
 
-          expect(result.status, result.stdout + result.stderr).toBe(0);
-          expect(result.capture.sudoCalls).toHaveLength(1);
-          expect(fs.existsSync(path.join(stateDir, "ca.pem"))).toBe(false);
-          expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
-          expect(fs.existsSync(path.join(stateDir, "ca.trust-refresh-pending"))).toBe(false);
-        } finally {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(result.capture.sudoCalls).toHaveLength(1);
+        expect(fs.existsSync(path.join(stateDir, "ca.pem"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "ca-key.pem"))).toBe(false);
+        expect(fs.existsSync(path.join(stateDir, "ca.trust-refresh-pending"))).toBe(false);
       }
     );
 
@@ -3543,14 +3500,9 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "keeps proxy identity when the proxy cannot be stopped",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-hung-proxy-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         const proxy = await startMockProxy(stateDir, { sigtermDelayMs: 6000 });
         try {
           fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(proxy.child.pid));
@@ -3600,7 +3552,6 @@ describe("CLI", { timeout: 15_000 }, () => {
             proxy.child.kill("SIGKILL");
             await new Promise<void>((resolve) => proxy.child.once("exit", () => resolve()));
           }
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },
       15_000
@@ -3610,11 +3561,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       it.skipIf(process.platform === "win32")(
         `keeps state and CA trust when a live proxy does not answer the probe (${identity} identity)`,
         async () => {
-          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-unresponsive-"));
-          const stateDir = path.join(tmpDir, "state");
-          const home = path.join(tmpDir, "home");
-          fs.mkdirSync(stateDir);
-          fs.mkdirSync(home);
           const proxy = await startMockProxy(stateDir, { portlessHeader: false });
           const pid = proxy.child.pid!;
           const startTimePath = path.join(stateDir, "proxy.start");
@@ -3658,7 +3604,6 @@ describe("CLI", { timeout: 15_000 }, () => {
             expect(isAlivePid(pid)).toBe(true);
           } finally {
             await stopChild(proxy.child);
-            fs.rmSync(tmpDir, { recursive: true, force: true });
           }
         },
         15_000
@@ -3669,11 +3614,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       it.skipIf(process.platform === "win32")(
         `keeps state and CA trust when a suspended proxy stops answering (${socketLookup} socket lookup)`,
         async () => {
-          const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-suspended-"));
-          const stateDir = path.join(tmpDir, "state");
-          const home = path.join(tmpDir, "home");
-          fs.mkdirSync(stateDir);
-          fs.mkdirSync(home);
           const proxy = await startMockProxy(stateDir);
           const pid = proxy.child.pid!;
           try {
@@ -3718,7 +3658,6 @@ describe("CLI", { timeout: 15_000 }, () => {
               proxy.child.kill("SIGKILL");
               await new Promise<void>((resolve) => proxy.child.once("exit", () => resolve()));
             }
-            fs.rmSync(tmpDir, { recursive: true, force: true });
           }
         },
         15_000
@@ -3728,11 +3667,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.skipIf(process.platform === "win32")(
       "removes stale proxy state for a recycled PID without signaling it",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-unrelated-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         const port = await getFreePort();
         const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
           stdio: "ignore",
@@ -3768,7 +3702,6 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(isAlivePid(pid)).toBe(true);
         } finally {
           unrelated.kill("SIGKILL");
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },
       15_000
@@ -3777,11 +3710,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.skipIf(process.platform === "win32")(
       "removes stale proxy state when the recorded start time belongs to another process",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-recycled-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         const port = await getFreePort();
         const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
           stdio: "ignore",
@@ -3817,7 +3745,6 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(isAlivePid(pid)).toBe(true);
         } finally {
           unrelated.kill("SIGKILL");
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },
       15_000
@@ -3826,11 +3753,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.skipIf(process.platform === "win32")(
       "removes stale proxy state when another process owns the proxy port",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-other-holder-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         const owner = await startMockProxy(stateDir, { portlessHeader: false });
         const ownerPid = owner.child.pid!;
         const unrelated = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
@@ -3868,7 +3790,6 @@ describe("CLI", { timeout: 15_000 }, () => {
         } finally {
           unrelated.kill("SIGKILL");
           await stopChild(owner.child);
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       },
       15_000
@@ -3877,11 +3798,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.skipIf(process.platform === "win32")(
       "does not erase a proxy that restarted while stopping",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-restarted-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         const pidPath = path.join(stateDir, "proxy.pid");
         const proxy = await startMockProxy(stateDir, { pidFileOnSigterm: pidPath });
         try {
@@ -3904,7 +3820,6 @@ describe("CLI", { timeout: 15_000 }, () => {
           expect(fs.existsSync(path.join(stateDir, "proxy.port"))).toBe(true);
         } finally {
           await stopChild(proxy.child);
-          fs.rmSync(tmpDir, { recursive: true, force: true });
         }
       }
     );
@@ -3942,37 +3857,28 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     );
 
-    it.skipIf(process.platform === "win32")(
+    it.runIf(process.platform === "linux")(
       "preserves CA identity when elevated trust removal still fails",
       async () => {
-        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-ca-failed-"));
-        const stateDir = path.join(tmpDir, "state");
-        const home = path.join(tmpDir, "home");
-        fs.mkdirSync(stateDir);
-        fs.mkdirSync(home);
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
-        try {
-          const result = runWithHostsFileMock(["clean", "--yes"], {
-            content: "",
-            failPrivilegedCleanup: true,
-            failCAAlways: true,
-            stateDir,
-            uid: 1000,
-            extraEnv: {
-              HOME: home,
-              PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files",
-              PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
-            },
-          });
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "",
+          failPrivilegedCleanup: true,
+          failCAAlways: true,
+          stateDir,
+          uid: 1000,
+          extraEnv: {
+            HOME: home,
+            PORTLESS_INTERNAL_CLEAN_STEPS: "ca,files",
+            PORTLESS_INTERNAL_CLEAN_DIRS: JSON.stringify([stateDir]),
+          },
+        });
 
-          expect(result.status).toBe(1);
-          expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
-          expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
-        } finally {
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        }
+        expect(result.status).toBe(1);
+        expect(fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8")).toBe("certificate");
+        expect(fs.readFileSync(path.join(stateDir, "ca-key.pem"), "utf-8")).toBe("private key");
       }
     );
 
