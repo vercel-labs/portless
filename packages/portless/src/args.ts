@@ -22,8 +22,8 @@ export interface ParsedArgs {
   value(flag: string): string | undefined;
 }
 
-/** Reports a flag as it is read, with the value of a value flag. Return false to stop reading. */
-export type FlagVisitor = (flag: string, value: string | undefined) => boolean | void;
+/** Reports a flag as it is read, with the value of a value flag. */
+export type FlagVisitor = (flag: string, value: string | undefined) => void;
 
 /** One recognized flag token: its name, its value, and the last index it used. */
 interface FlagToken {
@@ -133,7 +133,7 @@ export function parseCommandArgs(
 }
 
 /**
- * Visits leading flags in argument order until `--`, a positional, or `visit` returns false.
+ * Visits leading flags in argument order until `--` or a positional.
  * Returns child arguments unchanged; callers decide how repeated flags are handled.
  */
 export function visitLeadingFlags(
@@ -147,7 +147,7 @@ export function visitLeadingFlags(
     if (arg === "--") return args.slice(i + 1);
     if (!arg.startsWith("-") || arg === "-") return args.slice(i);
     const token = readFlagToken(command, args, i, spec);
-    if (visit(token.flag, token.value) === false) return [];
+    visit(token.flag, token.value);
     i = token.end;
   }
 
