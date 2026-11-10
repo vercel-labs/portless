@@ -517,6 +517,14 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("portless doctor");
       expect(stdout).not.toContain("--prefix <label>");
       expect(stdout).toContain("Run options: portless run --help");
+      const [zeroArgOptions, commandOptions] = stdout
+        .slice(stdout.indexOf("Options:"), stdout.indexOf("Environment variables:"))
+        .split("Options for run and <name> <command>:");
+      expect(zeroArgOptions).toContain("--script <name>");
+      for (const flag of ["--name <name>", "--force", "--app-port <number>"]) {
+        expect(zeroArgOptions).not.toContain(flag);
+        expect(commandOptions).toContain(flag);
+      }
       expect(run(["run", "--help"]).stdout).toContain("--prefix <label>");
       expect(stdout).not.toContain("--port");
       expect(stdout).not.toContain("--foreground");

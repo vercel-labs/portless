@@ -2451,10 +2451,12 @@ ${colors.bold("Options:")}
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
-  --force                       Kill the existing process and take over its route
-  --name <name>                 Set the app name or bypass command dispatch
-  --app-port <number>           Use a fixed port for the app
   --                            Stop flag parsing and pass remaining arguments to the app
+
+${colors.bold("Options for run and <name> <command>:")}
+  --name <name>                 Set the app name or bypass command dispatch
+  --force                       Kill the existing process and take over its route
+  --app-port <number>           Use a fixed port for the app
 
 ${colors.bold("Environment variables:")}
   PORTLESS=0                    Run app commands directly without the proxy
