@@ -702,11 +702,21 @@ async function stopRecordedGroups(
 }
 
 /**
+ * Whether a stale record still has recovery work that startup cannot finish: a
+ * Tailscale share is unregistered by prune or clean, so its record must stay.
+ */
+function keepsStaleRecordAfterRecovery(route: RouteMapping): boolean {
+  return route.tailscaleHttpsPort !== undefined;
+}
+
+/**
  * Stop dev servers left running by portless sessions that died without
  * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
  * the stored process group is the only remaining link to the orphaned tree.
  * Shares stay while the group is still running, and a member that outlived
- * SIGTERM is recorded so `prune --force` can retry it.
+ * SIGTERM is recorded so `prune --force` can retry it. A record whose group is
+ * verified gone and whose tunnels were stopped is removed, so later runs do not
+ * signal the same tunnel PIDs again.
  */
 async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
   const orphaned = store
@@ -735,6 +745,9 @@ async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
     for (const t of stopRecordedTunnels(route, true)) {
       const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
       console.error(colors.yellow(message));
+    }
+    if (!keepsStaleRecordAfterRecovery(route)) {
+      store.removeStaleRoute(route.hostname, route.pid);
     }
   }
 }
@@ -1260,6 +1273,52 @@ function isProcessRunning(pid: number): boolean {
   return true;
 }
 
+/**
+ * Whether a live PID is suspended by SIGSTOP or a debugger. Returns null when
+ * the platform or a failed lookup cannot report the state, so callers keep the
+ * stored proxy state instead of guessing from the listening socket.
+ */
+function isProcessSuspended(pid: number): boolean | null {
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      const state = stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
+      if (!state) return null;
+      return state === "T" || state === "t";
+    }
+    if (process.platform === "darwin") {
+      const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+        encoding: "utf-8",
+        timeout: 2000,
+      }).trim();
+      if (!state) return null;
+      return state.startsWith("T");
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Clear the port file and runtime markers once the proxy process is gone. */
+async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): Promise<boolean> {
+  if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
+    console.error(
+      colors.red(`Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`)
+    );
+    return false;
+  }
+  if (await isProxyRunning(proxyPort)) {
+    console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
+    return false;
+  }
+  writeTlsMarker(store.dir, false);
+  writeCustomCertMarker(store.dir, false);
+  writeTldFile(store.dir, DEFAULT_TLD);
+  writeLanMarker(store.dir, null);
+  return true;
+}
+
 /** Wait until the recorded PID exits and its listener closes. */
 async function waitForProxyToClose(
   proxyPort: number,
@@ -1301,24 +1360,7 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
             );
             return false;
           }
-          if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
-            console.error(
-              colors.red(
-                `Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`
-              )
-            );
-            return false;
-          }
-          if (await isProxyRunning(proxyPort)) {
-            console.error(
-              colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`)
-            );
-            return false;
-          }
-          writeTlsMarker(store.dir, false);
-          writeCustomCertMarker(store.dir, false);
-          writeTldFile(store.dir, DEFAULT_TLD);
-          writeLanMarker(store.dir, null);
+          if (!(await clearProxyStateAfterStop(store, proxyPort))) return false;
           console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
           return true;
         } catch (err: unknown) {
@@ -1387,6 +1429,21 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
 
     // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
     if (!(await isProxyRunning(proxyPort))) {
+      if (isProcessSuspended(pid) === false) {
+        if (!removeStateFileIfMatches(pidPath, String(pid))) {
+          console.error(
+            colors.red(`Proxy PID file changed to ${readStateFile(pidPath)}; leaving it in place.`)
+          );
+          return false;
+        }
+        if (!(await clearProxyStateAfterStop(store, proxyPort))) return false;
+        console.log(
+          colors.yellow(
+            `PID ${pid} is not a proxy listening on port ${proxyPort}. Removed stale proxy state.`
+          )
+        );
+        return true;
+      }
       console.error(
         colors.red(`Could not verify that PID ${pid} is a proxy that stopped on port ${proxyPort}.`)
       );
@@ -1406,33 +1463,13 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
       return false;
     }
-    const storedPid = readStateFile(pidPath);
-    if (storedPid !== null && storedPid !== String(pid)) {
-      console.error(colors.red(`Proxy PID changed to ${storedPid}; leaving it in place.`));
-      return false;
-    }
-    if (storedPid !== null && !removeStateFileIfMatches(pidPath, String(pid))) {
-      console.error(colors.red("Proxy PID file changed while stopping; leaving it in place."));
-      return false;
-    }
-    if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
+    if (!removeStateFileIfMatches(pidPath, String(pid))) {
       console.error(
-        colors.red(
-          `Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`
-        )
+        colors.red(`Proxy PID changed to ${readStateFile(pidPath)}; leaving it in place.`)
       );
       return false;
     }
-    if (await isProxyRunning(proxyPort)) {
-      console.error(
-        colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`)
-      );
-      return false;
-    }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    if (!(await clearProxyStateAfterStop(store, proxyPort))) return false;
     console.log(colors.green("Proxy stopped."));
     return true;
   } catch (err: unknown) {

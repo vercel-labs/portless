@@ -1413,6 +1413,58 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "drops a stale recovery record once its orphaned group and tunnel are gone",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-start-recovery-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const binaryPath = path.join(tmpDir, "ngrok");
+        fs.copyFileSync(process.execPath, binaryPath);
+        const tunnel = spawn(
+          binaryPath,
+          ["-e", 'process.title="ngrok";setInterval(() => {}, 1000)'],
+          { stdio: "ignore" }
+        );
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_PORT: String(await getFreePort()),
+          PORTLESS_HTTPS: "0",
+        };
+        try {
+          fs.writeFileSync(
+            routesPath,
+            JSON.stringify([
+              {
+                hostname: "stale.localhost",
+                port: await getFreePort(),
+                pid: 999999,
+                childPgid: 999999,
+                childStartTime: "leader-start",
+                ngrokPid: tunnel.pid,
+                registeredAt: Date.now() - 60_000,
+              },
+            ])
+          );
+
+          const result = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stderr).toContain("Stopped orphaned ngrok tunnel");
+          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
+          await new Promise<void>((resolve) => {
+            if (tunnel.exitCode !== null || tunnel.signalCode !== null) resolve();
+            else tunnel.once("exit", () => resolve());
+          });
+          expect(isAlivePid(tunnel.pid!)).toBe(false);
+        } finally {
+          tunnel.kill("SIGKILL");
+          run(["proxy", "stop"], { env });
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      },
+      20_000
+    );
   });
 
   describe("doctor", () => {
@@ -3433,7 +3485,7 @@ describe("CLI", { timeout: 15_000 }, () => {
     }
 
     it.skipIf(process.platform === "win32")(
-      "keeps state and does not signal a live recorded PID that is not the proxy",
+      "removes stale proxy state for a recycled PID without signaling it",
       async () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-unrelated-"));
         const stateDir = path.join(tmpDir, "state");
@@ -3449,8 +3501,8 @@ describe("CLI", { timeout: 15_000 }, () => {
           await new Promise((resolve) => setTimeout(resolve, 200));
           fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
           fs.writeFileSync(path.join(stateDir, "proxy.port"), String(port));
-          fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
-          fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
+          fs.writeFileSync(path.join(stateDir, "proxy.tls"), "1");
+          fs.writeFileSync(path.join(stateDir, "proxy.lan"), "192.0.2.10");
 
           const result = runWithHostsFileMock(["clean", "--yes"], {
             content: "",
@@ -3464,11 +3516,13 @@ describe("CLI", { timeout: 15_000 }, () => {
             },
           });
 
-          expect(result.status).toBe(1);
-          expect(result.stderr).toContain(`Could not verify that PID ${pid}`);
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout).toContain(`PID ${pid} is not a proxy listening on port ${port}`);
+          expect(result.stdout).toContain("Removed stale proxy state");
+          expect(result.stderr).not.toContain("kill -CONT");
           expect(result.capture.sudoCalls).toEqual([]);
-          for (const file of ["proxy.pid", "ca.pem", "ca-key.pem"]) {
-            expect(fs.existsSync(path.join(stateDir, file))).toBe(true);
+          for (const file of ["proxy.pid", "proxy.port"]) {
+            expect(fs.existsSync(path.join(stateDir, file))).toBe(false);
           }
           expect(isAlivePid(pid)).toBe(true);
         } finally {

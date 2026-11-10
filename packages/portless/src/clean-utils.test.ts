@@ -4,7 +4,6 @@ import * as path from "node:path";
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   attemptCATrustRemovalForCleanup,
-  collectStateDirsForCleanup,
   collectStateDirsForCleanupWithFailures,
   isCleanableStateDir,
   removePortlessStateFiles,
@@ -28,7 +27,7 @@ vi.mock("./cli-utils.js", async (importOriginal) => {
   };
 });
 
-describe("collectStateDirsForCleanup", () => {
+describe("collectStateDirsForCleanupWithFailures", () => {
   const prevState = process.env.PORTLESS_STATE_DIR;
 
   afterEach(() => {
@@ -39,7 +38,7 @@ describe("collectStateDirsForCleanup", () => {
   it("includes PORTLESS_STATE_DIR when the directory exists", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-"));
     process.env.PORTLESS_STATE_DIR = tmp;
-    const dirs = collectStateDirsForCleanup();
+    const { dirs } = collectStateDirsForCleanupWithFailures();
     expect(dirs).toContain(path.resolve(tmp));
     fs.rmSync(tmp, { recursive: true, force: true });
   });
@@ -55,7 +54,7 @@ describe("collectStateDirsForCleanup", () => {
       process.env.PORTLESS_STATE_DIR = link;
       try {
         expect(isCleanableStateDir(link)).toBe(false);
-        const dirs = collectStateDirsForCleanup();
+        const { dirs } = collectStateDirsForCleanupWithFailures();
         expect(dirs).toContain(canonical);
         expect(dirs).not.toContain(link);
 
