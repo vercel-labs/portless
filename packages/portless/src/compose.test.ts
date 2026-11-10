@@ -528,6 +528,15 @@ describe("composeGlobalError", () => {
     expect(composeGlobalError(["--env-file="])).toBe("--env-file requires a value.");
   });
 
+  it("reports an empty value the same way in every form", () => {
+    expect(composeGlobalError(["--file", ""])).toBe("--file requires a value.");
+    expect(composeGlobalError(["-f", ""])).toBe("-f requires a value.");
+    expect(composeGlobalError(["--project-name", "", "-f", "compose.yml"])).toBe(
+      "--project-name requires a value."
+    );
+    expect(splitComposeArgs(["--file", "", "ps"]).subcommand).toBe("ps");
+  });
+
   it("reports an invalid boolean value", () => {
     expect(composeGlobalError(["--dry-run=yes"])).toBe("--dry-run takes true or false.");
     expect(composeGlobalError(["-h=yes"])).toBe("-h takes true or false.");
