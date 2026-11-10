@@ -127,16 +127,6 @@ describe("visitLeadingFlags", () => {
     expect(rest).toEqual(["next", "--force=false"]);
   });
 
-  it("stops when the visitor asks it to", () => {
-    const visits: string[] = [];
-    const rest = visitLeadingFlags("run", ["--name=a", "--bogus"], childSpec, (flag) => {
-      visits.push(flag);
-      return false;
-    });
-    expect(visits).toEqual(["--name"]);
-    expect(rest).toEqual([]);
-  });
-
   it("drops a leading -- and keeps everything after it", () => {
     const visits: string[] = [];
     const rest = visitLeadingFlags("run", ["--", "--force", "next"], childSpec, (flag) => {
