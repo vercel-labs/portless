@@ -13,6 +13,7 @@ import {
   generateHostsSyncToken,
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
+import { COMMAND_NAMES } from "./commands.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
@@ -449,6 +450,34 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(stdout.trimStart()).toMatch(new RegExp(`^portless ${command} - `));
         expect(fs.readdirSync(state)).toEqual(["routes.json"]);
         expect(fs.readFileSync(path.join(state, "routes.json"), "utf-8")).toBe(routes);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each(
+      COMMAND_NAMES.filter((name) => name !== "run" && name !== "compose").flatMap((name) => [
+        [[name, "--", "--help"], name],
+        [[name, "--", "-h"], name],
+        [[name, "--bogus", "--help"], name],
+      ])
+    )("prints help for %j, a command that wraps nothing", (args, command) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
+      try {
+        const bin = path.join(tmpDir, "bin");
+        const home = path.join(tmpDir, "home");
+        const state = path.join(tmpDir, "state");
+        fs.mkdirSync(bin);
+        fs.mkdirSync(home);
+        fs.mkdirSync(state);
+        const { status, stdout, stderr } = run(args as string[], {
+          cwd: tmpDir,
+          env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
+        });
+        expect(status).toBe(0);
+        expect(stderr).toBe("");
+        expect(stdout).toContain(`portless ${command}`);
+        expect(fs.readdirSync(state)).toEqual([]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
