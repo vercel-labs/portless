@@ -1950,7 +1950,8 @@ describe("resolveTurboRootForwarding", () => {
     ["pnpm dlx turbo dev", 1],
     ["pnpm dlx turbo@2 dev", 1],
     ["bunx turbo dev", 1],
-    ["yarn turbo dev", 1],
+    ["yarn turbo dev", 2],
+    ["yarn exec turbo dev", 2],
     ["yarn exec -- turbo dev", 1],
     ["yarn dlx turbo@2 dev", 1],
     ["FOO=bar turbo dev", 1],
@@ -1968,8 +1969,15 @@ describe("resolveTurboRootForwarding", () => {
     ["turbo dev --", 0],
     ["turbo dev -- --inspect", 0],
     ["npx turbo dev --", 0],
-  ])("returns %i separator(s) for %s", (script, separators) => {
+  ])("resolves %s with %i separator(s)", (script, separators) => {
     expect(resolve(script)).toEqual({ kind: "forward", separators });
+  });
+
+  it.each([
+    ["yarn turbo dev", 1],
+    ["yarn exec turbo dev", 1],
+  ])("resolves Yarn Berry %s with %i separator(s)", (script, separators) => {
+    expect(resolve(script, {}, "yarn@4.0.0")).toEqual({ kind: "forward", separators });
   });
 
   it.each([
@@ -2016,6 +2024,10 @@ describe("resolveTurboRootForwarding", () => {
     ["yarn@1.22.19", "yarn run turbo-dev --", "turbo dev", 1],
     ["yarn@4.0.0", "yarn run turbo-dev", "turbo dev", 1],
     ["yarn@4.0.0", "yarn run turbo-dev --", "turbo dev", 0],
+    ["yarn@1.22.19", "yarn turbo-dev", "turbo dev", 2],
+    ["yarn@1.22.19", "yarn turbo-dev --", "turbo dev", 1],
+    ["yarn@4.0.0", "yarn turbo-dev", "turbo dev", 1],
+    ["yarn@4.0.0", "yarn turbo-dev --", "turbo dev", 0],
     ["npm@10.0.0", "FOO=1 npm run turbo-dev", "turbo dev", 2],
     ["npm@10.0.0", "FOO=1 npm run turbo-dev --", "turbo dev", 1],
     ["npm@10.0.0", "FOO=1 npm run turbo-dev", "turbo dev -- --fixed", 1],

@@ -2169,11 +2169,12 @@ type CommandResolution = {
   packageSpec: boolean;
 };
 
-function commandIndex(commandArgs: string[]): CommandResolution | null {
+function commandIndex(commandArgs: string[], packageDir: string): CommandResolution | null {
   let i = 0;
   let commandStart = -1;
   let consumedSeparators = 0;
   let packageSpec = false;
+  const yarnClassic = isYarnClassic(packageDir);
   for (;;) {
     while (i < commandArgs.length && ENV_ASSIGNMENT.test(commandArgs[i])) i++;
     if (i >= commandArgs.length) return null;
@@ -2198,10 +2199,25 @@ function commandIndex(commandArgs: string[]): CommandResolution | null {
     ) {
       subcommand = commandArgs[skipped.index];
       const afterSubcommand = skipRunnerPrefix(commandArgs, skipped.index + 1, runner);
-      if (name === "npm" && !afterSubcommand.separator) consumedSeparators++;
+      if (
+        !afterSubcommand.separator &&
+        (name === "npm" || (name === "yarn" && yarnClassic && subcommand === "exec"))
+      ) {
+        consumedSeparators++;
+      }
       i = afterSubcommand.index;
     } else {
       i = skipped.index;
+      const target = commandArgs[i];
+      if (
+        name === "yarn" &&
+        yarnClassic &&
+        target !== undefined &&
+        !target.startsWith("-") &&
+        !["run", "exec", "dlx"].includes(target)
+      ) {
+        consumedSeparators++;
+      }
     }
     packageSpec = isPackageSpecRunner(name, subcommand);
   }
@@ -2499,6 +2515,51 @@ export type TurboRootForwarding =
   | { kind: "forward"; separators: number }
   | { kind: "unsafe"; turbo: boolean };
 
+type ScriptDelegation = {
+  scriptName: string;
+  tailStart: number;
+  consumedSeparators: number;
+};
+
+/**
+ * Identify a package-manager invocation that runs another package script.
+ * Yarn also runs a script by name without `run`, and only its classic version
+ * consumes one separator before forwarding the script's arguments.
+ */
+function resolveScriptDelegation(
+  commandArgs: string[],
+  packageDir: string,
+  targetIndex: number
+): ScriptDelegation | null {
+  const manager = commandBasename(commandArgs[0] ?? "");
+  if (!PACKAGE_SCRIPT_MANAGERS.has(manager)) return null;
+
+  const runIndex =
+    commandArgs[targetIndex] === "run" ? targetIndex : commandArgs[1] === "run" ? 1 : -1;
+  if (runIndex >= 0) {
+    const scriptName = commandArgs[runIndex + 1];
+    if (!scriptName || scriptName.startsWith("-")) return null;
+    const consumedSeparators =
+      manager === "npm" || manager === "bun" || (manager === "yarn" && isYarnClassic(packageDir))
+        ? 1
+        : 0;
+    return { scriptName, tailStart: runIndex + 2, consumedSeparators };
+  }
+
+  const scriptName = commandArgs[targetIndex];
+  if (
+    manager === "yarn" &&
+    targetIndex > 0 &&
+    scriptName !== undefined &&
+    !scriptName.startsWith("-") &&
+    !["exec", "dlx"].includes(scriptName)
+  ) {
+    return { scriptName, tailStart: targetIndex + 1, consumedSeparators: 0 };
+  }
+
+  return null;
+}
+
 function resolveTurboScript(
   scriptName: string,
   packageDir: string,
@@ -2512,7 +2573,7 @@ function resolveTurboScript(
   if (isUnsafeToAppendArgs(raw)) {
     return { kind: "unsafe", turbo: mentionsTurbo(commandArgs) };
   }
-  const resolved = commandIndex(commandArgs);
+  const resolved = commandIndex(commandArgs, packageDir);
   if (resolved && isTurboCommand(commandArgs[resolved.index], resolved.packageSpec)) {
     const existing =
       inheritedSeparators +
@@ -2524,21 +2585,18 @@ function resolveTurboScript(
   }
   if (depth === 0 && resolved) {
     const command = commandArgs.slice(resolved.commandStart);
-    const packageManager = commandBasename(command[0]!);
-    const scriptTokens = resolvePackageScriptTokens(command, packageDir);
-    if (scriptTokens) {
-      const nestedConsumed =
-        packageManager === "npm" ||
-        packageManager === "bun" ||
-        (packageManager === "yarn" && isYarnClassic(packageDir))
-          ? 1
-          : 0;
+    const delegation = resolveScriptDelegation(
+      command,
+      packageDir,
+      resolved.index - resolved.commandStart
+    );
+    if (delegation && resolveScript(delegation.scriptName, packageDir)) {
       return resolveTurboScript(
-        command[2]!,
+        delegation.scriptName,
         packageDir,
         1,
-        consumedSeparators + resolved.consumedSeparators + nestedConsumed,
-        command.slice(3).filter((arg) => arg === "--").length
+        consumedSeparators + resolved.consumedSeparators + delegation.consumedSeparators,
+        command.slice(delegation.tailStart).filter((arg) => arg === "--").length
       );
     }
   }
