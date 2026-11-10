@@ -1966,6 +1966,13 @@ describe("resolveTurboRootForwarding", () => {
     ["env --ignore-environment -- turbo dev", 1],
     ["cross-env NODE_ENV=test turbo dev", 1],
     ["cross-env NODE_ENV=test npx turbo dev", 1],
+    ["dotenv -- turbo dev", 1],
+    ["dotenv -e .env.local -- turbo dev", 1],
+    ["dotenv turbo dev", 2],
+    ["dotenv turbo dev --", 1],
+    ["bun x turbo dev", 1],
+    ["bun --bun x turbo@2 dev", 1],
+    ["bun run turbo dev", 1],
     ["turbo dev --", 0],
     ["turbo dev -- --inspect", 0],
     ["npx turbo dev --", 0],
@@ -2059,14 +2066,15 @@ describe("resolveTurboRootForwarding", () => {
     });
   });
 
-  it("returns none beyond one level", () => {
-    expect(
-      resolve(
-        "npm run turbo-dev",
-        { "turbo-dev": "npm run deeper", deeper: "turbo dev" },
-        "npm@10.0.0"
-      )
-    ).toEqual({ kind: "none" });
+  it("follows delegation through several scripts and stops at a cycle", () => {
+    const nested = { "turbo-dev": "npm run deeper", deeper: "turbo dev" };
+    expect(resolve("npm run turbo-dev", nested, "npm@10.0.0")).toEqual({
+      kind: "forward",
+      separators: 3,
+    });
+    expect(resolve("npm run other", { other: "npm run dev" }, "npm@10.0.0")).toEqual({
+      kind: "none",
+    });
   });
 
   it("returns none when the script is missing", () => {
