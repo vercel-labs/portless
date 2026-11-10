@@ -467,9 +467,13 @@ describe("orphaned process groups", () => {
       pid: number;
     }>;
     const matching = records.filter((route) => route.hostname === hostname);
-    expect(matching[0]).toMatchObject({ port: state.appPort, pid: state.cliChild!.pid });
-    expect(matching[0]!.port).not.toBe(oldPort);
-    expect(matching.some((route) => route.port === oldPort && !isAlive(route.pid))).toBe(true);
+    expect(matching).toEqual([
+      expect.objectContaining({ port: state.appPort, pid: state.cliChild!.pid }),
+    ]);
+    expect(state.appPort).not.toBe(oldPort);
+
+    expect(await waitForPidToExit(pid, 5000)).toBe(true);
+    expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
 
     const pruneResult = spawnSync(process.execPath, [CLI_PATH, "prune"], {
       env: {
@@ -483,6 +487,8 @@ describe("orphaned process groups", () => {
       timeout: 10_000,
     });
     expect(pruneResult.status, pruneResult.stderr).toBe(0);
+    expect(pruneResult.stdout).toContain("No orphaned routes found");
+    expect(pruneResult.stdout).not.toContain("killed process group");
 
     const afterPrune = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
       hostname: string;
@@ -491,8 +497,7 @@ describe("orphaned process groups", () => {
     expect(afterPrune.filter((route) => route.hostname === hostname)).toEqual([
       expect.objectContaining({ port: state.appPort }),
     ]);
-    expect(await waitForPidToExit(pid, 5000)).toBe(true);
-    expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
+    expect(isAlive(state.cliChild!.pid!)).toBe(true);
   });
 });
 
