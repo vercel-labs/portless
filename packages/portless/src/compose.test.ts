@@ -33,6 +33,7 @@ describe("splitComposeArgs", () => {
       globals: ["-f", "a.yml", "--profile", "dev"],
       subcommand: "up",
       rest: ["-d", "web"],
+      dockerArgs: ["-f", "a.yml", "--profile", "dev", "up", "-d", "web"],
     });
   });
 
@@ -41,6 +42,7 @@ describe("splitComposeArgs", () => {
       globals: ["--file=a.yml", "--dry-run"],
       subcommand: "down",
       rest: [],
+      dockerArgs: ["--file=a.yml", "--dry-run", "down"],
     });
   });
 
@@ -49,16 +51,32 @@ describe("splitComposeArgs", () => {
       globals: ["-fcompose.yml", "-p=demo", "--profile", "dev"],
       subcommand: "up",
       rest: [],
+      dockerArgs: ["-fcompose.yml", "-p=demo", "--profile", "dev", "up"],
     });
   });
 
-  it("ends the wrapper's globals at --", () => {
+  it("ends the wrapper's globals at -- and keeps it from docker", () => {
     expect(splitComposeArgs(["-f", "a.yml", "--", "up", "-d"])).toEqual({
       globals: ["-f", "a.yml"],
       subcommand: "up",
       rest: ["-d"],
+      dockerArgs: ["-f", "a.yml", "up", "-d"],
     });
-    expect(splitComposeArgs(["--"])).toEqual({ globals: [], subcommand: undefined, rest: [] });
+    expect(splitComposeArgs(["--"])).toEqual({
+      globals: [],
+      subcommand: undefined,
+      rest: [],
+      dockerArgs: [],
+    });
+  });
+
+  it("keeps a -- that belongs to the subcommand", () => {
+    expect(splitComposeArgs(["up", "--", "--build"])).toEqual({
+      globals: [],
+      subcommand: "up",
+      rest: ["--", "--build"],
+      dockerArgs: ["up", "--", "--build"],
+    });
   });
 });
 
@@ -90,13 +108,22 @@ describe("buildUpArgs", () => {
     expect(dir(["-finfra/compose.yml"])).toBe(path.resolve("/app", "infra"));
     expect(dir(["-f=infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
     expect(dir(["--file=infra/compose.yml", "--project-directory", "/other"])).toBe("/other");
+    expect(dir(["--workdir", "/work"])).toBe("/work");
+    expect(dir(["--workdir=/work", "--project-directory", "/other"])).toBe("/other");
   });
 
   it("strips attached file, project, and directory flags", () => {
     expect(
       buildUpArgs({
         ...base,
-        globals: ["-fcompose.yml", "-p=demo", "--project-directory=/other", "--profile", "dev"],
+        globals: [
+          "-fcompose.yml",
+          "-p=demo",
+          "--project-directory=/other",
+          "--workdir=/old",
+          "--profile",
+          "dev",
+        ],
       })
     ).toEqual([
       "-p",
@@ -477,6 +504,12 @@ describe("composeGlobalError", () => {
   it("accepts attached shorthand values", () => {
     expect(composeGlobalError(["-fcompose.yml", "-f=compose.yml", "-pdemo", "-p=demo"])).toBeNull();
     expect(composeGlobalError(["-f-", "-f=-"])).toBeNull();
+  });
+
+  it("accepts the deprecated --workdir value flag and its long form only", () => {
+    expect(composeGlobalError(["--workdir", "/app", "--workdir=/app"])).toBeNull();
+    expect(composeGlobalError(["-w", "/app"])).toBe('Unknown flag "-w" for portless compose.');
+    expect(composeGlobalError(["--workdir="])).toBe("--workdir requires a value.");
   });
 
   it("accepts boolean values", () => {

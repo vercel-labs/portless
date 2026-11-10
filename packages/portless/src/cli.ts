@@ -2760,11 +2760,6 @@ async function handleAlias(args: string[]): Promise<void> {
   }
   if (!isRemove && !aliasName) throw new UsageError("Missing alias name.", usageHints);
   if (!isRemove && !aliasPortValue) throw new UsageError("Missing port.", usageHints);
-  if (args.slice(1).some((arg) => arg.startsWith("--upstream="))) {
-    throw new UsageError("Use --upstream followed by a separate value.", [
-      "See: portless alias --help",
-    ]);
-  }
   const upstreamValues = parsed.values("--upstream");
   if (upstreamValues.length > 1) {
     throw new UsageError("--upstream may be specified only once.", ["See: portless alias --help"]);
@@ -4954,7 +4949,7 @@ function assertComposeGlobals(globals: readonly string[]): void {
 
 async function handleCompose(args: string[]): Promise<void> {
   const composeArgs = args.slice(1);
-  const { globals, subcommand, rest } = splitComposeArgs(composeArgs);
+  const { globals, subcommand, rest, dockerArgs } = splitComposeArgs(composeArgs);
   const childHelp = rest.includes("--help") || rest.includes("-h");
   const globalHelp = isGlobalFlagSet(globals, ["--help", "-h"]);
 
@@ -4969,13 +4964,13 @@ async function handleCompose(args: string[]): Promise<void> {
   if (!globalHelp) assertComposeGlobals(globals);
 
   if (globalHelp || childHelp || (subcommand !== "up" && subcommand !== "down")) {
-    process.exit(await spawnDockerCompose(composeArgs).exited);
+    process.exit(await spawnDockerCompose(dockerArgs).exited);
   }
 
   try {
     // stdin can be read once; keep it for every compose call that needs the file.
     const input = readsComposeFromStdin(globals) ? fs.readFileSync(0, "utf8") : undefined;
-    if (subcommand === "down") await composeDown(composeArgs, globals, input);
+    if (subcommand === "down") await composeDown(dockerArgs, globals, input);
 
     // Include every profile so `up <service>` can start a service from an
     // inactive profile; compose still applies the user's --profile flags at up.

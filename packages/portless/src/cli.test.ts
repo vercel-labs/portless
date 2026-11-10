@@ -894,12 +894,13 @@ describe("CLI", { timeout: 15_000 }, () => {
           const env = { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined };
           for (const [args, expected] of [
             [["compose", "ps", "--bad"], "compose ps --bad"],
-            [["compose", "--", "logs", "-n", "5"], "compose -- logs -n 5"],
+            [["compose", "--", "logs", "-n", "5"], "compose logs -n 5"],
             [["compose", "-f", "compose.dev.yml", "config"], "compose -f compose.dev.yml config"],
             [["compose", "-fcompose.dev.yml", "config"], "compose -fcompose.dev.yml config"],
             [["compose", "-f=compose.dev.yml", "ps"], "compose -f=compose.dev.yml ps"],
             [["compose", "-pdemo", "config"], "compose -pdemo config"],
             [["compose", "-p=demo", "ps"], "compose -p=demo ps"],
+            [["compose", "--workdir", "/app", "logs"], "compose --workdir /app logs"],
             [["compose", "--dry-run=true", "config"], "compose --dry-run=true config"],
             [["compose", "--help=false", "ps"], "compose --help=false ps"],
             [
@@ -908,7 +909,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             ],
             [
               ["compose", "-fcompose.dev.yml", "--", "logs", "-n", "5"],
-              "compose -fcompose.dev.yml -- logs -n 5",
+              "compose -fcompose.dev.yml logs -n 5",
             ],
           ] as const) {
             fs.rmSync(log, { force: true });
@@ -917,6 +918,34 @@ describe("CLI", { timeout: 15_000 }, () => {
             expect(stdout).toContain(`docker ${expected}`);
             expect(fs.readFileSync(log, "utf-8").trim()).toBe(expected);
           }
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the wrapper's -- off the docker down command",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-down-sep-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 0\n', {
+            mode: 0o755,
+          });
+          const { status } = run(["compose", "-f", "compose.yml", "--", "down"], {
+            env: {
+              PATH: `${tmpDir}:${process.env.PATH}`,
+              STUB_LOG: log,
+              PORTLESS: undefined,
+              PORTLESS_STATE_DIR: path.join(tmpDir, "state"),
+            },
+          });
+          expect(status).toBe(0);
+          const calls = fs.readFileSync(log, "utf-8").trim().split("\n");
+          expect(calls).toContain("compose -f compose.yml down");
+          expect(calls.some((call) => call.includes("-- down"))).toBe(false);
         } finally {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
@@ -1419,7 +1448,6 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.each([
       ["missing value", ["--upstream"], "--upstream requires a value"],
       ["flag used as value", ["--upstream", "--help"], "--upstream requires a value"],
-      ["equals form", ["--upstream=https://api.internal"], "separate value"],
       ["bare hostname", ["--upstream", "api.internal"], "Invalid --upstream value"],
       ["path", ["--upstream", "https://api.internal/path"], "Invalid --upstream value"],
       ["query", ["--upstream", "https://api.internal?key=value"], "Invalid --upstream value"],
@@ -1441,6 +1469,27 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(result.status).toBe(2);
         expect(result.stderr).toContain(message);
         expect(fs.existsSync(stateDir)).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("accepts --upstream=value like any other value flag", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-upstream-eq-"));
+      try {
+        const { status } = run(
+          ["alias", "api", "8080", "--upstream=http://api.internal", "--tld", "localhost"],
+          { env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" } }
+        );
+        expect(status).toBe(0);
+        const routes = JSON.parse(fs.readFileSync(path.join(tmpDir, "routes.json"), "utf-8")) as {
+          hostname: string;
+          upstream?: { tls?: boolean; host?: string };
+        }[];
+        expect(routes.find((route) => route.hostname === "api.localhost")?.upstream).toEqual({
+          tls: false,
+          host: "api.internal",
+        });
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
