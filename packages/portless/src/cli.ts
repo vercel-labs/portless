@@ -2,11 +2,13 @@
 
 declare const __VERSION__: string;
 
-import colors from "./colors.js";
+import colors, { enabled as colorEnabled } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
+import { randomBytes } from "node:crypto";
+import * as http from "node:http";
 import {
   type ComposeContainers,
   type ComposeModel,
@@ -23,6 +25,12 @@ import {
   staleAliases,
 } from "./compose.js";
 import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import {
+  createDeviceTrustHandler,
+  DEVICE_TRUST_MS,
+  readDeviceCA,
+  renderTerminalQr,
+} from "./device-trust.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   generateHostsSyncToken,
@@ -2149,6 +2157,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
+  ${colors.cyan("portless trust --device")}          Trust the local CA on a phone or other device (QR code)
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
   ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
@@ -2407,6 +2416,73 @@ async function handleTrust(): Promise<void> {
 
   console.error(colors.red(`Failed to trust CA: ${result.error}`));
   process.exit(1);
+}
+
+function printTrustHelp(): void {
+  console.log(`
+${colors.bold("portless trust")} - Trust the local CA.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless trust")}            Add the local CA to this machine's system trust store
+  ${colors.cyan("portless trust --device")}   Trust it on a phone or other device on the same network
+
+With --device, portless serves the CA certificate (never its key) over plain
+HTTP on this machine's LAN address, at a one-time path, for ten minutes, and
+prints a QR code for it with the certificate's SHA-256 fingerprint. The page the
+device opens offers a configuration profile on iOS, the certificate on Android,
+and PEM elsewhere, with the remaining steps for that platform. Use it with LAN
+mode (portless proxy start --lan) to open apps from the device over HTTPS.
+`);
+  process.exit(0);
+}
+
+async function handleTrustDevice(): Promise<void> {
+  const { dir } = await discoverState();
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+  ensureCerts(dir);
+  const ca = readDeviceCA(dir);
+  const ip = await getLocalNetworkIp();
+  if (!ip) {
+    console.error(colors.red("No LAN address found for a device to reach."));
+    console.error(
+      colors.blue("Connect this machine to the same network as the device and try again.")
+    );
+    process.exit(1);
+  }
+
+  const token = randomBytes(16).toString("base64url");
+  const server = http.createServer(
+    createDeviceTrustHandler(ca, token, (file, userAgent) => {
+      const time = new Date().toLocaleTimeString();
+      const agent = (userAgent ?? "unknown device").slice(0, 60);
+      console.log(colors.gray(`${time}  ${agent}  ${file || "opened the page"}`));
+    })
+  );
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "0.0.0.0", resolve);
+  });
+  const { port } = server.address() as { port: number };
+  const url = `http://${ip}:${port}/${token}/`;
+
+  console.log(`
+Scan with the device's camera on the same network to trust ${colors.bold(ca.name)}:
+
+${renderTerminalQr(url, colorEnabled)}
+${colors.cyan(url)}
+
+SHA-256 ${ca.fingerprint}
+
+Then open apps from the device with LAN mode: ${colors.cyan("portless proxy start --lan")}
+${colors.gray("Serving for ten minutes. Press Ctrl+C to stop sooner.")}
+`);
+
+  setTimeout(() => {
+    server.close();
+    process.exit(0);
+  }, DEVICE_TRUST_MS);
 }
 
 async function handleClean(args: string[]): Promise<void> {
@@ -5518,7 +5594,9 @@ async function main() {
       return;
     }
     if (args[0] === "trust") {
-      await handleTrust();
+      if (args[1] === "--help" || args[1] === "-h") printTrustHelp();
+      if (args[1] === "--device") await handleTrustDevice();
+      else await handleTrust();
       return;
     }
     if (args[0] === "clean") {

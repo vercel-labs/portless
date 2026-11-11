@@ -258,6 +258,51 @@ const PAGE_STYLES = `
     text-align: center;
     padding: 32px 0;
   }
+  .button {
+    display: block;
+    text-align: center;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--bg);
+    background: var(--fg);
+    border-radius: 8px;
+    padding: 12px 16px;
+    text-decoration: none;
+  }
+  .button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .steps {
+    list-style: none;
+    counter-reset: step;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+  .steps > li {
+    counter-increment: step;
+    position: relative;
+    padding: 14px 16px 14px 48px;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--text-2);
+  }
+  .steps > li + li { border-top: 1px solid var(--border); }
+  .steps > li::before {
+    content: counter(step);
+    position: absolute;
+    left: 16px;
+    top: 14px;
+    font-family: var(--font-mono);
+    font-size: 13px;
+    color: var(--text-3);
+  }
+  .steps strong { color: var(--fg); font-weight: 500; }
+  .steps .button { margin: 2px 0 10px; }
+  .formats {
+    font-size: 13px;
+    color: var(--text-3);
+    text-align: center;
+  }
+  .formats a { color: var(--text-2); }
+  .hint { margin-top: 10px; font-size: 13px; color: var(--text-3); text-align: center; }
   .footer {
     margin-top: 64px;
     font-size: 11px;
@@ -268,18 +313,28 @@ const PAGE_STYLES = `
 `;
 
 export function renderPage(status: number, statusText: string, body: string): string {
+  return renderBrandedPage(`${status} - ${statusText}`, String(status), statusText, body);
+}
+
+/** A page in the portless style with a hero heading. Every argument is HTML, so escape text first. */
+export function renderBrandedPage(
+  title: string,
+  heading: string,
+  subheading: string,
+  body: string
+): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
-<title>${status} - ${statusText}</title>
+<title>${title}</title>
 <style>${PAGE_STYLES}</style>
 </head>
 <body>
 <div class="page">
-<div class="hero"><h1>${status}</h1><h2>${statusText}</h2></div>
+<div class="hero"><h1>${heading}</h1><h2>${subheading}</h2></div>
 ${body}
 <p class="footer">portless</p>
 </div>

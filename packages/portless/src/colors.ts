@@ -4,7 +4,8 @@ function supportsColor(): boolean {
   return !!(process.stdout.isTTY || process.stderr.isTTY);
 }
 
-const enabled = supportsColor();
+/** Whether output carries ANSI styles: forced, disabled, or a TTY. */
+export const enabled = supportsColor();
 
 const wrap = (open: string, close: string) => {
   if (!enabled) return (s: string) => s;

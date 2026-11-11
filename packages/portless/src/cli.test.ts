@@ -1425,6 +1425,15 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("trust subcommand", () => {
+    it("prints help with --help", () => {
+      const { status, stdout } = run(["trust", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless trust --device");
+      expect(stdout).toContain("never its key");
+    });
+  });
+
   describe("clean subcommand", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["clean", "--help"]);

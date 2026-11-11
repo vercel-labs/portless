@@ -265,9 +265,17 @@ The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first succ
 
 ```bash
 portless trust
+portless trust --device
 ```
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
+
+`--device` trusts the same CA on a phone or another device on your network, so apps in [LAN mode](#lan-mode) load over HTTPS without warnings. It prints a QR code and the CA's SHA-256 fingerprint, then serves the CA certificate (never its key) over plain HTTP on your LAN address, at a one-time path, for ten minutes. The page the device opens offers a configuration profile on iOS, the certificate on Android, and PEM elsewhere, with the steps that platform still needs:
+
+- **iOS**: install the profile from **Settings**, then turn on full trust under **General > About > Certificate Trust Settings**.
+- **Android**: install the certificate from **Settings** by searching for **CA certificate**, then restart Chrome. Apps other than browsers ignore user-added CAs.
+
+The device must be on the same network. On macOS with the application firewall on, Node may ask to accept incoming connections the first time.
 
 ## Clean up
 
@@ -417,6 +425,8 @@ Without LAN mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` 
 Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
 
 Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-utils`). Not supported on Windows.
+
+With `--https`, each device needs the portless CA. Run `portless trust --device` and scan the QR code it prints ([Trust the CA](#trust-the-ca)).
 
 **Framework notes:**
 
