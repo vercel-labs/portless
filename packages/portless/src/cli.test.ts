@@ -2634,6 +2634,41 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
     }, 30_000);
 
+    // Windows ends a SIGTERMed process without running its exit cleanup, so
+    // there the markers are never reset and only `proxy stop` applies.
+    it.each(
+      process.platform === "win32"
+        ? (["proxy stop"] as const)
+        : (["proxy stop", "SIGTERM"] as const)
+    )(
+      "keeps HTTPS for unprivileged mode after %s",
+      async (how) => {
+        const env = { ...proxyEnv(), PORTLESS_HTTPS: undefined };
+        expect(run(["proxy", "start", "--unprivileged", "--https"], { env }).status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+        if (how === "proxy stop") {
+          expect(run(["proxy", "stop"], { env }).status).toBe(0);
+        } else {
+          const pidPath = path.join(tmpDir, "proxy.pid");
+          process.kill(Number(fs.readFileSync(pidPath, "utf-8")), "SIGTERM");
+          for (let i = 0; i < 100 && fs.existsSync(pidPath); i++) {
+            await new Promise((resolve) => setTimeout(resolve, 100));
+          }
+          expect(fs.existsSync(pidPath)).toBe(false);
+        }
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+
+        // Nothing asks for HTTPS this time: it has to come from the remembered mode.
+        expect(run(["proxy", "start"], { env }).status).toBe(0);
+        await waitForHttpHeader(testPort, "X-Portless", "1");
+        const log = fs.readFileSync(path.join(tmpDir, "proxy.log"), "utf-8");
+        expect(log).not.toMatch(/^HTTP proxy listening/m);
+        expect(log.match(/^HTTPS\/2 proxy listening/gm)?.length).toBeGreaterThan(2);
+      },
+      30_000
+    );
+
     it("never writes the hosts file in unprivileged mode", async () => {
       const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
       expect(start.status).toBe(0);
