@@ -4,7 +4,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { RouteStore, RouteConflictError } from "./routes.js";
+import { RouteStore, RouteConflictError, RoutesFileError } from "./routes.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -47,34 +47,24 @@ describe("RouteStore", () => {
       expect(store.loadRoutes()).toEqual([]);
     });
 
-    it("returns empty array for invalid JSON", () => {
+    it("throws for invalid JSON instead of returning an empty table", () => {
       store.ensureDir();
       fs.writeFileSync(store.getRoutesPath(), "not json");
-      expect(store.loadRoutes()).toEqual([]);
+      expect(() => store.loadRoutes()).toThrow(RoutesFileError);
+      expect(() => store.loadRoutes()).toThrow(/invalid JSON/);
     });
 
-    it("calls onWarning for invalid JSON", () => {
-      const warnings: string[] = [];
-      const warnStore = new RouteStore(tmpDir, {
-        onWarning: (msg) => warnings.push(msg),
-      });
-      warnStore.ensureDir();
-      fs.writeFileSync(warnStore.getRoutesPath(), "not json");
-      warnStore.loadRoutes();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain("invalid JSON");
+    it("leaves a corrupt routes file in place", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), "not json");
+      expect(() => store.loadRoutes()).toThrow(/invalid JSON/);
+      expect(fs.readFileSync(store.getRoutesPath(), "utf-8")).toBe("not json");
     });
 
-    it("calls onWarning when routes file is not an array", () => {
-      const warnings: string[] = [];
-      const warnStore = new RouteStore(tmpDir, {
-        onWarning: (msg) => warnings.push(msg),
-      });
-      warnStore.ensureDir();
-      fs.writeFileSync(warnStore.getRoutesPath(), JSON.stringify({ not: "array" }));
-      warnStore.loadRoutes();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain("expected array");
+    it("throws when the routes file is not an array", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify({ not: "array" }));
+      expect(() => store.loadRoutes()).toThrow(/expected array/);
     });
 
     it("filters out entries with invalid schema", () => {

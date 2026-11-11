@@ -834,7 +834,14 @@ function startProxyServer(
   fixOwnership(routesPath);
 
   // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes = store.loadRoutes();
+  let cachedRoutes: ReturnType<RouteStore["loadRoutes"]> = [];
+  try {
+    cachedRoutes = store.loadRoutes();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes: ${message}`));
+  }
+  let routesReloadWarningShown = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -907,6 +914,7 @@ function startProxyServer(
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
+      routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
@@ -928,8 +936,13 @@ function startProxyServer(
           }
         }
       }
-    } catch {
-      // File may be mid-write; keep existing cached routes
+    } catch (err) {
+      // Keep the last known routes, and say why once instead of on every reload.
+      if (!routesReloadWarningShown) {
+        routesReloadWarningShown = true;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(`Could not reload routes: ${message}`));
+      }
     }
   };
 
@@ -2492,7 +2505,13 @@ async function handleClean(args: string[]): Promise<void> {
   await stopProxy(store, port, tls);
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  const routesForClean = store.loadRoutesRaw();
+  let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  try {
+    routesForClean = store.loadRoutesRaw();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
+  }
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
