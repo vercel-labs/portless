@@ -25,8 +25,8 @@ const EXPIRY_BUFFER_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 /** Common Name used for the portless local CA. */
 const CA_COMMON_NAME = "portless Local CA";
 
-/** openssl command timeout (ms). */
-const OPENSSL_TIMEOUT_MS = 15_000;
+/** openssl command timeout (ms). Tests raise it on runners with slow process startup. */
+const OPENSSL_TIMEOUT_MS = Number(process.env.PORTLESS_OPENSSL_TIMEOUT_MS) || 15_000;
 
 /**
  * Timeout for non-interactive macOS `security` commands (verify-cert, etc.).
