@@ -512,6 +512,55 @@ describe("tryUninstallService", () => {
     expect(result.needsElevation).toBe(true);
   });
 
+  it("marks systemctl's interactive authentication failure as needing elevation", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Interactive authentication required.",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.installed).toBe(true);
+    expect(result.error).toContain("Interactive authentication required");
+    expect(result.needsElevation).toBe(true);
+    expect(rmSync).not.toHaveBeenCalled();
+  });
+
+  it("does not claim elevation when the removal runs as root", () => {
+    setPlatform("linux");
+    setGetuid(0);
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Unit file is masked.",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.needsElevation).toBe(false);
+  });
+
+  it("does not claim elevation when the service manager is missing", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => {
+      const err = new Error("spawn systemctl ENOENT") as NodeJS.ErrnoException;
+      err.code = "ENOENT";
+      throw err;
+    });
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.needsElevation).toBe(false);
+  });
+
   it("reports a failed launchctl bootout instead of claiming removal", () => {
     setPlatform("darwin");
     vi.mocked(existsSync).mockReturnValue(true);

@@ -743,6 +743,26 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
+    it("exits 1 with empty stdout when routes.json is corrupt", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-corrupt-"));
+      try {
+        fs.writeFileSync(path.join(tmpDir, "routes.json"), "{");
+        const options = {
+          cwd: tmpDir,
+          env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" },
+        };
+        const json = run(["list", "--json"], options);
+        expect(json.status).toBe(1);
+        expect(json.stdout).toBe("");
+        expect(json.stderr).toContain("Corrupted routes file (invalid JSON)");
+        const human = run(["list"], options);
+        expect(human.status).toBe(1);
+        expect(human.stdout).toBe("");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("includes upstream settings from real aliases in JSON", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-json-upstream-"));
       const options = {
@@ -1889,7 +1909,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("warns when routes.json is corrupted", async () => {
+    it("fails doctor when routes.json is corrupted", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-doctor-routes-"));
       const proxyPort = await getFreePort();
       try {
@@ -1903,9 +1923,10 @@ describe("CLI", { timeout: 15_000 }, () => {
           },
         });
 
-        expect(status).toBe(0);
+        expect(status).toBe(1);
+        expect(stdout).toContain("Could not read routes");
         expect(stdout).toContain("Corrupted routes file (invalid JSON)");
-        expect(stdout).toContain("Summary: 0 failures");
+        expect(stdout).toContain("Summary: 1 failure");
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
