@@ -34,7 +34,7 @@ portless
 # -> runs "dev", https://<project>.localhost
 ```
 
-Pass arguments to the script after `--`, so `portless -- --inspect` runs `dev` with `--inspect`. At a monorepo root with Turbo, forwarding arguments through a root script with shell operators or a comment exits 2; make the root script a single Turbo command.
+Pass arguments to the script after `--`, so `portless -- --inspect` runs `dev` with `--inspect`. Forwarding arguments into a script with shell operators or a comment exits 2, in Turbo and outside it; run the command directly or make the script a single command.
 
 The name comes from `package.json`, the git root, or the directory. Pass a name and a command to choose both:
 

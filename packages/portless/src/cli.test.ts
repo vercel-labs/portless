@@ -7082,6 +7082,91 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
+      "rejects forwarded args through a compound script outside Turbo",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-compound-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-compound",
+              scripts: { dev: "node a.cjs && node b.cjs" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "a.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "a\\n");\n`
+          );
+          fs.writeFileSync(
+            path.join(root, "b.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "b:" + JSON.stringify(process.argv.slice(2)) + "\\n");\n`
+          );
+
+          for (const extra of [{ PORTLESS: "0" }, {}]) {
+            fs.rmSync(markFile, { force: true });
+            const result = spawnCli(root, childEnv(markFile, extra), ["--", ...forwarded]);
+            expect(result.status, result.output).toBe(2);
+            expect(result.output).toContain(
+              'Cannot forward arguments through the "dev" script. It has shell operators or a comment.'
+            );
+            expect(readMarks(markFile), result.output).toEqual([]);
+          }
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "rejects forwarded args through a compound package script in a non-Turbo workspace",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-compound-ws-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-compound-ws",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          const dir = path.join(root, "packages", "web");
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({
+              name: "web",
+              version: "0.0.0",
+              scripts: { dev: "node a.cjs && node b.cjs" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(dir, "a.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "a\\n");\n`
+          );
+          fs.writeFileSync(
+            path.join(dir, "b.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "b:" + JSON.stringify(process.argv.slice(2)) + "\\n");\n`
+          );
+
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...forwarded]);
+          expect(result.status, result.output).toBe(2);
+          expect(result.output).toContain(
+            'Cannot forward arguments through the "dev" script. It has shell operators or a comment.'
+          );
+          expect(readMarks(markFile), result.output).toEqual([]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
       "passes arguments to a root script that does not run Turbo",
       () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-root-script-"));

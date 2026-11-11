@@ -2378,7 +2378,7 @@ const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
  * their first token is not a name it recognizes, so a guard clause for them
  * would be unreachable. A regression test pins that outcome instead.
  */
-function isUnsafeToAppendArgs(command: string): boolean {
+export function isUnsafeToAppendArgs(command: string): boolean {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;

@@ -116,6 +116,7 @@ import {
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
   resolveTurboRootForwarding,
+  isUnsafeToAppendArgs,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -162,6 +163,7 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScriptCommand,
+  resolveScriptRaw,
   scriptRunCommand,
   packageManagerExec,
   hasScript,
@@ -2413,8 +2415,8 @@ ${colors.bold("Usage:")}
 Every command accepts --help or -h, which only prints help. After run <cmd>,
 compose <subcommand>, or --, they belong to the wrapped command.
 Value flags for run and named apps accept both --flag <value> and --flag=<value>.
-Turbo mode exits 2 when forwarded arguments reach a root script with shell operators;
-run turbo directly or make the root script a single Turbo command.
+Forwarding arguments into a script with shell operators or a comment exits 2;
+run the command directly or make the script a single command.
 
 ${colors.bold("Examples:")}
   portless
@@ -4429,6 +4431,29 @@ async function handleDefaultMode(
 }
 
 /**
+ * Reject forwarded arguments when the package script is compound. npm appends
+ * them to the end of the script line, so they would land on its last command
+ * instead of the app.
+ */
+function assertScriptCanForwardArgs(
+  scriptName: string,
+  packageDir: string,
+  extraArgs: readonly string[]
+): void {
+  if (extraArgs.length === 0) return;
+  const raw = resolveScriptRaw(scriptName, packageDir);
+  if (!raw || !isUnsafeToAppendArgs(raw)) return;
+  const forwarded = extraArgs.join(" ");
+  throw new UsageError(
+    `Cannot forward arguments through the "${scriptName}" script. It has shell operators or a comment.`,
+    [
+      `Run the command directly: portless run <command> -- ${forwarded}`,
+      `Or change the "${scriptName}" script to a single command.`,
+    ]
+  );
+}
+
+/**
  * Single-app mode: run one package through the proxy.
  */
 async function handleDefaultSingle(
@@ -4437,6 +4462,7 @@ async function handleDefaultSingle(
   appConfig: AppConfigWithSource | null,
   extraArgs: string[] = []
 ): Promise<void> {
+  assertScriptCanForwardArgs(scriptName, cwd, extraArgs);
   const resolved = resolveScriptCommand(scriptName, cwd, extraArgs);
   if (!resolved) {
     console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
@@ -4781,6 +4807,7 @@ async function handleDefaultMulti(
     if (rawScript.length === 0) continue;
 
     const pm = detectPackageManager(pkg.dir);
+    assertScriptCanForwardArgs(effectiveScript, pkg.dir, extraArgs);
     const commandArgs = scriptRunCommand(pm, effectiveScript, pkg.dir, extraArgs);
 
     const proxied = appOverride.proxy ?? isServerCommand(rawScript);
@@ -5916,6 +5943,7 @@ async function main() {
     const scriptArgs = args[0] === "--" ? args.slice(1) : [];
     const appConfig = loadAppConfig();
     const scriptName = globalScript ?? appConfig?.script ?? "dev";
+    assertScriptCanForwardArgs(scriptName, process.cwd(), scriptArgs);
     const resolved = resolveScriptCommand(scriptName, process.cwd(), scriptArgs);
     if (resolved) {
       spawnCommand(resolved);
