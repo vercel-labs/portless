@@ -14,6 +14,8 @@ import {
   DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
+  lanEffectiveTlds,
+  lanTlds,
   LEGACY_SYSTEM_STATE_DIR,
   PRIVILEGED_PORT_THRESHOLD,
   canBindProxyPort,
@@ -1999,6 +2001,38 @@ describe("parseTldList", () => {
   });
 });
 
+describe("lanTlds", () => {
+  it.each([
+    [undefined, ["local"]],
+    [[], ["local"]],
+    [["localhost"], ["localhost", "local"]],
+    [
+      ["local", "localhost"],
+      ["local", "localhost"],
+    ],
+    [
+      ["com", "local", "com"],
+      ["com", "local"],
+    ],
+  ])("serves %j as %j", (tlds, expected) => {
+    expect(lanTlds(tlds)).toEqual(expected);
+  });
+});
+
+describe("lanEffectiveTlds", () => {
+  it.each([
+    [undefined, ["local"]],
+    [["test"], ["local"]],
+    [["local"], ["local"]],
+    [
+      ["localhost", "local"],
+      ["localhost", "local"],
+    ],
+  ])("resolves %j to %j", (tlds, expected) => {
+    expect(lanEffectiveTlds(tlds)).toEqual(expected);
+  });
+});
+
 describe("buildProxyStartConfig", () => {
   it("forces .local and keeps explicit --ip in LAN mode", () => {
     expect(
@@ -2026,6 +2060,23 @@ describe("buildProxyStartConfig", () => {
         "192.168.1.42",
         "--wildcard",
       ],
+    });
+  });
+
+  it("keeps TLDs beside .local in LAN mode", () => {
+    expect(
+      buildProxyStartConfig({
+        useHttps: true,
+        lanMode: true,
+        lanIp: "192.168.1.42",
+        lanIpExplicit: true,
+        tld: "localhost",
+        tlds: ["localhost", "local"],
+      })
+    ).toEqual({
+      effectiveTld: "localhost",
+      effectiveTlds: ["localhost", "local"],
+      args: ["--https", "--lan", "--ip", "192.168.1.42", "--tld", "localhost", "--tld", "local"],
     });
   });
 

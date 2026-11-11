@@ -177,7 +177,7 @@ When portless itself returns an error (404 for an unknown host, 421 for a misdir
 
 `.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `portless hosts sync` to add entries to `/etc/hosts` if needed.
 
-Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. When configured TLDs overlap (e.g. `example.com` and `dev.example.com`), hostnames are matched against the longest TLD first, regardless of configuration order. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
+Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. An app started with `PORTLESS_TLD` set to one of the running proxy's TLDs uses that TLD for `PORTLESS_URL` instead. When configured TLDs overlap (e.g. `example.com` and `dev.example.com`), hostnames are matched against the longest TLD first, regardless of configuration order. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
 `portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected configured TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing, empty, or unconfigured value fails before any route changes, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
@@ -248,6 +248,8 @@ portless proxy start --lan --ip 192.168.1.42
 ```
 
 `--lan` explicitly binds the proxy to the IPv4 and IPv6 unspecified addresses, `0.0.0.0` and `::`, and advertises `<name>.local` hostnames over mDNS so devices on the same Wi-Fi can reach your apps. Portless auto-detects your LAN IP and follows network changes automatically, but you can pin a specific address with `--ip <address>` or the `PORTLESS_LAN_IP` environment variable. Set `PORTLESS_LAN=1` to default to LAN mode every time the proxy starts.
+
+Pass `--tld` with `--lan` to serve other TLDs beside `.local` from the same proxy, for example `portless proxy start --lan --tld local --tld localhost`. The TLDs keep the order you give, and `.local` is added last when you leave it out. Only `.local` names are advertised over mDNS, so other devices reach those, while names under the other TLDs resolve on this machine only.
 
 Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start again, it stays in LAN mode. All proxy settings (port, TLS, TLDs, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 

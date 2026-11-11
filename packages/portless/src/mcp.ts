@@ -803,7 +803,7 @@ export function printMcpHelp(): void {
       "Environment:",
       "  PORTLESS_STATE_DIR  Directory for portless state.",
       "  PORTLESS_PORT       Default proxy port.",
-      "  PORTLESS_TLD        Default TLD or comma separated TLD list.",
+      "  PORTLESS_TLD        Default TLD or comma separated TLD list; for an app, picks its PORTLESS_URL's TLD.",
       "  PORTLESS_PREFIX     Override the worktree label (empty disables it).",
       "",
       "Client config:",

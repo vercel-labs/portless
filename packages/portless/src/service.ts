@@ -8,6 +8,7 @@ import {
   buildProxyStartConfig,
   DEFAULT_TLD,
   discoverState,
+  lanTlds,
   getProtocolPort,
   isProxyRunning,
   parseTldList,
@@ -381,8 +382,9 @@ export function parseServiceInstallConfig(
     config.lanIp = null;
     config.lanIpExplicit = false;
   } else {
-    config.tlds = ["local"];
-    config.tld = "local";
+    const tldsGiven = tokens.includes("--tld") || !!env.PORTLESS_TLD;
+    config.tlds = tldsGiven ? lanTlds(config.tlds) : ["local"];
+    config.tld = primaryTld(config.tlds);
   }
 
   return config;
@@ -447,7 +449,7 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
   }
 
   if (ctx.config.lanMode) {
-    env.PORTLESS_TLD = "local";
+    env.PORTLESS_TLD = ctx.config.tlds.join(",");
   } else if (ctx.config.tlds.length > 1 || ctx.config.tld !== DEFAULT_TLD) {
     env.PORTLESS_TLD = ctx.config.tlds.join(",");
   }
@@ -604,7 +606,7 @@ export function buildServiceSpec(options: {
     extraEnv: options.installConfig?.extraEnv ?? {},
   };
   installConfig.tlds = installConfig.lanMode
-    ? ["local"]
+    ? lanTlds(options.installConfig?.tlds)
     : normalizeTlds(
         options.installConfig?.tlds ??
           (options.installConfig?.tld ? [options.installConfig.tld] : installConfig.tlds)
@@ -1238,7 +1240,7 @@ ${colors.bold("Install options:")}
   --https                          Enable HTTPS
   --lan                            Enable LAN mode
   --ip <address>                   Pin a specific LAN IP
-  --tld <tld>                      Use a custom TLD outside LAN mode, repeatable
+  --tld <tld>                      Use a custom TLD, repeatable; with --lan, served beside .local
   --wildcard                       Allow subdomain fallback
   --unprivileged                   Bind the wildcard address, loopback peers only, no elevation
   --cert <path>                    Use a custom TLS certificate
