@@ -530,14 +530,30 @@ describe("tryUninstallService", () => {
     expect(rmSync).not.toHaveBeenCalled();
   });
 
-  it("does not claim elevation for an unrelated systemctl failure", () => {
+  it("does not claim elevation when the removal runs as root", () => {
     setPlatform("linux");
+    setGetuid(0);
     vi.mocked(existsSync).mockReturnValue(true);
     const runner = vi.fn(() => ({
       status: 1,
       stdout: "",
       stderr: "Failed to disable unit: Unit file is masked.",
     }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.needsElevation).toBe(false);
+  });
+
+  it("does not claim elevation when the service manager is missing", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => {
+      const err = new Error("spawn systemctl ENOENT") as NodeJS.ErrnoException;
+      err.code = "ENOENT";
+      throw err;
+    });
 
     const result = tryUninstallService("/fake/cli.js", runner);
 

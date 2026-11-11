@@ -1018,21 +1018,20 @@ function runRemovalStep(runner: CommandRunner, command: string, args: string[]):
 }
 
 /**
- * Whether a removal failure means the command needed more privilege. Covers
- * errno codes and the messages launchctl, systemctl (including polkit), and
- * schtasks use when they cannot act as the current user.
+ * Whether a failed service removal should be retried with sudo. Portless
+ * installs a system service on macOS and Linux, so a non-root process cannot
+ * remove it and the failure text is not a reliable signal. Windows has no
+ * sudo retry, and a missing command is a real failure.
  */
-function isPermissionError(err: unknown): boolean {
-  const code =
-    err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    code === "EACCES" ||
-    code === "EPERM" ||
-    /permission denied|operation not permitted|access (is )?denied|interactive authentication required|authentication is required|not authori[sz]ed|must (be|run as) root/i.test(
-      message
-    )
-  );
+function removalNeedsElevation(err: unknown): boolean {
+  if (process.platform === "win32") return false;
+  if ((process.getuid?.() ?? -1) === 0) return false;
+  if (process.env[INTERNAL_ELEVATED_ENV] === "1") return false;
+  if (err && typeof err === "object" && "code" in err) {
+    const code = String((err as { code?: unknown }).code);
+    if (code === "ENOENT" || code === "EINVAL" || code === "ENOTDIR") return false;
+  }
+  return true;
 }
 
 function stopProxyOnPort(entryScript: string, runner: CommandRunner, proxyPort: number): void {
@@ -1214,7 +1213,7 @@ export function tryUninstallService(
       removed: false,
       installed,
       error: err instanceof Error ? err.message : String(err),
-      needsElevation: installed && isPermissionError(err),
+      needsElevation: installed && removalNeedsElevation(err),
     };
   }
 }
