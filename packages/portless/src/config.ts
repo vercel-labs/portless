@@ -13,6 +13,15 @@ export interface WorktreeConfig {
   prefix?: WorktreePrefixStyle;
   hostnameTemplate?: string;
 }
+/**
+ * How an app's port is chosen when `appPort` does not fix it.
+ *   - `random`: any free port in the range (default).
+ *   - `stable`: a port derived from the app's hostname, so a checkout keeps
+ *     its port across restarts and different checkouts land on different ports.
+ *   - `sequential`: the lowest free port in the range, so the first app on a
+ *     machine gets exactly the bottom of the range.
+ */
+export type AppPortStrategy = "random" | "stable" | "sequential";
 
 export interface AppConfig {
   name?: string;
@@ -20,6 +29,9 @@ export interface AppConfig {
   appPort?: number;
   proxy?: boolean;
   worktree?: WorktreeConfig;
+  appPortStrategy?: AppPortStrategy;
+  /** Inclusive range the strategy picks from. Defaults to 4000 to 4999. */
+  appPortRange?: [number, number];
 }
 
 export interface PortlessConfig extends AppConfig {
@@ -149,6 +161,8 @@ export function resolveAppConfig(
     appPort: config.appPort,
     proxy: config.proxy,
     worktree: config.worktree,
+    appPortStrategy: config.appPortStrategy,
+    appPortRange: config.appPortRange,
   };
 }
 
@@ -335,8 +349,19 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo", "worktree"]);
-const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree"]);
+export const APP_PORT_STRATEGIES: readonly AppPortStrategy[] = ["random", "stable", "sequential"];
+
+const APP_KEYS = [
+  "name",
+  "script",
+  "appPort",
+  "proxy",
+  "worktree",
+  "appPortStrategy",
+  "appPortRange",
+];
+const KNOWN_TOP_KEYS = new Set([...APP_KEYS, "apps", "turbo"]);
+const KNOWN_APP_KEYS = new Set(APP_KEYS);
 const KNOWN_WORKTREE_KEYS = new Set(["prefix", "hostnameTemplate"]);
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
@@ -376,6 +401,8 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
       throw new ConfigValidationError(`"proxy" in ${configPath} must be a boolean.`);
     }
   }
+
+  validateAppPortKeys(obj, "", configPath);
 
   if (obj.turbo !== undefined) {
     if (typeof obj.turbo !== "boolean") {
@@ -436,6 +463,7 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
   if (obj.worktree !== undefined) {
     validateWorktreeConfig(obj.worktree, `${prefix}.worktree`, configPath);
   }
+  validateAppPortKeys(obj, `${prefix}.`, configPath);
 
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
 }
@@ -474,6 +502,49 @@ function validateWorktreeConfig(value: unknown, prefix: string, configPath: stri
   }
 
   warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, prefix);
+}
+
+/**
+ * Validate the port-picking keys. `appPort` fixes the port outright, so a
+ * strategy next to it in the same object has nothing to decide and is
+ * rejected rather than silently ignored.
+ */
+function validateAppPortKeys(
+  obj: Record<string, unknown>,
+  prefix: string,
+  configPath: string
+): void {
+  if (obj.appPortStrategy !== undefined) {
+    if (
+      typeof obj.appPortStrategy !== "string" ||
+      !(APP_PORT_STRATEGIES as readonly string[]).includes(obj.appPortStrategy)
+    ) {
+      throw new ConfigValidationError(
+        `"${prefix}appPortStrategy" in ${configPath} must be one of: ${APP_PORT_STRATEGIES.map((s) => `"${s}"`).join(", ")}.`
+      );
+    }
+    if (obj.appPort !== undefined) {
+      throw new ConfigValidationError(
+        `"${prefix}appPort" fixes the port, so "${prefix}appPortStrategy" has nothing to decide; set one of them in ${configPath}.`
+      );
+    }
+  }
+
+  if (obj.appPortRange !== undefined) {
+    const range = obj.appPortRange;
+    const isPort = (value: unknown): value is number =>
+      typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65535;
+    if (!Array.isArray(range) || range.length !== 2 || !isPort(range[0]) || !isPort(range[1])) {
+      throw new ConfigValidationError(
+        `"${prefix}appPortRange" in ${configPath} must be [min, max] with integers between 1 and 65535.`
+      );
+    }
+    if (range[0] > range[1]) {
+      throw new ConfigValidationError(
+        `"${prefix}appPortRange" in ${configPath} must have min <= max.`
+      );
+    }
+  }
 }
 
 function warnUnknownKeys(

@@ -99,6 +99,7 @@ import {
   isUnprivilegedEnvEnabled,
   readUnprivilegedMarker,
   writeUnprivilegedMarker,
+  resolveAppPortAllocation,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -155,6 +156,7 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
+import type { AppPortAllocation } from "./cli-utils.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import {
@@ -1490,7 +1492,8 @@ async function runApp(
   autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  allocation: AppPortAllocation = resolveAppPortAllocation(null)
 ) {
   let store = initialStore;
   console.log(chalk.blue.bold(`\nportless\n`));
@@ -1604,11 +1607,23 @@ async function runApp(
     }
   }
 
-  const port = desiredPort ?? (await findFreePort());
+  const port =
+    desiredPort ??
+    (await findFreePort(allocation.range[0], allocation.range[1], {
+      strategy: allocation.strategy,
+      key: hostname,
+      exclude: registeredPorts(store),
+    }));
   if (desiredPort) {
     console.log(colors.green(`-- Using port ${port} (fixed)`));
-  } else {
+  } else if (allocation.strategy === "random") {
     console.log(colors.green(`-- Using port ${port}`));
+  } else {
+    console.log(
+      colors.green(
+        `-- Using port ${port} (${allocation.strategy} in ${allocation.range[0]}-${allocation.range[1]})`
+      )
+    );
   }
 
   stopOrphanedProcessGroups(store);
@@ -2298,6 +2313,8 @@ ${colors.bold("Options:")}
 ${colors.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
   PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
+  PORTLESS_APP_PORT_STRATEGY=   How to pick an app port: random (default), stable, sequential
+  PORTLESS_APP_PORT_RANGE=      Range to pick from, e.g. 4200-4999 (default 4000-4999)
   PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
   PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
   PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
@@ -4105,7 +4122,8 @@ async function handleDefaultSingle(
     { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
@@ -4121,7 +4139,26 @@ interface MultiAppEntry {
   label: string;
   commandArgs: string[];
   appPort?: number;
+  allocation: AppPortAllocation;
   proxied: boolean;
+}
+
+/** Ports that registered routes already own, so a new pick never doubles up on one. */
+function registeredPorts(store: RouteStore): Set<number> {
+  try {
+    return new Set(store.loadRoutes().map((route) => route.port));
+  } catch {
+    return new Set();
+  }
+}
+
+/** Pick a port for a multi-app entry with its own strategy, keyed by its hostname. */
+function pickAppPort(app: MultiAppEntry, store: RouteStore): Promise<number> {
+  return findFreePort(app.allocation.range[0], app.allocation.range[1], {
+    strategy: app.allocation.strategy,
+    key: app.name,
+    exclude: registeredPorts(store),
+  });
 }
 
 function spawnChildProcess(
@@ -4198,7 +4235,7 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    appPort = app.appPort ?? (await findFreePort());
+    appPort = app.appPort ?? (await pickAppPort(app, store));
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -4417,7 +4454,15 @@ async function handleDefaultMulti(
       appOverride.worktree?.hostnameTemplate
     );
 
-    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+    apps.push({
+      pkg,
+      name,
+      label,
+      commandArgs,
+      appPort: appOverride.appPort,
+      allocation: resolveAppPortAllocation(appOverride),
+      proxied,
+    });
   }
 
   if (apps.length === 0) {
@@ -4539,7 +4584,7 @@ async function runWithTurbo(
       continue;
     }
 
-    const appPort = app.appPort ?? (await findFreePort());
+    const appPort = app.appPort ?? (await pickAppPort(app, store));
     const hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -4804,7 +4849,8 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
@@ -4820,11 +4866,9 @@ async function handleNamedMode(args: string[]): Promise<void> {
     process.exit(1);
   }
 
-  if (!parsed.appPort) {
-    const appConfig = loadAppConfig();
-    if (appConfig?.appPort) {
-      parsed.appPort = appConfig.appPort;
-    }
+  const appConfig = loadAppConfig();
+  if (!parsed.appPort && appConfig?.appPort) {
+    parsed.appPort = appConfig.appPort;
   }
 
   // Truncate individual labels that exceed the DNS limit, same as handleRunMode.
@@ -4850,7 +4894,8 @@ async function handleNamedMode(args: string[]): Promise<void> {
     undefined,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
