@@ -739,10 +739,16 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         }
       });
 
-      // Abort the outgoing request if the client disconnects
+      // Abort the outgoing request if the client disconnects. "close" also
+      // fires once the response is complete, and a backend that answered
+      // before reading the whole body leaves the request unfinished. Keep
+      // reading the rest of the body so the client connection can carry its
+      // next request.
       res.on("close", () => {
         connection.cancel?.();
         if (!proxyReq.destroyed) {
+          req.unpipe(proxyReq);
+          req.resume();
           proxyReq.destroy();
         }
       });

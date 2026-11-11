@@ -1113,6 +1113,63 @@ describe("createProxyServer", () => {
       client.destroy();
       expect(responses).toBe(2);
     });
+
+    it("keeps reading the request body after an early response so the connection can be reused", async () => {
+      // Reject an upload from its headers, before reading its body, the way an
+      // app answers 413 or 401.
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          if (req.method === "POST") {
+            res.statusCode = 413;
+            res.end("too large");
+            return;
+          }
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "api.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      // The client sends the rest of the body after the answer arrives, then
+      // its next request on the same connection.
+      const bodySize = 1024 * 1024;
+      const client = net.createConnection(addr.port, "127.0.0.1");
+      const statuses = await new Promise<string[]>((resolve, reject) => {
+        let data = "";
+        let sentRest = false;
+        const statuses = () => data.match(/HTTP\/1\.1 \d{3}/g) || [];
+        const timer = setTimeout(() => resolve(statuses()), 2000);
+        client.on("data", (chunk) => {
+          data += chunk;
+          if (!sentRest && data.endsWith("too large")) {
+            sentRest = true;
+            client.write(Buffer.alloc(bodySize - 1024));
+            client.write("GET / HTTP/1.1\r\nHost: api.localhost\r\n\r\n");
+          }
+          if (statuses().length === 2) {
+            clearTimeout(timer);
+            resolve(statuses());
+          }
+        });
+        client.on("error", reject);
+        client.write(
+          `POST /upload HTTP/1.1\r\nHost: api.localhost\r\nContent-Length: ${bodySize}\r\n\r\n`
+        );
+        client.write(Buffer.alloc(1024));
+      });
+      client.destroy();
+      expect(statuses).toEqual(["HTTP/1.1 413", "HTTP/1.1 200"]);
+    });
   });
 
   describe("upstream connections", () => {
