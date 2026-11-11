@@ -2200,6 +2200,126 @@ describe("CLI", { timeout: 15_000 }, () => {
         if (proxyChild) await stopChild(proxyChild);
       }
     });
+
+    it("registers every repeated --name through the worktree template", async () => {
+      let proxyChild: ReturnType<typeof spawn> | undefined;
+
+      try {
+        const proxy = await startMockProxy(tmpDir);
+        proxyChild = proxy.child;
+        const proxyPort = proxy.port;
+
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxyPort.toString());
+        fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+        fs.writeFileSync(
+          path.join(tmpDir, "portless.json"),
+          JSON.stringify({ worktree: { hostnameTemplate: "{worktree}-{name}" } })
+        );
+
+        const capturePath = path.join(tmpDir, "multi-name-capture.json");
+        const scriptPath = path.join(tmpDir, "capture-multi-name.js");
+        fs.writeFileSync(
+          scriptPath,
+          [
+            'const fs = require("node:fs");',
+            `const routes = JSON.parse(fs.readFileSync(${JSON.stringify(
+              path.join(tmpDir, "routes.json")
+            )}, "utf-8"));`,
+            `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({`,
+            "  PORTLESS_URL: process.env.PORTLESS_URL,",
+            "  routes,",
+            "}));",
+          ].join("\n") + "\n"
+        );
+
+        const { status, stdout } = run(
+          [
+            "run",
+            "--name",
+            "brand-a",
+            "--name",
+            "brand-b",
+            "--name",
+            "brand-a",
+            "--name",
+            "brand-c",
+            "node",
+            scriptPath,
+          ],
+          {
+            cwd: tmpDir,
+            env: {
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_HTTPS: "0",
+              PORTLESS_PREFIX: "fix-ui",
+            },
+          }
+        );
+
+        expect(status).toBe(0);
+        expect(stdout).toContain('Names "brand-a", "brand-b", "brand-c" (from --name flags)');
+        expect(stdout).toContain(`-> http://fix-ui-brand-a.localhost:${proxyPort}`);
+        expect(stdout).toContain(`also -> http://fix-ui-brand-b.localhost:${proxyPort}`);
+        expect(stdout).toContain(`also -> http://fix-ui-brand-c.test:${proxyPort}`);
+
+        const capture = JSON.parse(fs.readFileSync(capturePath, "utf-8")) as {
+          PORTLESS_URL: string;
+          routes: Array<{ hostname: string; port: number }>;
+        };
+
+        expect(capture.PORTLESS_URL).toBe(`http://fix-ui-brand-a.localhost:${proxyPort}`);
+        expect(capture.routes.map((route) => route.hostname).sort()).toEqual([
+          "fix-ui-brand-a.localhost",
+          "fix-ui-brand-a.test",
+          "fix-ui-brand-b.localhost",
+          "fix-ui-brand-b.test",
+          "fix-ui-brand-c.localhost",
+          "fix-ui-brand-c.test",
+        ]);
+        expect(new Set(capture.routes.map((route) => route.port)).size).toBe(1);
+      } finally {
+        if (proxyChild) await stopChild(proxyChild);
+      }
+    });
+
+    it("rejects repeated --name values that resolve to the same hostname", async () => {
+      const proxyPort = await getFreePort();
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ worktree: { hostnameTemplate: "{worktree}-app" } })
+      );
+      const ranFile = path.join(tmpDir, "app-ran.txt");
+
+      const { status, stderr } = run(
+        [
+          "run",
+          "--name",
+          "brand-a",
+          "--name",
+          "brand-b",
+          "node",
+          "-e",
+          `require("node:fs").writeFileSync(${JSON.stringify(ranFile)}, "ran")`,
+        ],
+        {
+          cwd: tmpDir,
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: String(proxyPort),
+            PORTLESS_HTTPS: "0",
+            PORTLESS_PREFIX: "fix-ui",
+          },
+        }
+      );
+
+      expect(status).toBe(1);
+      expect(stderr).toContain(
+        'Names "brand-a" and "brand-b" both resolve to "fix-ui-app.localhost"'
+      );
+      expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+      expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+      expect(fs.existsSync(ranFile)).toBe(false);
+    });
   });
 
   describe("NODE_EXTRA_CA_CERTS injection", () => {
@@ -2544,6 +2664,26 @@ describe("CLI", { timeout: 15_000 }, () => {
       });
       expect(status).toBe(0);
       expect(stdout.trim()).toBe("ok");
+    });
+
+    it("documents repeating --name in run help", () => {
+      const { stdout } = run(["run", "--help"]);
+      expect(stdout).toContain("Repeat to serve one app on several hostnames");
+      expect(stdout).toContain("portless run --name a --name b vite dev");
+    });
+
+    it("strips repeated --name flags and passes command through (PORTLESS=0)", () => {
+      const { status, stdout } = run(["run", "--name", "a", "--name", "b", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
+    });
+
+    it("exits 1 when a repeated --name has no value", () => {
+      const { status, stderr } = run(["run", "--name", "a", "--name", "--force", "echo", "ok"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("--name requires");
     });
 
     it("does not consume --name after -- separator (PORTLESS=0)", () => {
