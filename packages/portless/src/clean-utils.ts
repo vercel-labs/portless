@@ -14,6 +14,7 @@ const PORTLESS_STATE_FILES = [
   "proxy.tld",
   "proxy.tlds",
   "proxy.lan",
+  "proxy.unprivileged",
   "proxy.hosts-sync-token",
   "proxy.hosts-sync-token.tmp",
   "ca.trusted",
