@@ -168,7 +168,6 @@ import {
   isServerCommand,
   splitCommand,
   detectPackageManager,
-  loadPackagePortlessConfig,
   mergeWorktreeConfig,
   ConfigValidationError,
 } from "./config.js";
@@ -4749,16 +4748,12 @@ async function handleDefaultMulti(
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
-    let pkgConfig: AppConfig | null;
+    let leafConfig: AppConfig | null;
     // Worktree config matches default mode: the leaf portless.json (or its
     // package.json "portless" fallback) wins over the workspace root config.
-    let leafWorktree: WorktreeConfig | undefined;
     try {
-      pkgConfig = loadPackagePortlessConfig(pkg.dir);
       const leaf = loadConfig(pkg.dir);
-      leafWorktree = leaf
-        ? resolveAppConfig(leaf.config, leaf.configDir, pkg.dir).worktree
-        : undefined;
+      leafConfig = leaf ? resolveAppConfig(leaf.config, leaf.configDir, pkg.dir) : null;
     } catch (err) {
       if (err instanceof ConfigValidationError) {
         console.error(colors.red(`Error: ${err.message}`));
@@ -4769,8 +4764,8 @@ async function handleDefaultMulti(
 
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
-      ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
-      worktree: mergeWorktreeConfig(rootOverride?.worktree, leafWorktree),
+      ...Object.fromEntries(Object.entries(leafConfig ?? {}).filter(([, v]) => v !== undefined)),
+      worktree: mergeWorktreeConfig(rootOverride?.worktree, leafConfig?.worktree),
     };
 
     const effectiveScript = globalScript ?? appOverride.script ?? configScript;

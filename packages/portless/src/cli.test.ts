@@ -6290,7 +6290,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
   describe("multi-app app port precedence", () => {
     it.skipIf(process.platform === "win32")(
-      "gives a multi-app package PORTLESS_APP_PORT over its portless.json appPort",
+      "gives a multi-app package its portless.json appPort and lets PORTLESS_APP_PORT override it",
       async () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-"));
         const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-state-"));
@@ -6357,6 +6357,31 @@ describe("CLI", { timeout: 15_000 }, () => {
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
           expect(captured, output).toBe(String(envPort));
+
+          await stopChild(cli);
+          cli = undefined;
+          fs.rmSync(capturePath, { force: true });
+          delete childEnv.PORTLESS_APP_PORT;
+          output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          captured = "";
+          for (let i = 0; i < 60; i++) {
+            try {
+              captured = fs.readFileSync(capturePath, "utf-8");
+            } catch {
+              captured = "";
+            }
+            if (captured) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          expect(captured, output).toBe(String(configPort));
         } finally {
           if (cli) await stopChild(cli);
           run(["proxy", "stop"], { env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" } });
