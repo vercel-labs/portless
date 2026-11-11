@@ -512,6 +512,39 @@ describe("tryUninstallService", () => {
     expect(result.needsElevation).toBe(true);
   });
 
+  it("marks systemctl's interactive authentication failure as needing elevation", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Interactive authentication required.",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.installed).toBe(true);
+    expect(result.error).toContain("Interactive authentication required");
+    expect(result.needsElevation).toBe(true);
+    expect(rmSync).not.toHaveBeenCalled();
+  });
+
+  it("does not claim elevation for an unrelated systemctl failure", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Unit file is masked.",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.needsElevation).toBe(false);
+  });
+
   it("reports a failed launchctl bootout instead of claiming removal", () => {
     setPlatform("darwin");
     vi.mocked(existsSync).mockReturnValue(true);

@@ -1017,6 +1017,11 @@ function runRemovalStep(runner: CommandRunner, command: string, args: string[]):
   }
 }
 
+/**
+ * Whether a removal failure means the command needed more privilege. Covers
+ * errno codes and the messages launchctl, systemctl (including polkit), and
+ * schtasks use when they cannot act as the current user.
+ */
 function isPermissionError(err: unknown): boolean {
   const code =
     err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
@@ -1024,7 +1029,9 @@ function isPermissionError(err: unknown): boolean {
   return (
     code === "EACCES" ||
     code === "EPERM" ||
-    /permission denied|operation not permitted|access (is )?denied/i.test(message)
+    /permission denied|operation not permitted|access (is )?denied|interactive authentication required|authentication is required|not authori[sz]ed|must (be|run as) root/i.test(
+      message
+    )
   );
 }
 
