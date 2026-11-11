@@ -126,7 +126,7 @@ Run `portless doctor` first when a URL does not load. It checks the proxy, route
 
 ## Platforms
 
-portless runs on macOS, Linux, and Windows with Node.js 24 or later. `--tailscale` and `--funnel` need the Tailscale CLI, `--ngrok` needs the ngrok CLI, and `--cloudflare` needs `cloudflared`.
+portless runs on macOS, Linux, and Windows with Node.js 24 or later. `--tailscale`, `--tailscale-http` and `--funnel` need the Tailscale CLI, `--ngrok` needs the ngrok CLI, and `--cloudflare` needs `cloudflared`.
 
 ## Development
 

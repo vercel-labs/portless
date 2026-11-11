@@ -71,6 +71,10 @@ portless docs.myapp next dev
       <td>Share the app on your Tailscale network.</td>
     </tr>
     <tr>
+      <td>`--tailscale-http`</td>
+      <td>Share on the tailnet over plain HTTP, addressed by the node's tailnet IP. For tailnets that cannot enable MagicDNS. Cannot be combined with `--funnel`.</td>
+    </tr>
+    <tr>
       <td>`--funnel`</td>
       <td>Share the app publicly via Tailscale Funnel.</td>
     </tr>
@@ -87,6 +91,7 @@ portless docs.myapp next dev
 
 ```bash
 portless myapp --tailscale next dev
+portless myapp --tailscale-http next dev
 portless myapp --funnel next dev
 portless myapp --ngrok next dev
 ```
@@ -123,7 +128,21 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public)
 ```
 
-The Tailscale CLI must be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled. `--funnel` also needs Funnel enabled for the tailnet and node. If a setting is missing, portless exits before starting the child process. Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs, and the Tailscale serve registrations are removed when the app exits.
+The Tailscale CLI must be installed and connected (`tailscale up`). `--tailscale` and `--funnel` need MagicDNS and Tailscale HTTPS certificates enabled, and `--funnel` also needs Funnel enabled for the tailnet and node. If a setting is missing, portless exits before starting the child process, and when MagicDNS is the missing setting, the error points you to `--tailscale-http`. Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs, and the Tailscale serve registrations are removed when the app exits.
+
+#### Tailnets without MagicDNS
+
+HTTPS sharing needs a certificate for the node's MagicDNS name. Some tailnets cannot enable MagicDNS because it resolves subnet routers to their private IPs, which breaks split-horizon DNS. On those tailnets, use `--tailscale-http`:
+
+```bash
+portless myapp --tailscale-http next dev
+# -> https://myapp.localhost           (local)
+# -> http://100.101.102.103            (tailnet)
+```
+
+`--tailscale-http` forwards a tailnet port straight to the app and reports the node's tailnet IP, so no certificate is involved. WireGuard encrypts all tailnet traffic, so the plaintext hop stays inside the tunnel. The first app gets port 80, and later apps get 8080, 8081, and so on.
+
+Browsers still treat a plain-HTTP tailnet URL as an insecure context. APIs that require a secure context, such as service workers, camera and microphone access, and `crypto.subtle`, are unavailable, and cookies marked `Secure` are not set. Because the forward is raw TCP, the app also does not receive the `Tailscale-User-*` and `X-Forwarded-*` headers that an HTTPS serve adds. You can't combine `--tailscale-http` with `--funnel`, because Funnel has no plain-HTTP mode.
 
 ### Share with ngrok
 
