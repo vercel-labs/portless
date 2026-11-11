@@ -6267,6 +6267,86 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
   });
 
+  describe("multi-app app port precedence", () => {
+    it.skipIf(process.platform === "win32")(
+      "gives a multi-app package PORTLESS_APP_PORT over its portless.json appPort",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-state-"));
+        const proxyPort = await getFreePort();
+        const configPort = await getFreePort();
+        let envPort = await getFreePort();
+        while (envPort === configPort || envPort === proxyPort) envPort = await getFreePort();
+        const capturePath = path.join(stateDir, "port.txt");
+        let cli: ReturnType<typeof spawn> | undefined;
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          const dir = path.join(root, "packages", "web");
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "capture.cjs"),
+            `require("node:fs").writeFileSync(${JSON.stringify(capturePath)}, process.env.PORT || "");\n`
+          );
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({ name: "web", version: "0.0.0", scripts: { dev: "node capture.cjs" } })
+          );
+          fs.writeFileSync(
+            path.join(dir, "portless.json"),
+            JSON.stringify({ appPort: configPort, proxy: true })
+          );
+
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_PORT = proxyPort.toString();
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.PORTLESS_APP_PORT = envPort.toString();
+          childEnv.NO_COLOR = "1";
+          delete childEnv.PORTLESS_PREFIX;
+
+          let output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          let captured = "";
+          for (let i = 0; i < 60; i++) {
+            try {
+              captured = fs.readFileSync(capturePath, "utf-8");
+            } catch {
+              captured = "";
+            }
+            if (captured) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          expect(captured, output).toBe(String(envPort));
+        } finally {
+          if (cli) await stopChild(cli);
+          run(["proxy", "stop"], { env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" } });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+  });
+
   describe("multi-app script selection", () => {
     // Skipped on Windows for the same reason as the multi-app worktree test:
     // multi-app mode spawns the package manager, and spawn("npm") fails there.

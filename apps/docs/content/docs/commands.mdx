@@ -63,7 +63,7 @@ portless docs.myapp next dev
     </tr>
     <tr>
       <td>`--app-port <number>`</td>
-      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`.</td>
+      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`. In a monorepo run, `PORTLESS_APP_PORT` applies to every proxied app; set a per-app `appPort` when the apps need different ports.</td>
     </tr>
     <tr>
       <td>`--force`</td>

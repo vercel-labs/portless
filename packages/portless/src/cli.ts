@@ -2428,7 +2428,7 @@ ${colors.bold("Options for run and <name> <command>:")}
 ${colors.bold("Environment variables:")}
   PORTLESS=0                    Run app commands directly without the proxy
   PORTLESS_PORT=<number>        Set the default proxy port
-  PORTLESS_APP_PORT=<number>    Set a fixed port for the app
+  PORTLESS_APP_PORT=<number>    Set a fixed port for each proxied app
   PORTLESS_HTTPS=0              Disable HTTPS for the proxy
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
@@ -4716,6 +4716,7 @@ async function handleDefaultMulti(
   }
 
   const apps: MultiAppEntry[] = [];
+  const envAppPort = appPortFromEnv();
 
   const detectedWorktrees = new Map<WorktreePrefixStyle, WorktreePrefix | null>();
   const worktreeFor = (worktreeConfig: WorktreeConfig | undefined): WorktreePrefix | null => {
@@ -4791,7 +4792,14 @@ async function handleDefaultMulti(
       appOverride.worktree?.hostnameTemplate
     );
 
-    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+    apps.push({
+      pkg,
+      name,
+      label,
+      commandArgs,
+      appPort: envAppPort ?? appOverride.appPort,
+      proxied,
+    });
   }
 
   if (apps.length === 0) {
