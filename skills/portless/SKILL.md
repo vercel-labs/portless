@@ -392,17 +392,25 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 Optional config file. Portless looks for it in the current directory; `worktree` options also inherit from the workspace root into package directories.
 
-| Field      | Type    | Default                    | Description                                              |
-| ---------- | ------- | -------------------------- | -------------------------------------------------------- |
-| `name`     | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
-| `script`   | string  | `"dev"`                    | Name of a package.json script to run                     |
-| `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
-| `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
-| `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `worktree` | object  |                            | Worktree label style and hostname template               |
-| `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
+| Field          | Type               | Default                    | Description                                                         |
+| -------------- | ------------------ | -------------------------- | ------------------------------------------------------------------- |
+| `name`         | string             | inferred from package.json | Base app name (worktree prefix still applies)                       |
+| `script`       | string             | `"dev"`                    | Name of a package.json script to run                                |
+| `appPort`      | number             | auto-assigned              | Fixed port for the child process                                    |
+| `proxy`        | boolean            | auto-detected              | Whether to route through the proxy (`false` for tasks)              |
+| `apps`         | object             |                            | Overrides for workspace packages, keyed by relative path            |
+| `worktree`     | object             |                            | Worktree label style and hostname template                          |
+| `turbo`        | boolean            | `true`                     | Set `false` to use direct spawning instead of turborepo             |
+| `https`        | boolean            | `true`                     | `false` serves plain HTTP (same as `PORTLESS_HTTPS=0`)              |
+| `port`         | number             | 443 (HTTPS) / 80 (HTTP)    | Proxy port (same as `PORTLESS_PORT`)                                |
+| `tld`          | string or string[] | `"localhost"`              | One TLD or several (same as `PORTLESS_TLD`)                         |
+| `wildcard`     | boolean            | `false`                    | Subdomain fallback (same as `PORTLESS_WILDCARD`)                    |
+| `syncHosts`    | boolean            | `true`                     | `false` turns hosts-file sync off (same as `PORTLESS_SYNC_HOSTS=0`) |
+| `unprivileged` | boolean            | `false`                    | Port below 1024 without sudo (same as `PORTLESS_UNPRIVILEGED=1`)    |
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
+
+The proxy settings `https`, `port`, `tld`, `wildcard`, `syncHosts`, and `unprivileged` pin how the proxy runs for the whole project. Each is applied as the default for the `PORTLESS_*` variable it names, so a flag or an exported variable still wins. A package directory inside a workspace falls back to the workspace root's proxy settings. `"unprivileged": true` with `"syncHosts": true` is rejected when the file is read.
 
 ### package.json "portless" key
 
