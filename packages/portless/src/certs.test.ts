@@ -422,6 +422,42 @@ describe("createSNICallback", () => {
     expect(cert.subjectAltName).toBe("DNS:myapp.localhost");
   });
 
+  // Root and Windows ignore file mode bits, so the read-only serial cannot
+  // reproduce the signing failure there.
+  const canSimulateReadOnlySerial =
+    process.platform !== "win32" && (process.getuid?.() ?? -1) !== 0;
+
+  it.skipIf(!canSimulateReadOnlySerial)(
+    "removes a partial certificate and reports the error when signing fails",
+    async () => {
+      const certs = ensureCerts(tmpDir);
+      const srlPath = path.join(tmpDir, "ca.srl");
+      const hostCertPath = path.join(tmpDir, "host-certs", "blocked_localhost.pem");
+      fs.chmodSync(srlPath, 0o444);
+
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const sniCallback = createSNICallback(
+          tmpDir,
+          fs.readFileSync(certs.certPath),
+          fs.readFileSync(certs.keyPath)
+        );
+        const error = await new Promise<Error | null>((resolve) => {
+          sniCallback("blocked.localhost", (err) => resolve(err));
+        });
+
+        expect(error).toBeInstanceOf(Error);
+        expect(error?.message).toMatch(/ca\.srl|Permission denied/);
+        expect(fs.existsSync(hostCertPath)).toBe(false);
+        expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("blocked.localhost"));
+        expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("ca.srl"));
+      } finally {
+        fs.chmodSync(srlPath, 0o644);
+        consoleError.mockRestore();
+      }
+    }
+  );
+
   it("reissues a cached host cert that has a bare TLD wildcard SAN", async () => {
     const hostDir = path.join(tmpDir, "host-certs");
     fs.mkdirSync(hostDir, { recursive: true });

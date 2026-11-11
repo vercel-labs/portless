@@ -486,6 +486,9 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
       crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
     );
   }
+  // A privileged start creates ca.srl as root. Hand it back to the invoking
+  // user so later unprivileged starts can update the serial number (#584).
+  fixOwnership(srlPath);
   openssl([
     "x509",
     "-req",
@@ -855,26 +858,36 @@ async function generateHostCertAsync(
       crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
     );
   }
-  await opensslAsync([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    certPath,
-    ...(await backdatedNotBeforeArgsAsync()),
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
+  // A privileged start creates ca.srl as root. Hand it back to the invoking
+  // user so later unprivileged starts can update the serial number (#584).
+  fixOwnership(srlPath);
+  try {
+    await opensslAsync([
+      "x509",
+      "-req",
+      "-sha256",
+      "-in",
+      csrPath,
+      "-CA",
+      caCertPath,
+      "-CAkey",
+      caKeyPath,
+      "-CAserial",
+      srlPath,
+      "-out",
+      certPath,
+      ...(await backdatedNotBeforeArgsAsync()),
+      "-days",
+      SERVER_VALIDITY_DAYS.toString(),
+      "-extfile",
+      extPath,
+    ]);
+  } catch (error) {
+    // A failed signature can leave a zero-byte certificate. Remove it so the
+    // next handshake retries instead of serving a broken cert from disk.
+    await fs.promises.rm(certPath, { force: true });
+    throw error;
+  }
 
   // Clean up temporary files (keep ca.srl for serial number tracking)
   for (const tmp of [csrPath, extPath]) {
@@ -1009,7 +1022,11 @@ export function createSNICallback(
       })
       .catch((err) => {
         pending.delete(servername);
-        cb(err instanceof Error ? err : new Error(String(err)));
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.error(
+          `[portless] Failed to prepare a TLS certificate for ${servername}: ${error.message}`
+        );
+        cb(error);
       });
   };
 }
