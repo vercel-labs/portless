@@ -262,14 +262,17 @@ export class RouteStore {
     }
   }
 
-  private saveRoutes(routes: RouteMapping[], replaceSkippedHostname?: string): void {
+  private saveRoutes(
+    routes: RouteMapping[],
+    replaceSkippedHostnames: readonly string[] = []
+  ): void {
     const skipped = this.skippedRoutes().filter(
       (value) =>
-        replaceSkippedHostname === undefined ||
         typeof value !== "object" ||
         value === null ||
         !("hostname" in value) ||
-        value.hostname !== replaceSkippedHostname
+        typeof value.hostname !== "string" ||
+        !replaceSkippedHostnames.includes(value.hostname)
     );
     fs.writeFileSync(this.routesPath, JSON.stringify([...routes, ...skipped], null, 2), {
       mode: FILE_MODE,
@@ -297,52 +300,125 @@ export class RouteStore {
     if (!this.acquireLock()) {
       throw new Error("Failed to acquire route lock");
     }
-    let killedPid: number | undefined;
     try {
-      if (
-        !force &&
-        this.skippedRoutes().some(
-          (value) =>
-            typeof value === "object" &&
-            value !== null &&
-            "hostname" in value &&
-            value.hostname === hostname
-        )
-      ) {
-        throw new Error(
-          `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
-        );
-      }
       const routes = this.loadRoutes(true);
-      const existing = routes.find((r) => r.hostname === hostname);
-      const isAlias = existing?.pid === 0;
-      if (existing && existing.pid !== pid && (isAlias || this.isProcessAlive(existing.pid))) {
-        if (!force) {
-          throw new RouteConflictError(hostname, existing.pid);
-        }
-        // --force: kill the existing process before taking over; an alias has none
-        if (!isAlias) {
-          try {
-            process.kill(existing.pid, "SIGTERM");
-            killedPid = existing.pid;
-          } catch {
-            // Process may have exited between the check and the kill; non-fatal
-          }
-        }
-      }
-      const filtered = routes.filter((r) => r.hostname !== hostname);
-      const entry: RouteMapping = {
-        hostname,
-        port,
-        pid,
-        registeredAt: Date.now(),
-        ...(upstream === undefined ? {} : { upstream }),
-      };
-      filtered.push(entry);
-      this.saveRoutes(filtered, force ? hostname : undefined);
+      const killedPid = this.putRoute(routes, hostname, port, pid, force, upstream);
+      this.saveRoutes(routes, force ? [hostname] : []);
+      return killedPid;
     } finally {
       this.releaseLock();
     }
+  }
+
+  /**
+   * Pick an app port with `pick` and register `hostnames` on it. `pick`
+   * receives the ports already assigned to other live routes (other apps and
+   * aliases) and must not return one of them.
+   *
+   * findFreePort releases its probe before the app binds, so two runs started
+   * together could otherwise pick the same port, and a dev server that keeps
+   * running after `EADDRINUSE` would leave its route pointing at the other app
+   * (#533). `pick` runs without the lock, since it awaits network probes and the
+   * lock is acquired synchronously by other route operations in this process.
+   * The routes are then reloaded under the lock: if another run claimed the
+   * port meanwhile, it joins the excluded set and `pick` runs again. Each retry
+   * excludes one more port, so the loop ends. The hostnames of one app (one per
+   * TLD) share its port, so they are not excluded.
+   */
+  async claimAppPort(
+    hostnames: readonly string[],
+    pid: number,
+    pick: (taken: ReadonlySet<number>) => Promise<number>,
+    force = false
+  ): Promise<{ port: number; killedPids: number[] }> {
+    this.ensureDir();
+    const isOther = (r: RouteMapping) => !hostnames.includes(r.hostname);
+    const taken = new Set(
+      this.loadRoutes()
+        .filter(isOther)
+        .map((r) => r.port)
+    );
+    for (;;) {
+      const port = await pick(taken);
+      if (!this.acquireLock()) {
+        throw new Error("Failed to acquire route lock");
+      }
+      try {
+        const routes = this.loadRoutes(true);
+        const holders = routes.filter(isOther).map((r) => r.port);
+        if (holders.includes(port)) {
+          for (const p of holders) taken.add(p);
+          continue;
+        }
+        const killedPids: number[] = [];
+        for (const hostname of hostnames) {
+          const killedPid = this.putRoute(routes, hostname, port, pid, force);
+          if (killedPid !== undefined) killedPids.push(killedPid);
+        }
+        this.saveRoutes(routes, force ? hostnames : []);
+        return { port, killedPids };
+      } finally {
+        this.releaseLock();
+      }
+    }
+  }
+
+  /**
+   * Put `hostname` -> `port` into `routes` in place. Throws when the stored
+   * routes hold an invalid entry for `hostname`, or RouteConflictError when
+   * another live process owns it, unless `force` is set, in which case that
+   * process is sent SIGTERM. Returns the PID of the killed process. The caller
+   * holds the lock and saves `routes`.
+   */
+  private putRoute(
+    routes: RouteMapping[],
+    hostname: string,
+    port: number,
+    pid: number,
+    force: boolean,
+    upstream?: RouteInfo["upstream"]
+  ): number | undefined {
+    if (
+      !force &&
+      this.skippedRoutes().some(
+        (value) =>
+          typeof value === "object" &&
+          value !== null &&
+          "hostname" in value &&
+          value.hostname === hostname
+      )
+    ) {
+      throw new Error(
+        `"${hostname}" has an invalid or unsupported stored route. Use --force to replace it.`
+      );
+    }
+    let killedPid: number | undefined;
+    const existing = routes.find((r) => r.hostname === hostname);
+    const isAlias = existing?.pid === 0;
+    if (existing && existing.pid !== pid && (isAlias || this.isProcessAlive(existing.pid))) {
+      if (!force) {
+        throw new RouteConflictError(hostname, existing.pid);
+      }
+      // --force: kill the existing process before taking over; an alias has none
+      if (!isAlias) {
+        try {
+          process.kill(existing.pid, "SIGTERM");
+          killedPid = existing.pid;
+        } catch {
+          // Process may have exited between the check and the kill; non-fatal
+        }
+      }
+    }
+    for (let i = routes.length - 1; i >= 0; i--) {
+      if (routes[i].hostname === hostname) routes.splice(i, 1);
+    }
+    routes.push({
+      hostname,
+      port,
+      pid,
+      registeredAt: Date.now(),
+      ...(upstream === undefined ? {} : { upstream }),
+    });
     return killedPid;
   }
 

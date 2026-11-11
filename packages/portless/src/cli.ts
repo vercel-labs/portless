@@ -642,6 +642,30 @@ function addRoutes(
 }
 
 /**
+ * Register `hostnames` for an app. A fixed `desiredPort` is registered as is.
+ * Otherwise the port is picked skipping ports that other live routes already
+ * hold, then claimed under the route lock, picking again if another run took it
+ * meanwhile, so runs started together never get the same port (#533).
+ */
+async function registerAppRoutes(
+  store: RouteStore,
+  hostnames: readonly string[],
+  desiredPort: number | undefined,
+  pid: number,
+  force = false
+): Promise<{ port: number; killedPids: number[] }> {
+  if (desiredPort !== undefined) {
+    return { port: desiredPort, killedPids: addRoutes(store, hostnames, desiredPort, pid, force) };
+  }
+  return store.claimAppPort(
+    hostnames,
+    pid,
+    (taken) => findFreePort(undefined, undefined, taken),
+    force
+  );
+}
+
+/**
  * Stop dev servers left running by portless sessions that died without
  * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
  * the stored process group is the only remaining link to the orphaned tree.
@@ -1604,19 +1628,20 @@ async function runApp(
     }
   }
 
-  const port = desiredPort ?? (await findFreePort());
-  if (desiredPort) {
-    console.log(colors.green(`-- Using port ${port} (fixed)`));
-  } else {
-    console.log(colors.green(`-- Using port ${port}`));
-  }
-
   stopOrphanedProcessGroups(store);
 
   // Register route (--force kills the existing owner if any)
+  let port: number;
   let killedPids: number[] = [];
   try {
-    killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    ({ port, killedPids } = await registerAppRoutes(
+      store,
+      hostnames,
+      desiredPort,
+      process.pid,
+      force
+    ));
+    console.log(colors.green(`-- Using port ${port}${desiredPort ? " (fixed)" : ""}`));
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
     if (err instanceof RouteConflictError) {
@@ -4198,13 +4223,12 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    ({ port: appPort } = await registerAppRoutes(store, hostnames, app.appPort, process.pid));
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 
     env = {
@@ -4539,13 +4563,12 @@ async function runWithTurbo(
       continue;
     }
 
-    const appPort = app.appPort ?? (await findFreePort());
     const hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
 
-    addRoutes(store, hostnames, appPort, process.pid);
+    const { port: appPort } = await registerAppRoutes(store, hostnames, app.appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 
