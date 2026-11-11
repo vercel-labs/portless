@@ -1566,6 +1566,75 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
   });
 
+  describe("corrupt routes file recovery", () => {
+    it("quarantines the file and starts the proxy", async () => {
+      const state = fs.mkdtempSync(path.join(os.tmpdir(), "portless-corrupt-proxy-"));
+      const port = await getFreePort();
+      const env = { PORTLESS_STATE_DIR: state, PORTLESS_HTTPS: "0", PORTLESS_PORT: String(port) };
+      try {
+        fs.writeFileSync(path.join(state, "routes.json"), "{");
+        const start = run(["proxy", "start", "--no-tls", "-p", String(port)], { env });
+        expect(start.status, start.stdout + start.stderr).toBe(0);
+        expect(start.stderr).toContain("Moved corrupted routes file");
+        expect(fs.readdirSync(state).some((file) => file.startsWith("routes.json.corrupt-"))).toBe(
+          true
+        );
+        const listed = run(["list", "--json"], { env });
+        expect(listed.status).toBe(0);
+        expect(JSON.parse(listed.stdout)).toEqual({ routes: [] });
+      } finally {
+        run(["proxy", "stop", "--port", String(port)], { env });
+        fs.rmSync(state, { recursive: true, force: true });
+      }
+    });
+
+    it("runs a named app when the file is corrupt", async () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-corrupt-app-"));
+      const state = fs.mkdtempSync(path.join(os.tmpdir(), "portless-corrupt-app-state-"));
+      const port = await getFreePort();
+      const env: Record<string, string | undefined> = {
+        ...process.env,
+        PORTLESS_STATE_DIR: state,
+        PORTLESS_HTTPS: "0",
+        PORTLESS_PORT: String(port),
+        NO_COLOR: "1",
+      };
+      for (const key of Object.keys(env)) {
+        if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete env[key];
+      }
+      fs.writeFileSync(
+        path.join(root, "server.cjs"),
+        'const http=require("node:http");http.createServer((q,r)=>r.end("ok")).listen(Number(process.env.PORT),process.env.HOST||"127.0.0.1");\n'
+      );
+      fs.writeFileSync(path.join(state, "routes.json"), "{");
+      const child = spawn(process.execPath, [CLI_PATH, "myapp", "node", "server.cjs"], {
+        cwd: root,
+        env,
+        stdio: ["ignore", "pipe", "pipe"],
+      });
+      let output = "";
+      child.stdout?.on("data", (chunk) => (output += chunk.toString()));
+      child.stderr?.on("data", (chunk) => (output += chunk.toString()));
+      try {
+        let routes: Array<{ hostname: string }> = [];
+        for (let i = 0; i < 60; i++) {
+          const listed = run(["list", "--json"], { env });
+          if (listed.status === 0) routes = JSON.parse(listed.stdout).routes;
+          if (routes.length > 0) break;
+          await new Promise((resolve) => setTimeout(resolve, 250));
+        }
+        expect(routes, output).toHaveLength(1);
+        expect(routes[0]!.hostname).toContain("myapp");
+        expect(output).toContain("Moved corrupted routes file");
+      } finally {
+        await stopChild(child);
+        run(["proxy", "stop", "--port", String(port)], { env });
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(state, { recursive: true, force: true });
+      }
+    }, 30_000);
+  });
+
   describe("doctor", () => {
     it("prints help with --help", () => {
       const { status, stdout } = run(["doctor", "--help"]);

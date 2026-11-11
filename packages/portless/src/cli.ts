@@ -643,6 +643,7 @@ function addRoutes(
   force = false,
   upstream?: AliasUpstream
 ): number[] {
+  store.recoverCorruptRoutesFile();
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
@@ -1777,6 +1778,7 @@ async function runApp(
   lanIp?: string | null
 ) {
   let store = initialStore;
+  initialStore.recoverCorruptRoutesFile();
   console.error(chalk.blue.bold(`\nportless\n`));
 
   // Check tailscale readiness early, before auto-starting the proxy.
@@ -1840,6 +1842,7 @@ async function runApp(
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
+    store.recoverCorruptRoutesFile();
     if (tls && !isCATrusted(stateDir)) {
       await handleTrust();
     }
@@ -3383,6 +3386,7 @@ async function handleAlias(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+  store.recoverCorruptRoutesFile();
 
   if (isRemove) {
     const hostnames = buildHostnames(removeName!, tlds, targetTlds);
@@ -4172,6 +4176,7 @@ async function handleProxy(args: string[]): Promise<void> {
   const store = new RouteStore(stateDir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+  store.recoverCorruptRoutesFile();
 
   // Check if already running. Plain HTTP check detects both TLS and non-TLS
   // proxies because the TLS-enabled proxy accepts plain HTTP via byte-peeking.
@@ -5527,6 +5532,7 @@ async function composeDown(args: string[], globals: string[], input?: string): P
   }
   const { dir, tlds } = await discoverState();
   const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+  store.recoverCorruptRoutesFile();
   const aliases = store.loadRoutes().filter((r) => r.pid === 0);
   removeRoutes(store, staleAliases(aliases, project, tlds, after));
   if (after.ports.size === 0) {
@@ -5797,6 +5803,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
 }
 
 function isAliasConflict(store: RouteStore, hostname: string): boolean {
+  store.recoverCorruptRoutesFile();
   return store.loadRoutes().some((r) => r.hostname === hostname && r.pid === 0);
 }
 

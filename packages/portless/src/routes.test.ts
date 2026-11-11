@@ -67,6 +67,23 @@ describe("RouteStore", () => {
       expect(() => store.loadRoutes()).toThrow(/expected array/);
     });
 
+    it("moves a corrupt routes file aside for a write path", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), "not json");
+      expect(store.recoverCorruptRoutesFile()).toBe(true);
+      expect(store.loadRoutes()).toEqual([]);
+      const backup = fs.readdirSync(tmpDir).find((name) => name.startsWith("routes.json.corrupt-"));
+      expect(backup).toBeDefined();
+      expect(fs.readFileSync(path.join(tmpDir, backup!), "utf-8")).toBe("not json");
+    });
+
+    it("leaves a valid routes file alone when recovering", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), "[]");
+      expect(store.recoverCorruptRoutesFile()).toBe(false);
+      expect(store.loadRoutes()).toEqual([]);
+    });
+
     it("filters out entries with invalid schema", () => {
       store.ensureDir();
       const routes = [
