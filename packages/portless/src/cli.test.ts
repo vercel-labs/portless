@@ -6366,6 +6366,58 @@ describe("CLI", { timeout: 15_000 }, () => {
       },
       60_000
     );
+    it("refuses PORTLESS_APP_PORT when several apps would start", () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-ambiguous-"));
+      const stateDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "portless-multi-port-ambiguous-state-")
+      );
+      try {
+        fs.writeFileSync(
+          path.join(root, "package.json"),
+          JSON.stringify({
+            name: "myrepo",
+            private: true,
+            packageManager: "npm@10.0.0",
+            workspaces: ["packages/*"],
+          })
+        );
+        for (const name of ["web", "api"]) {
+          const dir = path.join(root, "packages", name);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({ name, version: "0.0.0", scripts: { dev: "node noop.cjs" } })
+          );
+          fs.writeFileSync(path.join(dir, "portless.json"), JSON.stringify({ proxy: true }));
+          fs.writeFileSync(path.join(dir, "noop.cjs"), "setTimeout(() => {}, 5000);\n");
+        }
+
+        const childEnv: Record<string, string | undefined> = { ...process.env };
+        for (const key of Object.keys(childEnv)) {
+          if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+        }
+        childEnv.PORTLESS_STATE_DIR = stateDir;
+        childEnv.PORTLESS_HTTPS = "0";
+        childEnv.PORTLESS_APP_PORT = "45678";
+        childEnv.NO_COLOR = "1";
+        delete childEnv.PORTLESS_PREFIX;
+
+        const result = spawnSync(process.execPath, [CLI_PATH], {
+          encoding: "utf-8",
+          timeout: 15_000,
+          cwd: root,
+          env: childEnv,
+        });
+
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("PORTLESS_APP_PORT sets one port");
+        expect(result.stderr).toContain("2 apps");
+        expect(result.stderr).not.toContain("Proxy is running");
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe("multi-app script selection", () => {

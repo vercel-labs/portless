@@ -2441,7 +2441,7 @@ ${colors.bold("Options for run and <name> <command>:")}
 ${colors.bold("Environment variables:")}
   PORTLESS=0                    Run app commands directly without the proxy
   PORTLESS_PORT=<number>        Set the default proxy port
-  PORTLESS_APP_PORT=<number>    Set a fixed port for each proxied app
+  PORTLESS_APP_PORT=<number>    Set a fixed port for the app
   PORTLESS_HTTPS=0              Disable HTTPS for the proxy
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
@@ -4829,6 +4829,16 @@ async function handleDefaultMulti(
   apps.sort((a, b) => a.label.localeCompare(b.label));
   const proxiedApps = apps.filter((a) => a.proxied);
   const taskApps = apps.filter((a) => !a.proxied);
+
+  if (envAppPort !== undefined && proxiedApps.length > 1) {
+    throw new UsageError(
+      `PORTLESS_APP_PORT sets one port, but this run starts ${proxiedApps.length} apps.`,
+      [
+        "Set appPort for each app in portless.json, or unset PORTLESS_APP_PORT.",
+        'Example: { "apps": { "packages/web": { "appPort": 4100 }, "packages/api": { "appPort": 4200 } } }',
+      ]
+    );
+  }
 
   console.error(chalk.blue.bold(`\nportless\n`));
 
