@@ -489,6 +489,32 @@ export class RouteStore {
   }
 
   /**
+   * Move a corrupt routes file aside so a write path can start with an empty
+   * table. Missing and valid files are left alone; an unreadable file still
+   * throws because it cannot be moved.
+   */
+  recoverCorruptRoutesFile(): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
+    }
+    try {
+      try {
+        this.readRouteFile(this.routesPath);
+        return false;
+      } catch (err) {
+        if (!(err instanceof RoutesFileError) || err.reason !== "corrupt") throw err;
+        const backup = `${this.routesPath}.corrupt-${Date.now()}`;
+        fs.renameSync(this.routesPath, backup);
+        this.onWarning?.(`Moved corrupted routes file to ${backup}. Starting with no routes.`);
+        return true;
+      }
+    } finally {
+      this.releaseLock();
+    }
+  }
+
+  /**
    * Record the group member `prune` verified this run, only while the stored
    * stale record is still the one it examined.
    */
