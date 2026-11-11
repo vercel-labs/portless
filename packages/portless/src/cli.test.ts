@@ -1629,8 +1629,13 @@ describe("CLI", { timeout: 15_000 }, () => {
       } finally {
         await stopChild(child);
         run(["proxy", "stop", "--port", String(port)], { env });
-        fs.rmSync(root, { recursive: true, force: true });
-        fs.rmSync(state, { recursive: true, force: true });
+        for (const dir of [root, state]) {
+          try {
+            fs.rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+          } catch {
+            // Windows can keep the directory busy briefly after the child exits.
+          }
+        }
       }
     }, 30_000);
   });
