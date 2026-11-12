@@ -379,6 +379,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       [["prune", "--force", "--help"], "prune"],
       [["hosts", "sync", "--help"], "hosts"],
       [["service", "install", "--help"], "service"],
+      [["alias", "--help", "--bogus"], "alias"],
+      [["alias", "--remove", "--help"], "alias"],
     ])("prints help for %j without running the command", (args, command) => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
       try {
@@ -797,8 +799,8 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["doctor", "typo"], {
         env: { PORTLESS: "0" },
       });
-      expect(status).toBe(1);
-      expect(stderr).toContain("Unknown argument");
+      expect(status).toBe(2);
+      expect(stderr).toContain("Unexpected argument");
       expect(stderr).not.toContain("ENOENT");
     });
   });
@@ -812,10 +814,211 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("--foreground");
     });
 
-    it("exits 1 for unknown proxy subcommand", () => {
-      const { status, stdout } = run(["proxy", "unknown"]);
-      expect(status).toBe(1);
-      expect(stdout).toContain("proxy start");
+    it("exits 2 for unknown proxy subcommand", () => {
+      const { status, stderr } = run(["proxy", "unknown"]);
+      expect(status).toBe(2);
+      expect(stderr).toContain('Unknown proxy subcommand "unknown"');
+    });
+
+    it("rejects an unknown start flag before starting the proxy", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-args-"));
+      const testPort = await getFreePort();
+      try {
+        const { status, stderr } = run(["proxy", "start", "--forground"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: String(testPort),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Unknown flag");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejects an invalid --tld value as a usage error", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-tld-"));
+      try {
+        const { status, stderr } = run(["proxy", "start", "--tld", "_bad"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Invalid TLD");
+        expect(stderr).toContain("portless proxy start --help");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("compose", () => {
+    it("prints help and exits 0 with no arguments", () => {
+      const { status, stdout } = run(["compose"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless compose");
+    });
+
+    it("treats an unknown global flag without a subcommand as a usage error", () => {
+      const { status, stderr } = run(["compose", "--bad"]);
+      expect(status).toBe(2);
+      expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
+    });
+
+    it("prints compose help when --help is given with a bad flag", () => {
+      for (const args of [
+        ["compose", "--help", "--bad"],
+        ["compose", "--bad", "--help"],
+        ["compose", "--help=true"],
+      ]) {
+        const { status, stdout } = run(args);
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless compose");
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "rejects a bad global flag before a subcommand, even with child help, without running docker",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-globals-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 1\n', {
+            mode: 0o755,
+          });
+          for (const extra of [[], ["--help"], ["-h"]] as const) {
+            for (const subcommand of ["up", "down", "ps", "config"]) {
+              const { status, stdout, stderr } = run(["compose", "--bad", subcommand, ...extra], {
+                env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined },
+              });
+              expect(status).toBe(2);
+              expect(stdout).toBe("");
+              expect(stderr).toContain('Unknown flag "--bad" for portless compose.');
+              expect(stderr).toContain("See: portless compose --help");
+            }
+          }
+          expect(fs.existsSync(log)).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps docker's exit code and arguments for the commands portless passes through",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-passthrough-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(
+            docker,
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\necho "docker $*"\nexit 7\n',
+            { mode: 0o755 }
+          );
+          const env = { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined };
+          for (const [args, expected] of [
+            [["compose", "ps", "--bad"], "compose ps --bad"],
+            [["compose", "--", "logs", "-n", "5"], "compose logs -n 5"],
+            [["compose", "-f", "compose.dev.yml", "config"], "compose -f compose.dev.yml config"],
+            [["compose", "-fcompose.dev.yml", "config"], "compose -fcompose.dev.yml config"],
+            [["compose", "-f=compose.dev.yml", "ps"], "compose -f=compose.dev.yml ps"],
+            [["compose", "-pdemo", "config"], "compose -pdemo config"],
+            [["compose", "-p=demo", "ps"], "compose -p=demo ps"],
+            [["compose", "--workdir", "/app", "logs"], "compose --workdir /app logs"],
+            [["compose", "--dry-run=true", "config"], "compose --dry-run=true config"],
+            [["compose", "--help=false", "ps"], "compose --help=false ps"],
+            [
+              ["compose", "-fcompose.dev.yml", "up", "--help"],
+              "compose -fcompose.dev.yml up --help",
+            ],
+            [
+              ["compose", "-fcompose.dev.yml", "--", "logs", "-n", "5"],
+              "compose -fcompose.dev.yml logs -n 5",
+            ],
+          ] as const) {
+            fs.rmSync(log, { force: true });
+            const { status, stdout } = run([...args], { env });
+            expect(status).toBe(7);
+            expect(stdout).toContain(`docker ${expected}`);
+            expect(fs.readFileSync(log, "utf-8").trim()).toBe(expected);
+          }
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the wrapper's -- off the docker down command",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-down-sep-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 0\n', {
+            mode: 0o755,
+          });
+          const { status } = run(["compose", "-f", "compose.yml", "--", "down"], {
+            env: {
+              PATH: `${tmpDir}:${process.env.PATH}`,
+              STUB_LOG: log,
+              PORTLESS: undefined,
+              PORTLESS_STATE_DIR: path.join(tmpDir, "state"),
+            },
+          });
+          expect(status).toBe(0);
+          const calls = fs.readFileSync(log, "utf-8").trim().split("\n");
+          expect(calls).toContain("compose -f compose.yml down");
+          expect(calls.some((call) => call.includes("-- down"))).toBe(false);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")("passes raw argv through when PORTLESS=0", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-bypass-"));
+      const log = path.join(tmpDir, "docker.log");
+      try {
+        const docker = path.join(tmpDir, "docker");
+        fs.writeFileSync(
+          docker,
+          '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\necho "docker $*"\nexit 9\n',
+          { mode: 0o755 }
+        );
+        const { status, stdout } = run(["compose", "--bad", "-fcompose.yml", "up"], {
+          env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: "0" },
+        });
+        expect(status).toBe(9);
+        expect(stdout).toContain("docker compose --bad -fcompose.yml up");
+        expect(fs.readFileSync(log, "utf-8").trim()).toBe("compose --bad -fcompose.yml up");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("prune", () => {
+    it("rejects an unknown flag without changing routes.json", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-args-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const routes = JSON.stringify([{ hostname: "example.localhost", port: 3000, pid: 0 }]);
+      fs.writeFileSync(routesPath, routes);
+      try {
+        const { status, stderr } = run(["prune", "--forc"], {
+          env: { PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Did you mean --force?");
+        expect(fs.readFileSync(routesPath, "utf-8")).toBe(routes);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 
@@ -840,15 +1043,15 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("error: no command provided", () => {
-    it("exits 1 when only a name is given without a command", () => {
+    it("exits 2 when only a name is given without a command", () => {
       const { status, stderr } = run(["myapp"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("No command provided");
     });
 
     it("suggests a command when the name is misspelled", () => {
       const { status, stderr } = run(["lsit"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("No command provided");
       expect(stderr).toContain("portless list");
     });
@@ -861,7 +1064,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       ["a leading app port", ["--app-port", "3000", "lsit", "--help"]],
     ])("suggests the command for a misspelled name followed by %s", (_case, args) => {
       const { status, stderr } = run(args);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain('"lsit" is not a portless command. Did you mean:');
       expect(stderr).toContain("portless list");
       expect(stderr).not.toContain("Unknown flag");
@@ -878,7 +1081,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("does not suggest a command when --name sets the app name", () => {
       const { status, stderr } = run(["--name", "lsit"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("No command provided");
       expect(stderr).not.toContain("Did you mean");
     });
@@ -993,8 +1196,103 @@ describe("CLI", { timeout: 15_000 }, () => {
   describe("unknown flag detection", () => {
     it("rejects unknown flags before command", () => {
       const { status, stderr } = run(["--forec", "myapp", "echo", "test"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Unknown flag");
+    });
+  });
+
+  describe("flag values", () => {
+    it("accepts --flag=value for run and named mode", () => {
+      const runMode = run(["run", "--name=myapp", "echo", "ok"], { env: { PORTLESS: "0" } });
+      expect(runMode.status).toBe(0);
+      expect(runMode.stdout.trim()).toBe("ok");
+
+      const namedMode = run(["myapp", "--app-port=3000", "echo", "ok"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(namedMode.status).toBe(0);
+      expect(namedMode.stdout.trim()).toBe("ok");
+    });
+
+    it("rejects a value on a boolean flag before running the child", () => {
+      for (const args of [
+        ["run", "--force=false", "echo", "ran"],
+        ["myapp", "--force=true", "echo", "ran"],
+      ]) {
+        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" } });
+        expect(status).toBe(2);
+        expect(stderr).toContain("--force does not take a value.");
+        expect(stdout).not.toContain("ran");
+      }
+    });
+
+    it("passes child flags after the command untouched", () => {
+      const { status, stdout } = run(
+        [
+          "run",
+          "node",
+          "-e",
+          "console.log(process.argv.slice(1).join(','))",
+          "--",
+          "--port",
+          "3000",
+          "--force",
+        ],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("--port,3000,--force");
+    });
+  });
+
+  describe("flag order", () => {
+    it("prints run help before a later bad flag", () => {
+      for (const args of [
+        ["run", "--help", "--bogus"],
+        ["run", "--help", "--force=false"],
+        ["run", "-h", "--app-port", "abc"],
+      ]) {
+        const { status, stdout, stderr } = run(args);
+        expect(status).toBe(0);
+        expect(stdout).toContain("portless run");
+        expect(stderr).toBe("");
+      }
+    });
+
+    it("rejects a bad flag before a later --help", () => {
+      const unknown = run(["run", "--bogus", "--help"]);
+      expect(unknown.status).toBe(2);
+      expect(unknown.stderr).toContain("Unknown flag");
+
+      const badValue = run(["run", "--app-port", "abc", "--help"]);
+      expect(badValue.status).toBe(2);
+      expect(badValue.stderr).toContain("Invalid app port");
+
+      const booleanValue = run(["run", "--force=false", "--help"]);
+      expect(booleanValue.status).toBe(2);
+      expect(booleanValue.stderr).toContain("--force does not take a value.");
+    });
+
+    it("checks every --app-port, not only the first", () => {
+      for (const args of [
+        ["run", "--app-port=3000", "--app-port=abc", "echo", "ran"],
+        ["myapp", "--app-port", "abc", "--app-port", "3000", "echo", "ran"],
+        ["--app-port=3000", "myapp", "--app-port=abc", "echo", "ran"],
+      ]) {
+        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" } });
+        expect(status).toBe(2);
+        expect(stderr).toContain("Invalid app port");
+        expect(stdout).not.toContain("ran");
+      }
+    });
+
+    it("accepts repeated flags and runs the child", () => {
+      const { status, stdout } = run(
+        ["run", "--force", "--force", "--name=a", "--name=b", "echo", "ok"],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(status).toBe(0);
+      expect(stdout.trim()).toBe("ok");
     });
   });
 
@@ -1009,12 +1307,12 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("run subcommand dispatch", () => {
-    it("exits 1 with 'No command provided' when no args follow run and no dev script", () => {
+    it("exits 2 with 'No command provided' when no args follow run and no dev script", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-run-"));
       try {
         fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
         const { status, stderr } = run(["run"], { cwd: tmpDir });
-        expect(status).toBe(1);
+        expect(status).toBe(2);
         expect(stderr).toContain("No command provided");
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1037,7 +1335,7 @@ describe("CLI", { timeout: 15_000 }, () => {
     it("does not print version for run --version", () => {
       // parseRunArgs rejects unknown flags
       const { status, stderr } = run(["run", "--version"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Unknown flag");
     });
 
@@ -1143,7 +1441,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["run", "--app-port", "abc", "echo", "ok"], {
         env: { PORTLESS: "0" },
       });
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Invalid app port");
     });
 
@@ -1151,7 +1449,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["run", "--app-port"], {
         env: { PORTLESS: "0" },
       });
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("--app-port requires");
     });
 
@@ -1180,28 +1478,27 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("portless alias");
     });
 
-    it("exits 1 with usage when no args given", () => {
+    it("exits 2 with usage when no args given", () => {
       const { status, stderr } = run(["alias"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("Missing arguments");
+      expect(status).toBe(2);
+      expect(stderr).toContain("Missing alias name");
     });
 
-    it("exits 1 with usage when only name is given", () => {
+    it("exits 2 with usage when only name is given", () => {
       const { status, stderr } = run(["alias", "mydb"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("Missing arguments");
+      expect(status).toBe(2);
+      expect(stderr).toContain("Missing port");
     });
 
-    it("exits 1 for invalid port", () => {
+    it("exits 2 for invalid port", () => {
       const { status, stderr } = run(["alias", "mydb", "notaport"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Invalid port");
     });
 
     it.each([
       ["missing value", ["--upstream"], "--upstream requires a value"],
       ["flag used as value", ["--upstream", "--help"], "--upstream requires a value"],
-      ["equals form", ["--upstream=https://api.internal"], "separate value"],
       ["bare hostname", ["--upstream", "api.internal"], "Invalid --upstream value"],
       ["path", ["--upstream", "https://api.internal/path"], "Invalid --upstream value"],
       ["query", ["--upstream", "https://api.internal?key=value"], "Invalid --upstream value"],
@@ -1228,13 +1525,34 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("exits 1 without registering a route for a port with trailing text", () => {
+    it("accepts --upstream=value like any other value flag", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-upstream-eq-"));
+      try {
+        const { status } = run(
+          ["alias", "api", "8080", "--upstream=http://api.internal", "--tld", "localhost"],
+          { env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" } }
+        );
+        expect(status).toBe(0);
+        const routes = JSON.parse(fs.readFileSync(path.join(tmpDir, "routes.json"), "utf-8")) as {
+          hostname: string;
+          upstream?: { tls?: boolean; host?: string };
+        }[];
+        expect(routes.find((route) => route.hostname === "api.localhost")?.upstream).toEqual({
+          tls: false,
+          host: "api.internal",
+        });
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("exits 2 without registering a route for a port with trailing text", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-port-"));
       try {
         const { status, stderr } = run(["alias", "mydb", "192.168.1.1:8123"], {
           env: { PORTLESS_STATE_DIR: tmpDir },
         });
-        expect(status).toBe(1);
+        expect(status).toBe(2);
         expect(stderr).toContain('Invalid port "192.168.1.1:8123"');
         expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
       } finally {
@@ -1242,23 +1560,23 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("exits 1 for invalid proxy stop arguments", () => {
+    it("exits 2 for invalid proxy stop arguments", () => {
       const { status, stderr } = run(["proxy", "stop", "-p", "8123abc"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Invalid port number: 8123abc");
 
       for (const args of [["-p"], ["--port"], ["--port", ""], ["extra"]]) {
         const invalid = run(["proxy", "stop", ...args]);
-        expect(invalid.status).toBe(1);
+        expect(invalid.status).toBe(2);
         expect(invalid.stderr).toContain("Error:");
         expect(invalid.stderr).not.toContain("Proxy is not running");
       }
     });
 
-    it("exits 1 when --remove has no name", () => {
+    it("exits 2 when --remove has no name", () => {
       const { status, stderr } = run(["alias", "--remove"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("No alias name");
+      expect(status).toBe(2);
+      expect(stderr).toContain("--remove requires a value");
     });
 
     it("prints help without registering a route when --help follows the arguments", () => {
@@ -1275,15 +1593,19 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("exits 1 on unknown flags without registering a route", () => {
+    it("exits 2 on unknown flags without registering a route", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-flag-"));
       try {
-        for (const flag of ["--frce", "--remove"]) {
+        const cases: Array<[string, string]> = [
+          ["--frce", 'Unknown flag "--frce"'],
+          ["--remove", "--remove requires a value"],
+        ];
+        for (const [flag, message] of cases) {
           const { status, stderr } = run(["alias", "mydb", "5432", flag], {
             env: { PORTLESS_STATE_DIR: tmpDir },
           });
-          expect(status).toBe(1);
-          expect(stderr).toContain(`Unknown flag "${flag}"`);
+          expect(status).toBe(2);
+          expect(stderr).toContain(message);
         }
         expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
       } finally {
@@ -1348,14 +1670,14 @@ describe("CLI", { timeout: 15_000 }, () => {
           "mytls.localhost",
         ]);
 
-        const invalidTlds: Array<[string[], string]> = [
-          [["--tld", "test", "--tld", " "], "--tld requires a TLD value"],
-          [["--tld", "unknown"], 'TLD "unknown" is not configured (localhost, test, dev).'],
-          [["--tld"], "--tld requires a TLD value"],
+        const invalidTlds: Array<[string[], number, string]> = [
+          [["--tld", "test", "--tld", " "], 2, "--tld requires a TLD value"],
+          [["--tld", "unknown"], 1, 'TLD "unknown" is not configured (localhost, test, dev).'],
+          [["--tld"], 2, "--tld requires a value"],
         ];
-        for (const [args, message] of invalidTlds) {
+        for (const [args, status, message] of invalidTlds) {
           const invalid = run(["alias", "mydb", "5432", ...args], { env });
-          expect(invalid.status).toBe(1);
+          expect(invalid.status).toBe(status);
           expect(invalid.stderr).toContain(message);
           expect(hostnames().sort()).toEqual([
             "mydb.localhost",
@@ -1365,8 +1687,8 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
 
         const forceRemove = run(["alias", "--remove", "mydb", "--force"], { env });
-        expect(forceRemove.status).toBe(1);
-        expect(forceRemove.stderr).toContain('Unknown flag "--force"');
+        expect(forceRemove.status).toBe(2);
+        expect(forceRemove.stderr).toContain("--force cannot be used with --remove");
         expect(hostnames().sort()).toEqual([
           "mydb.localhost",
           "myplain.localhost",
@@ -1440,7 +1762,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("rejects unknown hosts subcommand", () => {
       const { status, stderr } = run(["hosts", "typo"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Unknown hosts subcommand");
     });
 
@@ -1573,8 +1895,8 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("rejects unknown arguments", () => {
       const { status, stderr } = run(["clean", "typo"]);
-      expect(status).toBe(1);
-      expect(stderr).toContain("Unknown argument");
+      expect(status).toBe(2);
+      expect(stderr).toContain("Unexpected argument");
     });
 
     it("does not bypass when PORTLESS=0 is set", () => {
@@ -1593,8 +1915,8 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("does not bypass clean with extra args when PORTLESS=0", () => {
       const { status, stderr } = run(["clean", "typo"], { env: { PORTLESS: "0" } });
-      expect(status).toBe(1);
-      expect(stderr).toContain("Unknown argument");
+      expect(status).toBe(2);
+      expect(stderr).toContain("Unexpected argument");
     });
   });
 
@@ -1618,11 +1940,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("start");
       expect(stdout).toContain("stop");
-    });
-
-    it("exits 1 for unknown proxy subcommand", () => {
-      const { status } = run(["proxy", "typo"]);
-      expect(status).toBe(1);
     });
 
     it("prints help instead of stopping when stop is given --help", () => {
@@ -1963,6 +2280,16 @@ describe("CLI", { timeout: 15_000 }, () => {
     afterEach(() => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
+
+    it.each([[["--ip", "run", "echo", "ok"]], [["--ip=notanip", "myapp", "echo", "ok"]]])(
+      "rejects %j, whose --ip value is not an IP address",
+      (args) => {
+        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" }, cwd: tmpDir });
+        expect(status).toBe(2);
+        expect(stdout).toBe("");
+        expect(stderr).toContain("--ip requires an IP address");
+      }
+    );
 
     it.skipIf(process.platform === "win32")("warns when --lan and --tld are both provided", () => {
       // Use an empty PATH so the mDNS check fails early, causing the
@@ -2451,9 +2778,9 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("portless get");
     });
 
-    it("exits 1 with usage when no name given", () => {
+    it("exits 2 with usage when no name given", () => {
       const { status, stderr } = run(["get"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Missing service name");
     });
 
@@ -2471,7 +2798,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("rejects unknown flags", () => {
       const { status, stderr } = run(["get", "--typo", "backend"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("Unknown flag");
     });
 
@@ -2629,15 +2956,15 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout.trim()).toBe("ok");
     });
 
-    it("exits 1 when --name has no value", () => {
+    it("exits 2 when --name has no value", () => {
       const { status, stderr } = run(["--name"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("--name requires");
     });
 
-    it("exits 1 when --name has name but no command", () => {
+    it("exits 2 when --name has name but no command", () => {
       const { status, stderr } = run(["--name", "myapp"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("No command provided");
     });
   });
@@ -2657,15 +2984,15 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout.trim()).toBe("ok");
     });
 
-    it("exits 1 when --name has no value", () => {
+    it("exits 2 when --name has no value", () => {
       const { status, stderr } = run(["run", "--name"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("--name requires");
     });
 
-    it("exits 1 when --name value looks like a flag", () => {
+    it("exits 2 when --name value looks like a flag", () => {
       const { status, stderr } = run(["run", "--name", "--force", "echo", "ok"]);
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("--name requires");
     });
 
@@ -3397,7 +3724,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         JSON.stringify({ name: "myapp", script: "nonexistent" })
       );
       const { status, stderr } = run(["run"], { cwd: tmpDir });
-      expect(status).toBe(1);
+      expect(status).toBe(2);
       expect(stderr).toContain("No command provided");
     });
 

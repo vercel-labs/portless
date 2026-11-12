@@ -8,7 +8,11 @@ import { RouteStore, RouteConflictError } from "./routes.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, mkdirSync: vi.fn(actual.mkdirSync) };
+  return {
+    ...actual,
+    mkdirSync: vi.fn(actual.mkdirSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
+  };
 });
 
 describe("RouteStore", () => {
@@ -305,6 +309,26 @@ describe("RouteStore", () => {
       const s = new RouteStore(nested);
       s.addRoute("test.localhost", 4001, process.pid);
       expect(fs.existsSync(s.getRoutesPath())).toBe(true);
+    });
+
+    it("never exposes a partially written routes file to readers", () => {
+      store.addRoute("app.localhost", 4001, process.pid);
+      const stable = fs.readFileSync(store.getRoutesPath(), "utf-8");
+      fs.writeFileSync(`${store.getRoutesPath()}.tmp`, "stale", { mode: 0o444 });
+      const write = vi.mocked(fs.writeFileSync);
+      const writeActual = write.getMockImplementation()!;
+      let observedDuringWrite: string | undefined;
+      write.mockImplementationOnce((target, data, options) => {
+        const text = String(data);
+        writeActual(target, text.slice(0, Math.floor(text.length / 2)), options);
+        observedDuringWrite = fs.readFileSync(store.getRoutesPath(), "utf-8");
+        writeActual(target, text);
+      });
+
+      store.updateRoute("app.localhost", { childPgid: 4242 });
+
+      expect(observedDuringWrite).toBe(stable);
+      expect(store.loadRoutes()[0].childPgid).toBe(4242);
     });
   });
 

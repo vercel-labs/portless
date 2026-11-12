@@ -27,7 +27,7 @@ portless <name> <cmd> [args...]
 
 `portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
-`portless <name>` uses an explicit name with no inference or prefixing.
+`portless <name>` uses an explicit name with no inference or prefixing. Value flags for `portless run` and named apps accept either `--flag value` or `--flag=value`.
 
 ```bash
 portless run                             # run dev script through proxy
@@ -482,3 +482,7 @@ portless --version
 ```
 
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command: `portless run next dev --help` passes `--help` to Next.js. A misspelled command such as `portless lsit` suggests the closest match.
+
+## Exit codes
+
+`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, a missing flag value or required argument, or an extra argument. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
