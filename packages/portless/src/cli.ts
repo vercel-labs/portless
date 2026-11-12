@@ -145,7 +145,7 @@ import {
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
-  isCleanableStateDir,
+  isSafeCleanableStateDir,
   removePortlessStateFiles,
   type CATrustRemovalResult,
 } from "./clean-utils.js";
@@ -2861,7 +2861,7 @@ async function handleClean(args: string[]): Promise<void> {
     }
     const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
     const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
-    const cleanableDirs = approvedDirs.filter(isCleanableStateDir);
+    const cleanableDirs = approvedDirs.filter(isSafeCleanableStateDir);
     const left = runCleanupSteps(requestedCleanupSteps, cleanableDirs, preserveProxyRuntime);
     const clean =
       cleanableDirs.length === approvedDirs.length &&

@@ -63,6 +63,62 @@ export function isCleanableStateDir(dir: string): boolean {
   }
 }
 
+/**
+ * UIDs allowed to own a state directory during cleanup: root, the current user,
+ * and the invoking sudo user.
+ */
+function allowedStateDirOwners(): Set<number> | null {
+  if (process.platform === "win32") return null;
+  const uid = process.getuid?.();
+  if (uid === undefined) return null;
+  const owners = new Set<number>([0, uid]);
+  const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+  if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
+  return owners;
+}
+
+/**
+ * Whether every ancestor of a canonical directory is either owned by an
+ * allowed user, not writable by group or others, or protected by the sticky
+ * bit.
+ */
+function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
+  let current = path.dirname(dir);
+  for (;;) {
+    try {
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      const writableByOthers = (stat.mode & 0o022) !== 0;
+      const sticky = (stat.mode & 0o1000) !== 0;
+      if (!owners.has(stat.uid) && writableByOthers && !sticky) return false;
+    } catch {
+      return false;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return true;
+    current = parent;
+  }
+}
+
+/**
+ * Whether a state directory is safe for cleanup: a real directory owned by the
+ * current user, the invoking sudo user, or root, not writable by group or
+ * others, and not inside an untrusted writable parent directory.
+ */
+export function isSafeCleanableStateDir(dir: string): boolean {
+  try {
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+    const owners = allowedStateDirOwners();
+    if (!owners) return true;
+    if (!owners.has(stat.uid)) return false;
+    if ((stat.mode & 0o022) !== 0) return false;
+    return hasSafeStateDirAncestry(dir, owners);
+  } catch {
+    return false;
+  }
+}
+
 export type CATrustRemovalResult = {
   removed: boolean;
   error?: string;
@@ -75,7 +131,7 @@ export type CollectedStateDirs = {
 
 /**
  * Canonicalize configured state directories and report invalid paths.
- * Skip symlinked legacy system directories rather than cleaning their targets.
+ * Skip legacy system directories that are symlinked or owned by another user.
  */
 export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
   const dirs = new Set<string>();
@@ -84,7 +140,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
-    if (!allowSymlink && !isCleanableStateDir(resolved)) return;
+    if (!allowSymlink && !isSafeCleanableStateDir(resolved)) return;
     let canonical: string;
     try {
       canonical = fs.realpathSync(resolved);
@@ -93,8 +149,8 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
       failures.add(resolved);
       return;
     }
-    if (!isCleanableStateDir(canonical)) {
-      failures.add(resolved);
+    if (!isSafeCleanableStateDir(canonical)) {
+      if (allowSymlink) failures.add(resolved);
       return;
     }
     dirs.add(canonical);
@@ -112,9 +168,17 @@ export function attemptCATrustRemovalForCleanup(
 ): Map<string, CATrustRemovalResult> {
   const results = new Map<string, CATrustRemovalResult>();
   for (const stateDir of stateDirs) {
-    if (!isCleanableStateDir(stateDir)) continue;
+    if (!isSafeCleanableStateDir(stateDir)) continue;
     try {
-      fs.statSync(path.join(stateDir, "ca.pem"));
+      const caPath = path.join(stateDir, "ca.pem");
+      if (fs.lstatSync(caPath).isSymbolicLink()) {
+        results.set(stateDir, {
+          removed: false,
+          error: "Could not inspect CA certificate: refusing symlinked ca.pem",
+        });
+        continue;
+      }
+      fs.statSync(caPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
       const message = error instanceof Error ? error.message : String(error);
