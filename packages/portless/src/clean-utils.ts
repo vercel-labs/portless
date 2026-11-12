@@ -78,19 +78,23 @@ function allowedStateDirOwners(): Set<number> | null {
 }
 
 /**
- * Whether every ancestor of a canonical directory is either owned by an
- * allowed user, not writable by group or others, or protected by the sticky
- * bit.
+ * Whether every ancestor of a state directory is either owned by an allowed
+ * user, not world-writable, or protected by the sticky bit.
  */
 function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
-  let current = path.dirname(dir);
+  let current: string;
+  try {
+    current = path.dirname(fs.realpathSync(dir));
+  } catch {
+    return false;
+  }
   for (;;) {
     try {
       const stat = fs.lstatSync(current);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-      const writableByOthers = (stat.mode & 0o022) !== 0;
+      const worldWritable = (stat.mode & 0o002) !== 0;
       const sticky = (stat.mode & 0o1000) !== 0;
-      if (!owners.has(stat.uid) && writableByOthers && !sticky) return false;
+      if (!owners.has(stat.uid) && worldWritable && !sticky) return false;
     } catch {
       return false;
     }
@@ -101,18 +105,20 @@ function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
 }
 
 /**
- * Whether a state directory is safe for cleanup: a real directory owned by the
- * current user, the invoking sudo user, or root, not writable by group or
- * others, and not inside an untrusted writable parent directory.
+ * Whether a state directory is safe for cleanup: a real directory, not
+ * world-writable, and not inside an untrusted world-writable parent directory.
+ * When `enforceOwner` is true (used for the shared legacy `/tmp/portless`
+ * path), the directory must also be owned by the current user, the invoking
+ * sudo user, or root.
  */
-export function isSafeCleanableStateDir(dir: string): boolean {
+export function isSafeCleanableStateDir(dir: string, enforceOwner = false): boolean {
   try {
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
     const owners = allowedStateDirOwners();
     if (!owners) return true;
-    if (!owners.has(stat.uid)) return false;
-    if ((stat.mode & 0o022) !== 0) return false;
+    if (enforceOwner && !owners.has(stat.uid)) return false;
+    if ((stat.mode & 0o002) !== 0) return false;
     return hasSafeStateDirAncestry(dir, owners);
   } catch {
     return false;
@@ -140,7 +146,8 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
-    if (!allowSymlink && !isSafeCleanableStateDir(resolved)) return;
+    const enforceOwner = !allowSymlink;
+    if (!allowSymlink && !isSafeCleanableStateDir(resolved, enforceOwner)) return;
     let canonical: string;
     try {
       canonical = fs.realpathSync(resolved);
@@ -149,7 +156,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
       failures.add(resolved);
       return;
     }
-    if (!isSafeCleanableStateDir(canonical)) {
+    if (!isSafeCleanableStateDir(canonical, enforceOwner)) {
       if (allowSymlink) failures.add(resolved);
       return;
     }

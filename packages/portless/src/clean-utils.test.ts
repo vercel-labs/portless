@@ -136,14 +136,14 @@ describe("collectStateDirsForCleanupWithFailures", () => {
           return stat;
         }) as typeof fs.lstatSync);
 
-        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        expect(isSafeCleanableStateDir(canonical, true)).toBe(false);
         const foreignCollected = collectStateDirsForCleanupWithFailures();
         expect(foreignCollected.dirs).not.toContain(canonical);
         expect(foreignCollected.failures).toEqual([]);
 
         lstatSyncMock.mockImplementation(actualFs.lstatSync);
         fs.chmodSync(LEGACY_SYSTEM_STATE_DIR, 0o777);
-        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        expect(isSafeCleanableStateDir(canonical, true)).toBe(false);
         const writableCollected = collectStateDirsForCleanupWithFailures();
         expect(writableCollected.dirs).not.toContain(canonical);
       } finally {
