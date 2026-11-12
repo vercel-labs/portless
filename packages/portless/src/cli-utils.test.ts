@@ -32,6 +32,7 @@ import {
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
+  resolveScriptArgForwarding,
   resolveTurboRootForwarding,
   isPortListening,
   isProxyRunning,
@@ -2084,6 +2085,62 @@ describe("resolveTurboRootForwarding", () => {
 
   it.runIf(process.platform === "win32")("recognizes a turbo.cmd shim", () => {
     expect(resolve("turbo.cmd dev")).toEqual({ kind: "forward", separators: 1 });
+  });
+});
+
+describe("resolveScriptArgForwarding", () => {
+  let pkgDir: string;
+
+  beforeEach(() => {
+    pkgDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-script-forward-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(pkgDir, { recursive: true, force: true });
+  });
+
+  function resolve(
+    dev: string,
+    extraScripts: Record<string, string> = {},
+    packageManager?: string
+  ) {
+    fs.writeFileSync(
+      path.join(pkgDir, "package.json"),
+      JSON.stringify({
+        name: "test-app",
+        ...(packageManager ? { packageManager } : {}),
+        scripts: { dev, ...extraScripts },
+      })
+    );
+    return resolveScriptArgForwarding("dev", pkgDir);
+  }
+
+  it.each([
+    ["node server.js", {}, undefined, 0],
+    ["npm run start", { start: "node server.js" }, "npm@10.0.0", 1],
+    ["npm run start --", { start: "node server.js" }, "npm@10.0.0", 0],
+    ["npm run mid", { mid: "npm run start", start: "node server.js" }, "npm@10.0.0", 2],
+    ["pnpm run start", { start: "node server.js" }, "pnpm@11.1.3", 0],
+    ["bun run start", { start: "node server.js" }, "bun@1.4.4", 1],
+    ["yarn run start", { start: "node server.js" }, "yarn@1.22.19", 1],
+    ["yarn run start", { start: "node server.js" }, "yarn@4.0.0", 0],
+    ["yarn start", { start: "node server.js" }, "yarn@1.22.19", 1],
+    ["yarn start", { start: "node server.js" }, "yarn@4.0.0", 0],
+    ["npm exec vite", {}, "npm@10.0.0", 1],
+    ["npm exec -- vite", {}, "npm@10.0.0", 0],
+  ])("resolves %s with %i separator(s)", (dev, extra, pm, separators) => {
+    expect(resolve(dev, extra, pm)).toEqual({ kind: "forward", separators });
+  });
+
+  it("reports an unsafe nested script and stops at a delegation cycle", () => {
+    expect(resolve("npm run start", { start: "node a.js && node b.js" }, "npm@10.0.0")).toEqual({
+      kind: "unsafe",
+      scriptName: "start",
+    });
+    expect(resolve("npm run start", { start: "npm run dev" }, "npm@10.0.0")).toEqual({
+      kind: "unsafe",
+      scriptName: "start",
+    });
   });
 });
 

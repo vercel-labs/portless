@@ -2563,6 +2563,46 @@ export function resolveTurboRootForwarding(
   return resolveTurboScript(scriptName, packageDir, 0, 0, 0);
 }
 
+export type ScriptArgForwarding =
+  | { kind: "missing" }
+  | { kind: "forward"; separators: number }
+  | { kind: "unsafe"; scriptName: string };
+
+function resolveScriptArgForwardingStep(
+  scriptName: string,
+  packageDir: string,
+  depth: number,
+  consumedSeparators: number,
+  inheritedSeparators: number
+): ScriptArgForwarding {
+  const raw = resolveScriptRaw(scriptName, packageDir);
+  const tokens = resolveScript(scriptName, packageDir);
+  if (!raw || !tokens) return { kind: "missing" };
+  if (isUnsafeToAppendArgs(raw)) return { kind: "unsafe", scriptName };
+  const unwrapped = unwrapCommand(tokens, packageDir);
+  if (!unwrapped)
+    return { kind: "forward", separators: Math.max(0, consumedSeparators - inheritedSeparators) };
+  const { command, script } = unwrapped;
+  const consumed = consumedSeparators + unwrapped.consumed;
+  const existing = inheritedSeparators + command.slice(1).filter((arg) => arg === "--").length;
+  if (!script || !resolveScript(command[0], packageDir)) {
+    return { kind: "forward", separators: Math.max(0, consumed - existing) };
+  }
+  if (depth >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "unsafe", scriptName };
+  return resolveScriptArgForwardingStep(command[0], packageDir, depth + 1, consumed, existing);
+}
+
+/**
+ * Resolve how forwarded arguments pass through a package script, following
+ * wrappers and nested scripts and counting the `--` separators they consume.
+ */
+export function resolveScriptArgForwarding(
+  scriptName: string,
+  packageDir: string
+): ScriptArgForwarding {
+  return resolveScriptArgForwardingStep(scriptName, packageDir, 0, 0, 0);
+}
+
 /**
  * When the child command delegates to a package script (`<pm> run <script>`),
  * the framework command lives inside package.json where injectFrameworkFlags

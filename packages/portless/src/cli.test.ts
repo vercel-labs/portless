@@ -7167,6 +7167,66 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
+      "forwards args through a dev script that delegates via npm run and ignores compound leaf scripts in Turbo mode",
+      () => {
+        const single = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-delegated-"));
+        const turboWs = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-leaf-"));
+        const singleMarks = path.join(single, "marks.txt");
+        const turboMarks = path.join(turboWs, "marks.txt");
+
+        try {
+          writeApp(single, "delegated-app");
+          const singlePkg = JSON.parse(fs.readFileSync(path.join(single, "package.json"), "utf8"));
+          singlePkg.scripts = { dev: "npm run start", start: singlePkg.scripts.dev };
+          fs.writeFileSync(path.join(single, "package.json"), JSON.stringify(singlePkg));
+
+          const singleResult = spawnCli(single, childEnv(singleMarks, { PORTLESS: "0" }), [
+            "--",
+            ...args,
+          ]);
+          expect(singleResult.status, singleResult.output).toBe(0);
+          expect(readMarks(singleMarks), singleResult.output).toEqual([["delegated-app", args]]);
+
+          fs.writeFileSync(
+            path.join(turboWs, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-leaf",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev: "turbo run dev --filter=web" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(turboWs, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(turboWs, "packages", "web"), "web", false);
+          const unusedDir = path.join(turboWs, "packages", "unused");
+          fs.mkdirSync(unusedDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(unusedDir, "package.json"),
+            JSON.stringify({
+              name: "unused",
+              version: "0.0.0",
+              scripts: { dev: "node a.cjs && node b.cjs" },
+              portless: { proxy: false },
+            })
+          );
+          linkLocalTurbo(turboWs);
+
+          const turboResult = spawnCli(turboWs, childEnv(turboMarks, {}), ["--", ...args]);
+          expect(turboResult.status, turboResult.output).toBe(0);
+          expect(readMarks(turboMarks), turboResult.output).toEqual([["web", args]]);
+        } finally {
+          fs.rmSync(single, { recursive: true, force: true });
+          fs.rmSync(turboWs, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
       "passes arguments to a root script that does not run Turbo",
       () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-root-script-"));
