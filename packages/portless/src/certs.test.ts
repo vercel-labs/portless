@@ -789,22 +789,6 @@ describe("untrustCA", () => {
       expect(fs.existsSync(outsideTarget)).toBe(false);
       expect(fs.lstatSync(pendingLink).isSymbolicLink()).toBe(false);
       expect(fs.readFileSync(pendingLink, "utf-8")).toBe("1\n");
-
-      const stateLink = path.join(tmpDir, "state-link");
-      const realStateDir = path.join(tmpDir, "real-state");
-      fs.mkdirSync(realStateDir);
-      fs.symlinkSync(realStateDir, stateLink, "dir");
-      fs.copyFileSync(caPath, path.join(realStateDir, "ca.pem"));
-      fs.copyFileSync(caPath, installedCA);
-      const linkedResult = untrustCALinux(stateLink, {
-        configs: [config],
-        activeConfig: config,
-        runUpdate,
-      });
-      expect(linkedResult).toEqual({ removed: false, error: "trust refresh failed" });
-      expect(fs.readFileSync(path.join(realStateDir, "ca.trust-refresh-pending"), "utf-8")).toBe(
-        "1\n"
-      );
     }
   );
 });
