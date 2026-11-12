@@ -53,33 +53,25 @@ export type RemovePortlessStateFilesOptions = {
   preserveProxyRuntime?: boolean;
 };
 
-/** Whether a path is an existing real directory rather than a symlink. */
-export function isCleanableStateDir(dir: string): boolean {
-  try {
-    const stat = fs.lstatSync(dir);
-    return stat.isDirectory() && !stat.isSymbolicLink();
-  } catch {
-    return false;
-  }
-}
-
 /**
  * UIDs allowed to own a state directory during cleanup: root, the current user,
- * and the invoking sudo user.
+ * and, when running as root under sudo, the invoking sudo user.
  */
 function allowedStateDirOwners(): Set<number> | null {
   if (process.platform === "win32") return null;
   const uid = process.getuid?.();
   if (uid === undefined) return null;
   const owners = new Set<number>([0, uid]);
-  const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
-  if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
+  if (uid === 0) {
+    const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+    if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
+  }
   return owners;
 }
 
 /**
- * Whether every ancestor of a state directory is either owned by an allowed
- * user, not writable by group or others, or protected by the sticky bit.
+ * Whether every ancestor of a state directory is owned by an allowed user and
+ * either not writable by group or others or protected by the sticky bit.
  */
 function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
   let current: string;
@@ -92,9 +84,10 @@ function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
     try {
       const stat = fs.lstatSync(current);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+      if (!owners.has(stat.uid)) return false;
       const writableByOthers = (stat.mode & 0o022) !== 0;
       const sticky = (stat.mode & 0o1000) !== 0;
-      if (!owners.has(stat.uid) && writableByOthers && !sticky) return false;
+      if (writableByOthers && !sticky) return false;
     } catch {
       return false;
     }
@@ -107,9 +100,9 @@ function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
 /**
  * Whether a state directory is safe for cleanup: a real directory owned by the
  * current user, the invoking sudo user, or root, not writable by group or
- * others, and not inside an untrusted writable parent directory.
+ * others, and with safe ancestor ownership and permissions.
  */
-export function isSafeCleanableStateDir(dir: string): boolean {
+export function isCleanableStateDir(dir: string): boolean {
   try {
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
@@ -122,6 +115,8 @@ export function isSafeCleanableStateDir(dir: string): boolean {
     return false;
   }
 }
+
+export const isSafeCleanableStateDir = isCleanableStateDir;
 
 export type CATrustRemovalResult = {
   removed: boolean;
@@ -206,12 +201,12 @@ export function removePortlessStateFiles(
   options: RemovePortlessStateFilesOptions = {}
 ): string[] {
   try {
-    const stat = fs.lstatSync(dir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return [dir];
+    fs.lstatSync(dir);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
     return [dir];
   }
+  if (!isCleanableStateDir(dir)) return [dir];
 
   const failures: string[] = [];
   for (const f of PORTLESS_STATE_FILES) {
