@@ -2,7 +2,7 @@
 
 declare const __VERSION__: string;
 
-import colors from "./colors.js";
+import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isIP } from "node:net";
@@ -628,6 +628,7 @@ function addRoutes(
   force = false,
   upstream?: AliasUpstream
 ): number[] {
+  store.recoverCorruptRoutesFile();
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
@@ -662,13 +663,13 @@ function stopOrphanedProcessGroups(store: RouteStore): void {
     if (route.pid === 0 || isPidAlive(route.pid)) continue;
     for (const t of stopRecordedTunnels(route, true)) {
       const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
-      console.log(colors.yellow(message));
+      console.error(colors.yellow(message));
     }
     const pgid = route.childPgid;
     if (!pgid || seen.has(pgid)) continue;
     seen.add(pgid);
     if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
-      console.log(
+      console.error(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
     }
@@ -834,7 +835,14 @@ function startProxyServer(
   fixOwnership(routesPath);
 
   // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes = store.loadRoutes();
+  let cachedRoutes: ReturnType<RouteStore["loadRoutes"]> = [];
+  try {
+    cachedRoutes = store.loadRoutes();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes: ${message}`));
+  }
+  let routesReloadWarningShown = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -907,6 +915,7 @@ function startProxyServer(
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadRoutes();
+      routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
@@ -928,8 +937,13 @@ function startProxyServer(
           }
         }
       }
-    } catch {
-      // File may be mid-write; keep existing cached routes
+    } catch (err) {
+      // Keep the last known routes, and say why once instead of on every reload.
+      if (!routesReloadWarningShown) {
+        routesReloadWarningShown = true;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(`Could not reload routes: ${message}`));
+      }
     }
   };
 
@@ -1283,8 +1297,25 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   }
 }
 
-function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
+function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: boolean): void {
   const routes = store.loadRoutes();
+
+  if (json) {
+    const output = routes.map((route) => ({
+      hostname: route.hostname,
+      url: formatUrl(route.hostname, proxyPort, tls),
+      port: route.port,
+      pid: route.pid,
+      registeredAt: route.registeredAt,
+      ...(route.upstream ? { upstream: route.upstream } : {}),
+      ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
+      ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
+      ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
+      ...(route.cloudflareUrl ? { cloudflareUrl: route.cloudflareUrl } : {}),
+    }));
+    console.log(JSON.stringify({ routes: output }));
+    return;
+  }
 
   if (routes.length === 0) {
     console.log(colors.yellow("No active routes."));
@@ -1439,7 +1470,7 @@ async function ensureProxyRunning(
     process.exit(1);
   }
 
-  console.log(colors.gray("Starting proxy..."));
+  console.error(colors.gray("Starting proxy..."));
   const proxyStartConfig = buildProxyStartConfig({
     useHttps: startConfig.useHttps,
     customCertPath: startConfig.customCertPath,
@@ -1457,7 +1488,7 @@ async function ensureProxyRunning(
   const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
 
   const result = spawnSync(process.execPath, startArgs, {
-    stdio: "inherit",
+    stdio: ["inherit", 2, "inherit"],
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
 
@@ -1504,7 +1535,8 @@ async function runApp(
   lanIp?: string | null
 ) {
   let store = initialStore;
-  console.log(chalk.blue.bold(`\nportless\n`));
+  initialStore.recoverCorruptRoutesFile();
+  console.error(chalk.blue.bold(`\nportless\n`));
 
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
@@ -1567,6 +1599,7 @@ async function runApp(
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
+    store.recoverCorruptRoutesFile();
     if (tls && !isCATrusted(stateDir)) {
       await handleTrust();
     }
@@ -1584,7 +1617,7 @@ async function runApp(
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
     tlds = runningConfig.tlds;
-    console.log(chalk.gray("-- Proxy is running"));
+    console.error(chalk.gray("  Proxy is running"));
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
@@ -1604,22 +1637,22 @@ async function runApp(
   }
 
   if (lanIp) {
-    console.log(chalk.gray(`-- ${hostnames.join(", ")} (LAN: ${lanIp})`));
+    console.error(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
   } else {
-    console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
+    console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    console.log(chalk.gray(`-- Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
+    console.error(chalk.gray(`  Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
-      console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+      console.error(chalk.gray(`  Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
   }
 
   const port = desiredPort ?? (await findFreePort());
   if (desiredPort) {
-    console.log(colors.green(`-- Using port ${port} (fixed)`));
+    console.error(colors.green(`  Using port ${port} (fixed)`));
   } else {
-    console.log(colors.green(`-- Using port ${port}`));
+    console.error(colors.green(`  Using port ${port}`));
   }
 
   stopOrphanedProcessGroups(store);
@@ -1637,21 +1670,21 @@ async function runApp(
     throw err;
   }
   if (killedPids.length > 0) {
-    console.log(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
+    console.error(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
   }
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   const allUrls = formatUrls(hostnames, proxyPort, tls);
-  console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+  console.error(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
   for (const extraUrl of allUrls.slice(1)) {
-    console.log(chalk.cyan(`  also -> ${extraUrl}`));
+    console.error(chalk.cyan(`  also -> ${extraUrl}`));
   }
   if (allUrls.length > 1) {
-    console.log("");
+    console.error("");
   }
   if (lanIp) {
-    console.log(chalk.green(`  LAN -> ${finalUrl}`));
-    console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+    console.error(chalk.green(`  LAN -> ${finalUrl}`));
+    console.error(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
   // Tailscale sharing: register with tailscale serve (or funnel).
@@ -1718,11 +1751,11 @@ async function runApp(
     // a successful register or exits the process on final failure.
     tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
     const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
-    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+    console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
     if (wantsFunnel) {
-      console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+      console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
     } else {
-      console.log(chalk.gray("  (accessible from your tailnet)\n"));
+      console.error(chalk.gray("  (accessible from your tailnet)\n"));
     }
 
     try {
@@ -1746,8 +1779,8 @@ async function runApp(
         onExit: (code, signal) => handleTunnelExit(run, code, signal),
         configPath: path.join(store.dir, "cloudflared.yml"),
       });
-      console.log(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
-      console.log(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
+      console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
+      console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
 
       try {
         store.updateRoute(hostname, {
@@ -1824,7 +1857,7 @@ async function runApp(
   const caFragment = caEnv.NODE_EXTRA_CA_CERTS
     ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
     : "";
-  console.log(
+  console.error(
     chalk.gray(
       `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
     )
@@ -2368,23 +2401,23 @@ async function handleTrust(args: string[] = []): Promise<void> {
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
-    console.log(colors.gray("Generated local CA certificate."));
+    console.error(colors.gray("Generated local CA certificate."));
     // A running proxy keeps the previous CA and the TLS contexts it already
     // built in memory, so it presents the old chain until it restarts.
     if (await isProxyRunning(port, tls)) {
       const portFlag = port !== getDefaultPort(tls) ? ` -p ${port}` : "";
-      console.log(
+      console.error(
         colors.yellow("The running proxy still serves certificates from the previous CA.")
       );
-      console.log(
+      console.error(
         colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
       );
     }
   }
   const result = trustCA(dir);
   if (result.trusted) {
-    console.log(colors.green("Local CA added to system trust store."));
-    console.log(colors.gray("Browsers will now trust portless HTTPS certificates."));
+    console.error(colors.green("Local CA added to system trust store."));
+    console.error(colors.gray("Browsers will now trust portless HTTPS certificates."));
     return;
   }
 
@@ -2393,7 +2426,9 @@ async function handleTrust(args: string[] = []): Promise<void> {
   const isPermissionError =
     result.error?.includes("Permission denied") || result.error?.includes("EACCES");
   if (isPermissionError && !isWindows && process.getuid?.() !== 0) {
-    console.log(colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo..."));
+    console.error(
+      colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo...")
+    );
     const sudoResult = spawnSync(
       "sudo",
       [
@@ -2473,7 +2508,13 @@ async function handleClean(args: string[]): Promise<void> {
   await stopProxy(store, port, tls);
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  const routesForClean = store.loadRoutesRaw();
+  let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  try {
+    routesForClean = store.loadRoutesRaw();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
+  }
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
@@ -2630,12 +2671,12 @@ async function handlePrune(args: string[]): Promise<void> {
 }
 
 async function handleList(args: string[]): Promise<void> {
-  parseCommandArgs("list", args.slice(1), {}, 0);
+  const json = parseCommandArgs("list", args.slice(1), { "--json": "boolean" }, 0).has("--json");
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  listRoutes(store, port, tls);
+  listRoutes(store, port, tls, json);
 }
 
 function printListHelp(): void {
@@ -2643,9 +2684,10 @@ function printListHelp(): void {
 ${colors.bold("portless list")} - Show active routes and their uptime.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless list")}
+  ${colors.cyan("portless list [--json]")}
 
 ${colors.bold("Options:")}
+  --json                 Print routes as JSON, including upstream settings when set
   --help, -h             Show this help
 `);
 }
@@ -2666,6 +2708,7 @@ PORTLESS_PREFIX="" skips worktree naming.
 
 ${colors.bold("Options:")}
   --no-worktree          Skip config loading and worktree naming
+  --json                 Print name, hostname, and URL as JSON
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2676,7 +2719,12 @@ ${colors.bold("Examples:")}
 }
 
 async function handleGet(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs("get", args.slice(1), { "--no-worktree": "boolean" }, 1);
+  const parsed = parseCommandArgs(
+    "get",
+    args.slice(1),
+    { "--no-worktree": "boolean", "--json": "boolean" },
+    1
+  );
   const name = parsed.positionals[0];
   if (!name) {
     throw new UsageError("Missing service name.", [
@@ -2688,6 +2736,7 @@ async function handleGet(args: string[]): Promise<void> {
   }
 
   const skipWorktree = parsed.has("--no-worktree");
+  const json = parsed.has("--json");
   const appConfig = skipWorktree ? null : loadAppConfig();
   const worktree = skipWorktree
     ? null
@@ -2698,7 +2747,7 @@ async function handleGet(args: string[]): Promise<void> {
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
   // Print bare URL to stdout so it works in $(portless get <name>)
-  process.stdout.write(url + "\n");
+  process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
 }
 
 function printAliasHelp(): void {
@@ -2826,6 +2875,7 @@ async function handleAlias(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+  store.recoverCorruptRoutesFile();
 
   if (isRemove) {
     const hostnames = buildHostnames(removeName!, tlds, targetTlds);
@@ -3030,19 +3080,25 @@ function printDoctorHelp(): void {
 ${colors.bold("portless doctor")} - Check local portless health and print suggested fixes.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless doctor")}
+  ${colors.cyan("portless doctor [--json]")}
 
 Checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA
 trust, hostname resolution, and LAN mode prerequisites. It does not start,
 stop, clean, prune, trust, or modify portless state.
 
 ${colors.bold("Options:")}
+  --json                 Print the report as JSON
   --help, -h             Show this help
+
+${colors.bold("Exit codes:")}
+  0                      No failures; warnings do not affect the exit code
+  1                      One or more failures
+  2                      Invalid arguments
 `);
 }
 
 async function handleDoctor(args: string[]): Promise<void> {
-  parseCommandArgs("doctor", args.slice(1), {}, 0);
+  const json = parseCommandArgs("doctor", args.slice(1), { "--json": "boolean" }, 0).has("--json");
 
   const findings: DoctorFinding[] = [];
   const add = (status: DoctorStatus, message: string, hint?: string) => {
@@ -3086,16 +3142,23 @@ async function handleDoctor(args: string[]): Promise<void> {
   const proxyUsesCustomCert = proxyTls && readCustomCertMarker(state.dir);
   const stateExists = fs.existsSync(state.dir);
 
-  console.log(colors.blue.bold("\nportless doctor\n"));
-  console.log(`Version: ${__VERSION__}`);
-  console.log(`Node.js: ${process.versions.node}`);
-  console.log(`Platform: ${process.platform} ${process.arch}`);
-  console.log(`State dir: ${state.dir}`);
-  console.log(`Proxy target: ${formatUrl("127.0.0.1", proxyPort, proxyTls)}`);
-  console.log(
-    `Mode: ${proxyTls ? "HTTPS" : "HTTP"}, ${formatTldList(state.tlds)}${state.lanMode ? ", LAN" : ""}`
-  );
-  console.log("");
+  const version = __VERSION__;
+  const nodeVersion = process.versions.node;
+  const platform = `${process.platform} ${process.arch}`;
+  const stateDir = state.dir;
+  const proxyTarget = formatUrl("127.0.0.1", proxyPort, proxyTls);
+  const mode = `${proxyTls ? "HTTPS" : "HTTP"}, ${formatTldList(state.tlds)}${state.lanMode ? ", LAN" : ""}`;
+
+  if (!json) {
+    console.log(colors.blue.bold("\nportless doctor\n"));
+    console.log(`Version: ${version}`);
+    console.log(`Node.js: ${nodeVersion}`);
+    console.log(`Platform: ${platform}`);
+    console.log(`State dir: ${stateDir}`);
+    console.log(`Proxy target: ${proxyTarget}`);
+    console.log(`Mode: ${mode}`);
+    console.log("");
+  }
 
   const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
   if (nodeMajor >= 24) {
@@ -3326,18 +3389,36 @@ async function handleDoctor(args: string[]): Promise<void> {
     }
   }
 
+  const failures = findings.filter((finding) => finding.status === "fail").length;
+  const warnings = findings.filter((finding) => finding.status === "warn").length;
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        version,
+        nodeVersion,
+        platform,
+        stateDir,
+        proxyTarget,
+        mode,
+        findings,
+        summary: { failures, warnings },
+      })
+    );
+    if (failures > 0) process.exitCode = 1;
+    return;
+  }
+
   for (const finding of findings) {
     printDoctorFinding(finding);
   }
-
-  const failures = findings.filter((finding) => finding.status === "fail").length;
-  const warnings = findings.filter((finding) => finding.status === "warn").length;
   console.log("");
   if (failures > 0) {
     console.log(
       colors.red(`Summary: ${pluralize(failures, "failure")}, ${pluralize(warnings, "warning")}.`)
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log(colors.green(`Summary: 0 failures, ${pluralize(warnings, "warning")}.`));
 }
@@ -3599,6 +3680,7 @@ async function handleProxy(args: string[]): Promise<void> {
   const store = new RouteStore(stateDir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+  store.recoverCorruptRoutesFile();
 
   // Check if already running. Plain HTTP check detects both TLS and non-TLS
   // proxies because the TLS-enabled proxy accepts plain HTTP via byte-peeking.
@@ -3784,10 +3866,10 @@ async function handleProxy(args: string[]): Promise<void> {
         process.exit(1);
       }
     } else {
-      console.log(colors.gray("Ensuring TLS certificates..."));
+      console.error(colors.gray("Ensuring TLS certificates..."));
       const certs = ensureCerts(stateDir);
       if (certs.caGenerated) {
-        console.log(colors.green("Generated local CA certificate."));
+        console.error(colors.green("Generated local CA certificate."));
       }
 
       if (desiredUnprivileged && !isCATrusted(stateDir)) {
@@ -3800,10 +3882,10 @@ async function handleProxy(args: string[]): Promise<void> {
         );
         console.warn(colors.cyan("  portless trust"));
       } else if (!skipTrust && !isCATrusted(stateDir)) {
-        console.log(colors.yellow("Adding CA to system trust store..."));
+        console.error(colors.yellow("Adding CA to system trust store..."));
         const trustResult = trustCA(stateDir);
         if (trustResult.trusted) {
-          console.log(
+          console.error(
             colors.green("CA added to system trust store. Browsers will trust portless certs.")
           );
         } else {
@@ -4108,8 +4190,8 @@ function prefixStream(
 }
 
 function pipeOutput(child: ReturnType<typeof spawn>, prefix: string): void {
-  prefixStream(child.stdout, process.stdout, prefix);
-  prefixStream(child.stderr, process.stderr, prefix);
+  prefixStream(child.stdout, process.stdout, colorFor("stdout", prefix));
+  prefixStream(child.stderr, process.stderr, colorFor("stderr", prefix));
 }
 
 async function spawnProxiedApp(
@@ -4376,7 +4458,7 @@ async function handleDefaultMulti(
   const proxiedApps = apps.filter((a) => a.proxied);
   const taskApps = apps.filter((a) => !a.proxied);
 
-  console.log(chalk.blue.bold(`\nportless\n`));
+  console.error(chalk.blue.bold(`\nportless\n`));
 
   let { dir, port, tls, tlds, lanMode } = await discoverState();
 
@@ -4518,10 +4600,10 @@ async function runWithTurbo(
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
     for (const { label, url } of appUrls) {
       const pad = " ".repeat(maxLabel - label.length);
-      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+      console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.log("");
+  console.error("");
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
@@ -4624,10 +4706,10 @@ async function runWithDirectSpawn(
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
     for (const { label, url } of appUrls) {
       const pad = " ".repeat(maxLabel - label.length);
-      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+      console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.log("");
+  console.error("");
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
@@ -4954,6 +5036,7 @@ async function composeDown(args: string[], globals: string[], input?: string): P
   }
   const { dir, tlds } = await discoverState();
   const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+  store.recoverCorruptRoutesFile();
   const aliases = store.loadRoutes().filter((r) => r.pid === 0);
   removeRoutes(store, staleAliases(aliases, project, tlds, after));
   if (after.ports.size === 0) {
@@ -5129,14 +5212,14 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   fs.writeFileSync(files.model, JSON.stringify(plan.model, null, 2), { mode: 0o600 });
   fixOwnership(files.model, files.ports);
 
-  console.log(colors.bold(`\nportless compose ${plan.project}\n`));
+  console.error(colors.bold(`\nportless compose ${plan.project}\n`));
   for (const k of plan.kept) {
     const where = k.published ? `host port ${k.published}` : "an ephemeral port";
     const verb = k.dropped ? "drops" : "keeps";
-    console.log(colors.gray(`-- ${k.service}:${k.target} ${verb} ${where} (${k.reason})`));
+    console.error(colors.gray(`  ${k.service}:${k.target} ${verb} ${where} (${k.reason})`));
   }
   if (plan.routes.length === 0) {
-    console.log(colors.yellow("No published HTTP ports found. Nothing to route."));
+    console.error(colors.yellow("No published HTTP ports found. Nothing to route."));
   }
 
   const upArgs = buildUpArgs({
@@ -5180,7 +5263,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
       }
       conflicts.delete(primary);
       registered.set(primary, port);
-      console.log(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
+      console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
     }
     return true;
   };
@@ -5188,7 +5271,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   if (detached) {
     const code = await spawnDockerCompose(upArgs).exited;
     if (code === 0) {
-      console.log("");
+      console.error("");
       if (!sync()) {
         console.warn(
           colors.yellow(
@@ -5224,6 +5307,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
 }
 
 function isAliasConflict(store: RouteStore, hostname: string): boolean {
+  store.recoverCorruptRoutesFile();
   return store.loadRoutes().some((r) => r.hostname === hostname && r.pid === 0);
 }
 

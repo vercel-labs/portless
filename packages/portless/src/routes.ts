@@ -49,6 +49,18 @@ type RouteMetadataPatch = {
   cloudflarePid?: number | null;
 };
 
+/** A routes file that exists but cannot be read or parsed, so it is not an empty table. */
+export class RoutesFileError extends Error {
+  constructor(
+    readonly file: string,
+    readonly reason: "corrupt" | "unreadable",
+    message: string
+  ) {
+    super(message);
+    this.name = "RoutesFileError";
+  }
+}
+
 export function isValidUpstream(value: unknown): value is NonNullable<RouteInfo["upstream"]> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
   const upstream = value as Record<string, unknown>;
@@ -209,41 +221,62 @@ export class RouteStore {
    * unprotected concurrent writes.
    */
   loadRoutes(persistCleanup = false): RouteMapping[] {
-    if (!fs.existsSync(this.routesPath)) {
-      return [];
-    }
-    try {
-      const raw = fs.readFileSync(this.routesPath, "utf-8");
-      let parsed: unknown;
+    const routes = this.readRouteFile(this.routesPath);
+    // Filter out stale routes whose owning process is no longer alive
+    const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
+    if (persistCleanup && alive.length !== routes.length) {
+      // Persist the cleaned-up list so stale entries don't accumulate.
+      // Only safe when caller holds the lock.
       try {
-        parsed = JSON.parse(raw);
+        this.saveRoutes(alive);
       } catch {
-        this.onWarning?.(`Corrupted routes file (invalid JSON): ${this.routesPath}`);
-        return [];
+        // Write may fail (permissions); non-fatal
       }
-      if (!Array.isArray(parsed)) {
-        this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
-        return [];
-      }
-      const routes: RouteMapping[] = parsed.filter(isValidRoute);
-      if (routes.length !== parsed.length) {
-        this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
-      }
-      // Filter out stale routes whose owning process is no longer alive
-      const alive = routes.filter((r) => r.pid === 0 || this.isProcessAlive(r.pid));
-      if (persistCleanup && alive.length !== routes.length) {
-        // Persist the cleaned-up list so stale entries don't accumulate.
-        // Only safe when caller holds the lock.
-        try {
-          this.saveRoutes(alive);
-        } catch {
-          // Write may fail (permissions); non-fatal
-        }
-      }
-      return alive;
-    } catch {
+    }
+    return alive;
+  }
+
+  /**
+   * Read and validate the routes file. A missing file is an empty table. An
+   * unreadable or corrupt file throws, so callers never report it as empty.
+   */
+  private readRouteFile(file: string): RouteMapping[] {
+    if (!fs.existsSync(file)) {
       return [];
     }
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, "utf-8");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      throw new RoutesFileError(
+        file,
+        "unreadable",
+        `Could not read routes file ${file}: ${message}`
+      );
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      throw new RoutesFileError(
+        file,
+        "corrupt",
+        `Corrupted routes file (invalid JSON): ${file}. Move it aside or run portless clean.`
+      );
+    }
+    if (!Array.isArray(parsed)) {
+      throw new RoutesFileError(
+        file,
+        "corrupt",
+        `Corrupted routes file (expected array): ${file}. Move it aside or run portless clean.`
+      );
+    }
+    const routes: RouteMapping[] = parsed.filter(isValidRoute);
+    if (routes.length !== parsed.length) {
+      this.onWarning?.(`Skipped invalid route entries in ${file}`);
+    }
+    return routes;
   }
 
   private skippedRoutes(): unknown[] {
@@ -361,31 +394,32 @@ export class RouteStore {
    * but whose dev server may still be holding a port.
    */
   loadRoutesRaw(): RouteMapping[] {
-    if (!fs.existsSync(this.routesPath)) {
-      return [];
+    return this.readRouteFile(this.routesPath);
+  }
+
+  /**
+   * Move a corrupt routes file aside so a write path can start with an empty
+   * table. Missing and valid files are left alone; an unreadable file still
+   * throws because it cannot be moved.
+   */
+  recoverCorruptRoutesFile(): boolean {
+    this.ensureDir();
+    if (!this.acquireLock()) {
+      throw new Error("Failed to acquire route lock");
     }
     try {
-      const raw = fs.readFileSync(this.routesPath, "utf-8");
-      let parsed: unknown;
       try {
-        parsed = JSON.parse(raw);
-      } catch {
-        this.onWarning?.(`Corrupted routes file (invalid JSON): ${this.routesPath}`);
-        return [];
+        this.readRouteFile(this.routesPath);
+        return false;
+      } catch (err) {
+        if (!(err instanceof RoutesFileError) || err.reason !== "corrupt") throw err;
+        const backup = `${this.routesPath}.corrupt-${Date.now()}`;
+        fs.renameSync(this.routesPath, backup);
+        this.onWarning?.(`Moved corrupted routes file to ${backup}. Starting with no routes.`);
+        return true;
       }
-      if (!Array.isArray(parsed)) {
-        this.onWarning?.(`Corrupted routes file (expected array): ${this.routesPath}`);
-        return [];
-      }
-      const routes = parsed.filter(isValidRoute);
-      if (routes.length !== parsed.length) {
-        this.onWarning?.(`Skipped invalid route entries in ${this.routesPath}`);
-      }
-      return routes;
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.onWarning?.(`Could not read routes file: ${message}`);
-      return [];
+    } finally {
+      this.releaseLock();
     }
   }
 
