@@ -5,6 +5,7 @@ import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fixOwnership, resolveUserHome } from "./utils.js";
+import { isCleanableStateDir } from "./clean-utils.js";
 import {
   isWSL,
   isWindowsCATrusted,
@@ -98,21 +99,30 @@ function readTrustMarker(stateDir: string): string | null {
 }
 
 /**
- * Write a state marker file without following a symlink at the destination.
- * Replaces any existing entry via an exclusive temp file and rename.
+ * Create or replace the CA trust refresh marker in a validated state directory
+ * without following a symlink at the destination.
  */
-function writeStateMarkerFile(filePath: string, content: string): void {
+function writePendingRefreshMarker(filePath: string): void {
   const dir = path.dirname(filePath);
-  const stat = fs.lstatSync(dir);
-  if (!stat.isDirectory() || stat.isSymbolicLink()) {
-    throw new Error(`Refusing to write marker in non-directory state path: ${dir}`);
+  if (!isCleanableStateDir(dir)) {
+    throw new Error(`Refusing to write marker in unsafe state directory: ${dir}`);
   }
   const tempPath = path.join(
     dir,
     `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
   );
+  const openFlags =
+    fs.constants.O_CREAT |
+    fs.constants.O_EXCL |
+    fs.constants.O_WRONLY |
+    (fs.constants.O_NOFOLLOW ?? 0);
   try {
-    fs.writeFileSync(tempPath, content, { encoding: "utf-8", mode: 0o644, flag: "wx" });
+    const fd = fs.openSync(tempPath, openFlags, 0o644);
+    try {
+      fs.writeFileSync(fd, "1\n", "utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
     fixOwnership(tempPath);
     fs.renameSync(tempPath, filePath);
   } catch (err) {
@@ -145,10 +155,10 @@ function clearTrustRefreshPending(stateDir: string): void {
 function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
-    const canonicalDir = fs.realpathSync(stateDir);
-    clearTrustRefreshPending(canonicalDir);
+    clearTrustRefreshPending(stateDir);
     const marker = isWSL() ? `wsl:${fp}` : fp;
-    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), marker + "\n");
+    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
+    fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
   }
 }
 
@@ -1245,6 +1255,12 @@ export function untrustCALinux(
   stateDir: string,
   options: LinuxCATrustRemovalOptions = {}
 ): { removed: boolean; error?: string } {
+  if (!isCleanableStateDir(stateDir)) {
+    return {
+      removed: false,
+      error: `Refusing to untrust CA from unsafe state directory: ${stateDir}`,
+    };
+  }
   const errors: string[] = [];
   const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
   let refreshNeeded = hasRegularTrustRefreshPending(pendingRefreshPath);
@@ -1269,7 +1285,7 @@ export function untrustCALinux(
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
           if (!refreshNeeded) {
-            writeStateMarkerFile(pendingRefreshPath, "1\n");
+            writePendingRefreshMarker(pendingRefreshPath);
             refreshNeeded = true;
           }
           fs.unlinkSync(dest);

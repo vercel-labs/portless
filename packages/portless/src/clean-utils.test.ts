@@ -146,6 +146,20 @@ describe("collectStateDirsForCleanupWithFailures", () => {
         expect(isSafeCleanableStateDir(canonical)).toBe(false);
         const writableCollected = collectStateDirsForCleanupWithFailures();
         expect(writableCollected.dirs).not.toContain(canonical);
+
+        fs.chmodSync(LEGACY_SYSTEM_STATE_DIR, 0o755);
+        const parentCanonical = path.dirname(canonical);
+        lstatSyncMock.mockImplementation(((target: fs.PathLike) => {
+          const stat = actualFs.lstatSync(target);
+          if (String(target) === parentCanonical) {
+            return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+              uid: (process.getuid?.() ?? 1000) + 1000,
+              mode: (stat.mode & ~0o7777) | 0o1777,
+            });
+          }
+          return stat;
+        }) as typeof fs.lstatSync);
+        expect(isSafeCleanableStateDir(canonical)).toBe(false);
       } finally {
         lstatSyncMock.mockImplementation(actualFs.lstatSync);
         fs.rmSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, force: true });
