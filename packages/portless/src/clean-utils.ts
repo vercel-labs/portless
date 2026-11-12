@@ -105,19 +105,17 @@ function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
 }
 
 /**
- * Whether a state directory is safe for cleanup: a real directory, not
- * world-writable, and not inside an untrusted world-writable parent directory.
- * When `enforceOwner` is true (used for the shared legacy `/tmp/portless`
- * path), the directory must also be owned by the current user, the invoking
- * sudo user, or root.
+ * Whether a state directory is safe for cleanup: a real directory owned by the
+ * current user, the invoking sudo user, or root, not world-writable, and not
+ * inside an untrusted world-writable parent directory.
  */
-export function isSafeCleanableStateDir(dir: string, enforceOwner = false): boolean {
+export function isSafeCleanableStateDir(dir: string): boolean {
   try {
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
     const owners = allowedStateDirOwners();
     if (!owners) return true;
-    if (enforceOwner && !owners.has(stat.uid)) return false;
+    if (!owners.has(stat.uid)) return false;
     if ((stat.mode & 0o002) !== 0) return false;
     return hasSafeStateDirAncestry(dir, owners);
   } catch {
@@ -146,8 +144,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
-    const enforceOwner = !allowSymlink;
-    if (!allowSymlink && !isSafeCleanableStateDir(resolved, enforceOwner)) return;
+    if (!allowSymlink && !isSafeCleanableStateDir(resolved)) return;
     let canonical: string;
     try {
       canonical = fs.realpathSync(resolved);
@@ -156,7 +153,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
       failures.add(resolved);
       return;
     }
-    if (!isSafeCleanableStateDir(canonical, enforceOwner)) {
+    if (!isSafeCleanableStateDir(canonical)) {
       if (allowSymlink) failures.add(resolved);
       return;
     }

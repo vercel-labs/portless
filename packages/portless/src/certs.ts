@@ -99,22 +99,25 @@ function readTrustMarker(stateDir: string): string | null {
 
 /**
  * Write a state marker file without following a symlink at the destination.
- * Replaces any existing entry via an exclusive temp file and rename.
+ * Resolves the parent state directory and replaces the marker entry via an
+ * exclusive temp file and rename.
  */
 function writeStateMarkerFile(filePath: string, content: string): void {
-  const dir = path.dirname(filePath);
+  const dir = fs.realpathSync(path.dirname(filePath));
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error(`Refusing to write marker in non-directory state path: ${dir}`);
   }
+  const baseName = path.basename(filePath);
+  const targetPath = path.join(dir, baseName);
   const tempPath = path.join(
     dir,
-    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
+    `.${baseName}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
   );
   try {
     fs.writeFileSync(tempPath, content, { encoding: "utf-8", mode: 0o644, flag: "wx" });
     fixOwnership(tempPath);
-    fs.renameSync(tempPath, filePath);
+    fs.renameSync(tempPath, targetPath);
   } catch (err) {
     try {
       fs.unlinkSync(tempPath);
