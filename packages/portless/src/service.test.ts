@@ -417,10 +417,10 @@ describe("handleService", () => {
     errorSpy.mockRestore();
   });
 
-  it("prints help and exits 0 for --help", async () => {
+  it("prints help and exits 0 when no subcommand is given", async () => {
     const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
     await expect(
-      handleService(["service", "--help"], { entryScript: "/fake/cli.js", runner })
+      handleService(["service"], { entryScript: "/fake/cli.js", runner })
     ).rejects.toThrow("process.exit");
     expect(exitSpy).toHaveBeenCalledWith(0);
     const output = logSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
@@ -428,14 +428,6 @@ describe("handleService", () => {
     expect(output).toContain("service install");
     expect(output).toContain("service uninstall");
     expect(output).toContain("service status");
-  });
-
-  it("prints help and exits 0 when no subcommand is given", async () => {
-    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
-    await expect(
-      handleService(["service"], { entryScript: "/fake/cli.js", runner })
-    ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
   it("exits 1 for unknown subcommand", async () => {

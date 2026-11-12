@@ -13,6 +13,7 @@ import {
   generateHostsSyncToken,
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
+import { COMMAND_NAMES } from "./commands.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
@@ -367,6 +368,86 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+  });
+
+  describe("command help", () => {
+    it.each([
+      [["trust", "--help"], "trust"],
+      [["trust", "-h"], "trust"],
+      [["list", "--help"], "list"],
+      [["proxy", "start", "--help"], "proxy"],
+      [["prune", "--force", "--help"], "prune"],
+      [["hosts", "sync", "--help"], "hosts"],
+      [["service", "install", "--help"], "service"],
+    ])("prints help for %j without running the command", (args, command) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
+      try {
+        const bin = path.join(tmpDir, "bin");
+        const home = path.join(tmpDir, "home");
+        const state = path.join(tmpDir, "state");
+        fs.mkdirSync(bin);
+        fs.mkdirSync(home);
+        fs.mkdirSync(state);
+        const routes = JSON.stringify([{ hostname: "stale.localhost", port: 4999, pid: 999999 }]);
+        fs.writeFileSync(path.join(state, "routes.json"), routes);
+        const { status, stdout } = run(args, {
+          cwd: tmpDir,
+          env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
+        });
+        expect(status).toBe(0);
+        expect(stdout.trimStart()).toMatch(new RegExp(`^portless ${command} - `));
+        expect(fs.readdirSync(state)).toEqual(["routes.json"]);
+        expect(fs.readFileSync(path.join(state, "routes.json"), "utf-8")).toBe(routes);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.each(
+      COMMAND_NAMES.filter((name) => name !== "run" && name !== "compose").flatMap((name) => [
+        [[name, "--", "--help"], name],
+        [[name, "--", "-h"], name],
+        [[name, "--bogus", "--help"], name],
+      ])
+    )("prints help for %j, a command that wraps nothing", (args, command) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-command-help-"));
+      try {
+        const bin = path.join(tmpDir, "bin");
+        const home = path.join(tmpDir, "home");
+        const state = path.join(tmpDir, "state");
+        fs.mkdirSync(bin);
+        fs.mkdirSync(home);
+        fs.mkdirSync(state);
+        const { status, stdout, stderr } = run(args as string[], {
+          cwd: tmpDir,
+          env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
+        });
+        expect(status).toBe(0);
+        expect(stderr).toBe("");
+        expect(stdout).toContain(`portless ${command}`);
+        expect(fs.readdirSync(state)).toEqual([]);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "passes --help after a compose subcommand to Docker Compose",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-help-"));
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(docker, '#!/bin/sh\necho "docker $*"\n', { mode: 0o755 });
+          const { status, stdout } = run(["compose", "up", "--help"], {
+            env: { PATH: tmpDir, PORTLESS: undefined },
+          });
+          expect(status).toBe(0);
+          expect(stdout).toContain("docker compose up --help");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
   });
 
   describe("--version", () => {
@@ -764,9 +845,59 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(1);
       expect(stderr).toContain("No command provided");
     });
+
+    it("suggests a command when the name is misspelled", () => {
+      const { status, stderr } = run(["lsit"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+      expect(stderr).toContain("portless list");
+    });
+
+    it.each([
+      ["a help flag", ["lsit", "--help"]],
+      ["an unknown flag", ["lsit", "--json"]],
+      ["a leading flag", ["--force", "lsit", "--help"]],
+      ["a leading sharing flag", ["--ngrok", "lsit", "--help"]],
+      ["a leading app port", ["--app-port", "3000", "lsit", "--help"]],
+    ])("suggests the command for a misspelled name followed by %s", (_case, args) => {
+      const { status, stderr } = run(args);
+      expect(status).toBe(1);
+      expect(stderr).toContain('"lsit" is not a portless command. Did you mean:');
+      expect(stderr).toContain("portless list");
+      expect(stderr).not.toContain("Unknown flag");
+    });
+
+    it("keeps a misspelled name as the app name when a command follows", () => {
+      expect(run(["lis@t"]).stderr).toContain("portless list");
+
+      const { status, stderr } = run(["lis@t", "echo", "test"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("Invalid hostname");
+      expect(stderr).not.toContain("is not a portless command");
+    });
+
+    it("does not suggest a command when --name sets the app name", () => {
+      const { status, stderr } = run(["--name", "lsit"]);
+      expect(status).toBe(1);
+      expect(stderr).toContain("No command provided");
+      expect(stderr).not.toContain("Did you mean");
+    });
   });
 
   describe("PORTLESS=0 bypass", () => {
+    it("runs reserved commands instead of spawning them", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-bypass-get-"));
+      try {
+        const { status, stdout } = run(["get", "backend"], {
+          env: { PORTLESS: "0", PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(status).toBe(0);
+        expect(stdout).toContain("backend.localhost");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("runs command directly when PORTLESS=0 is set", () => {
       const { status, stdout } = run(["myapp", "echo", "hello"], {
         env: { PORTLESS: "0" },
