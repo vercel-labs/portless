@@ -99,25 +99,22 @@ function readTrustMarker(stateDir: string): string | null {
 
 /**
  * Write a state marker file without following a symlink at the destination.
- * Resolves the parent state directory and replaces the marker entry via an
- * exclusive temp file and rename.
+ * Replaces any existing entry via an exclusive temp file and rename.
  */
 function writeStateMarkerFile(filePath: string, content: string): void {
-  const dir = fs.realpathSync(path.dirname(filePath));
+  const dir = path.dirname(filePath);
   const stat = fs.lstatSync(dir);
   if (!stat.isDirectory() || stat.isSymbolicLink()) {
     throw new Error(`Refusing to write marker in non-directory state path: ${dir}`);
   }
-  const baseName = path.basename(filePath);
-  const targetPath = path.join(dir, baseName);
   const tempPath = path.join(
     dir,
-    `.${baseName}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
   );
   try {
     fs.writeFileSync(tempPath, content, { encoding: "utf-8", mode: 0o644, flag: "wx" });
     fixOwnership(tempPath);
-    fs.renameSync(tempPath, targetPath);
+    fs.renameSync(tempPath, filePath);
   } catch (err) {
     try {
       fs.unlinkSync(tempPath);
@@ -148,9 +145,10 @@ function clearTrustRefreshPending(stateDir: string): void {
 function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
-    clearTrustRefreshPending(stateDir);
+    const canonicalDir = fs.realpathSync(stateDir);
+    clearTrustRefreshPending(canonicalDir);
     const marker = isWSL() ? `wsl:${fp}` : fp;
-    writeStateMarkerFile(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
+    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), marker + "\n");
   }
 }
 

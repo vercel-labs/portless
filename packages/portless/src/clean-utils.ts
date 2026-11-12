@@ -79,7 +79,7 @@ function allowedStateDirOwners(): Set<number> | null {
 
 /**
  * Whether every ancestor of a state directory is either owned by an allowed
- * user, not world-writable, or protected by the sticky bit.
+ * user, not writable by group or others, or protected by the sticky bit.
  */
 function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
   let current: string;
@@ -92,9 +92,9 @@ function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
     try {
       const stat = fs.lstatSync(current);
       if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-      const worldWritable = (stat.mode & 0o002) !== 0;
+      const writableByOthers = (stat.mode & 0o022) !== 0;
       const sticky = (stat.mode & 0o1000) !== 0;
-      if (!owners.has(stat.uid) && worldWritable && !sticky) return false;
+      if (!owners.has(stat.uid) && writableByOthers && !sticky) return false;
     } catch {
       return false;
     }
@@ -106,8 +106,8 @@ function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
 
 /**
  * Whether a state directory is safe for cleanup: a real directory owned by the
- * current user, the invoking sudo user, or root, not world-writable, and not
- * inside an untrusted world-writable parent directory.
+ * current user, the invoking sudo user, or root, not writable by group or
+ * others, and not inside an untrusted writable parent directory.
  */
 export function isSafeCleanableStateDir(dir: string): boolean {
   try {
@@ -116,7 +116,7 @@ export function isSafeCleanableStateDir(dir: string): boolean {
     const owners = allowedStateDirOwners();
     if (!owners) return true;
     if (!owners.has(stat.uid)) return false;
-    if ((stat.mode & 0o002) !== 0) return false;
+    if ((stat.mode & 0o022) !== 0) return false;
     return hasSafeStateDirAncestry(dir, owners);
   } catch {
     return false;
