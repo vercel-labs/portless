@@ -6,13 +6,14 @@ import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
   isCleanableStateDir,
+  isSafeCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
 import { LEGACY_SYSTEM_STATE_DIR } from "./cli-utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, statSync: vi.fn(actual.statSync) };
+  return { ...actual, lstatSync: vi.fn(actual.lstatSync), statSync: vi.fn(actual.statSync) };
 });
 
 vi.mock("./cli-utils.js", async (importOriginal) => {
@@ -114,6 +115,43 @@ describe("collectStateDirsForCleanupWithFailures", () => {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it.skipIf(process.platform === "win32")(
+    "skips a legacy directory owned by another user or writable by others",
+    async () => {
+      delete process.env.PORTLESS_STATE_DIR;
+      const actualFs = await vi.importActual<typeof import("node:fs")>("node:fs");
+      const lstatSyncMock = vi.mocked(fs.lstatSync);
+      fs.rmSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, force: true });
+      fs.mkdirSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, mode: 0o755 });
+      const canonical = fs.realpathSync(LEGACY_SYSTEM_STATE_DIR);
+      try {
+        lstatSyncMock.mockImplementation(((target: fs.PathLike) => {
+          const stat = actualFs.lstatSync(target);
+          if (String(target) === LEGACY_SYSTEM_STATE_DIR || String(target) === canonical) {
+            return Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, {
+              uid: (process.getuid?.() ?? 1000) + 1000,
+            });
+          }
+          return stat;
+        }) as typeof fs.lstatSync);
+
+        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        const foreignCollected = collectStateDirsForCleanupWithFailures();
+        expect(foreignCollected.dirs).not.toContain(canonical);
+        expect(foreignCollected.failures).toEqual([]);
+
+        lstatSyncMock.mockImplementation(actualFs.lstatSync);
+        fs.chmodSync(LEGACY_SYSTEM_STATE_DIR, 0o777);
+        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        const writableCollected = collectStateDirsForCleanupWithFailures();
+        expect(writableCollected.dirs).not.toContain(canonical);
+      } finally {
+        lstatSyncMock.mockImplementation(actualFs.lstatSync);
+        fs.rmSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, force: true });
+      }
+    }
+  );
 });
 
 describe("removePortlessStateFiles", () => {

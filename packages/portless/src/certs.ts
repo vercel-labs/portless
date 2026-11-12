@@ -87,10 +87,50 @@ function caFingerprint(stateDir: string): string | null {
 
 function readTrustMarker(stateDir: string): string | null {
   try {
-    const value = fs.readFileSync(path.join(stateDir, CA_TRUST_MARKER), "utf-8").trim();
+    const markerPath = path.join(stateDir, CA_TRUST_MARKER);
+    const stat = fs.lstatSync(markerPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const value = fs.readFileSync(markerPath, "utf-8").trim();
     return value || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Write a state marker file without following a symlink at the destination.
+ * Replaces any existing entry via an exclusive temp file and rename.
+ */
+function writeStateMarkerFile(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  const stat = fs.lstatSync(dir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) {
+    throw new Error(`Refusing to write marker in non-directory state path: ${dir}`);
+  }
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
+  );
+  try {
+    fs.writeFileSync(tempPath, content, { encoding: "utf-8", mode: 0o644, flag: "wx" });
+    fixOwnership(tempPath);
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Temp file may not have been created; ignore.
+    }
+    throw err;
+  }
+}
+
+function hasRegularTrustRefreshPending(filePath: string): boolean {
+  try {
+    const stat = fs.lstatSync(filePath);
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 
@@ -107,8 +147,7 @@ function writeTrustMarker(stateDir: string): void {
   if (fp) {
     clearTrustRefreshPending(stateDir);
     const marker = isWSL() ? `wsl:${fp}` : fp;
-    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
-    fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
+    writeStateMarkerFile(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
   }
 }
 
@@ -1113,7 +1152,7 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
 
 /** Whether a previous CA removal still needs the distro trust cache refresh. */
 export function isCATrustRefreshPending(stateDir: string): boolean {
-  return fs.existsSync(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
+  return hasRegularTrustRefreshPending(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
 }
 
 /**
@@ -1207,7 +1246,7 @@ export function untrustCALinux(
 ): { removed: boolean; error?: string } {
   const errors: string[] = [];
   const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
-  let refreshNeeded = fileExists(pendingRefreshPath);
+  let refreshNeeded = hasRegularTrustRefreshPending(pendingRefreshPath);
   const configs = options.configs ?? Object.values(LINUX_CA_TRUST_CONFIGS);
   const activeConfig = options.activeConfig ?? getLinuxCATrustConfig();
   const runUpdate =
@@ -1220,12 +1259,16 @@ export function untrustCALinux(
     const dest = path.join(config.certDir, "portless-ca.crt");
     try {
       if (fileExists(dest)) {
-        const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
+        const caCertPath = path.join(stateDir, CA_CERT_FILE);
+        const caStat = fs.lstatSync(caCertPath);
+        if (!caStat.isFile() || caStat.isSymbolicLink()) {
+          throw new Error(`Refusing symlinked CA certificate: ${caCertPath}`);
+        }
+        const ours = fs.readFileSync(caCertPath, "utf-8").trim();
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
           if (!refreshNeeded) {
-            fs.writeFileSync(pendingRefreshPath, "1\n");
-            fixOwnership(pendingRefreshPath);
+            writeStateMarkerFile(pendingRefreshPath, "1\n");
             refreshNeeded = true;
           }
           fs.unlinkSync(dest);
