@@ -5,7 +5,7 @@ import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
 import { fixOwnership, resolveUserHome } from "./utils.js";
-import { isCleanableStateDir } from "./clean-utils.js";
+import { explainUnsafeStateDir, isCleanableStateDir } from "./clean-utils.js";
 import {
   isWSL,
   isWindowsCATrusted,
@@ -102,21 +102,10 @@ function readTrustMarker(stateDir: string): string | null {
  * Create or replace a state marker file without following a symlink at the
  * destination, using an exclusive no-follow temp file and atomic rename.
  */
-function writeStateMarkerFile(
-  filePath: string,
-  content: string,
-  requireCleanableDir = false
-): void {
+function writeStateMarkerFile(filePath: string, content: string): void {
   const dir = path.dirname(filePath);
-  if (requireCleanableDir) {
-    if (!isCleanableStateDir(dir)) {
-      throw new Error(`Refusing to write marker in unsafe state directory: ${dir}`);
-    }
-  } else {
-    const stat = fs.lstatSync(dir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) {
-      throw new Error(`Refusing to write marker in non-directory state path: ${dir}`);
-    }
+  if (!isCleanableStateDir(dir)) {
+    throw new Error(`Refusing to write marker in unsafe state directory: ${dir}`);
   }
   const tempPath = path.join(
     dir,
@@ -1089,14 +1078,22 @@ export function createSNICallback(
  *
  * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
  */
-export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
-  if (!fileExists(caCertPath)) {
+export function trustCA(configuredStateDir: string): { trusted: boolean; error?: string } {
+  if (!fileExists(path.join(configuredStateDir, CA_CERT_FILE))) {
     return {
       trusted: false,
       error: "CA certificate not found. Run portless trust to generate it.",
     };
   }
+  const unsafe = explainUnsafeStateDir(configuredStateDir);
+  if (unsafe) {
+    return {
+      trusted: false,
+      error: `Refusing to trust the CA in ${configuredStateDir}: ${unsafe}`,
+    };
+  }
+  const stateDir = fs.realpathSync(configuredStateDir);
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
 
   try {
     if (process.platform === "darwin") {
@@ -1296,7 +1293,7 @@ export function untrustCALinux(
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
           if (!refreshNeeded) {
-            writeStateMarkerFile(pendingRefreshPath, "1\n", true);
+            writeStateMarkerFile(pendingRefreshPath, "1\n");
             refreshNeeded = true;
           }
           fs.unlinkSync(dest);

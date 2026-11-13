@@ -40,6 +40,20 @@ describe("RouteStore", () => {
       store.ensureDir();
       expect(() => store.ensureDir()).not.toThrow();
     });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the directory owner-writable only under a group-writable umask",
+      () => {
+        const previous = process.umask(0o002);
+        try {
+          const created = path.join(tmpDir, "umask");
+          new RouteStore(created).ensureDir();
+          expect(fs.statSync(created).mode & 0o777).toBe(0o755);
+        } finally {
+          process.umask(previous);
+        }
+      }
+    );
   });
 
   describe("loadRoutes", () => {

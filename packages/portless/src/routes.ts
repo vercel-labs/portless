@@ -22,6 +22,22 @@ export const FILE_MODE = 0o644;
 /** Directory permission mode for the state directory. */
 export const DIR_MODE = 0o755;
 
+/**
+ * Create a state directory if it is missing and make it writable only by its
+ * owner, whatever the umask. Under sudo, hands it to the invoking user.
+ */
+export function ensureStateDir(dir: string): void {
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+  }
+  try {
+    fs.chmodSync(dir, DIR_MODE);
+  } catch {
+    // May fail if directory is owned by another user; non-fatal
+  }
+  fixOwnership(dir);
+}
+
 export interface RouteMapping extends RouteInfo {
   pid: number;
   /** Process group of the command portless spawned for this route. */
@@ -196,15 +212,7 @@ export class RouteStore {
   }
 
   ensureDir(): void {
-    if (!fs.existsSync(this.dir)) {
-      fs.mkdirSync(this.dir, { recursive: true, mode: DIR_MODE });
-    }
-    try {
-      fs.chmodSync(this.dir, DIR_MODE);
-    } catch {
-      // May fail if directory is owned by another user; non-fatal
-    }
-    fixOwnership(this.dir);
+    ensureStateDir(this.dir);
   }
 
   getRoutesPath(): string {

@@ -664,6 +664,18 @@ describe("trustCA", () => {
     expect(result.error).toContain("portless trust");
   });
 
+  it.skipIf(process.platform === "win32")(
+    "refuses a state directory other users can write to",
+    () => {
+      ensureCerts(tmpDir);
+      fs.chmodSync(tmpDir, 0o777);
+      const result = trustCA(tmpDir);
+      expect(result.trusted).toBe(false);
+      expect(result.error).toContain("other users can write to it");
+      expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+    }
+  );
+
   it.skipIf(process.platform !== "darwin")(
     "returns actionable error when security command fails (#228)",
     () => {

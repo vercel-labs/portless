@@ -14,7 +14,8 @@ import {
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
 import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
-import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
+import { ensureStateDir } from "./routes.js";
+import { parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
@@ -1066,8 +1067,7 @@ async function stopExistingProxy(
 }
 
 function prepareServiceState(stateDir: string): void {
-  fs.mkdirSync(stateDir, { recursive: true });
-  fixOwnership(stateDir);
+  ensureStateDir(stateDir);
 }
 
 function prepareTrust(stateDir: string): void {

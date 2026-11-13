@@ -69,54 +69,93 @@ function allowedStateDirOwners(): Set<number> | null {
   return owners;
 }
 
+export type StateDirProblem =
+  | { reason: "not-directory"; path: string }
+  | { reason: "foreign-owner"; path: string }
+  | { reason: "writable-by-others"; path: string }
+  | { reason: "unsafe-parent"; path: string };
+
 /**
- * Whether every ancestor of a state directory is owned by an allowed user and
- * either not writable by group or others or protected by the sticky bit.
+ * The first ancestor of a state directory that another user could use to swap
+ * the directory: one owned by someone else, or writable by group or others
+ * without the sticky bit. Returns null when every ancestor is safe.
  */
-function hasSafeStateDirAncestry(dir: string, owners: Set<number>): boolean {
+function findUnsafeStateDirAncestor(dir: string, owners: Set<number>): string | null {
   let current: string;
   try {
     current = path.dirname(fs.realpathSync(dir));
   } catch {
-    return false;
+    return path.dirname(dir);
   }
   for (;;) {
     try {
       const stat = fs.lstatSync(current);
-      if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-      if (!owners.has(stat.uid)) return false;
+      if (!stat.isDirectory()) return current;
+      if (!owners.has(stat.uid)) return current;
       const writableByOthers = (stat.mode & 0o022) !== 0;
       const sticky = (stat.mode & 0o1000) !== 0;
-      if (writableByOthers && !sticky) return false;
+      if (writableByOthers && !sticky) return current;
     } catch {
-      return false;
+      return current;
     }
     const parent = path.dirname(current);
-    if (parent === current) return true;
+    if (parent === current) return null;
     current = parent;
   }
 }
 
 /**
- * Whether a state directory is safe for cleanup: a real directory owned by the
- * current user, the invoking sudo user, or root, not writable by group or
- * others, and with safe ancestor ownership and permissions.
+ * Why a state directory cannot be trusted with CA material or elevated work,
+ * or null when only its owner can change it. The directory must be a real
+ * directory owned by the current user, the invoking sudo user, or root, not
+ * writable by group or others, and reachable only through safe ancestors.
  */
-export function isCleanableStateDir(dir: string): boolean {
+export function findStateDirProblem(dir: string): StateDirProblem | null {
+  let stat: fs.Stats;
   try {
-    const stat = fs.lstatSync(dir);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
-    const owners = allowedStateDirOwners();
-    if (!owners) return true;
-    if (!owners.has(stat.uid)) return false;
-    if ((stat.mode & 0o022) !== 0) return false;
-    return hasSafeStateDirAncestry(dir, owners);
+    stat = fs.lstatSync(dir);
   } catch {
-    return false;
+    return { reason: "not-directory", path: dir };
   }
+  if (!stat.isDirectory()) return { reason: "not-directory", path: dir };
+  const owners = allowedStateDirOwners();
+  if (!owners) return null;
+  if (!owners.has(stat.uid)) return { reason: "foreign-owner", path: dir };
+  if ((stat.mode & 0o022) !== 0) return { reason: "writable-by-others", path: dir };
+  const ancestor = findUnsafeStateDirAncestor(dir, owners);
+  return ancestor ? { reason: "unsafe-parent", path: ancestor } : null;
 }
 
-export const isSafeCleanableStateDir = isCleanableStateDir;
+/** Whether cleanup may act on a state directory. See findStateDirProblem. */
+export function isCleanableStateDir(dir: string): boolean {
+  return findStateDirProblem(dir) === null;
+}
+
+/**
+ * A sentence fragment saying why a state directory path is refused, or null
+ * when it is safe. Resolves symlinks first, so a link to a safe directory is
+ * accepted.
+ */
+export function explainUnsafeStateDir(dir: string): string | null {
+  let canonical: string;
+  try {
+    canonical = fs.realpathSync(dir);
+  } catch {
+    return "it cannot be resolved";
+  }
+  const problem = findStateDirProblem(canonical);
+  if (!problem) return null;
+  switch (problem.reason) {
+    case "not-directory":
+      return "it is not a directory";
+    case "foreign-owner":
+      return "it is owned by another user";
+    case "writable-by-others":
+      return `other users can write to it. Run: chmod go-w ${problem.path}`;
+    case "unsafe-parent":
+      return `other users can replace it through ${problem.path}`;
+  }
+}
 
 export type CATrustRemovalResult = {
   removed: boolean;
@@ -139,7 +178,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
-    if (!allowSymlink && !isSafeCleanableStateDir(resolved)) return;
+    if (!allowSymlink && !isCleanableStateDir(resolved)) return;
     let canonical: string;
     try {
       canonical = fs.realpathSync(resolved);
@@ -148,7 +187,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
       failures.add(resolved);
       return;
     }
-    if (!isSafeCleanableStateDir(canonical)) {
+    if (!isCleanableStateDir(canonical)) {
       if (allowSymlink) failures.add(resolved);
       return;
     }
@@ -167,7 +206,7 @@ export function attemptCATrustRemovalForCleanup(
 ): Map<string, CATrustRemovalResult> {
   const results = new Map<string, CATrustRemovalResult>();
   for (const stateDir of stateDirs) {
-    if (!isSafeCleanableStateDir(stateDir)) continue;
+    if (!isCleanableStateDir(stateDir)) continue;
     try {
       const caPath = path.join(stateDir, "ca.pem");
       if (fs.lstatSync(caPath).isSymbolicLink()) {

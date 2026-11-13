@@ -1125,7 +1125,7 @@ describe("handleService", () => {
       .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service");
     const unit = String(unitWrite?.[1] ?? "");
 
-    expect(mkdirSync).toHaveBeenCalledWith(stateDir, { recursive: true });
+    expect(mkdirSync).toHaveBeenCalledWith(stateDir, { recursive: true, mode: 0o755 });
     expect(unit).toContain(`Environment=PORTLESS_STATE_DIR="${systemdStateDir}"`);
     expect(unit).toContain(`"--cert" "${systemdCertPath}" "--key" "${systemdKeyPath}"`);
   });
