@@ -60,6 +60,7 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
+  ensureStateDir,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";
@@ -145,7 +146,8 @@ import {
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
-  isSafeCleanableStateDir,
+  explainUnsafeStateDir,
+  isCleanableStateDir,
   removePortlessStateFiles,
   type CATrustRemovalResult,
 } from "./clean-utils.js";
@@ -2628,6 +2630,10 @@ Generates the local CA first if it does not exist yet. Browsers and other
 clients then accept portless HTTPS certificates. The OS may ask for
 authorization or sudo.
 
+On macOS and Linux, the state directory and each parent directory must be
+owned by you or root and not writable by group or others. A sticky parent
+such as /tmp is allowed. Otherwise trust exits with the reason.
+
 ${colors.bold("Usage:")}
   ${colors.cyan("portless trust")}
 
@@ -2639,8 +2645,11 @@ ${colors.bold("Options:")}
 async function handleTrust(args: string[] = []): Promise<void> {
   parseCommandArgs("trust", args.slice(1), {}, 0);
   const { dir, port, tls } = await discoverState();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) ensureStateDir(dir);
+  const unsafe = explainUnsafeStateDir(dir);
+  if (unsafe) {
+    console.error(colors.red(`Cannot trust the CA in ${dir}: ${unsafe}`));
+    process.exit(1);
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
@@ -2831,6 +2840,10 @@ Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
 fails, the CA certificate and key are retained so clean can safely retry.
 
+On macOS and Linux, a state directory that another user owns or can write to
+is left alone. Clean prints the reason and exits nonzero. A /tmp/portless
+directory that fails the check is skipped without an error.
+
 On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
 or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
 steps against the same allowlisted state directories. If the proxy cannot be
@@ -2861,7 +2874,7 @@ async function handleClean(args: string[]): Promise<void> {
     }
     const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
     const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
-    const cleanableDirs = approvedDirs.filter(isSafeCleanableStateDir);
+    const cleanableDirs = approvedDirs.filter(isCleanableStateDir);
     const left = runCleanupSteps(requestedCleanupSteps, cleanableDirs, preserveProxyRuntime);
     const clean =
       cleanableDirs.length === approvedDirs.length &&
@@ -2883,9 +2896,8 @@ async function handleClean(args: string[]): Promise<void> {
   );
   console.error(`  Remove the portless block from ${HOSTS_DISPLAY}`);
   for (const failed of collectedStateDirs.failures) {
-    console.error(
-      colors.yellow(`  Cannot resolve state directory: ${failed}. It will be left alone.`)
-    );
+    const reason = explainUnsafeStateDir(failed) ?? "it cannot be resolved";
+    console.error(colors.yellow(`  Leave ${failed} alone: ${reason}`));
   }
 
   if (!parsed.has("--yes") && !parsed.has("-y")) {

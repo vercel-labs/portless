@@ -271,13 +271,15 @@ portless trust
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
 
+On macOS and Linux, `portless trust` and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. `portless trust` exits with the reason when the directory fails this check. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
+
 ## Clean up
 
 ```bash
 portless clean
 ```
 
-Stops the proxy if it is running, removes the startup service and portless CA from the OS trust store when installed, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. On macOS and Linux, failed CA, state-file, and hosts steps are retried with sudo against the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. Custom `--cert` / `--key` paths are not removed. If trust-store removal still fails, portless keeps its CA certificate and key so a later `portless clean` can retry.
+Stops the proxy if it is running, removes the startup service and portless CA from the OS trust store when installed, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. On macOS and Linux, failed CA, state-file, and hosts steps are retried with sudo against the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. Custom `--cert` / `--key` paths are not removed. If trust-store removal still fails, portless keeps its CA certificate and key so a later `portless clean` can retry. A state directory that another user owns or can write to is left alone: clean prints the reason and exits nonzero, and a `/tmp/portless` directory that fails the check is skipped without an error. See [Trust the CA](#trust-the-ca) for the rule.
 
 ## Prune orphans
 

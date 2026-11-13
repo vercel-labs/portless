@@ -5,8 +5,8 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
+  findStateDirProblem,
   isCleanableStateDir,
-  isSafeCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
 import { LEGACY_SYSTEM_STATE_DIR } from "./cli-utils.js";
@@ -136,14 +136,20 @@ describe("collectStateDirsForCleanupWithFailures", () => {
           return stat;
         }) as typeof fs.lstatSync);
 
-        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        expect(findStateDirProblem(canonical)).toEqual({
+          reason: "foreign-owner",
+          path: canonical,
+        });
         const foreignCollected = collectStateDirsForCleanupWithFailures();
         expect(foreignCollected.dirs).not.toContain(canonical);
         expect(foreignCollected.failures).toEqual([]);
 
         lstatSyncMock.mockImplementation(actualFs.lstatSync);
         fs.chmodSync(LEGACY_SYSTEM_STATE_DIR, 0o777);
-        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        expect(findStateDirProblem(canonical)).toEqual({
+          reason: "writable-by-others",
+          path: canonical,
+        });
         const writableCollected = collectStateDirsForCleanupWithFailures();
         expect(writableCollected.dirs).not.toContain(canonical);
 
@@ -159,7 +165,10 @@ describe("collectStateDirsForCleanupWithFailures", () => {
           }
           return stat;
         }) as typeof fs.lstatSync);
-        expect(isSafeCleanableStateDir(canonical)).toBe(false);
+        expect(findStateDirProblem(canonical)).toEqual({
+          reason: "unsafe-parent",
+          path: parentCanonical,
+        });
       } finally {
         lstatSyncMock.mockImplementation(actualFs.lstatSync);
         fs.rmSync(LEGACY_SYSTEM_STATE_DIR, { recursive: true, force: true });
