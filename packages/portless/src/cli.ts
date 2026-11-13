@@ -40,6 +40,7 @@ import {
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
 import {
+  ensureStateDir,
   explainUnsafeStateDir,
   fixOwnership,
   isCleanableStateDir,
@@ -62,7 +63,6 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
-  ensureStateDir,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";

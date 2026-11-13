@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
-import { isCleanableStateDir } from "./utils.js";
+import { explainUnsafeStateDir, isCleanableStateDir } from "./utils.js";
 
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
@@ -84,7 +84,7 @@ export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
       failures.add(resolved);
       return;
     }
-    if (!isCleanableStateDir(canonical)) {
+    if (explainUnsafeStateDir(resolved) !== null) {
       if (allowSymlink) failures.add(resolved);
       return;
     }

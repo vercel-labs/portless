@@ -2,7 +2,12 @@ import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
-import { fixOwnership, isErrnoException, isProcessAlive as isPidAlive } from "./utils.js";
+import {
+  ensureStateDir,
+  fixOwnership,
+  isErrnoException,
+  isProcessAlive as isPidAlive,
+} from "./utils.js";
 
 /** How long (ms) before a lock directory is considered stale and forcibly removed. */
 const STALE_LOCK_THRESHOLD_MS = 10_000;
@@ -18,25 +23,6 @@ const LOCK_RETRY_CAP_MS = 100;
 
 /** File permission mode for route and state files. */
 export const FILE_MODE = 0o644;
-
-/** Directory permission mode for the state directory. */
-export const DIR_MODE = 0o755;
-
-/**
- * Create a state directory if it is missing and make it writable only by its
- * owner, whatever the umask. Under sudo, hands it to the invoking user.
- */
-export function ensureStateDir(dir: string): void {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-  }
-  try {
-    fs.chmodSync(dir, DIR_MODE);
-  } catch {
-    // May fail if directory is owned by another user; non-fatal
-  }
-  fixOwnership(dir);
-}
 
 export interface RouteMapping extends RouteInfo {
   pid: number;

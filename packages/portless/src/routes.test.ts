@@ -5,6 +5,7 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { RouteStore, RouteConflictError, RoutesFileError } from "./routes.js";
+import { ensureStateDir } from "./utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -54,6 +55,48 @@ describe("RouteStore", () => {
         }
       }
     );
+
+    it.skipIf(process.platform === "win32")(
+      "repairs a group-writable directory its owner created",
+      () => {
+        const own = path.join(tmpDir, "own");
+        fs.mkdirSync(own);
+        fs.chmodSync(own, 0o775);
+        expect(ensureStateDir(own)).toBeNull();
+        expect(fs.statSync(own).mode & 0o777).toBe(0o755);
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "follows a symlink only another user could not have planted",
+      () => {
+        const real = path.join(tmpDir, "real");
+        fs.mkdirSync(real, { mode: 0o700 });
+        const link = path.join(tmpDir, "link");
+        fs.symlinkSync(real, link);
+        expect(ensureStateDir(link)).toBeNull();
+        expect(fs.statSync(real).mode & 0o777).toBe(0o755);
+      }
+    );
+
+    for (const kind of ["directory", "file"] as const) {
+      it.skipIf(process.platform === "win32")(
+        `never changes the mode of a ${kind} behind a symlink in a shared directory`,
+        () => {
+          const target = path.join(tmpDir, "protected");
+          if (kind === "directory") fs.mkdirSync(target, { mode: 0o700 });
+          else fs.writeFileSync(target, "secret", { mode: 0o600 });
+          const shared = path.join(tmpDir, "shared");
+          fs.mkdirSync(shared);
+          fs.chmodSync(shared, 0o777);
+          const link = path.join(shared, "state");
+          fs.symlinkSync(target, link);
+
+          expect(ensureStateDir(link)).toContain("other users can redirect it through");
+          expect(fs.statSync(target).mode & 0o777).toBe(kind === "directory" ? 0o700 : 0o600);
+        }
+      );
+    }
   });
 
   describe("loadRoutes", () => {
