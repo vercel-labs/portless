@@ -723,6 +723,7 @@ function keepsStaleRecordAfterRecovery(route: RouteMapping): boolean {
  * signal the same tunnel PIDs again.
  */
 async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
+  if (store.untrustedReason()) return;
   const orphaned = store
     .loadRoutesRaw()
     .filter((route) => route.pid !== 0 && !isPidAlive(route.pid));
@@ -1408,7 +1409,7 @@ type RecordedProxy =
  * different process from the one holding the proxy port.
  */
 async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<RecordedProxy> {
-  const unsafe = fs.existsSync(store.dir) ? explainUnsafeStateDir(store.dir) : null;
+  const unsafe = store.untrustedReason();
   if (unsafe) return { state: "untrusted", reason: unsafe };
   if (!fs.existsSync(store.pidPath)) {
     if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
@@ -2981,7 +2982,7 @@ async function handleClean(args: string[]): Promise<void> {
   // Clean up any tailscale serve/funnel registrations tied to stale routes
   let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
   try {
-    routesForClean = store.loadRoutesRaw();
+    routesForClean = store.untrustedReason() ? [] : store.loadRoutesRaw();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
@@ -3126,6 +3127,13 @@ async function handlePrune(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+
+  const unsafe = store.untrustedReason();
+  if (unsafe) {
+    console.error(colors.red(`Cannot prune routes recorded in ${dir}: ${unsafe}`));
+    console.error(colors.blue("Nothing was signaled."));
+    process.exit(1);
+  }
 
   const stale = store.findStaleRoutes();
   if (stale.length === 0) {
@@ -3506,6 +3514,12 @@ async function handleHosts(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+
+  const unsafe = store.untrustedReason();
+  if (unsafe) {
+    console.error(colors.red(`Cannot sync hosts from routes recorded in ${dir}: ${unsafe}`));
+    process.exit(1);
+  }
 
   const routes = store.loadRoutes();
   const hostnames = routes.map((r) => r.hostname);
@@ -5737,6 +5751,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
 
   const project = source.name;
   const files = composeStatePaths(dir, project);
+  store.ensureDir();
   fs.mkdirSync(path.dirname(files.model), { recursive: true });
   fixOwnership(path.dirname(files.model));
   assertUniqueProjectLabel(dir, project);
