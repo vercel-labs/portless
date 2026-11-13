@@ -2138,8 +2138,7 @@ describe("resolveScriptArgForwarding", () => {
       scriptName: "start",
     });
     expect(resolve("npm run start", { start: "npm run dev" }, "npm@10.0.0")).toEqual({
-      kind: "unsafe",
-      scriptName: "start",
+      kind: "too-deep",
     });
   });
 });

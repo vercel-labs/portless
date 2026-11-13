@@ -4450,6 +4450,12 @@ function forwardScriptExtraArgs(
       ]
     );
   }
+  if (forwarding.kind === "too-deep") {
+    throw new UsageError(
+      `Cannot forward arguments through the "${scriptName}" script. It runs through too many package scripts, or the scripts call each other in a loop.`,
+      [`Run the command directly: portless run <command> -- ${extraArgs.join(" ")}`]
+    );
+  }
   const separators = forwarding.kind === "forward" ? forwarding.separators : 0;
   return separators > 0
     ? [...Array.from({ length: separators }, () => "--"), ...extraArgs]

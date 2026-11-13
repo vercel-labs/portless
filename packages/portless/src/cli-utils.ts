@@ -2566,7 +2566,8 @@ export function resolveTurboRootForwarding(
 export type ScriptArgForwarding =
   | { kind: "missing" }
   | { kind: "forward"; separators: number }
-  | { kind: "unsafe"; scriptName: string };
+  | { kind: "unsafe"; scriptName: string }
+  | { kind: "too-deep" };
 
 function resolveScriptArgForwardingStep(
   scriptName: string,
@@ -2588,7 +2589,7 @@ function resolveScriptArgForwardingStep(
   if (!script || !resolveScript(command[0], packageDir)) {
     return { kind: "forward", separators: Math.max(0, consumed - existing) };
   }
-  if (depth >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "unsafe", scriptName };
+  if (depth >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "too-deep" };
   return resolveScriptArgForwardingStep(command[0], packageDir, depth + 1, consumed, existing);
 }
 
