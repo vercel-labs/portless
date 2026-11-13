@@ -1145,7 +1145,7 @@ describe("handleService", () => {
         runner,
       })
     ).rejects.toThrow(
-      "Cannot install the service with state in /shared/state: it is owned by another user"
+      `Cannot install the service with state in ${path.resolve("/shared/state")}: it is owned by another user`
     );
 
     expect(runner).not.toHaveBeenCalled();
