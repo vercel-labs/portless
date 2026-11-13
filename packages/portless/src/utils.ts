@@ -559,3 +559,15 @@ export function ensureStateDir(dir: string): string | null {
   if (ownerRepair && setStateDirMode(canonical)) return null;
   return describeStateDirProblem(problem);
 }
+
+/**
+ * Prepare a state directory for use. As root, throws when the directory fails
+ * findStateDirProblem, so a privileged process never runs on state another
+ * user controls.
+ */
+export function requireStateDir(dir: string): void {
+  const unsafe = ensureStateDir(dir);
+  if (unsafe && process.platform !== "win32" && process.getuid?.() === 0) {
+    throw new Error(`Cannot use state directory ${dir} as root: ${unsafe}`);
+  }
+}

@@ -79,6 +79,24 @@ describe("RouteStore", () => {
       }
     );
 
+    it.skipIf(process.platform === "win32")(
+      "refuses, as root, a directory that fails the check and leaves it unchanged",
+      () => {
+        const shared = path.join(tmpDir, "group-writable");
+        fs.mkdirSync(shared);
+        fs.chmodSync(shared, 0o775);
+        const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
+        try {
+          expect(() => new RouteStore(shared).ensureDir()).toThrow(
+            `Cannot use state directory ${shared} as root`
+          );
+        } finally {
+          getuid.mockRestore();
+        }
+        expect(fs.statSync(shared).mode & 0o777).toBe(0o775);
+      }
+    );
+
     for (const kind of ["directory", "file"] as const) {
       it.skipIf(process.platform === "win32")(
         `never changes the mode of a ${kind} behind a symlink in a shared directory`,
