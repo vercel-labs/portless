@@ -99,13 +99,24 @@ function readTrustMarker(stateDir: string): string | null {
 }
 
 /**
- * Create or replace the CA trust refresh marker in a validated state directory
- * without following a symlink at the destination.
+ * Create or replace a state marker file without following a symlink at the
+ * destination, using an exclusive no-follow temp file and atomic rename.
  */
-function writePendingRefreshMarker(filePath: string): void {
+function writeStateMarkerFile(
+  filePath: string,
+  content: string,
+  requireCleanableDir = false
+): void {
   const dir = path.dirname(filePath);
-  if (!isCleanableStateDir(dir)) {
-    throw new Error(`Refusing to write marker in unsafe state directory: ${dir}`);
+  if (requireCleanableDir) {
+    if (!isCleanableStateDir(dir)) {
+      throw new Error(`Refusing to write marker in unsafe state directory: ${dir}`);
+    }
+  } else {
+    const stat = fs.lstatSync(dir);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error(`Refusing to write marker in non-directory state path: ${dir}`);
+    }
   }
   const tempPath = path.join(
     dir,
@@ -119,7 +130,7 @@ function writePendingRefreshMarker(filePath: string): void {
   try {
     const fd = fs.openSync(tempPath, openFlags, 0o644);
     try {
-      fs.writeFileSync(fd, "1\n", "utf-8");
+      fs.writeFileSync(fd, content, "utf-8");
     } finally {
       fs.closeSync(fd);
     }
@@ -155,10 +166,10 @@ function clearTrustRefreshPending(stateDir: string): void {
 function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
-    clearTrustRefreshPending(stateDir);
+    const canonicalDir = fs.realpathSync(stateDir);
+    clearTrustRefreshPending(canonicalDir);
     const marker = isWSL() ? `wsl:${fp}` : fp;
-    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
-    fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
+    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), marker + "\n");
   }
 }
 
@@ -1285,7 +1296,7 @@ export function untrustCALinux(
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
           if (!refreshNeeded) {
-            writePendingRefreshMarker(pendingRefreshPath);
+            writeStateMarkerFile(pendingRefreshPath, "1\n", true);
             refreshNeeded = true;
           }
           fs.unlinkSync(dest);
