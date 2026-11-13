@@ -34,6 +34,8 @@ portless
 # -> runs "dev", https://<project>.localhost
 ```
 
+Pass arguments to the script after `--`, so `portless -- --inspect` runs `dev` with `--inspect`. Forwarding arguments into a script with shell operators or a comment exits 2, in Turbo and outside it; run the command directly or make the script a single command.
+
 The name comes from `package.json`, the git root, or the directory. Pass a name and a command to choose both:
 
 ```bash
@@ -116,7 +118,7 @@ The server does not start dev servers. Agents run `portless run <cmd>` in a shel
 
 ## Commands
 
-Run `portless --help` for the full list, or `portless <command> --help` for one command. `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js. Usage errors, such as an unknown flag or a missing argument, exit with code `2`; other failures exit with `1`. Wrapped commands (`run`, named apps, and `compose`) keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`. Use `portless list --json` or `portless get <name> --json` for JSON output.
+Run `portless --help` for the command list and common app options. Use `portless proxy --help` for proxy options, or `portless <command> --help` for command details. `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js. Usage errors, such as an unknown flag or a missing argument, exit with code `2`; other failures exit with `1`. Wrapped commands (`run`, named apps, and `compose`) keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`. Use `portless list --json` or `portless get <name> --json` for JSON output.
 
 | Group                | Commands                                                                              | Docs                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |

@@ -48,7 +48,7 @@ portless myapp next dev
 # -> https://myapp.localhost
 ```
 
-The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`. Auto-start reuses the configuration (port, TLS, TLDs) from the most recent proxy run, so a restart or reboot does not silently revert to defaults. Explicit env vars always take priority.
+The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`. Auto-start reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, so the next start uses the flags and environment variables it is given. Explicit env vars take priority.
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting. Task runners like turborepo should pre-start the proxy.
 
@@ -60,8 +60,11 @@ Bare `portless` works out of the box. It runs the `"dev"` script from `package.j
 
 ```bash
 portless        # -> runs "dev" script, https://<project>.localhost
+portless -- --inspect  # -> runs "dev --inspect"
 pnpm dev        # -> works without portless, plain "next dev"
 ```
+
+Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command.
 
 Use an optional `portless.json` to override defaults (name, script, port):
 
@@ -214,7 +217,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | Variable                | Description                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------ |
 | `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`     | Use a fixed port for the app (skip auto-assignment)                            |
+| `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
 | `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
 | `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
 | `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
@@ -254,7 +257,7 @@ portless proxy start --lan --ip 192.168.1.42
 
 `--lan` explicitly binds the proxy to the IPv4 and IPv6 unspecified addresses, `0.0.0.0` and `::`, and advertises `<name>.local` hostnames over mDNS so devices on the same Wi-Fi can reach your apps. Portless auto-detects your LAN IP and follows network changes automatically, but you can pin a specific address with `--ip <address>` or the `PORTLESS_LAN_IP` environment variable. Set `PORTLESS_LAN=1` to default to LAN mode every time the proxy starts.
 
-Portless remembers LAN mode via `proxy.lan`, so if you stop a LAN proxy and start again, it stays in LAN mode. All proxy settings (port, TLS, TLDs, LAN) are persisted and reused on auto-start unless overridden by explicit flags or env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpected proxy exit leaves it for auto-start. A normal `portless proxy stop` clears the saved port, TLS, TLD, and LAN settings, so the next start uses its flags and env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
 LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling).
 
@@ -334,6 +337,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless`                                        | Run dev script through proxy                                   |
 | `portless`                                        | From monorepo root: run all workspace packages                 |
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
+| `portless -- <args...>`                           | Pass arguments to the script run in zero-arg mode              |
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
 | `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
@@ -383,7 +387,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> --force <cmd>`                   | Kill the existing process and take over its route              |
 | `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child    |
-| `portless --help` / `-h`                          | Show help                                                      |
+| `portless --help` / `-h`                          | Show commands and common app options                           |
+| `portless proxy --help`                           | Show proxy startup options                                     |
 | `portless <command> --help` / `-h`                | Print command help without running it                          |
 | `portless --version` / `-v`                       | Show version                                                   |
 

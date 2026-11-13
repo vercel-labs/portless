@@ -2,6 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -529,19 +530,46 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stdout).toContain("service install");
       expect(stdout).toContain("portless run");
       expect(stdout).toContain("portless get");
-      expect(stdout).toContain("run [--name <name>]");
       expect(stdout).toContain("portless doctor");
-      expect(stdout).toContain("--port");
-      expect(stdout).toContain("-p");
-      expect(stdout).toContain("--foreground");
-      expect(stdout).toContain("PORTLESS_STATE_DIR");
-      expect(stdout).toContain("PORTLESS_URL");
+      expect(stdout).not.toContain("--prefix <label>");
+      expect(stdout).toContain("Run options: portless run --help");
+      const [zeroArgOptions, commandOptions] = stdout
+        .slice(stdout.indexOf("Options:"), stdout.indexOf("Environment variables:"))
+        .split("Options for run and <name> <command>:");
+      expect(zeroArgOptions).toContain("--script <name>");
+      for (const flag of ["--name <name>", "--force", "--app-port <number>"]) {
+        expect(zeroArgOptions).not.toContain(flag);
+        expect(commandOptions).toContain(flag);
+      }
+      expect(run(["run", "--help"]).stdout).toContain("--prefix <label>");
+      expect(stdout).not.toContain("--port");
+      expect(stdout).not.toContain("--foreground");
+      expect(stdout).toContain("Proxy options: portless proxy --help");
+      expect(stdout).toContain("PORTLESS_APP_PORT");
+      expect(stdout).toContain("PORTLESS_LAN");
+      expect(stdout).toContain("PORTLESS_PREFIX");
       expect(stdout).toContain("--ngrok");
-      expect(stdout).toContain("PORTLESS_NGROK");
-      expect(stdout).toContain("PORTLESS_NGROK_URL");
       expect(stdout).toContain("--cloudflare");
-      expect(stdout).toContain("PORTLESS_CLOUDFLARE_URL");
       expect(stdout).toContain("portless clean");
+    });
+
+    it("keeps proxy startup options in proxy help", () => {
+      const { status, stdout } = run(["proxy", "--help"]);
+      expect(status).toBe(0);
+      for (const flag of [
+        "--port",
+        "--https",
+        "--no-tls",
+        "--cert",
+        "--key",
+        "--foreground",
+        "--tld",
+        "--wildcard",
+        "--unprivileged",
+        "--skip-trust",
+      ]) {
+        expect(stdout).toContain(flag);
+      }
     });
 
     it("prints help and exits 0 with -h", () => {
@@ -4388,6 +4416,54 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("persisted proxy port", () => {
+    let tmpDir: string;
+
+    beforeEach(() => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-port-marker-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    it("lets PORTLESS_PORT override the saved port after an unexpected exit", async () => {
+      const savedPort = await getFreePort();
+      const envPort = await getFreePort();
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), savedPort.toString());
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: envPort.toString(),
+        PORTLESS_HTTPS: "0",
+      };
+
+      try {
+        const { status, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        expect(status).toBe(0);
+        expect(stderr).toContain(`http://myapp.localhost:${envPort}`);
+      } finally {
+        run(["proxy", "stop", "-p", envPort.toString()], { env });
+      }
+    });
+
+    it("reuses the saved port after an unexpected exit without PORTLESS_PORT", async () => {
+      const savedPort = await getFreePort();
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), savedPort.toString());
+      const env = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_HTTPS: "0",
+      };
+
+      try {
+        const { status, stderr } = run(["myapp", "node", "-e", "process.exit(0)"], { env });
+        expect(status).toBe(0);
+        expect(stderr).toContain(`http://myapp.localhost:${savedPort}`);
+      } finally {
+        run(["proxy", "stop", "-p", savedPort.toString()], { env });
+      }
+    });
+  });
+
   describe("persisted LAN marker", () => {
     let tmpDir: string;
 
@@ -5284,6 +5360,61 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(start.stdout + start.stderr).not.toContain("Adding CA to system trust store");
     }, 30_000);
 
+    it.each(["daemon", "foreground"])(
+      "serves HTTPS with --https even when PORTLESS_HTTPS=0 (%s)",
+      async (mode) => {
+        const homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-home-"));
+        let child: ReturnType<typeof spawn> | undefined;
+        try {
+          const env = {
+            ...proxyEnv(),
+            HOME: homeDir,
+            USERPROFILE: homeDir,
+          };
+          const args = ["proxy", "start", "--https", "--skip-trust", "-p", String(testPort)];
+          if (mode === "foreground") {
+            child = spawn(process.execPath, [CLI_PATH, ...args, "--foreground"], {
+              env: {
+                ...process.env,
+                ...env,
+                NO_COLOR: "1",
+                PNPM_SCRIPT_SRC_DIR: undefined,
+                npm_command: undefined,
+              },
+              stdio: "ignore",
+            });
+          } else {
+            const start = run(args, { env });
+            expect(start.status, start.stdout + start.stderr).toBe(0);
+          }
+          await waitForHttpHeader(testPort, "X-Portless", "1");
+
+          const header = await new Promise<string | string[] | undefined>((resolve, reject) => {
+            const req = https.get(
+              {
+                hostname: "127.0.0.1",
+                port: testPort,
+                rejectUnauthorized: false,
+                timeout: 2000,
+              },
+              (res) => {
+                res.resume();
+                resolve(res.headers["x-portless"]);
+              }
+            );
+            req.on("error", reject);
+            req.on("timeout", () => req.destroy(new Error("HTTPS request timed out")));
+          });
+          expect(header).toBe("1");
+        } finally {
+          if (child) await stopChild(child);
+          run(["proxy", "stop"], { env: proxyEnv() });
+          fs.rmSync(homeDir, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
     it("never writes the hosts file in unprivileged mode", async () => {
       const start = run(["proxy", "start", "--unprivileged"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -5470,6 +5601,60 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("hello");
     });
+
+    it("bare portless gives the app PORTLESS_APP_PORT over portless.json appPort", async () => {
+      const proxyPort = await getFreePort();
+      const configPort = await getFreePort();
+      let envPort = await getFreePort();
+      while (envPort === configPort || envPort === proxyPort) envPort = await getFreePort();
+      const proxyEnv = {
+        PORTLESS_STATE_DIR: tmpDir,
+        PORTLESS_PORT: String(proxyPort),
+        PORTLESS_HTTPS: "0",
+      };
+      fs.writeFileSync(
+        path.join(tmpDir, "package.json"),
+        JSON.stringify({
+          name: "test-app",
+          scripts: { dev: "node dev.cjs" },
+        })
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "dev.cjs"),
+        [
+          'const fs = require("node:fs");',
+          'const http = require("node:http");',
+          "const server = http.createServer();",
+          'server.listen(Number(process.env.PORT), "127.0.0.1", () => {',
+          '  fs.writeFileSync("port.json", JSON.stringify({',
+          "    envPort: Number(process.env.PORT),",
+          "    boundPort: server.address().port,",
+          "  }));",
+          "  server.close();",
+          "});",
+        ].join("\n") + "\n"
+      );
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ name: "test-app", appPort: configPort })
+      );
+      try {
+        const start = run(["proxy", "start"], { env: proxyEnv });
+        expect(start.status, start.stdout + start.stderr).toBe(0);
+
+        const result = run([], {
+          cwd: tmpDir,
+          env: { ...proxyEnv, PORTLESS_APP_PORT: String(envPort) },
+        });
+        expect(result.status, result.stdout + result.stderr).toBe(0);
+        expect(JSON.parse(fs.readFileSync(path.join(tmpDir, "port.json"), "utf-8"))).toEqual({
+          envPort,
+          boundPort: envPort,
+        });
+      } finally {
+        run(["proxy", "stop"], { env: proxyEnv });
+      }
+    }, 30_000);
 
     // Run the CLI against a fake package-manager binary (shim) that records
     // the args and env it was invoked with, so package-script flag forwarding
@@ -5941,7 +6126,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       expect(stdout).toContain("--tailscale");
       expect(stdout).toContain("--funnel");
-      expect(stdout).toContain("PORTLESS_TAILSCALE");
     });
 
     it("fails with actionable message when tailscale is not installed", () => {
@@ -5997,8 +6181,6 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
       expect(stdout).toContain("--ngrok");
-      expect(stdout).toContain("PORTLESS_NGROK");
-      expect(stdout).toContain("PORTLESS_NGROK_URL");
     });
 
     it("fails with actionable message when ngrok is not installed", () => {
@@ -6267,6 +6449,922 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       },
       60_000
+    );
+  });
+
+  describe("multi-app app port precedence", () => {
+    it.skipIf(process.platform === "win32")(
+      "gives a multi-app package its portless.json appPort and lets PORTLESS_APP_PORT override it",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-state-"));
+        const proxyPort = await getFreePort();
+        const configPort = await getFreePort();
+        let envPort = await getFreePort();
+        while (envPort === configPort || envPort === proxyPort) envPort = await getFreePort();
+        const capturePath = path.join(stateDir, "port.txt");
+        let cli: ReturnType<typeof spawn> | undefined;
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          const dir = path.join(root, "packages", "web");
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "capture.cjs"),
+            `require("node:fs").writeFileSync(${JSON.stringify(capturePath)}, process.env.PORT || "");\n`
+          );
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({ name: "web", version: "0.0.0", scripts: { dev: "node capture.cjs" } })
+          );
+          fs.writeFileSync(
+            path.join(dir, "portless.json"),
+            JSON.stringify({ appPort: configPort, proxy: true })
+          );
+
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_PORT = proxyPort.toString();
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.PORTLESS_APP_PORT = envPort.toString();
+          childEnv.NO_COLOR = "1";
+          delete childEnv.PORTLESS_PREFIX;
+
+          let output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          let captured = "";
+          for (let i = 0; i < 60; i++) {
+            try {
+              captured = fs.readFileSync(capturePath, "utf-8");
+            } catch {
+              captured = "";
+            }
+            if (captured) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          expect(captured, output).toBe(String(envPort));
+
+          await stopChild(cli);
+          cli = undefined;
+          fs.rmSync(capturePath, { force: true });
+          delete childEnv.PORTLESS_APP_PORT;
+          output = "";
+          cli = spawn(process.execPath, [CLI_PATH], {
+            cwd: root,
+            env: childEnv,
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          cli.stdout?.on("data", (chunk) => (output += chunk.toString()));
+          cli.stderr?.on("data", (chunk) => (output += chunk.toString()));
+
+          captured = "";
+          for (let i = 0; i < 60; i++) {
+            try {
+              captured = fs.readFileSync(capturePath, "utf-8");
+            } catch {
+              captured = "";
+            }
+            if (captured) break;
+            await new Promise((resolve) => setTimeout(resolve, 500));
+          }
+          expect(captured, output).toBe(String(configPort));
+        } finally {
+          if (cli) await stopChild(cli);
+          run(["proxy", "stop"], { env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" } });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+    it("refuses PORTLESS_APP_PORT when several apps would start", () => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-port-ambiguous-"));
+      const stateDir = fs.mkdtempSync(
+        path.join(os.tmpdir(), "portless-multi-port-ambiguous-state-")
+      );
+      try {
+        fs.writeFileSync(
+          path.join(root, "package.json"),
+          JSON.stringify({
+            name: "myrepo",
+            private: true,
+            packageManager: "npm@10.0.0",
+            workspaces: ["packages/*"],
+          })
+        );
+        for (const name of ["web", "api"]) {
+          const dir = path.join(root, "packages", name);
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({ name, version: "0.0.0", scripts: { dev: "node noop.cjs" } })
+          );
+          fs.writeFileSync(path.join(dir, "portless.json"), JSON.stringify({ proxy: true }));
+          fs.writeFileSync(path.join(dir, "noop.cjs"), "setTimeout(() => {}, 5000);\n");
+        }
+
+        const childEnv: Record<string, string | undefined> = { ...process.env };
+        for (const key of Object.keys(childEnv)) {
+          if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+        }
+        childEnv.PORTLESS_STATE_DIR = stateDir;
+        childEnv.PORTLESS_HTTPS = "0";
+        childEnv.PORTLESS_APP_PORT = "45678";
+        childEnv.NO_COLOR = "1";
+        delete childEnv.PORTLESS_PREFIX;
+
+        const result = spawnSync(process.execPath, [CLI_PATH], {
+          encoding: "utf-8",
+          timeout: 15_000,
+          cwd: root,
+          env: childEnv,
+        });
+
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("PORTLESS_APP_PORT sets one port");
+        expect(result.stderr).toContain("2 apps");
+        expect(result.stderr).not.toContain("Proxy is running");
+      } finally {
+        fs.rmSync(root, { recursive: true, force: true });
+        fs.rmSync(stateDir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("multi-app script selection", () => {
+    // Skipped on Windows for the same reason as the multi-app worktree test:
+    // multi-app mode spawns the package manager, and spawn("npm") fails there.
+    it.skipIf(process.platform === "win32")(
+      "lets --script override a per-app script and keeps the app script otherwise",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-script-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-script-state-"));
+        const marks = path.join(root, "marks.txt");
+        const readMarks = () => fs.readFileSync(marks, "utf-8").split("\n").filter(Boolean).sort();
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "myrepo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          // Both apps pin "start": web in the root apps map, api in its own
+          // portless config. Neither may beat an explicit --script.
+          fs.writeFileSync(
+            path.join(root, "portless.json"),
+            JSON.stringify({ apps: { "packages/web": { script: "start", proxy: false } } })
+          );
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            fs.mkdirSync(dir, { recursive: true });
+            fs.writeFileSync(
+              path.join(dir, "mark.cjs"),
+              `require("node:fs").appendFileSync(process.env.MARK_FILE, "${name}:" + process.argv[2] + "\\n");\n`
+            );
+            fs.writeFileSync(
+              path.join(dir, "package.json"),
+              JSON.stringify({
+                name,
+                version: "0.0.0",
+                scripts: { dev: "node mark.cjs dev", start: "node mark.cjs start" },
+                portless: { proxy: false, ...(name === "api" ? { script: "start" } : {}) },
+              })
+            );
+          }
+
+          // Strip parent-only npm/pnpm vars so the spawned `npm run <script>` is
+          // real npm, not the vitest runner's pnpm (npm_execpath).
+          const childEnv: Record<string, string | undefined> = { ...process.env };
+          for (const key of Object.keys(childEnv)) {
+            if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete childEnv[key];
+          }
+          childEnv.PORTLESS_STATE_DIR = stateDir;
+          childEnv.PORTLESS_HTTPS = "0";
+          childEnv.NO_COLOR = "1";
+          childEnv.MARK_FILE = marks;
+          delete childEnv.PORTLESS_PREFIX;
+
+          const runWorkspace = (args: string[]) => {
+            fs.writeFileSync(marks, "");
+            const result = spawnSync(process.execPath, [CLI_PATH, ...args], {
+              encoding: "utf-8",
+              timeout: 45_000,
+              cwd: root,
+              env: childEnv,
+            });
+            return {
+              status: result.status,
+              marks: readMarks(),
+              output: `${result.stdout}${result.stderr}`,
+            };
+          };
+
+          const flagged = runWorkspace(["--script", "dev"]);
+          expect(flagged.marks, flagged.output).toEqual(["api:dev", "web:dev"]);
+          expect(flagged.status, flagged.output).toBe(0);
+
+          const bare = runWorkspace([]);
+          expect(bare.marks, bare.output).toEqual(["api:start", "web:start"]);
+          expect(bare.status, bare.output).toBe(0);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+  });
+
+  describe("zero-argument argument forwarding", () => {
+    const args = ["--help", "--script", "start", "--prefix", "pr-1", "--marker", "one"];
+
+    const writeApp = (dir: string, name: string, proxy = true, packageManager = "npm@10.0.0") => {
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "package.json"),
+        JSON.stringify({
+          name,
+          version: "0.0.0",
+          packageManager,
+          scripts: { dev: "node mark.cjs" },
+          ...(proxy ? {} : { portless: { proxy: false } }),
+        })
+      );
+      fs.writeFileSync(
+        path.join(dir, "mark.cjs"),
+        [
+          'const fs = require("node:fs");',
+          'const pkg = require("./package.json");',
+          "fs.appendFileSync(process.env.MARK_FILE, `${pkg.name}:${JSON.stringify(process.argv.slice(2))}\\n`);",
+        ].join("\n") + "\n"
+      );
+    };
+
+    const childEnv = (markFile: string, extra: Record<string, string | undefined>) => {
+      const env: Record<string, string | undefined> = { ...process.env };
+      for (const key of Object.keys(env)) {
+        if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete env[key];
+      }
+      const repoBin = path.resolve(__dirname, "../../../node_modules/.bin");
+      env.PATH = [repoBin, env.PATH].filter(Boolean).join(path.delimiter);
+      delete env.PORTLESS;
+      return { ...env, NO_COLOR: "1", MARK_FILE: markFile, ...extra };
+    };
+
+    const readMarks = (markFile: string): [string, string[]][] => {
+      if (!fs.existsSync(markFile)) return [];
+      return fs
+        .readFileSync(markFile, "utf-8")
+        .split("\n")
+        .filter(Boolean)
+        .map((line): [string, string[]] => {
+          const separator = line.indexOf(":");
+          return [line.slice(0, separator), JSON.parse(line.slice(separator + 1))];
+        })
+        .sort(([a], [b]) => a.localeCompare(b));
+    };
+
+    const spawnCli = (cwd: string, env: Record<string, string | undefined>, cliArgs: string[]) => {
+      const result = spawnSync(process.execPath, [CLI_PATH, ...cliArgs], {
+        encoding: "utf-8",
+        timeout: 45_000,
+        cwd,
+        env,
+      });
+      return { status: result.status, output: `${result.stdout}${result.stderr}` };
+    };
+
+    const linkLocalTurbo = (root: string) => {
+      const turboDir = path.resolve(__dirname, "../../../node_modules/turbo");
+      const pkg = JSON.parse(fs.readFileSync(path.join(turboDir, "package.json"), "utf8"));
+      const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin.turbo;
+      fs.mkdirSync(path.join(root, "node_modules", ".bin"), { recursive: true });
+      fs.symlinkSync(path.join(turboDir, bin), path.join(root, "node_modules", ".bin", "turbo"));
+      fs.symlinkSync(turboDir, path.join(root, "node_modules", "turbo"), "dir");
+    };
+
+    it.skipIf(process.platform === "win32")(
+      "links Turbo's real bin instead of the package-manager shim",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-turbo-bin-"));
+        try {
+          linkLocalTurbo(root);
+          const turboDir = path.resolve(__dirname, "../../../node_modules/turbo");
+          const pkg = JSON.parse(fs.readFileSync(path.join(turboDir, "package.json"), "utf8"));
+          const bin = typeof pkg.bin === "string" ? pkg.bin : pkg.bin.turbo;
+          const link = path.join(root, "node_modules", ".bin", "turbo");
+          expect(fs.readlinkSync(link)).toBe(path.join(turboDir, bin));
+          const result = spawnSync(process.execPath, [link, "--version"], { encoding: "utf-8" });
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout.trim()).toBe(pkg.version);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments after -- to the single app script through the npm separator",
+      async () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-"));
+        const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-state-"));
+        const markFile = path.join(root, "marks.txt");
+        const proxyPort = await getFreePort();
+        const env = childEnv(markFile, {
+          PORTLESS_STATE_DIR: stateDir,
+          PORTLESS_PORT: String(proxyPort),
+          PORTLESS_HTTPS: "0",
+        });
+
+        try {
+          writeApp(root, "args-app");
+          const result = spawnCli(root, env, ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([["args-app", args]]);
+        } finally {
+          run(["proxy", "stop", "-p", String(proxyPort)], { env });
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(stateDir, { recursive: true, force: true });
+        }
+      },
+      60_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments after -- to the single app script with PORTLESS=0 through npm and pnpm",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-skip-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          writeApp(root, "args-app");
+          const npmResult = spawnCli(root, childEnv(markFile, { PORTLESS: "0" }), ["--", ...args]);
+          expect(npmResult.status, npmResult.output).toBe(0);
+          expect(readMarks(markFile), npmResult.output).toEqual([["args-app", args]]);
+
+          fs.rmSync(markFile, { force: true });
+          writeApp(root, "args-app", true, "pnpm@11.1.3");
+          const pnpmResult = spawnCli(root, childEnv(markFile, { PORTLESS: "0" }), ["--", ...args]);
+          expect(pnpmResult.status, pnpmResult.output).toBe(0);
+          expect(readMarks(markFile), pnpmResult.output).toEqual([["args-app", args]]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments after -- to every workspace app",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-ws-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-workspace",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([
+            ["api", args],
+            ["web", args],
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments through a root Turbo script",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev: "turbo dev" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([
+            ["api", args],
+            ["web", args],
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments through wrapped Turbo root scripts",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-wrap-"));
+        const markFile = path.join(root, "marks.txt");
+
+        const writeRoot = (
+          packageManager: string,
+          dev: string,
+          extraScripts: Record<string, string> = {}
+        ) => {
+          const pnpm = packageManager.startsWith("pnpm");
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-wrap",
+              private: true,
+              packageManager,
+              ...(pnpm ? {} : { workspaces: ["packages/*"] }),
+              scripts: { dev, ...extraScripts },
+            })
+          );
+          const workspaceFile = path.join(root, "pnpm-workspace.yaml");
+          if (pnpm) fs.writeFileSync(workspaceFile, "packages:\n  - packages/*\n");
+          else fs.rmSync(workspaceFile, { force: true });
+        };
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          linkLocalTurbo(root);
+
+          const cases: {
+            packageManager: string;
+            dev: string;
+            scripts?: Record<string, string>;
+            fixed?: string[];
+          }[] = [
+            { packageManager: "npm@10.0.0", dev: "npx turbo dev" },
+            { packageManager: "npm@10.0.0", dev: "npm exec turbo dev" },
+            { packageManager: "npm@10.0.0", dev: "npm exec turbo dev --" },
+            { packageManager: "npm@10.0.0", dev: "turbo dev --" },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev -- --fixed" },
+              fixed: ["--fixed"],
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "npm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev -- --fixed" },
+              fixed: ["--fixed"],
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "FOO=1 npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "FOO=1 npm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "npm@10.0.0",
+              dev: "env FOO=1 npm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            { packageManager: "pnpm@11.1.3", dev: "pnpm exec turbo dev" },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "pnpm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "FOO=1 pnpm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "pnpm run turbo-dev --",
+              scripts: { "turbo-dev": "turbo dev" },
+            },
+            {
+              packageManager: "pnpm@11.1.3",
+              dev: "pnpm run turbo-dev",
+              scripts: { "turbo-dev": "turbo dev -- --fixed" },
+              fixed: ["--fixed"],
+            },
+          ];
+
+          for (const { packageManager, dev, scripts = {}, fixed = [] } of cases) {
+            writeRoot(packageManager, dev, scripts);
+            fs.rmSync(markFile, { force: true });
+            const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+            expect(result.status, `${dev}: ${result.output}`).toBe(0);
+            expect(readMarks(markFile), `${dev}: ${result.output}`).toEqual([
+              ["api", [...fixed, ...args]],
+              ["web", [...fixed, ...args]],
+            ]);
+          }
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      90_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the root script's environment when forwarding through a nested script",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-env-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-env",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev: "CUSTOM_ENV=root-value npm run turbo-dev", "turbo-dev": "turbo dev" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({
+              tasks: { dev: { cache: false, env: ["MARK_FILE", "CUSTOM_ENV"] } },
+            })
+          );
+          for (const name of ["web", "api"]) {
+            const dir = path.join(root, "packages", name);
+            writeApp(dir, name, false);
+            fs.writeFileSync(
+              path.join(dir, "mark.cjs"),
+              [
+                'const fs = require("node:fs");',
+                'const pkg = require("./package.json");',
+                "fs.appendFileSync(process.env.MARK_FILE, `${pkg.name} env=${process.env.CUSTOM_ENV} args=${JSON.stringify(process.argv.slice(2))}\\n`);",
+              ].join("\n") + "\n"
+            );
+          }
+          linkLocalTurbo(root);
+
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...forwarded]);
+          expect(result.status, result.output).toBe(0);
+          expect(fs.readFileSync(markFile, "utf-8").trim().split("\n").sort()).toEqual([
+            `api env=root-value args=${JSON.stringify(forwarded)}`,
+            `web env=root-value args=${JSON.stringify(forwarded)}`,
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments through direct Turbo when the root has no script",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-direct-"));
+        const markFile = path.join(root, "marks.txt");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-direct",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+          linkLocalTurbo(root);
+
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(result.status, result.output).toBe(0);
+          expect(readMarks(markFile), result.output).toEqual([
+            ["api", args],
+            ["web", args],
+          ]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "rejects unsafe root scripts before forwarding arguments",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-unsafe-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+
+        const writeDev = (dev: string) => {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-unsafe",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev },
+            })
+          );
+        };
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+
+          for (const [dev, recovery] of [
+            [
+              "turbo dev && node mark-root.cjs",
+              'Change the root "dev" script to a single command, such as "turbo dev"',
+            ],
+            [
+              "turbo dev # note",
+              'Change the root "dev" script to a single command, such as "turbo dev"',
+            ],
+            ["node mark-root.cjs && node mark-root.cjs", "portless run <command> -- --marker one"],
+          ]) {
+            writeDev(dev);
+            fs.rmSync(markFile, { force: true });
+            const result = spawnCli(root, childEnv(markFile, {}), ["--", ...forwarded]);
+            expect(result.status, `${dev}: ${result.output}`).toBe(2);
+            expect(result.output, dev).toContain(
+              'Cannot forward arguments through the "dev" root script. It has shell operators or a comment.'
+            );
+            expect(result.output, dev).toContain(recovery);
+            expect(readMarks(markFile), result.output).toEqual([]);
+          }
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "rejects forwarded args through a compound script outside Turbo",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-compound-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-compound",
+              scripts: { dev: "node a.cjs && node b.cjs" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "a.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "a\\n");\n`
+          );
+          fs.writeFileSync(
+            path.join(root, "b.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "b:" + JSON.stringify(process.argv.slice(2)) + "\\n");\n`
+          );
+
+          for (const extra of [{ PORTLESS: "0" }, {}]) {
+            fs.rmSync(markFile, { force: true });
+            const result = spawnCli(root, childEnv(markFile, extra), ["--", ...forwarded]);
+            expect(result.status, result.output).toBe(2);
+            expect(result.output).toContain(
+              'Cannot forward arguments through the "dev" script. It has shell operators or a comment.'
+            );
+            expect(readMarks(markFile), result.output).toEqual([]);
+          }
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "rejects forwarded args through a compound package script in a non-Turbo workspace",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-compound-ws-"));
+        const markFile = path.join(root, "marks.txt");
+        const forwarded = ["--marker", "one"];
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-compound-ws",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+            })
+          );
+          const dir = path.join(root, "packages", "web");
+          fs.mkdirSync(dir, { recursive: true });
+          fs.writeFileSync(
+            path.join(dir, "package.json"),
+            JSON.stringify({
+              name: "web",
+              version: "0.0.0",
+              scripts: { dev: "node a.cjs && node b.cjs" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(dir, "a.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "a\\n");\n`
+          );
+          fs.writeFileSync(
+            path.join(dir, "b.cjs"),
+            `require("node:fs").appendFileSync(${JSON.stringify(markFile)}, "b:" + JSON.stringify(process.argv.slice(2)) + "\\n");\n`
+          );
+
+          const result = spawnCli(root, childEnv(markFile, {}), ["--", ...forwarded]);
+          expect(result.status, result.output).toBe(2);
+          expect(result.output).toContain(
+            'Cannot forward arguments through the "dev" script. It has shell operators or a comment.'
+          );
+          expect(readMarks(markFile), result.output).toEqual([]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "forwards args through a dev script that delegates via npm run and ignores compound leaf scripts in Turbo mode",
+      () => {
+        const single = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-delegated-"));
+        const turboWs = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-leaf-"));
+        const singleMarks = path.join(single, "marks.txt");
+        const turboMarks = path.join(turboWs, "marks.txt");
+
+        try {
+          writeApp(single, "delegated-app");
+          const singlePkg = JSON.parse(fs.readFileSync(path.join(single, "package.json"), "utf8"));
+          singlePkg.scripts = { dev: "npm run start", start: singlePkg.scripts.dev };
+          fs.writeFileSync(path.join(single, "package.json"), JSON.stringify(singlePkg));
+
+          const singleResult = spawnCli(single, childEnv(singleMarks, { PORTLESS: "0" }), [
+            "--",
+            ...args,
+          ]);
+          expect(singleResult.status, singleResult.output).toBe(0);
+          expect(readMarks(singleMarks), singleResult.output).toEqual([["delegated-app", args]]);
+
+          fs.writeFileSync(
+            path.join(turboWs, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-leaf",
+              private: true,
+              packageManager: "npm@10.0.0",
+              workspaces: ["packages/*"],
+              scripts: { dev: "turbo run dev --filter=web" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(turboWs, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false, env: ["MARK_FILE"] } } })
+          );
+          writeApp(path.join(turboWs, "packages", "web"), "web", false);
+          const unusedDir = path.join(turboWs, "packages", "unused");
+          fs.mkdirSync(unusedDir, { recursive: true });
+          fs.writeFileSync(
+            path.join(unusedDir, "package.json"),
+            JSON.stringify({
+              name: "unused",
+              version: "0.0.0",
+              scripts: { dev: "node a.cjs && node b.cjs" },
+              portless: { proxy: false },
+            })
+          );
+          linkLocalTurbo(turboWs);
+
+          const turboResult = spawnCli(turboWs, childEnv(turboMarks, {}), ["--", ...args]);
+          expect(turboResult.status, turboResult.output).toBe(0);
+          expect(readMarks(turboMarks), turboResult.output).toEqual([["web", args]]);
+        } finally {
+          fs.rmSync(single, { recursive: true, force: true });
+          fs.rmSync(turboWs, { recursive: true, force: true });
+        }
+      },
+      45_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "passes arguments to a root script that does not run Turbo",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-root-script-"));
+        const markFile = path.join(root, "marks.txt");
+
+        const writeRoot = (packageManager: string) => {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-root-script",
+              private: true,
+              packageManager,
+              workspaces: ["packages/*"],
+              scripts: { dev: "node mark-root.cjs" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(root, "mark-root.cjs"),
+            [
+              'const fs = require("node:fs");',
+              "fs.appendFileSync(process.env.MARK_FILE, `root:${JSON.stringify(process.argv.slice(2))}\\n`);",
+            ].join("\n") + "\n"
+          );
+        };
+
+        try {
+          writeRoot("npm@10.0.0");
+          fs.writeFileSync(
+            path.join(root, "turbo.json"),
+            JSON.stringify({ tasks: { dev: { cache: false } } })
+          );
+          writeApp(path.join(root, "packages", "web"), "web", false);
+          writeApp(path.join(root, "packages", "api"), "api", false);
+
+          const npmResult = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(npmResult.status, npmResult.output).toBe(0);
+          expect(readMarks(markFile), npmResult.output).toEqual([["root", args]]);
+
+          fs.rmSync(markFile, { force: true });
+          writeRoot("pnpm@11.1.3");
+          const pnpmResult = spawnCli(root, childEnv(markFile, {}), ["--", ...args]);
+          expect(pnpmResult.status, pnpmResult.output).toBe(0);
+          expect(readMarks(markFile), pnpmResult.output).toEqual([["root", args]]);
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+        }
+      },
+      45_000
     );
   });
 });

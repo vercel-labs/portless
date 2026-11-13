@@ -9,7 +9,7 @@ import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
-import { resolveScript, resolveScriptRaw } from "./config.js";
+import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
 import {
   createLoopbackConnection,
   findStateDirProblem,
@@ -2013,6 +2013,25 @@ type FrameworkInvocation = {
   separator?: string;
 };
 
+function skipRunnerPrefix(
+  commandArgs: string[],
+  start: number,
+  runner: { valueFlags?: string[] }
+): { index: number; separator: boolean } {
+  let index = start;
+  let separator = false;
+  while (index < commandArgs.length && commandArgs[index].startsWith("-")) {
+    const option = commandArgs[index];
+    index++;
+    if (option === "--") {
+      separator = true;
+      break;
+    }
+    if (!option.includes("=") && runner.valueFlags?.includes(option)) index++;
+  }
+  return { index, separator };
+}
+
 function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
   if (commandArgs.length === 0) return null;
 
@@ -2025,32 +2044,26 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
     const runner = PACKAGE_RUNNERS[first];
     if (!runner) return null;
 
-    let i = 1;
-    const skipRunnerOptions = () => {
-      while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
-        const option = commandArgs[i];
-        i++;
-        if (option === "--") {
-          runnerSeparator = true;
-          break;
-        }
-        if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
-      }
-    };
+    let skipped = skipRunnerPrefix(commandArgs, 1, runner);
+    runnerSeparator = skipped.separator;
+    let i = skipped.index;
 
     if (runner.subcommands.length > 0) {
-      skipRunnerOptions();
       if (i >= commandArgs.length) return null;
       if (!runner.subcommands.includes(commandArgs[i])) {
         const name = path.basename(commandArgs[i]);
         frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
       } else {
-        i++;
+        skipped = skipRunnerPrefix(commandArgs, i + 1, runner);
+        runnerSeparator ||= skipped.separator;
+        i = skipped.index;
       }
     }
 
     if (frameworkIndex === null) {
-      skipRunnerOptions();
+      skipped = skipRunnerPrefix(commandArgs, i, runner);
+      runnerSeparator ||= skipped.separator;
+      i = skipped.index;
       if (i >= commandArgs.length) return null;
       const name = path.basename(commandArgs[i]);
       frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
@@ -2104,6 +2117,131 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
  */
 function findFrameworkBasename(commandArgs: string[]): string | null {
   return parseFrameworkInvocation(commandArgs)?.basename ?? null;
+}
+
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function commandBasename(token: string): string {
+  const name = path.basename(token);
+  return isWindows ? name.toLowerCase().replace(/\.(cmd|exe|bat|com)$/, "") : name;
+}
+
+function isTurboCommand(token: string, packageSpec: boolean): boolean {
+  const name = commandBasename(token);
+  return name === "turbo" || (packageSpec && !token.startsWith("@") && /^turbo@[^/]+$/.test(name));
+}
+
+function mentionsTurbo(commandArgs: string[]): boolean {
+  return commandArgs.some((arg) => {
+    const name = commandBasename(arg);
+    return name === "turbo" || /^turbo@[^/]+$/.test(name);
+  });
+}
+
+/** What a wrapper does to the command it runs and to the arguments forwarded through it. */
+type Wrapped = {
+  /** Whether it swallows one `--`: always, or only when its own options do not end with one. */
+  consumes?: "always" | "unless separated";
+  /** The `--` is swallowed by Yarn Classic only. */
+  classicOnly?: true;
+  /** What follows is a package spec such as `turbo@2`. */
+  packageSpec?: true;
+  /** What follows is a package script name: always after `run`, possibly after bare `yarn`. */
+  script?: "always" | "maybe";
+};
+
+type WrapperSpec = Wrapped & {
+  valueFlags?: string[];
+  subcommands?: Record<string, Wrapped>;
+  /** False when the command runs nothing without one of its subcommands. */
+  bare?: false;
+};
+
+const NPM_EXEC: Wrapped = { consumes: "unless separated", packageSpec: true };
+
+/** Every command that a root script may put in front of Turbo. */
+const COMMAND_WRAPPERS: Record<string, WrapperSpec> = {
+  env: { valueFlags: ["-u", "--unset"] },
+  "cross-env": {},
+  dotenv: { valueFlags: ["-e", "-v"], consumes: "unless separated" },
+  npx: { valueFlags: PACKAGE_RUNNERS.npx.valueFlags, packageSpec: true },
+  bunx: { packageSpec: true },
+  pnpx: { valueFlags: PACKAGE_RUNNERS.pnpx.valueFlags, packageSpec: true },
+  npm: {
+    valueFlags: PACKAGE_RUNNERS.npm.valueFlags,
+    subcommands: { exec: NPM_EXEC, x: NPM_EXEC, run: { consumes: "always", script: "always" } },
+  },
+  pnpm: { subcommands: { exec: {}, dlx: { packageSpec: true }, run: { script: "always" } } },
+  yarn: {
+    consumes: "always",
+    classicOnly: true,
+    script: "maybe",
+    subcommands: {
+      exec: { consumes: "unless separated", classicOnly: true },
+      dlx: { packageSpec: true },
+      run: { consumes: "always", classicOnly: true, script: "always" },
+    },
+  },
+  bun: {
+    bare: false,
+    subcommands: { x: { packageSpec: true }, run: { consumes: "always", script: "always" } },
+  },
+};
+
+type Unwrapped = {
+  /** The command left after every wrapper, starting at its executable or script name. */
+  command: string[];
+  /** `--` separators the wrappers swallow before the command sees forwarded arguments. */
+  consumed: number;
+  packageSpec: boolean;
+  script: Wrapped["script"];
+};
+
+/** Strip environment assignments and wrappers from the front of a script's tokens. */
+function unwrapCommand(tokens: string[], packageDir: string): Unwrapped | null {
+  const classic = isYarnClassic(packageDir);
+  let command = tokens;
+  let consumed = 0;
+  let packageSpec = false;
+  let script: Wrapped["script"];
+  for (;;) {
+    const first = command[0];
+    if (first === undefined) return null;
+    if (ENV_ASSIGNMENT.test(first)) {
+      command = command.slice(1);
+      continue;
+    }
+    const name = commandBasename(first);
+    const spec = COMMAND_WRAPPERS[name];
+    if (!spec) return { command, consumed, packageSpec, script };
+    let options = skipRunnerPrefix(command, 1, spec);
+    let wrapped: Wrapped = spec;
+    const subcommand = spec.subcommands?.[command[options.index] ?? ""];
+    if (subcommand) {
+      wrapped = subcommand;
+      options = subcommand.script
+        ? { index: options.index + 1, separator: false }
+        : skipRunnerPrefix(command, options.index + 1, spec);
+    } else if (spec.bare === false) {
+      return { command, consumed, packageSpec, script };
+    }
+    if (wrapped.script === "always") {
+      const target = command[options.index];
+      if (target === undefined || target.startsWith("-")) return null;
+      if (name === "bun" && !resolveScript(target, packageDir)) wrapped = {};
+    }
+    if (
+      wrapped.consumes &&
+      (!wrapped.classicOnly || classic) &&
+      (wrapped.consumes === "always" || !options.separator)
+    ) {
+      consumed++;
+    }
+    packageSpec = wrapped.packageSpec === true;
+    script = wrapped.script;
+    command = command.slice(options.index);
+    if (script === "always") return { command, consumed, packageSpec, script };
+  }
 }
 
 /**
@@ -2248,7 +2386,7 @@ const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
  * their first token is not a name it recognizes, so a guard clause for them
  * would be unreachable. A regression test pins that outcome instead.
  */
-function isUnsafeToAppendArgs(command: string): boolean {
+export function isUnsafeToAppendArgs(command: string): boolean {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -2391,6 +2529,87 @@ export function resolveFrameworkBasename(
   if (direct) return direct;
   const scriptTokens = resolvePackageScriptTokens(commandArgs, packageDir);
   return scriptTokens ? findFrameworkBasename(scriptTokens) : null;
+}
+
+export type TurboRootForwarding =
+  | { kind: "none" }
+  | { kind: "forward"; separators: number }
+  | { kind: "unsafe"; turbo: boolean };
+
+/** How many package scripts a root script may delegate through before portless stops following. */
+const MAX_SCRIPT_DELEGATION_DEPTH = 5;
+
+function resolveTurboScript(
+  scriptName: string,
+  packageDir: string,
+  depth: number,
+  consumedSeparators: number,
+  inheritedSeparators: number
+): TurboRootForwarding {
+  const raw = resolveScriptRaw(scriptName, packageDir);
+  const tokens = resolveScript(scriptName, packageDir);
+  if (!raw || !tokens) return { kind: "none" };
+  if (isUnsafeToAppendArgs(raw)) return { kind: "unsafe", turbo: mentionsTurbo(tokens) };
+  const unwrapped = unwrapCommand(tokens, packageDir);
+  if (!unwrapped) return { kind: "none" };
+  const { command, packageSpec, script } = unwrapped;
+  const consumed = consumedSeparators + unwrapped.consumed;
+  const existing = inheritedSeparators + command.slice(1).filter((arg) => arg === "--").length;
+  if (script !== "always" && isTurboCommand(command[0], packageSpec)) {
+    return { kind: "forward", separators: Math.max(0, 1 + consumed - existing) };
+  }
+  if (!script || depth >= MAX_SCRIPT_DELEGATION_DEPTH || !resolveScript(command[0], packageDir)) {
+    return { kind: "none" };
+  }
+  return resolveTurboScript(command[0], packageDir, depth + 1, consumed, existing);
+}
+
+export function resolveTurboRootForwarding(
+  scriptName: string,
+  packageDir: string
+): TurboRootForwarding {
+  return resolveTurboScript(scriptName, packageDir, 0, 0, 0);
+}
+
+export type ScriptArgForwarding =
+  | { kind: "missing" }
+  | { kind: "forward"; separators: number }
+  | { kind: "unsafe"; scriptName: string }
+  | { kind: "too-deep" };
+
+function resolveScriptArgForwardingStep(
+  scriptName: string,
+  packageDir: string,
+  depth: number,
+  consumedSeparators: number,
+  inheritedSeparators: number
+): ScriptArgForwarding {
+  const raw = resolveScriptRaw(scriptName, packageDir);
+  const tokens = resolveScript(scriptName, packageDir);
+  if (!raw || !tokens) return { kind: "missing" };
+  if (isUnsafeToAppendArgs(raw)) return { kind: "unsafe", scriptName };
+  const unwrapped = unwrapCommand(tokens, packageDir);
+  if (!unwrapped)
+    return { kind: "forward", separators: Math.max(0, consumedSeparators - inheritedSeparators) };
+  const { command, script } = unwrapped;
+  const consumed = consumedSeparators + unwrapped.consumed;
+  const existing = inheritedSeparators + command.slice(1).filter((arg) => arg === "--").length;
+  if (!script || !resolveScript(command[0], packageDir)) {
+    return { kind: "forward", separators: Math.max(0, consumed - existing) };
+  }
+  if (depth >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "too-deep" };
+  return resolveScriptArgForwardingStep(command[0], packageDir, depth + 1, consumed, existing);
+}
+
+/**
+ * Resolve how forwarded arguments pass through a package script, following
+ * wrappers and nested scripts and counting the `--` separators they consume.
+ */
+export function resolveScriptArgForwarding(
+  scriptName: string,
+  packageDir: string
+): ScriptArgForwarding {
+  return resolveScriptArgForwardingStep(scriptName, packageDir, 0, 0, 0);
 }
 
 /**

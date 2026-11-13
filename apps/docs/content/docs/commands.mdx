@@ -14,7 +14,10 @@ Runs the `"dev"` script from `package.json` through the proxy. The app name is i
 portless                      # single app: run dev script
 portless                      # monorepo root: start all apps
 portless --script start       # run "start" instead of "dev"
+portless -- --inspect         # pass arguments to the script
 ```
+
+Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command.
 
 Use a `portless.json` to override defaults. See [Configuration](/configuration).
 
@@ -60,7 +63,7 @@ portless docs.myapp next dev
     </tr>
     <tr>
       <td>`--app-port <number>`</td>
-      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`.</td>
+      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`. A monorepo run refuses `PORTLESS_APP_PORT` when several proxied apps would start; set a per-app `appPort` instead.</td>
     </tr>
     <tr>
       <td>`--force`</td>
@@ -327,7 +330,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--https`</td>
-      <td>Enable HTTPS (default, accepted for compatibility)</td>
+      <td>Serve HTTPS, even with `PORTLESS_HTTPS=0`. With `--unprivileged`, it turns HTTPS on and uses port 443.</td>
     </tr>
     <tr>
       <td>`--lan`</td>
@@ -360,7 +363,7 @@ portless proxy start
   </tbody>
 </table>
 
-When auto-starting, portless reuses the configuration (port, TLS, TLDs, LAN mode) from the most recent proxy run, so a restart or reboot does not revert to defaults. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority.
+When auto-starting, portless reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, so the next start uses the flags and environment variables it is given. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority, so `PORTLESS_PORT` starts the proxy on that port instead of the saved one.
 
 ### Unprivileged mode
 
@@ -420,7 +423,7 @@ portless proxy start --lan --ip 192.168.1.42   # manual IP override
 
 Without LAN mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` and `::1`. LAN mode explicitly binds them to `0.0.0.0` and `::`.
 
-Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
+Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpected proxy exit leaves it for auto-start. A normal `portless proxy stop` clears it, so the next start uses its flags and `PORTLESS_LAN`.
 
 Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-utils`). Not supported on Windows.
 
