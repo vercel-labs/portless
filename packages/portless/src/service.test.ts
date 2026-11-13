@@ -38,6 +38,7 @@ vi.mock("./utils.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./utils.js")>();
   return {
     ...mod,
+    ensureStateDir: vi.fn(() => null),
     fixOwnership: vi.fn(),
   };
 });
@@ -58,6 +59,7 @@ vi.mock("./cli-utils.js", async (importOriginal) => {
 const { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } =
   await import("node:fs");
 const { isMdnsSupported } = await import("./mdns.js");
+const { ensureStateDir } = await import("./utils.js");
 const { discoverState, isProxyRunning } = await import("./cli-utils.js");
 const actualCliUtils = await vi.importActual<typeof import("./cli-utils.js")>("./cli-utils.js");
 
@@ -89,6 +91,7 @@ afterEach(() => {
   });
   vi.mocked(existsSync).mockRestore();
   vi.mocked(mkdirSync).mockRestore();
+  vi.mocked(ensureStateDir).mockClear();
   vi.mocked(readFileSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
   vi.mocked(statSync).mockRestore();
@@ -655,7 +658,7 @@ describe("handleService", () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(errorSpy).not.toHaveBeenCalled();
     expect(runner).not.toHaveBeenCalled();
-    expect(mkdirSync).not.toHaveBeenCalled();
+    expect(ensureStateDir).not.toHaveBeenCalled();
     expect(writeFileSync).not.toHaveBeenCalled();
   });
 
@@ -1125,9 +1128,28 @@ describe("handleService", () => {
       .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service");
     const unit = String(unitWrite?.[1] ?? "");
 
-    expect(mkdirSync).toHaveBeenCalledWith(stateDir, { recursive: true, mode: 0o755 });
+    expect(ensureStateDir).toHaveBeenCalledWith(stateDir);
     expect(unit).toContain(`Environment=PORTLESS_STATE_DIR="${systemdStateDir}"`);
     expect(unit).toContain(`"--cert" "${systemdCertPath}" "--key" "${systemdKeyPath}"`);
+  });
+
+  it("refuses to install when another user controls the state directory", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    vi.mocked(ensureStateDir).mockReturnValueOnce("it is owned by another user");
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    await expect(
+      handleService(["service", "install", "--state-dir", "/shared/state"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      })
+    ).rejects.toThrow(
+      "Cannot install the service with state in /shared/state: it is owned by another user"
+    );
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
   });
 
   it("prints installed service config from a Linux unit", async () => {

@@ -40,6 +40,7 @@ import {
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
 import {
+  ensureStateDir,
   explainUnsafeStateDir,
   fixOwnership,
   isCleanableStateDir,
@@ -62,7 +63,6 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
-  ensureStateDir,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";
@@ -2583,7 +2583,8 @@ ${colors.bold("Options:")}
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
   --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
-  --state-dir <path>            Use a custom state directory with service install
+  --state-dir <path>            Use a custom state directory with service install.
+                                Other users must not be able to change it
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel

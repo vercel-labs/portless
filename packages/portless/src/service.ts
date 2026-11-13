@@ -14,8 +14,7 @@ import {
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
 import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
-import { ensureStateDir } from "./routes.js";
-import { parsePort, resolveUserHome } from "./utils.js";
+import { ensureStateDir, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
@@ -1067,7 +1066,8 @@ async function stopExistingProxy(
 }
 
 function prepareServiceState(stateDir: string): void {
-  ensureStateDir(stateDir);
+  const unsafe = ensureStateDir(stateDir);
+  if (unsafe) throw new Error(`Cannot install the service with state in ${stateDir}: ${unsafe}`);
 }
 
 function prepareTrust(stateDir: string): void {

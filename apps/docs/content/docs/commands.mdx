@@ -271,7 +271,7 @@ portless trust
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
 
-On macOS and Linux, `portless trust`, `portless proxy stop`, and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. `portless trust` and `portless proxy stop` exit with the reason when the directory fails this check, and `proxy stop` signals nothing. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
+On macOS and Linux, `portless trust`, `portless proxy stop`, `portless service install`, and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. A symlink on the path counts only when you or root own it and it sits in a directory that passes the same check. `portless trust`, `portless proxy stop`, and `portless service install` exit with the reason when the directory fails this check, and `proxy stop` signals nothing. portless never changes the permissions or owner of a state directory that fails it. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
 
 ## Clean up
 
