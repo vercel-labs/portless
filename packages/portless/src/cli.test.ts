@@ -3199,6 +3199,30 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(capture.content).not.toContain("stale.test");
       });
 
+      it.skipIf(process.platform === "win32")(
+        "refuses to publish hostnames from a state directory other users can write to",
+        () => {
+          fs.writeFileSync(
+            path.join(tmpDir, "routes.json"),
+            JSON.stringify([{ hostname: "planted.test", port: 1, pid: 0 }])
+          );
+          fs.chmodSync(tmpDir, 0o777);
+          try {
+            const { status, stderr, capture } = runWithHostsFileMock(["hosts", "sync"], {
+              content: staleHosts,
+              stateDir: tmpDir,
+            });
+
+            expect(status).toBe(1);
+            expect(stderr).toContain(`Cannot sync hosts from routes recorded in ${tmpDir}`);
+            expect(capture.writes).toHaveLength(0);
+            expect(capture.sudoCalls).toEqual([]);
+          } finally {
+            fs.chmodSync(tmpDir, 0o755);
+          }
+        }
+      );
+
       it("succeeds without writing when an empty routes file meets a readable empty hosts file", () => {
         const { status, stdout, capture } = runWithHostsFileMock(["hosts", "sync"], {
           content: "",

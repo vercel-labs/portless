@@ -3,6 +3,7 @@ import * as net from "node:net";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
 import {
+  explainUnsafeStateDir,
   fixOwnership,
   isErrnoException,
   isProcessAlive as isPidAlive,
@@ -199,6 +200,15 @@ export class RouteStore {
 
   ensureDir(): void {
     requireStateDir(this.dir);
+  }
+
+  /**
+   * Why what this directory records must not be acted on (processes to signal,
+   * hostnames to publish, tunnels to stop), or null when only its owner can
+   * change it. A directory that does not exist yet records nothing.
+   */
+  untrustedReason(): string | null {
+    return fs.existsSync(this.dir) ? explainUnsafeStateDir(this.dir) : null;
   }
 
   getRoutesPath(): string {

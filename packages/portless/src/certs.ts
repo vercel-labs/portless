@@ -324,6 +324,20 @@ function hasDuplicateExtensions(certPath: string): boolean {
 /**
  * Run openssl and return stdout. Throws on non-zero exit.
  */
+/**
+ * Start a command that creates a private key with a umask that hides the file
+ * from other users from the moment it exists. Some openssl builds create key
+ * files with the caller's umask, which is world-readable by default.
+ */
+function withPrivateFileMode<T>(start: () => T): T {
+  const previous = process.umask(0o077);
+  try {
+    return start();
+  } finally {
+    process.umask(previous);
+  }
+}
+
 function openssl(args: string[], options?: { input?: string }): string {
   try {
     const extraEnv = getOpensslEnv();
@@ -421,7 +435,9 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
   const reqConfigPath = path.join(stateDir, `ca-req-${process.pid}-${crypto.randomUUID()}.cnf`);
 
   // Generate EC private key
-  openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
+  withPrivateFileMode(() =>
+    openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
+  );
 
   // Generate self-signed CA certificate.
   //
@@ -509,7 +525,9 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   const extPath = path.join(stateDir, "server-ext.cnf");
 
   // Generate server private key
-  openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath]);
+  withPrivateFileMode(() =>
+    openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath])
+  );
 
   // Generate CSR
   openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
@@ -879,7 +897,9 @@ async function generateHostCertAsync(
   const extPath = path.join(hostDir, `${safeName}-ext.cnf`);
 
   // Generate key
-  await opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
+  await withPrivateFileMode(() =>
+    opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
+  );
 
   // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
   // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
