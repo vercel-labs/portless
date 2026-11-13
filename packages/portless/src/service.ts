@@ -1325,6 +1325,8 @@ ${colors.bold("Notes:")}
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.
+  On macOS and Linux, install exits with the reason when another user owns,
+  can write to, or can redirect the state directory.
   Windows installs a Task Scheduler startup task that runs as SYSTEM.
 `);
 }
