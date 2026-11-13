@@ -3775,6 +3775,56 @@ describe("CLI", { timeout: 15_000 }, () => {
       );
     }
 
+    for (const planted of ["a state directory others can write to", "a mismatched start time"]) {
+      it.skipIf(process.platform === "win32")(
+        `never signals a recorded PID that is not the answering proxy (${planted})`,
+        async () => {
+          const proxy = await startMockProxy(stateDir);
+          const bystander = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+            stdio: "ignore",
+          });
+          const pid = bystander.pid!;
+          try {
+            fs.writeFileSync(path.join(stateDir, "proxy.pid"), String(pid));
+            fs.writeFileSync(path.join(stateDir, "proxy.port"), String(proxy.port));
+            if (planted === "a mismatched start time") {
+              fs.writeFileSync(path.join(stateDir, "proxy.start"), "not the start time");
+            } else {
+              fs.writeFileSync(path.join(stateDir, "proxy.start"), getProcessStartTime(pid)!);
+              fs.chmodSync(stateDir, 0o777);
+            }
+
+            const result = runWithHostsFileMock(["clean", "--yes"], {
+              content: "",
+              stateDir,
+              uid: 1000,
+              sudoStatus: 1,
+              extraEnv: {
+                HOME: home,
+                PORTLESS_PORT: String(proxy.port),
+                PORTLESS_HTTPS: "0",
+              },
+            });
+
+            expect(result.status, result.stdout + result.stderr).toBe(1);
+            expect(result.stderr).toContain(
+              planted === "a mismatched start time"
+                ? `PID ${pid} in ${path.join(stateDir, "proxy.pid")} is not the proxy answering on port ${proxy.port}`
+                : `Cannot stop the proxy recorded in ${stateDir}: other users can write to it`
+            );
+            expect(isAlivePid(pid)).toBe(true);
+            expect(isAlivePid(proxy.child.pid!)).toBe(true);
+            expect(fs.existsSync(path.join(stateDir, "proxy.pid"))).toBe(true);
+          } finally {
+            fs.chmodSync(stateDir, 0o755);
+            bystander.kill("SIGKILL");
+            await stopChild(proxy.child);
+          }
+        },
+        15_000
+      );
+    }
+
     it.skipIf(process.platform === "win32")(
       "removes stale proxy state for a recycled PID without signaling it",
       async () => {

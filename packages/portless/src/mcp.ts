@@ -248,7 +248,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_stop",
     "Stop proxy",
-    "Stop the shared portless proxy. Pass port when the proxy runs on a non-default port. A recorded process that cannot be verified as the proxy is reported and left running, never signaled.",
+    "Stop the shared portless proxy. Pass port when the proxy runs on a non-default port. A recorded process that cannot be verified as the proxy is reported and left running, never signaled. A state directory that another user owns or can write to is refused.",
     { port: PORT_PROPERTY },
     [],
     {

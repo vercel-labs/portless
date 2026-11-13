@@ -10,7 +10,12 @@ import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
-import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
+import {
+  createLoopbackConnection,
+  findStateDirProblem,
+  parsePort,
+  resolveUserHome,
+} from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -994,7 +999,10 @@ export async function discoverState(): Promise<{
 
   // Check legacy system-level state (/tmp/portless) for proxies started with
   // older versions. Read-only: no root operations are performed on this path.
-  const legacyPort = readPortFromDir(LEGACY_SYSTEM_STATE_DIR);
+  const legacyPort =
+    findStateDirProblem(LEGACY_SYSTEM_STATE_DIR) === null
+      ? readPortFromDir(LEGACY_SYSTEM_STATE_DIR)
+      : null;
   if (legacyPort !== null) {
     if (await isProxyRunning(legacyPort)) {
       const tls = readTlsMarker(LEGACY_SYSTEM_STATE_DIR);

@@ -4,8 +4,12 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { fixOwnership, resolveUserHome } from "./utils.js";
-import { explainUnsafeStateDir, isCleanableStateDir } from "./clean-utils.js";
+import {
+  explainUnsafeStateDir,
+  fixOwnership,
+  isCleanableStateDir,
+  resolveUserHome,
+} from "./utils.js";
 import {
   isWSL,
   isWindowsCATrusted,

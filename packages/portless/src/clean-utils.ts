@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
+import { isCleanableStateDir } from "./utils.js";
 
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
@@ -52,110 +53,6 @@ export type RemovePortlessStateFilesOptions = {
   preserveCAIdentity?: boolean;
   preserveProxyRuntime?: boolean;
 };
-
-/**
- * UIDs allowed to own a state directory during cleanup: root, the current user,
- * and, when running as root under sudo, the invoking sudo user.
- */
-function allowedStateDirOwners(): Set<number> | null {
-  if (process.platform === "win32") return null;
-  const uid = process.getuid?.();
-  if (uid === undefined) return null;
-  const owners = new Set<number>([0, uid]);
-  if (uid === 0) {
-    const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
-    if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
-  }
-  return owners;
-}
-
-export type StateDirProblem =
-  | { reason: "not-directory"; path: string }
-  | { reason: "foreign-owner"; path: string }
-  | { reason: "writable-by-others"; path: string }
-  | { reason: "unsafe-parent"; path: string };
-
-/**
- * The first ancestor of a state directory that another user could use to swap
- * the directory: one owned by someone else, or writable by group or others
- * without the sticky bit. Returns null when every ancestor is safe.
- */
-function findUnsafeStateDirAncestor(dir: string, owners: Set<number>): string | null {
-  let current: string;
-  try {
-    current = path.dirname(fs.realpathSync(dir));
-  } catch {
-    return path.dirname(dir);
-  }
-  for (;;) {
-    try {
-      const stat = fs.lstatSync(current);
-      if (!stat.isDirectory()) return current;
-      if (!owners.has(stat.uid)) return current;
-      const writableByOthers = (stat.mode & 0o022) !== 0;
-      const sticky = (stat.mode & 0o1000) !== 0;
-      if (writableByOthers && !sticky) return current;
-    } catch {
-      return current;
-    }
-    const parent = path.dirname(current);
-    if (parent === current) return null;
-    current = parent;
-  }
-}
-
-/**
- * Why a state directory cannot be trusted with CA material or elevated work,
- * or null when only its owner can change it. The directory must be a real
- * directory owned by the current user, the invoking sudo user, or root, not
- * writable by group or others, and reachable only through safe ancestors.
- */
-export function findStateDirProblem(dir: string): StateDirProblem | null {
-  let stat: fs.Stats;
-  try {
-    stat = fs.lstatSync(dir);
-  } catch {
-    return { reason: "not-directory", path: dir };
-  }
-  if (!stat.isDirectory()) return { reason: "not-directory", path: dir };
-  const owners = allowedStateDirOwners();
-  if (!owners) return null;
-  if (!owners.has(stat.uid)) return { reason: "foreign-owner", path: dir };
-  if ((stat.mode & 0o022) !== 0) return { reason: "writable-by-others", path: dir };
-  const ancestor = findUnsafeStateDirAncestor(dir, owners);
-  return ancestor ? { reason: "unsafe-parent", path: ancestor } : null;
-}
-
-/** Whether cleanup may act on a state directory. See findStateDirProblem. */
-export function isCleanableStateDir(dir: string): boolean {
-  return findStateDirProblem(dir) === null;
-}
-
-/**
- * A sentence fragment saying why a state directory path is refused, or null
- * when it is safe. Resolves symlinks first, so a link to a safe directory is
- * accepted.
- */
-export function explainUnsafeStateDir(dir: string): string | null {
-  let canonical: string;
-  try {
-    canonical = fs.realpathSync(dir);
-  } catch {
-    return "it cannot be resolved";
-  }
-  const problem = findStateDirProblem(canonical);
-  if (!problem) return null;
-  switch (problem.reason) {
-    case "not-directory":
-      return "it is not a directory";
-    case "foreign-owner":
-      return "it is owned by another user";
-    case "writable-by-others":
-      return `other users can write to it. Run: chmod go-w ${problem.path}`;
-    case "unsafe-parent":
-      return `other users can replace it through ${problem.path}`;
-  }
-}
 
 export type CATrustRemovalResult = {
   removed: boolean;

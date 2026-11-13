@@ -5,10 +5,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
-  findStateDirProblem,
-  isCleanableStateDir,
   removePortlessStateFiles,
 } from "./clean-utils.js";
+import { findStateDirProblem, isCleanableStateDir } from "./utils.js";
 import { LEGACY_SYSTEM_STATE_DIR } from "./cli-utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
