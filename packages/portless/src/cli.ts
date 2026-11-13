@@ -3983,6 +3983,10 @@ ${colors.bold("Stop:")}
   process from the one answering on the proxy port, and never from a state
   directory another user owns or can write to.
 
+${colors.bold("State directory:")}
+  As root, the proxy exits instead of running on a state directory another
+  user owns, can write to, or can redirect.
+
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
   LAN mode explicitly binds the proxy to 0.0.0.0 and ::.
@@ -4341,6 +4345,7 @@ async function handleProxy(args: string[]): Promise<void> {
     console.log(
       colors.yellow(`Port ${proxyPort} requires elevated privileges. Requesting sudo...`)
     );
+    if (fs.existsSync(store.dir)) store.ensureDir();
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,

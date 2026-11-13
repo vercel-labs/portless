@@ -3,10 +3,10 @@ import * as net from "node:net";
 import * as path from "node:path";
 import type { RouteInfo } from "./types.js";
 import {
-  ensureStateDir,
   fixOwnership,
   isErrnoException,
   isProcessAlive as isPidAlive,
+  requireStateDir,
 } from "./utils.js";
 
 /** How long (ms) before a lock directory is considered stale and forcibly removed. */
@@ -198,7 +198,7 @@ export class RouteStore {
   }
 
   ensureDir(): void {
-    ensureStateDir(this.dir);
+    requireStateDir(this.dir);
   }
 
   getRoutesPath(): string {
