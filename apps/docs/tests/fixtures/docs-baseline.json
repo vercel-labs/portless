@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "cc1f6461ed612cf55083c6f8f71223e1922ba295247e4704ef2e82b20a588fc8",
-      "markdownBodySha256": "cc1f6461ed612cf55083c6f8f71223e1922ba295247e4704ef2e82b20a588fc8",
+      "mdxSha256": "10c8532093745550cf63728947d7d8b5a313d62744df34844c433d93185b5a71",
+      "markdownBodySha256": "10c8532093745550cf63728947d7d8b5a313d62744df34844c433d93185b5a71",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],

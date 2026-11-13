@@ -40,7 +40,9 @@ import {
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
 import {
+  explainUnsafeStateDir,
   fixOwnership,
+  isCleanableStateDir,
   formatUptime,
   formatUrl,
   isErrnoException,
@@ -146,8 +148,6 @@ import {
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
-  explainUnsafeStateDir,
-  isCleanableStateDir,
   removePortlessStateFiles,
   type CATrustRemovalResult,
 } from "./clean-utils.js";
@@ -1397,11 +1397,19 @@ async function waitForProxyToClose(
 /** What the PID file and the proxy port say about the proxy to stop. */
 type RecordedProxy =
   | { state: "stopped" | "corrupt" | "dead" | "forbidden" }
+  | { state: "untrusted"; reason: string }
   | { state: "unrecorded"; pid: number | null }
-  | { state: "running" | "recycled"; pid: number }
+  | { state: "running" | "recycled" | "mismatched"; pid: number }
   | { state: "unverified"; pid: number; identity: Exclude<ProxyIdentity, "recycled"> };
 
+/**
+ * Decide what to do about the recorded proxy. A PID is signaled only when the
+ * state directory is under the user's control and nothing shows the PID is a
+ * different process from the one holding the proxy port.
+ */
 async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<RecordedProxy> {
+  const unsafe = fs.existsSync(store.dir) ? explainUnsafeStateDir(store.dir) : null;
+  if (unsafe) return { state: "untrusted", reason: unsafe };
   if (!fs.existsSync(store.pidPath)) {
     if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
     return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
@@ -1413,11 +1421,11 @@ async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<
   } catch (err: unknown) {
     return { state: isErrnoException(err) && err.code === "EPERM" ? "forbidden" : "dead" };
   }
-  if (await isProxyRunning(proxyPort)) return { state: "running", pid };
+  const answering = await isProxyRunning(proxyPort);
   const identity = await identifyRecordedProxy(store, pid, proxyPort);
-  return identity === "recycled"
-    ? { state: "recycled", pid }
-    : { state: "unverified", pid, identity };
+  if (identity === "recycled") return { state: answering ? "mismatched" : "recycled", pid };
+  if (answering) return { state: "running", pid };
+  return { state: "unverified", pid, identity };
 }
 
 /** Signal a proxy process and wait for it and its listener to go away. */
@@ -1457,6 +1465,27 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
         return true;
       case "forbidden":
         return sudoStopOrHint(proxyPort);
+      case "untrusted":
+        console.error(
+          colors.red(`Cannot stop the proxy recorded in ${store.dir}: ${proxy.reason}`)
+        );
+        console.error(colors.blue("Nothing was signaled."));
+        return false;
+      case "mismatched":
+        console.error(
+          colors.red(
+            `PID ${proxy.pid} in ${store.pidPath} is not the proxy answering on port ${proxyPort}.`
+          )
+        );
+        console.error(colors.blue("It was not signaled, and the proxy state is kept."));
+        console.error(
+          colors.cyan(
+            isWindows
+              ? `Find the proxy with: netstat -ano | findstr :${proxyPort}`
+              : `Find the proxy with: lsof -ti tcp:${proxyPort} -sTCP:LISTEN`
+          )
+        );
+        return false;
       case "corrupt":
         console.error(colors.red("Corrupted PID file. Removing it."));
         fs.unlinkSync(store.pidPath);
@@ -3947,6 +3976,11 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
+
+${colors.bold("Stop:")}
+  Signals the recorded proxy only when nothing shows it is a different
+  process from the one answering on the proxy port, and never from a state
+  directory another user owns or can write to.
 
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.

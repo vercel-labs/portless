@@ -479,6 +479,8 @@ portless proxy start --unprivileged    # Plain HTTP on port 80, no sudo, clean U
 portless proxy stop                    # Stop (use sudo if started with sudo)
 ```
 
+`portless proxy stop` signals the recorded proxy PID only when nothing shows it is a different process from the one answering on the proxy port. Otherwise it reports the mismatch, signals nothing, and exits nonzero. A `/tmp/portless` directory from a version before 0.11 is used only when it passes the state directory check described under `portless trust`.
+
 ### Safari can't find .localhost URLs
 
 Safari relies on the system DNS resolver for `.localhost` subdomains, which may not resolve them on all macOS configurations. Chrome, Firefox, and Edge have built-in handling.
@@ -504,7 +506,7 @@ portless trust
 
 This adds the portless local CA to your system trust store. After that, restart the browser.
 
-On macOS and Linux, `portless trust` and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. `portless trust` exits with the reason when the directory fails this check. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
+On macOS and Linux, `portless trust`, `portless proxy stop`, and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. `portless trust` and `portless proxy stop` exit with the reason when the directory fails this check, and `proxy stop` signals nothing. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
 
 ### Remove portless from the machine
 
