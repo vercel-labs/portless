@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 
 const TAILSCALE_BINARY = "tailscale";
@@ -47,8 +49,8 @@ export interface EnsureTailscaleReadyOptions {
   runner?: TailscaleCommandRunner;
 }
 
-function defaultRunner(args: string[]): TailscaleCommandResult {
-  const result = spawnSync(TAILSCALE_BINARY, args, {
+function runTailscaleCommand(command: string, args: string[]): TailscaleCommandResult {
+  const result = spawnSync(command, args, {
     encoding: "utf-8",
     killSignal: "SIGKILL",
     timeout: TAILSCALE_COMMAND_TIMEOUT_MS,
@@ -60,6 +62,39 @@ function defaultRunner(args: string[]): TailscaleCommandResult {
     stderr: result.stderr ?? "",
     ...(result.error ? { error: result.error } : {}),
   };
+}
+
+/** Resolve an existing Windows `.cmd` shim on PATH. */
+export function findWindowsCmdShim(
+  name: string,
+  env: NodeJS.ProcessEnv = process.env
+): string | null {
+  const pathValue = env.PATH ?? env.Path ?? "";
+  for (const dir of pathValue.split(path.delimiter)) {
+    if (!dir) continue;
+    const candidate = path.join(dir, `${name}.cmd`);
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate;
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+/**
+ * Run the Tailscale CLI. On Windows, retry through the command shell only when
+ * an existing `.cmd` shim cannot be spawned directly.
+ */
+function defaultRunner(args: string[]): TailscaleCommandResult {
+  const result = runTailscaleCommand(TAILSCALE_BINARY, args);
+  const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
+  if (process.platform !== "win32" || (code !== "ENOENT" && code !== "EINVAL")) {
+    return result;
+  }
+  const shim = findWindowsCmdShim(TAILSCALE_BINARY);
+  if (!shim) return result;
+  return runTailscaleCommand(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", shim, ...args]);
 }
 
 function trimDot(value: string): string {

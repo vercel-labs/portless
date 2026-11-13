@@ -5,7 +5,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as utils from "./utils.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   augmentedPath,
   buildProxyStartConfig,
@@ -53,7 +53,7 @@ import {
   writeTlsMarker,
   ownedProcessIds,
   getProcessStartTime,
-  killOrphanedProcessGroup,
+  stopProcessGroup,
   writeUnprivilegedMarker,
 } from "./cli-utils.js";
 describe("proxy listener interface", () => {
@@ -2587,7 +2587,7 @@ describe("ownedProcessIds", () => {
   });
 });
 
-describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => {
+describe.skipIf(process.platform === "win32")("stopProcessGroup", () => {
   let orphanPid: number | undefined;
 
   // A detached grandchild leads its own group and outlives its parent, like
@@ -2619,24 +2619,87 @@ describe.skipIf(process.platform === "win32")("killOrphanedProcessGroup", () => 
     orphanPid = undefined;
   });
 
-  it("does not signal a group leader whose start time was not recorded or differs", () => {
+  it("does not signal a group whose recorded leader start time was not recorded or differs", async () => {
     orphanPid = spawnUnrelatedOrphan();
 
-    expect(killOrphanedProcessGroup(orphanPid, undefined)).toBe(false);
-    expect(killOrphanedProcessGroup(orphanPid, "Thu Jan  1 00:00:00 1970")).toBe(false);
+    await expect(stopProcessGroup(orphanPid, [], [], "SIGKILL")).resolves.toEqual({
+      state: "unverified",
+      signaled: false,
+    });
+    await expect(
+      stopProcessGroup(orphanPid, ["Thu Jan  1 00:00:00 1970"], [], "SIGKILL")
+    ).resolves.toEqual({ state: "unverified", signaled: false });
     expect(isAlive(orphanPid)).toBe(true);
   });
 
-  it("signals the group when the leader start time matches the recorded one", async () => {
+  it("reports a group stopped only after every member exits", async () => {
     orphanPid = spawnUnrelatedOrphan();
     const startTime = getProcessStartTime(orphanPid);
     expect(startTime).toBeTruthy();
 
-    expect(killOrphanedProcessGroup(orphanPid, startTime!, "SIGKILL")).toBe(true);
-    for (let i = 0; i < 50 && isAlive(orphanPid); i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
+    await expect(stopProcessGroup(orphanPid, [startTime!], [], "SIGKILL")).resolves.toEqual({
+      state: "stopped",
+      signaled: true,
+    });
     expect(isAlive(orphanPid)).toBe(false);
+  });
+
+  it("signals a group that only one of its recorded identities matches", async () => {
+    orphanPid = spawnUnrelatedOrphan();
+    const startTime = getProcessStartTime(orphanPid);
+    expect(startTime).toBeTruthy();
+
+    await expect(
+      stopProcessGroup(
+        orphanPid,
+        ["Thu Jan  1 00:00:00 1970", undefined, startTime!],
+        [],
+        "SIGKILL"
+      )
+    ).resolves.toEqual({ state: "stopped", signaled: true });
+    expect(isAlive(orphanPid)).toBe(false);
+  });
+
+  it("reports a leader that ignores the signal and names a surviving member", async () => {
+    const ready = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "portless-group-")), "ready");
+    const leader = spawn(
+      process.execPath,
+      [
+        "-e",
+        `const fs = require("node:fs");` +
+          `const { spawn } = require("node:child_process");` +
+          `const ready = process.argv[1];` +
+          `const child = spawn(process.execPath, ["-e", 'process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(process.argv[1], "ready"); setInterval(() => {}, 1000);', ready], { stdio: "ignore" });` +
+          `process.on("SIGTERM", () => {});` +
+          `const timer = setInterval(() => {` +
+          `if (!fs.existsSync(ready)) return;` +
+          `clearInterval(timer);` +
+          `process.stdout.write(String(child.pid) + "\\n");` +
+          `}, 20);` +
+          `setInterval(() => {}, 1000);`,
+        ready,
+      ],
+      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+    );
+    orphanPid = leader.pid!;
+    const childPid = await new Promise<number>((resolve, reject) => {
+      leader.once("error", reject);
+      leader.stdout!.once("data", (data) => resolve(Number(data.toString().trim())));
+    });
+    const startTime = getProcessStartTime(orphanPid);
+    expect(startTime).toBeTruthy();
+
+    try {
+      const stop = await stopProcessGroup(orphanPid, [startTime!], [], "SIGTERM", {
+        timeoutMs: 500,
+      });
+      expect(stop).toEqual({ state: "survived", signaled: true, survivor: expect.anything() });
+      expect(stop.survivor?.pid).toBe(childPid);
+      expect(isAlive(childPid)).toBe(true);
+    } finally {
+      process.kill(-orphanPid, "SIGKILL");
+      fs.rmSync(path.dirname(ready), { recursive: true, force: true });
+    }
   });
 });
 

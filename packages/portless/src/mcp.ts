@@ -237,7 +237,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_stop",
     "Stop proxy",
-    "Stop the shared portless proxy. Pass port when the proxy runs on a non-default port.",
+    "Stop the shared portless proxy. Pass port when the proxy runs on a non-default port. A recorded process that cannot be verified as the proxy is reported and left running, never signaled. A state directory that another user owns or can write to is refused.",
     { port: PORT_PROPERTY },
     [],
     {
@@ -263,7 +263,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "prune",
     "Prune servers",
-    "Kill orphaned dev servers left by crashed sessions.",
+    "Remove stale routes and shares, and stop matching recorded process groups. A group keeps its route and shares while any member is still running, even after it closes its port, and the surviving member is recorded for a retry. A group that cannot be verified is reported and kept, never signaled. A port holder that cannot be proven part of the recorded group is reported and kept, never killed. Stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups and unrelated port holders are not killed. Refuses a state directory that another user owns or can write to, and signals nothing.",
     {
       force: {
         type: "boolean",

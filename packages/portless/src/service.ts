@@ -14,7 +14,7 @@ import {
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
 import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
-import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
+import { ensureStateDir, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
@@ -715,6 +715,21 @@ export function buildServiceSpec(options: {
   };
 }
 
+/**
+ * Whether the Windows scheduled task exists. The task store is checked because
+ * schtasks reports a missing task and a failed query with the same status; an
+ * unreadable store throws so callers keep the service files.
+ */
+function windowsTaskExists(taskName: string): boolean {
+  const taskPath = path.win32.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "Tasks",
+    taskName
+  );
+  return fs.statSync(taskPath, { throwIfNoEntry: false }) !== undefined;
+}
+
 function currentServiceSpec(
   entryScript: string,
   installConfig?: ServiceInstallConfig
@@ -969,11 +984,17 @@ function requireUnixElevation(args: string[], runner: CommandRunner): void {
   process.exit(result.status ?? 1);
 }
 
+type CommandResult = ReturnType<CommandRunner>;
+
+function commandFailure(result: CommandResult, command: string): string {
+  const detail = result.stderr || result.stdout || result.error?.message || `${command} failed`;
+  return detail.trim();
+}
+
 function runRequired(runner: CommandRunner, command: string, args: string[]): void {
   const result = runner(command, args);
   if (result.status !== 0) {
-    const detail = result.stderr || result.stdout || result.error?.message || `${command} failed`;
-    throw new Error(detail.trim());
+    throw new Error(commandFailure(result, command));
   }
 }
 
@@ -981,15 +1002,36 @@ function runOptional(runner: CommandRunner, command: string, args: string[]): vo
   runner(command, args);
 }
 
-function isPermissionError(err: unknown): boolean {
-  const code =
-    err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    code === "EACCES" ||
-    code === "EPERM" ||
-    /permission denied|operation not permitted|access is denied/i.test(message)
+function isTargetMissing(result: CommandResult): boolean {
+  const output = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+  return /(not|could not be) found|could not find|no such process|not exist|not loaded|not running/i.test(
+    output
   );
+}
+
+/** Runs a stop or delete step, ignoring a non-zero status only when the target is already gone. */
+function runRemovalStep(runner: CommandRunner, command: string, args: string[]): void {
+  const result = runner(command, args);
+  if (result.status !== 0 && !isTargetMissing(result)) {
+    throw new Error(commandFailure(result, command));
+  }
+}
+
+/**
+ * Whether a failed service removal should be retried with sudo. Portless
+ * installs a system service on macOS and Linux, so a non-root process cannot
+ * remove it and the failure text is not a reliable signal. Windows has no
+ * sudo retry, and a missing command is a real failure.
+ */
+function removalNeedsElevation(err: unknown): boolean {
+  if (process.platform === "win32") return false;
+  if ((process.getuid?.() ?? -1) === 0) return false;
+  if (process.env[INTERNAL_ELEVATED_ENV] === "1") return false;
+  if (err && typeof err === "object" && "code" in err) {
+    const code = String((err as { code?: unknown }).code);
+    if (code === "ENOENT" || code === "EINVAL" || code === "ENOTDIR") return false;
+  }
+  return true;
 }
 
 function stopProxyOnPort(entryScript: string, runner: CommandRunner, proxyPort: number): void {
@@ -1024,8 +1066,8 @@ async function stopExistingProxy(
 }
 
 function prepareServiceState(stateDir: string): void {
-  fs.mkdirSync(stateDir, { recursive: true });
-  fixOwnership(stateDir);
+  const unsafe = ensureStateDir(stateDir);
+  if (unsafe) throw new Error(`Cannot install the service with state in ${stateDir}: ${unsafe}`);
 }
 
 function prepareTrust(stateDir: string): void {
@@ -1116,15 +1158,17 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
   const spec = currentServiceSpec(entryScript);
 
   if (spec.platform === "darwin") {
-    runOptional(runner, "launchctl", ["bootout", "system", spec.plistPath]);
+    runRemovalStep(runner, "launchctl", ["bootout", `system/${spec.label}`]);
     fs.rmSync(spec.plistPath, { force: true });
   } else if (spec.platform === "linux") {
-    runOptional(runner, "systemctl", ["disable", "--now", spec.serviceName]);
+    runRemovalStep(runner, "systemctl", ["disable", "--now", spec.serviceName]);
     fs.rmSync(spec.unitPath, { force: true });
     runOptional(runner, "systemctl", ["daemon-reload"]);
   } else {
-    runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
-    runOptional(runner, "schtasks", spec.deleteArgs);
+    if (windowsTaskExists(spec.taskName)) {
+      runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
+      runRemovalStep(runner, "schtasks", spec.deleteArgs);
+    }
     fs.rmSync(spec.scriptDir, { recursive: true, force: true });
   }
 
@@ -1147,17 +1191,16 @@ export function tryUninstallService(
     if (spec.platform === "darwin") {
       installed = fs.existsSync(spec.plistPath);
       if (!installed) return { removed: false, installed: false };
-      runOptional(runner, "launchctl", ["bootout", "system", spec.plistPath]);
+      runRemovalStep(runner, "launchctl", ["bootout", `system/${spec.label}`]);
       fs.rmSync(spec.plistPath, { force: true });
     } else if (spec.platform === "linux") {
       installed = fs.existsSync(spec.unitPath);
       if (!installed) return { removed: false, installed: false };
-      runOptional(runner, "systemctl", ["disable", "--now", spec.serviceName]);
+      runRemovalStep(runner, "systemctl", ["disable", "--now", spec.serviceName]);
       fs.rmSync(spec.unitPath, { force: true });
       runOptional(runner, "systemctl", ["daemon-reload"]);
     } else {
-      const query = runner("schtasks", ["/Query", "/TN", spec.taskName, "/FO", "LIST"]);
-      installed = query.status === 0;
+      installed = windowsTaskExists(spec.taskName);
       if (!installed) return { removed: false, installed: false };
       runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
       runRequired(runner, "schtasks", spec.deleteArgs);
@@ -1170,7 +1213,7 @@ export function tryUninstallService(
       removed: false,
       installed,
       error: err instanceof Error ? err.message : String(err),
-      needsElevation: installed && isPermissionError(err),
+      needsElevation: installed && removalNeedsElevation(err),
     };
   }
 }
@@ -1282,6 +1325,8 @@ ${colors.bold("Notes:")}
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.
+  On macOS and Linux, install exits with the reason when another user owns,
+  can write to, or can redirect the state directory.
   Windows installs a Task Scheduler startup task that runs as SYSTEM.
 `);
 }

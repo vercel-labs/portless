@@ -271,13 +271,15 @@ portless trust
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
 
+On macOS and Linux, `portless trust`, `portless proxy stop`, `portless prune`, `portless hosts sync`, `portless service install`, and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. A symlink on the path counts only when you or root own it and it sits in a directory that passes the same check. `portless trust`, `portless proxy stop`, `portless prune`, `portless hosts sync`, and `portless service install` exit with the reason when the directory fails this check. Nothing is signaled and the hosts file is not changed. portless never changes the permissions or owner of a state directory that fails it, and a proxy running as root exits instead of using one. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
+
 ## Clean up
 
 ```bash
 portless clean
 ```
 
-Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed. If trust-store removal fails, portless keeps its CA certificate and key so a later `portless clean` can retry.
+Stops the proxy if it is running, removes the startup service and portless CA from the OS trust store when installed, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. On macOS and Linux, failed CA, state-file, and hosts steps are retried with sudo against the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. Custom `--cert` / `--key` paths are not removed. If trust-store removal still fails, portless keeps its CA certificate and key so a later `portless clean` can retry. A state directory that another user owns or can write to is left alone: clean prints the reason and exits nonzero, and a `/tmp/portless` directory that fails the check is skipped without an error. See [Trust the CA](#trust-the-ca) for the rule.
 
 ## Prune orphans
 
@@ -286,9 +288,9 @@ portless prune
 portless prune --force
 ```
 
-Finds and kills orphaned dev server processes left behind by crashed portless sessions. When the CLI is killed with `kill -9` or crashes, child dev servers may survive and continue holding their ports. This command checks routes whose owning process is dead but whose port is still in use, terminates the orphans, and removes the stale route entries. Use `--force` to send SIGKILL instead of SIGTERM.
+Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares once the recorded group is gone. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time, or if a member recorded by an earlier run still matches, and it reports the group stopped only after every member has exited. While any member is still running, even one that closed its port after SIGTERM, prune keeps the route and its shares and records the member that survived, so a retry with `portless prune --force` verifies that member and sends SIGKILL. A group prune cannot verify is kept and reported, never signaled, except that a member holding its port while the recorded leader is gone is recorded so a retry can stop it. Prune reports unrelated port holders without killing them.
 
-On macOS and Linux, prune stops the whole process group portless started for the route, including processes that do not hold the port. A group is only signaled when its leader still has the start time portless recorded at spawn, so a reused PID is never targeted. `portless run` does the same cleanup on startup for routes whose session died.
+On Windows, prune cannot verify or signal process groups. It removes stale routes and Tailscale shares and reports any port holders. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. `portless run` also attempts to stop recorded orphaned process groups on startup.
 
 ## Proxy control
 
@@ -388,6 +390,8 @@ On a Mac with the application firewall turned on, the first wildcard bind shows 
 ```bash
 portless proxy stop
 ```
+
+Stops the proxy recorded in the state directory. portless signals the recorded PID only when nothing shows it is a different process from the one answering on the proxy port. When the recorded start time or the port's listener points to another process, it reports the mismatch, signals nothing, and exits nonzero. A `/tmp/portless` directory from a version before 0.11 is used only when it passes the state directory check in [Trust the CA](#trust-the-ca).
 
 ## OS startup service
 

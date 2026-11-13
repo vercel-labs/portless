@@ -10,7 +10,12 @@ import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { resolveScript, resolveScriptRaw } from "./config.js";
-import { createLoopbackConnection, parsePort, resolveUserHome } from "./utils.js";
+import {
+  createLoopbackConnection,
+  findStateDirProblem,
+  parsePort,
+  resolveUserHome,
+} from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -124,6 +129,12 @@ export const SIGNAL_CODES: Record<string, number> = {
 const COMMAND_SHUTDOWN_GRACE_MS = 5000;
 const COMMAND_SHUTDOWN_FORCE_MS = 10_000;
 const COMMAND_SHUTDOWN_POLL_MS = 50;
+
+/** How long (ms) to wait for a signaled process group to exit before reporting it as surviving. */
+const PROCESS_GROUP_EXIT_TIMEOUT_MS = 2000;
+
+/** Interval (ms) between process group exit polls. */
+const PROCESS_GROUP_POLL_MS = 100;
 
 type TrackedProcess = {
   pid: number;
@@ -988,7 +999,10 @@ export async function discoverState(): Promise<{
 
   // Check legacy system-level state (/tmp/portless) for proxies started with
   // older versions. Read-only: no root operations are performed on this path.
-  const legacyPort = readPortFromDir(LEGACY_SYSTEM_STATE_DIR);
+  const legacyPort =
+    findStateDirProblem(LEGACY_SYSTEM_STATE_DIR) === null
+      ? readPortFromDir(LEGACY_SYSTEM_STATE_DIR)
+      : null;
   if (legacyPort !== null) {
     if (await isProxyRunning(legacyPort)) {
       const tls = readTlsMarker(LEGACY_SYSTEM_STATE_DIR);
@@ -1383,12 +1397,54 @@ export function findPidsOnPort(port: number): number[] {
 }
 
 function isProcessGroupAlive(groupId: number): boolean {
+  if (isWindows || !Number.isInteger(groupId) || groupId <= 1) return false;
   try {
     process.kill(-groupId, 0);
     return true;
   } catch (err) {
     return (err as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+/**
+ * PIDs of a process group that have not exited, or null where groups cannot be
+ * listed. Unreaped zombies are left out: they keep the group number alive but
+ * are not running.
+ */
+export function listProcessGroupMembers(groupId: number): number[] | null {
+  if (isWindows || !Number.isInteger(groupId) || groupId <= 1) return null;
+  try {
+    const output = execFileSync("ps", ["-e", "-o", "pid=,pgid=,stat="], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    const members: number[] = [];
+    for (const line of output.split("\n")) {
+      const [pid, group, stat] = line.trim().split(/\s+/);
+      if (Number(group) !== groupId || Number(pid) <= 1) continue;
+      if (stat?.startsWith("Z") === true) continue;
+      members.push(Number(pid));
+    }
+    return members;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a process group still has a running member. */
+function groupHasLiveMember(groupId: number): boolean {
+  const members = listProcessGroupMembers(groupId);
+  return members === null ? isProcessGroupAlive(groupId) : members.length > 0;
+}
+
+/** Whether this exact process instance is still a member of the group. */
+function isGroupMember(pid: number, startTime: string | undefined, groupId: number): boolean {
+  return (
+    startTime !== undefined &&
+    pid > 1 &&
+    getProcessGroupId(pid) === groupId &&
+    getProcessStartTime(pid) === startTime
+  );
 }
 
 /**
@@ -1446,10 +1502,28 @@ export function getProcessStartTime(pid: number): string | null {
   }
 }
 
-/** Read the executable name of a process. Returns null on Windows or when it cannot be read. */
+/** Read the executable name of a process, without the Windows .exe suffix. Returns null if unreadable. */
 export function getProcessCommand(pid: number): string | null {
-  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
+    if (isWindows) {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop).Name`,
+        ],
+        { encoding: "utf-8", windowsHide: true, timeout: PID_LOOKUP_TIMEOUT_MS }
+      );
+      return (
+        output
+          .trim()
+          .replace(/\.exe$/i, "")
+          .toLowerCase() || null
+      );
+    }
     const output = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
@@ -1461,29 +1535,97 @@ export function getProcessCommand(pid: number): string | null {
 }
 
 /**
- * Kill a process group left behind by a portless session that died without
- * cleaning up. The group is only signaled while its leader is alive, still
- * leads the group, and has the start time recorded at spawn, so a recycled PID
- * is not targeted. Returns true when the signal was sent.
+ * Read the process group a live pid belongs to. Groups outlive their leader, so
+ * a match here is evidence about a process, never proof it belongs to us.
+ * Returns null on Windows or when the process is gone.
  */
-export function killOrphanedProcessGroup(
-  pgid: number,
-  startTime: string | undefined,
-  signal: NodeJS.Signals = "SIGTERM"
-): boolean {
-  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
+export function getProcessGroupId(pid: number): number | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pgid)], {
+    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
     });
-    if (Number(output.trim()) !== pgid) return false;
-    if (getProcessStartTime(pgid) !== startTime) return false;
-    process.kill(-pgid, signal);
-    return true;
+    const pgid = Number(output.trim());
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
   } catch {
-    return false;
+    return null;
   }
+}
+
+/**
+ * How a recorded process group ended after a stop attempt. A group is only
+ * reported as stopped once it has no live member left, so a process that
+ * closes its port but keeps running is never reported as killed.
+ */
+export type ProcessGroupState = "gone" | "stopped" | "survived" | "unverified";
+
+export interface ProcessGroupStop {
+  state: ProcessGroupState;
+  /** Whether a signal reached the group. */
+  signaled: boolean;
+  /** A member that outlived the signal, recorded so a retry can verify it. */
+  survivor?: { pid: number; startTime: string };
+}
+
+/** The member to record for a retry: a live listener of the recorded port first, then any live member. */
+function pickGroupSurvivor(
+  groupId: number,
+  excluded: Set<number>,
+  port: number | undefined
+): { pid: number; startTime: string } | undefined {
+  const members = listProcessGroupMembers(groupId) ?? [];
+  const listeners =
+    port === undefined ? [] : findPidsOnPort(port).filter((pid) => members.includes(pid));
+  for (const pid of [...listeners, ...members]) {
+    if (excluded.has(pid)) continue;
+    const startTime = getProcessStartTime(pid);
+    if (startTime) return { pid, startTime };
+  }
+  return undefined;
+}
+
+/**
+ * Try to stop a recorded process group. Every identity recorded for the group is
+ * tried, so one stale record cannot hide a valid one, and the group is signaled
+ * only while the recorded leader or a recorded member still matches, so a
+ * recycled group number is never signaled. The wait ends on real member exit,
+ * not on the port closing, and a survivor is a member still running after the
+ * signal, so a retry anchor is never a process that already exited.
+ */
+export async function stopProcessGroup(
+  groupId: number,
+  leaderStartTimes: (string | undefined)[],
+  recordedMembers: { pid: number; startTime: string | undefined }[],
+  signal: NodeJS.Signals = "SIGTERM",
+  options: { port?: number; timeoutMs?: number } = {}
+): Promise<ProcessGroupStop> {
+  if (!groupHasLiveMember(groupId)) return { state: "gone", signaled: false };
+  const proven =
+    leaderStartTimes.some((startTime) => isGroupMember(groupId, startTime, groupId)) ||
+    recordedMembers.some((member) => isGroupMember(member.pid, member.startTime, groupId));
+  if (!proven) return { state: "unverified", signaled: false };
+  let signaled = false;
+  try {
+    process.kill(-groupId, signal);
+    signaled = true;
+  } catch {
+    signaled = false;
+  }
+  const deadline = Date.now() + (options.timeoutMs ?? PROCESS_GROUP_EXIT_TIMEOUT_MS);
+  while (groupHasLiveMember(groupId)) {
+    if (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, PROCESS_GROUP_POLL_MS));
+      continue;
+    }
+    const excluded = new Set([groupId, ...recordedMembers.map((member) => member.pid)]);
+    return {
+      state: "survived",
+      signaled,
+      survivor: pickGroupSurvivor(groupId, excluded, options.port),
+    };
+  }
+  return { state: "stopped", signaled };
 }
 
 /**
@@ -2296,13 +2438,13 @@ export function injectPackageScriptFrameworkFlags(
 export function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output: process.stderr,
   });
   return new Promise((resolve) => {
     rl.on("close", () => resolve(""));
     rl.question(question, (answer) => {
-      rl.close();
       resolve(answer.trim().toLowerCase());
+      rl.close();
     });
   });
 }

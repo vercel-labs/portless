@@ -182,7 +182,7 @@ async function startCliApp(
   state: TestState,
   script = "server.js",
   extraEnv: Record<string, string> = {}
-): Promise<{ hostname: string; appPort: number }> {
+): Promise<{ hostname: string; appPort: number; logs: () => { stdout: string; stderr: string } }> {
   state.stateDir ??= fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-zombie-"));
 
   const baseEnv = {
@@ -257,7 +257,7 @@ async function startCliApp(
   const devPids = findPidsOnPort(state.appPort);
   expect(devPids.length).toBeGreaterThan(0);
 
-  return { hostname, appPort: state.appPort };
+  return { hostname, appPort: state.appPort, logs: () => ({ stdout, stderr }) };
 }
 
 describe("zombie process prevention", () => {
@@ -411,16 +411,93 @@ describe("orphaned process groups", () => {
     expect(await waitForPortToClose(state.appPort!, 5000)).toBe(true);
   });
 
+  it("reports an orphaned group that ignores SIGTERM and keeps it for a retry", async () => {
+    if (isWindows) return;
+
+    await startCliApp("orphan-stubborn", state, "stubborn-group.js");
+    const oldPort = state.appPort!;
+    state.cliChild!.kill("SIGKILL");
+    await waitForChildToExit(state.cliChild!, 5000);
+
+    const restarted = await startCliApp("orphan-stubborn", state, "server.js");
+    expect(restarted.logs().stderr).toMatch(
+      /Orphaned dev server \(process group \d+\) did not exit\. Run: portless prune --force/
+    );
+    expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
+
+    const routesPath = path.join(state.stateDir!, "routes.json");
+    const records = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+      port: number;
+      pid: number;
+      childPgid?: number;
+    }>;
+    const stale = records.filter((route) => route.port === oldPort && !isAlive(route.pid));
+    expect(stale).toHaveLength(1);
+    expect(stale[0]!.childPgid).toBeDefined();
+
+    const pruneResult = spawnSync(process.execPath, [CLI_PATH, "prune", "--force"], {
+      env: {
+        ...process.env,
+        PORTLESS_PORT: PROXY_PORT.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_STATE_DIR: state.stateDir,
+        NO_COLOR: "1",
+      },
+      encoding: "utf-8",
+      timeout: 15_000,
+    });
+    expect(pruneResult.status, pruneResult.stderr).toBe(0);
+    expect(pruneResult.stdout).toContain(`killed process group ${stale[0]!.childPgid} (SIGKILL)`);
+    expect(() => process.kill(stale[0]!.childPgid!, 0)).toThrow();
+  });
+
   it("run stops the orphaned process group of a crashed session", async () => {
     if (isWindows) return;
 
     const pid = await startAndCrash("orphan-restart");
     const oldPort = state.appPort!;
+    const hostname = "orphan-restart.localhost";
 
     await startCliApp("orphan-restart", state, "server.js");
 
+    const routesPath = path.join(state.stateDir, "routes.json");
+    const records = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+      hostname: string;
+      port: number;
+      pid: number;
+    }>;
+    const matching = records.filter((route) => route.hostname === hostname);
+    expect(matching).toEqual([
+      expect.objectContaining({ port: state.appPort, pid: state.cliChild!.pid }),
+    ]);
+    expect(state.appPort).not.toBe(oldPort);
+
     expect(await waitForPidToExit(pid, 5000)).toBe(true);
     expect(await waitForPortToClose(oldPort, 5000)).toBe(true);
+
+    const pruneResult = spawnSync(process.execPath, [CLI_PATH, "prune"], {
+      env: {
+        ...process.env,
+        PORTLESS_PORT: PROXY_PORT.toString(),
+        PORTLESS_HTTPS: "0",
+        PORTLESS_STATE_DIR: state.stateDir,
+        NO_COLOR: "1",
+      },
+      encoding: "utf-8",
+      timeout: 10_000,
+    });
+    expect(pruneResult.status, pruneResult.stderr).toBe(0);
+    expect(pruneResult.stdout).toContain("No orphaned routes found");
+    expect(pruneResult.stdout).not.toContain("killed process group");
+
+    const afterPrune = JSON.parse(fs.readFileSync(routesPath, "utf-8")) as Array<{
+      hostname: string;
+      port: number;
+    }>;
+    expect(afterPrune.filter((route) => route.hostname === hostname)).toEqual([
+      expect.objectContaining({ port: state.appPort }),
+    ]);
+    expect(isAlive(state.cliChild!.pid!)).toBe(true);
   });
 });
 
@@ -445,7 +522,7 @@ describe("portless prune", () => {
     }
   });
 
-  it("kills orphaned processes and removes stale routes", async () => {
+  it("removes stale routes without killing unrelated listeners", async () => {
     if (isWindows) return;
 
     stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-e2e-prune-"));
@@ -484,7 +561,8 @@ describe("portless prune", () => {
       JSON.stringify([{ hostname: "orphan-test.localhost", port: ORPHAN_PORT, pid: deadPid }])
     );
 
-    expect(findPidsOnPort(ORPHAN_PORT).length).toBeGreaterThan(0);
+    const listenerPid = orphanServer.pid!;
+    expect(findPidsOnPort(ORPHAN_PORT)).toContain(listenerPid);
 
     const result = spawnSync(process.execPath, [CLI_PATH, "prune"], {
       env: {
@@ -498,11 +576,10 @@ describe("portless prune", () => {
 
     expect(result.status).toBe(0);
     expect(result.stdout).toContain("orphan-test.localhost");
-    expect(result.stdout).toContain("killed");
-    expect(result.stdout).toContain("Pruned 1 stale route");
-
-    await sleep(1000);
-    expect(findPidsOnPort(ORPHAN_PORT)).toEqual([]);
+    expect(result.stdout).toContain(`PID ${listenerPid} still holds the port and was not killed`);
+    expect(result.stdout).toContain("Pruned 1 stale route, killed 0 orphaned processes");
+    expect(isAlive(listenerPid)).toBe(true);
+    expect(findPidsOnPort(ORPHAN_PORT)).toContain(listenerPid);
 
     const routesAfter = JSON.parse(fs.readFileSync(routesPath, "utf-8"));
     expect(routesAfter).toEqual([]);

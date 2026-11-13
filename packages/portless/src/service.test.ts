@@ -18,6 +18,7 @@ vi.mock("node:fs", async (importOriginal) => {
     mkdirSync: vi.fn(),
     readFileSync: vi.fn(mod.readFileSync),
     rmSync: vi.fn(),
+    statSync: vi.fn(mod.statSync),
     writeFileSync: vi.fn(),
   };
 });
@@ -37,6 +38,7 @@ vi.mock("./utils.js", async (importOriginal) => {
   const mod = await importOriginal<typeof import("./utils.js")>();
   return {
     ...mod,
+    ensureStateDir: vi.fn(() => null),
     fixOwnership: vi.fn(),
   };
 });
@@ -54,8 +56,10 @@ vi.mock("./cli-utils.js", async (importOriginal) => {
   };
 });
 
-const { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } = await import("node:fs");
+const { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } =
+  await import("node:fs");
 const { isMdnsSupported } = await import("./mdns.js");
+const { ensureStateDir } = await import("./utils.js");
 const { discoverState, isProxyRunning } = await import("./cli-utils.js");
 const actualCliUtils = await vi.importActual<typeof import("./cli-utils.js")>("./cli-utils.js");
 
@@ -87,8 +91,10 @@ afterEach(() => {
   });
   vi.mocked(existsSync).mockRestore();
   vi.mocked(mkdirSync).mockRestore();
+  vi.mocked(ensureStateDir).mockClear();
   vi.mocked(readFileSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
+  vi.mocked(statSync).mockRestore();
   vi.mocked(writeFileSync).mockRestore();
   vi.mocked(isMdnsSupported).mockReturnValue({ supported: true });
   vi.mocked(discoverState).mockReset();
@@ -436,6 +442,40 @@ describe("buildServiceUninstallSudoArgs", () => {
   });
 });
 
+describe("unloaded macOS service removal", () => {
+  it.each(["clean", "uninstall"])("removes the plist during %s", async (command) => {
+    setPlatform("darwin");
+    setGetuid(0);
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn((_: string, args: string[]) => ({
+      status: args.length === 2 ? 3 : 5,
+      stdout: "",
+      stderr:
+        args.length === 2
+          ? "Boot-out failed: 3: No such process"
+          : "Boot-out failed: 5: Input/output error",
+    }));
+    const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      if (command === "clean") {
+        expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+          removed: true,
+          installed: true,
+        });
+      } else {
+        await handleService(["service", "uninstall"], { entryScript: "/fake/cli.js", runner });
+        expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("uninstalled"));
+      }
+      expect(runner).toHaveBeenCalledWith("launchctl", ["bootout", "system/sh.portless.proxy"]);
+      expect(rmSync).toHaveBeenCalledWith("/Library/LaunchDaemons/sh.portless.proxy.plist", {
+        force: true,
+      });
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+});
+
 describe("tryUninstallService", () => {
   it("returns removed: false when service is not installed", () => {
     vi.mocked(existsSync).mockReturnValue(false);
@@ -473,6 +513,90 @@ describe("tryUninstallService", () => {
     expect(result.removed).toBe(false);
     expect(result.installed).toBe(true);
     expect(result.needsElevation).toBe(true);
+  });
+
+  it("marks systemctl's interactive authentication failure as needing elevation", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Interactive authentication required.",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.installed).toBe(true);
+    expect(result.error).toContain("Interactive authentication required");
+    expect(result.needsElevation).toBe(true);
+    expect(rmSync).not.toHaveBeenCalled();
+  });
+
+  it("does not claim elevation when the removal runs as root", () => {
+    setPlatform("linux");
+    setGetuid(0);
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Unit file is masked.",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.needsElevation).toBe(false);
+  });
+
+  it("does not claim elevation when the service manager is missing", () => {
+    setPlatform("linux");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => {
+      const err = new Error("spawn systemctl ENOENT") as NodeJS.ErrnoException;
+      err.code = "ENOENT";
+      throw err;
+    });
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.needsElevation).toBe(false);
+  });
+
+  it("reports a failed launchctl bootout instead of claiming removal", () => {
+    setPlatform("darwin");
+    vi.mocked(existsSync).mockReturnValue(true);
+    const runner = vi.fn(() => ({
+      status: 1,
+      stdout: "",
+      stderr: "Boot-out failed: 1: Operation not permitted",
+    }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.installed).toBe(true);
+    expect(result.error).toContain("Operation not permitted");
+    expect(result.needsElevation).toBe(true);
+    expect(rmSync).not.toHaveBeenCalled();
+  });
+
+  it("keeps Windows service files when the task store cannot be read", () => {
+    setPlatform("win32");
+    vi.mocked(statSync).mockImplementation(() => {
+      const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
+      err.code = "EACCES";
+      throw err;
+    });
+    const runner = vi.fn(() => ({ status: 1, stdout: "", stderr: "ERROR: Access is denied." }));
+
+    const result = tryUninstallService("/fake/cli.js", runner);
+
+    expect(result.removed).toBe(false);
+    expect(result.error).toContain("permission denied");
+    expect(runner).not.toHaveBeenCalled();
+    expect(rmSync).not.toHaveBeenCalled();
   });
 });
 
@@ -534,7 +658,7 @@ describe("handleService", () => {
     expect(exitSpy).not.toHaveBeenCalled();
     expect(errorSpy).not.toHaveBeenCalled();
     expect(runner).not.toHaveBeenCalled();
-    expect(mkdirSync).not.toHaveBeenCalled();
+    expect(ensureStateDir).not.toHaveBeenCalled();
     expect(writeFileSync).not.toHaveBeenCalled();
   });
 
@@ -752,6 +876,26 @@ describe("handleService", () => {
     });
   });
 
+  it("keeps Windows service files when the registered task cannot be removed", async () => {
+    setPlatform("win32");
+    vi.mocked(statSync).mockReturnValue({} as never);
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 1,
+      stdout: "",
+      stderr: "ERROR: Access is denied.",
+    }));
+
+    await expect(
+      handleService(["service", "uninstall"], {
+        entryScript: "C:\\cli.js",
+        runner,
+      })
+    ).rejects.toThrow("Access is denied.");
+
+    expect(rmSync).not.toHaveBeenCalled();
+    expect(logSpy.mock.calls.flat().join(" ")).not.toContain("uninstalled");
+  });
+
   it("repeated Windows installs always register the PT0S task definition", async () => {
     setPlatform("win32");
     const originalUserProfile = process.env.USERPROFILE;
@@ -927,6 +1071,26 @@ describe("handleService", () => {
     expect(runner).toHaveBeenCalledWith("systemctl", ["disable", "--now", "portless.service"]);
   });
 
+  it("fails the uninstall when the Linux service still cannot be disabled", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 1,
+      stdout: "",
+      stderr: "Failed to disable unit: Access denied",
+    }));
+
+    await expect(
+      handleService(["service", "uninstall"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      })
+    ).rejects.toThrow("Access denied");
+
+    expect(rmSync).not.toHaveBeenCalled();
+    expect(logSpy.mock.calls.flat().join(" ")).not.toContain("uninstalled");
+  });
+
   it("normalizes relative install paths before writing the Linux service", async () => {
     setPlatform("linux");
     setGetuid(0);
@@ -964,9 +1128,28 @@ describe("handleService", () => {
       .mock.calls.find(([file]) => file === "/etc/systemd/system/portless.service");
     const unit = String(unitWrite?.[1] ?? "");
 
-    expect(mkdirSync).toHaveBeenCalledWith(stateDir, { recursive: true });
+    expect(ensureStateDir).toHaveBeenCalledWith(stateDir);
     expect(unit).toContain(`Environment=PORTLESS_STATE_DIR="${systemdStateDir}"`);
     expect(unit).toContain(`"--cert" "${systemdCertPath}" "--key" "${systemdKeyPath}"`);
+  });
+
+  it("refuses to install when another user controls the state directory", async () => {
+    setPlatform("linux");
+    setGetuid(0);
+    vi.mocked(ensureStateDir).mockReturnValueOnce("it is owned by another user");
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    await expect(
+      handleService(["service", "install", "--state-dir", "/shared/state"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      })
+    ).rejects.toThrow(
+      `Cannot install the service with state in ${path.resolve("/shared/state")}: it is owned by another user`
+    );
+
+    expect(runner).not.toHaveBeenCalled();
+    expect(writeFileSync).not.toHaveBeenCalled();
   });
 
   it("prints installed service config from a Linux unit", async () => {

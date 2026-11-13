@@ -134,7 +134,7 @@ export function fixOwnership(...paths: string[]): void {
     try {
       const stat = fs.lstatSync(p);
       if (stat.isSymbolicLink()) continue;
-      fs.chownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
+      fs.lchownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
     } catch {
       // Best-effort
     }
@@ -318,4 +318,256 @@ export function parseHostnames(
     console.warn(`Warning: skipping TLD ${detail}`);
   }
   return hostnames;
+}
+
+/**
+ * UIDs allowed to own a state directory: root, the current user, and, when
+ * running as root under sudo, the invoking sudo user.
+ */
+function allowedStateDirOwners(): Set<number> | null {
+  if (process.platform === "win32") return null;
+  const uid = process.getuid?.();
+  if (uid === undefined) return null;
+  const owners = new Set<number>([0, uid]);
+  if (uid === 0) {
+    const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+    if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
+  }
+  return owners;
+}
+
+export type StateDirProblem =
+  | { reason: "unresolvable"; path: string }
+  | { reason: "not-directory"; path: string }
+  | { reason: "foreign-owner"; path: string }
+  | { reason: "writable-by-others"; path: string }
+  | { reason: "unsafe-parent"; path: string }
+  | { reason: "unsafe-link"; path: string };
+
+/**
+ * The first directory, from `start` up to the root, that another user could
+ * use to swap what lies below it: one owned by someone else, or writable by
+ * group or others without the sticky bit. Returns null when all are safe.
+ */
+function findUnsafeDirInChain(start: string, owners: Set<number>): string | null {
+  let current = start;
+  for (;;) {
+    try {
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory()) return current;
+      if (!owners.has(stat.uid)) return current;
+      const writableByOthers = (stat.mode & 0o022) !== 0;
+      const sticky = (stat.mode & 0o1000) !== 0;
+      if (writableByOthers && !sticky) return current;
+    } catch {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+type TrustedPath = { path: string } | { unsafe: string } | { missing: string };
+
+const MAX_SYMLINK_HOPS = 40;
+
+function splitAbsolutePath(absolute: string): string[] {
+  return absolute.slice(path.parse(absolute).root.length).split(path.sep).filter(Boolean);
+}
+
+/**
+ * Resolve a path like realpath, but refuse to follow a symlink another user
+ * could create or retarget: one an allowed user does not own, or one held in
+ * a directory that fails findUnsafeDirInChain.
+ */
+function resolveTrustedPath(target: string, owners: Set<number>): TrustedPath {
+  const absolute = path.resolve(target);
+  const root = path.parse(absolute).root;
+  let pending = splitAbsolutePath(absolute);
+  let current = root;
+  let hops = 0;
+  while (pending.length > 0) {
+    const next = path.join(current, pending[0]!);
+    pending = pending.slice(1);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(next);
+    } catch {
+      return { missing: next };
+    }
+    if (!stat.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    hops += 1;
+    if (hops > MAX_SYMLINK_HOPS || !owners.has(stat.uid)) return { unsafe: next };
+    const holder = findUnsafeDirInChain(current, owners);
+    if (holder) return { unsafe: holder };
+    let linked: string;
+    try {
+      linked = path.resolve(current, fs.readlinkSync(next));
+    } catch {
+      return { missing: next };
+    }
+    pending = [...splitAbsolutePath(linked), ...pending];
+    current = root;
+  }
+  return { path: current };
+}
+
+/**
+ * The first ancestor of a state directory that another user could use to swap
+ * or redirect the directory, or null when every ancestor is safe.
+ */
+function findUnsafeStateDirAncestor(dir: string, owners: Set<number>): string | null {
+  const resolved = resolveTrustedPath(dir, owners);
+  if ("unsafe" in resolved) return resolved.unsafe;
+  if ("missing" in resolved) return path.dirname(dir);
+  return findUnsafeDirInChain(path.dirname(resolved.path), owners);
+}
+
+/**
+ * Why a state directory cannot be trusted to name a CA, a process to signal,
+ * or elevated work, or null when only its owner can change it. The directory
+ * must be a real directory owned by the current user, the invoking sudo user,
+ * or root, reachable only through safe ancestors, and not writable by group or
+ * others. A "writable-by-others" result means the owner and ancestors passed.
+ */
+export function findStateDirProblem(dir: string): StateDirProblem | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch {
+    return { reason: "not-directory", path: dir };
+  }
+  if (!stat.isDirectory()) return { reason: "not-directory", path: dir };
+  const owners = allowedStateDirOwners();
+  if (!owners) return null;
+  if (!owners.has(stat.uid)) return { reason: "foreign-owner", path: dir };
+  const ancestor = findUnsafeStateDirAncestor(dir, owners);
+  if (ancestor) return { reason: "unsafe-parent", path: ancestor };
+  if ((stat.mode & 0o022) !== 0) return { reason: "writable-by-others", path: dir };
+  return null;
+}
+
+/** Whether portless may act on a state directory. See findStateDirProblem. */
+export function isCleanableStateDir(dir: string): boolean {
+  return findStateDirProblem(dir) === null;
+}
+
+/**
+ * Resolve a state directory path through trusted symlinks only and check the
+ * directory it names. `canonical` is null when the path cannot be used at all.
+ */
+function locateStateDir(dir: string): {
+  canonical: string | null;
+  problem: StateDirProblem | null;
+} {
+  const owners = allowedStateDirOwners();
+  let canonical: string;
+  if (owners) {
+    const resolved = resolveTrustedPath(dir, owners);
+    if ("unsafe" in resolved) {
+      return { canonical: null, problem: { reason: "unsafe-link", path: resolved.unsafe } };
+    }
+    if ("missing" in resolved) {
+      return { canonical: null, problem: { reason: "unresolvable", path: resolved.missing } };
+    }
+    canonical = resolved.path;
+  } else {
+    try {
+      canonical = fs.realpathSync(dir);
+    } catch {
+      return { canonical: null, problem: { reason: "unresolvable", path: dir } };
+    }
+  }
+  return { canonical, problem: findStateDirProblem(canonical) };
+}
+
+function describeStateDirProblem(problem: StateDirProblem | null): string | null {
+  if (!problem) return null;
+  switch (problem.reason) {
+    case "unresolvable":
+      return "it cannot be resolved";
+    case "not-directory":
+      return "it is not a directory";
+    case "foreign-owner":
+      return "it is owned by another user";
+    case "writable-by-others":
+      return `other users can write to it. Run: chmod go-w ${problem.path}`;
+    case "unsafe-parent":
+      return `other users can replace it through ${problem.path}`;
+    case "unsafe-link":
+      return `other users can redirect it through ${problem.path}`;
+  }
+}
+
+/**
+ * A sentence fragment saying why a state directory path is refused, or null
+ * when it is safe. A symlink to a safe directory is accepted when no other
+ * user could have created or retargeted the link.
+ */
+export function explainUnsafeStateDir(dir: string): string | null {
+  return describeStateDirProblem(locateStateDir(dir).problem);
+}
+
+/** Permission mode for a state directory: writable only by its owner. */
+const STATE_DIR_MODE = 0o755;
+
+/**
+ * Set the mode of a checked state directory through a no-follow directory
+ * descriptor, so a path swapped for a symlink or a file is never changed.
+ */
+function setStateDirMode(canonical: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      canonical,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+    );
+    if (!fs.fstatSync(fd).isDirectory()) return false;
+    fs.fchmodSync(fd, STATE_DIR_MODE);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * Create a state directory if it is missing and make it writable only by its
+ * owner, whatever the umask. The mode and owner are changed only on a
+ * directory that passes findStateDirProblem, or on one its own unprivileged
+ * owner is repairing. Returns why the directory is still unsafe, or null.
+ */
+export function ensureStateDir(dir: string): string | null {
+  let located = locateStateDir(dir);
+  if (located.problem?.reason === "unresolvable") {
+    fs.mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE });
+    located = locateStateDir(dir);
+  }
+  const { canonical, problem } = located;
+  if (canonical === null || process.platform === "win32") return describeStateDirProblem(problem);
+  if (problem === null) {
+    setStateDirMode(canonical);
+    fixOwnership(canonical);
+    return null;
+  }
+  const ownerRepair = problem.reason === "writable-by-others" && process.getuid?.() !== 0;
+  if (ownerRepair && setStateDirMode(canonical)) return null;
+  return describeStateDirProblem(problem);
+}
+
+/**
+ * Prepare a state directory for use. As root, throws when the directory fails
+ * findStateDirProblem, so a privileged process never runs on state another
+ * user controls.
+ */
+export function requireStateDir(dir: string): void {
+  const unsafe = ensureStateDir(dir);
+  if (unsafe && process.platform !== "win32" && process.getuid?.() === 0) {
+    throw new Error(`Cannot use state directory ${dir} as root: ${unsafe}`);
+  }
 }

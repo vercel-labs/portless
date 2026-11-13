@@ -4,7 +4,12 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFile as execFileCb, execFileSync } from "node:child_process";
 import { promisify } from "node:util";
-import { fixOwnership } from "./utils.js";
+import {
+  explainUnsafeStateDir,
+  fixOwnership,
+  isCleanableStateDir,
+  resolveUserHome,
+} from "./utils.js";
 import {
   isWSL,
   isWindowsCATrusted,
@@ -87,10 +92,59 @@ function caFingerprint(stateDir: string): string | null {
 
 function readTrustMarker(stateDir: string): string | null {
   try {
-    const value = fs.readFileSync(path.join(stateDir, CA_TRUST_MARKER), "utf-8").trim();
+    const markerPath = path.join(stateDir, CA_TRUST_MARKER);
+    const stat = fs.lstatSync(markerPath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    const value = fs.readFileSync(markerPath, "utf-8").trim();
     return value || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * Create or replace a state marker file without following a symlink at the
+ * destination, using an exclusive no-follow temp file and atomic rename.
+ */
+function writeStateMarkerFile(filePath: string, content: string): void {
+  const dir = path.dirname(filePath);
+  if (!isCleanableStateDir(dir)) {
+    throw new Error(`Refusing to write marker in unsafe state directory: ${dir}`);
+  }
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
+  );
+  const openFlags =
+    fs.constants.O_CREAT |
+    fs.constants.O_EXCL |
+    fs.constants.O_WRONLY |
+    (fs.constants.O_NOFOLLOW ?? 0);
+  try {
+    const fd = fs.openSync(tempPath, openFlags, 0o644);
+    try {
+      fs.writeFileSync(fd, content, "utf-8");
+    } finally {
+      fs.closeSync(fd);
+    }
+    fixOwnership(tempPath);
+    fs.renameSync(tempPath, filePath);
+  } catch (err) {
+    try {
+      fs.unlinkSync(tempPath);
+    } catch {
+      // Temp file may not have been created; ignore.
+    }
+    throw err;
+  }
+}
+
+function hasRegularTrustRefreshPending(filePath: string): boolean {
+  try {
+    const stat = fs.lstatSync(filePath);
+    return stat.isFile() && !stat.isSymbolicLink();
+  } catch {
+    return false;
   }
 }
 
@@ -105,10 +159,10 @@ function clearTrustRefreshPending(stateDir: string): void {
 function writeTrustMarker(stateDir: string): void {
   const fp = caFingerprint(stateDir);
   if (fp) {
-    clearTrustRefreshPending(stateDir);
+    const canonicalDir = fs.realpathSync(stateDir);
+    clearTrustRefreshPending(canonicalDir);
     const marker = isWSL() ? `wsl:${fp}` : fp;
-    fs.writeFileSync(path.join(stateDir, CA_TRUST_MARKER), marker + "\n");
-    fixOwnership(path.join(stateDir, CA_TRUST_MARKER));
+    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), marker + "\n");
   }
 }
 
@@ -270,6 +324,20 @@ function hasDuplicateExtensions(certPath: string): boolean {
 /**
  * Run openssl and return stdout. Throws on non-zero exit.
  */
+/**
+ * Start a command that creates a private key with a umask that hides the file
+ * from other users from the moment it exists. Some openssl builds create key
+ * files with the caller's umask, which is world-readable by default.
+ */
+function withPrivateFileMode<T>(start: () => T): T {
+  const previous = process.umask(0o077);
+  try {
+    return start();
+  } finally {
+    process.umask(previous);
+  }
+}
+
 function openssl(args: string[], options?: { input?: string }): string {
   try {
     const extraEnv = getOpensslEnv();
@@ -367,7 +435,9 @@ function generateCA(stateDir: string): { certPath: string; keyPath: string } {
   const reqConfigPath = path.join(stateDir, `ca-req-${process.pid}-${crypto.randomUUID()}.cnf`);
 
   // Generate EC private key
-  openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
+  withPrivateFileMode(() =>
+    openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
+  );
 
   // Generate self-signed CA certificate.
   //
@@ -455,7 +525,9 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   const extPath = path.join(stateDir, "server-ext.cnf");
 
   // Generate server private key
-  openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath]);
+  withPrivateFileMode(() =>
+    openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath])
+  );
 
   // Generate CSR
   openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
@@ -639,6 +711,11 @@ function isCATrustedMacOS(caCertPath: string): boolean {
  * Return the path to the current user's login keychain.
  */
 function loginKeychainPath(): string {
+  const home = resolveUserHome();
+  const sudoUser = process.env.SUDO_USER;
+  if ((process.getuid?.() ?? -1) === 0 && sudoUser && sudoUser !== "root") {
+    return path.join(home, "Library", "Keychains", "login.keychain-db");
+  }
   try {
     const result = execFileSync("security", ["default-keychain"], {
       encoding: "utf-8",
@@ -650,7 +727,6 @@ function loginKeychainPath(): string {
   } catch {
     // Fall back to conventional path
   }
-  const home = process.env.HOME || `/Users/${process.env.USER || "unknown"}`;
   return path.join(home, "Library", "Keychains", "login.keychain-db");
 }
 
@@ -821,7 +897,9 @@ async function generateHostCertAsync(
   const extPath = path.join(hostDir, `${safeName}-ext.cnf`);
 
   // Generate key
-  await opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath]);
+  await withPrivateFileMode(() =>
+    opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
+  );
 
   // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
   // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
@@ -1024,14 +1102,22 @@ export function createSNICallback(
  *
  * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
  */
-export function trustCA(stateDir: string): { trusted: boolean; error?: string } {
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
-  if (!fileExists(caCertPath)) {
+export function trustCA(configuredStateDir: string): { trusted: boolean; error?: string } {
+  if (!fileExists(path.join(configuredStateDir, CA_CERT_FILE))) {
     return {
       trusted: false,
       error: "CA certificate not found. Run portless trust to generate it.",
     };
   }
+  const unsafe = explainUnsafeStateDir(configuredStateDir);
+  if (unsafe) {
+    return {
+      trusted: false,
+      error: `Refusing to trust the CA in ${configuredStateDir}: ${unsafe}`,
+    };
+  }
+  const stateDir = fs.realpathSync(configuredStateDir);
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
 
   try {
     if (process.platform === "darwin") {
@@ -1105,6 +1191,11 @@ export function trustCA(stateDir: string): { trusted: boolean; error?: string } 
     }
     return { trusted: false, error: message };
   }
+}
+
+/** Whether a previous CA removal still needs the distro trust cache refresh. */
+export function isCATrustRefreshPending(stateDir: string): boolean {
+  return hasRegularTrustRefreshPending(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
 }
 
 /**
@@ -1196,9 +1287,15 @@ export function untrustCALinux(
   stateDir: string,
   options: LinuxCATrustRemovalOptions = {}
 ): { removed: boolean; error?: string } {
+  if (!isCleanableStateDir(stateDir)) {
+    return {
+      removed: false,
+      error: `Refusing to untrust CA from unsafe state directory: ${stateDir}`,
+    };
+  }
   const errors: string[] = [];
   const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
-  let refreshNeeded = fileExists(pendingRefreshPath);
+  let refreshNeeded = hasRegularTrustRefreshPending(pendingRefreshPath);
   const configs = options.configs ?? Object.values(LINUX_CA_TRUST_CONFIGS);
   const activeConfig = options.activeConfig ?? getLinuxCATrustConfig();
   const runUpdate =
@@ -1211,12 +1308,16 @@ export function untrustCALinux(
     const dest = path.join(config.certDir, "portless-ca.crt");
     try {
       if (fileExists(dest)) {
-        const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
+        const caCertPath = path.join(stateDir, CA_CERT_FILE);
+        const caStat = fs.lstatSync(caCertPath);
+        if (!caStat.isFile() || caStat.isSymbolicLink()) {
+          throw new Error(`Refusing symlinked CA certificate: ${caCertPath}`);
+        }
+        const ours = fs.readFileSync(caCertPath, "utf-8").trim();
         const installed = fs.readFileSync(dest, "utf-8").trim();
         if (ours === installed) {
           if (!refreshNeeded) {
-            fs.writeFileSync(pendingRefreshPath, "1\n");
-            fixOwnership(pendingRefreshPath);
+            writeStateMarkerFile(pendingRefreshPath, "1\n");
             refreshNeeded = true;
           }
           fs.unlinkSync(dest);

@@ -5,6 +5,7 @@ import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
 import { RouteStore, RouteConflictError, RoutesFileError } from "./routes.js";
+import { ensureStateDir } from "./utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -40,6 +41,80 @@ describe("RouteStore", () => {
       store.ensureDir();
       expect(() => store.ensureDir()).not.toThrow();
     });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the directory owner-writable only under a group-writable umask",
+      () => {
+        const previous = process.umask(0o002);
+        try {
+          const created = path.join(tmpDir, "umask");
+          new RouteStore(created).ensureDir();
+          expect(fs.statSync(created).mode & 0o777).toBe(0o755);
+        } finally {
+          process.umask(previous);
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "repairs a group-writable directory its owner created",
+      () => {
+        const own = path.join(tmpDir, "own");
+        fs.mkdirSync(own);
+        fs.chmodSync(own, 0o775);
+        expect(ensureStateDir(own)).toBeNull();
+        expect(fs.statSync(own).mode & 0o777).toBe(0o755);
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "follows a symlink only another user could not have planted",
+      () => {
+        const real = path.join(tmpDir, "real");
+        fs.mkdirSync(real, { mode: 0o700 });
+        const link = path.join(tmpDir, "link");
+        fs.symlinkSync(real, link);
+        expect(ensureStateDir(link)).toBeNull();
+        expect(fs.statSync(real).mode & 0o777).toBe(0o755);
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "refuses, as root, a directory that fails the check and leaves it unchanged",
+      () => {
+        const shared = path.join(tmpDir, "group-writable");
+        fs.mkdirSync(shared);
+        fs.chmodSync(shared, 0o775);
+        const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
+        try {
+          expect(() => new RouteStore(shared).ensureDir()).toThrow(
+            `Cannot use state directory ${shared} as root`
+          );
+        } finally {
+          getuid.mockRestore();
+        }
+        expect(fs.statSync(shared).mode & 0o777).toBe(0o775);
+      }
+    );
+
+    for (const kind of ["directory", "file"] as const) {
+      it.skipIf(process.platform === "win32")(
+        `never changes the mode of a ${kind} behind a symlink in a shared directory`,
+        () => {
+          const target = path.join(tmpDir, "protected");
+          if (kind === "directory") fs.mkdirSync(target, { mode: 0o700 });
+          else fs.writeFileSync(target, "secret", { mode: 0o600 });
+          const shared = path.join(tmpDir, "shared");
+          fs.mkdirSync(shared);
+          fs.chmodSync(shared, 0o777);
+          const link = path.join(shared, "state");
+          fs.symlinkSync(target, link);
+
+          expect(ensureStateDir(link)).toContain("other users can redirect it through");
+          expect(fs.statSync(target).mode & 0o777).toBe(kind === "directory" ? 0o700 : 0o600);
+        }
+      );
+    }
   });
 
   describe("loadRoutes", () => {
@@ -267,7 +342,9 @@ describe("RouteStore", () => {
 
     it("prunes dead supported routes without removing skipped entries", () => {
       seed();
-      expect(store.pruneStaleRoutes()).toEqual([stale]);
+      const dead = store.findStaleRoutes();
+      expect(dead).toEqual([stale]);
+      expect(store.removeStaleRoute(dead[0]!.hostname, dead[0]!.pid)).toBe(true);
       expect(disk()).toEqual(
         expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
       );
@@ -526,6 +603,128 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].pid).toBe(newOwnerPid);
+    });
+  });
+
+  describe("stale recovery records", () => {
+    const deadPid = 999999;
+    const staleRoute = {
+      hostname: "stale.localhost",
+      port: 4310,
+      pid: deadPid,
+      childPgid: 4242,
+      childStartTime: "leader-start",
+      tailscaleHttpsPort: 8443,
+      ngrokPid: 5151,
+      registeredAt: Date.now() - 60_000,
+    };
+
+    const writeRoutes = (routes: unknown[]) =>
+      fs.writeFileSync(path.join(tmpDir, "routes.json"), JSON.stringify(routes));
+    const readRaw = () =>
+      JSON.parse(fs.readFileSync(path.join(tmpDir, "routes.json"), "utf-8")) as Array<{
+        hostname: string;
+        pid: number;
+        port: number;
+        orphanPid?: number;
+        orphanStartTime?: string;
+        ngrokUrl?: string;
+      }>;
+
+    it("keeps a stale record out of the active view", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(store.loadRoutes()).toEqual([]);
+      expect(store.loadRoutesRaw()).toEqual([staleRoute]);
+      expect(store.findStaleRoutes()).toEqual([staleRoute]);
+    });
+
+    it("keeps the record through add, update, transfer and remove of other routes", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+      store.updateRoute("other.localhost", { ngrokUrl: "https://other.ngrok.app" });
+      expect(store.transferRoute("other.localhost", process.pid, process.ppid)).toBe(true);
+      store.removeRoute("other.localhost", process.ppid);
+
+      expect(readRaw()).toEqual([staleRoute]);
+      expect(store.loadRoutes()).toEqual([]);
+    });
+
+    it("keeps the record when the same hostname is registered again", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(() => store.addRoute("stale.localhost", 4999, process.pid)).not.toThrow();
+
+      expect(store.loadRoutes()).toHaveLength(1);
+      expect(store.loadRoutes()[0]!.port).toBe(4999);
+      expect(readRaw()).toHaveLength(2);
+      expect(readRaw()[0]).toMatchObject({
+        hostname: "stale.localhost",
+        port: 4999,
+        pid: process.pid,
+      });
+      expect(readRaw()[1]).toEqual(staleRoute);
+    });
+
+    it("returns the active entry first for a legacy file with a stale record first", () => {
+      store.ensureDir();
+      const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
+      writeRoutes([staleRoute, live]);
+
+      expect(store.loadRoutesRaw()).toEqual([live, staleRoute]);
+      expect(store.loadRoutesRaw().find((route) => route.hostname === "stale.localhost")).toEqual(
+        live
+      );
+    });
+
+    it("updates the live entry, not the stale record, for a shared hostname", () => {
+      store.ensureDir();
+      const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
+      writeRoutes([staleRoute, live]);
+
+      store.updateRoute("stale.localhost", { ngrokUrl: "https://live.ngrok.app" });
+
+      const raw = readRaw();
+      expect(raw[0]).toEqual({ ...live, ngrokUrl: "https://live.ngrok.app" });
+      expect(raw[1]).toEqual(staleRoute);
+    });
+
+    it("records a verified member only on the matching stale record", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(store.recordStaleOrphan({ ...staleRoute, childStartTime: "other" }, 4343, "m")).toBe(
+        false
+      );
+      expect(store.recordStaleOrphan(staleRoute, 4343, "member-start")).toBe(true);
+
+      expect(readRaw()).toEqual([
+        { ...staleRoute, orphanPid: 4343, orphanStartTime: "member-start" },
+      ]);
+    });
+
+    it("removes only the dead owner's record", () => {
+      store.ensureDir();
+      const second = { ...staleRoute, hostname: "second.localhost", port: 4311 };
+      writeRoutes([staleRoute, second]);
+
+      expect(store.removeStaleRoute("stale.localhost", 111111)).toBe(false);
+      expect(store.removeStaleRoute("stale.localhost", deadPid)).toBe(true);
+      expect(readRaw()).toEqual([second]);
+    });
+
+    it("drops stale entries without recovery data on the next write", () => {
+      store.ensureDir();
+      const plain = { hostname: "plain.localhost", port: 4312, pid: deadPid, registeredAt: 1 };
+      writeRoutes([plain]);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+
+      expect(readRaw().map((route) => route.hostname)).toEqual(["other.localhost"]);
     });
   });
 

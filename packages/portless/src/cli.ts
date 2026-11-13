@@ -6,7 +6,7 @@ import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isIP } from "node:net";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
   type ComposeContainers,
@@ -25,7 +25,14 @@ import {
   splitComposeArgs,
   staleAliases,
 } from "./compose.js";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import {
+  createSNICallback,
+  ensureCerts,
+  isCATrusted,
+  isCATrustRefreshPending,
+  trustCA,
+  untrustCA,
+} from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   generateHostsSyncToken,
@@ -33,7 +40,10 @@ import {
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
 import {
+  ensureStateDir,
+  explainUnsafeStateDir,
   fixOwnership,
+  isCleanableStateDir,
   formatUptime,
   formatUrl,
   isErrnoException,
@@ -92,7 +102,9 @@ import {
   guardWindowsOrphans,
   findPidsOnPort,
   findSelfDaemonizedListener,
-  killOrphanedProcessGroup,
+  stopProcessGroup,
+  type ProcessGroupStop,
+  getProcessGroupId,
   getProcessStartTime,
   getProcessCommand,
   getDefaultPort,
@@ -115,6 +127,7 @@ import {
   killTree,
   listenOnProxyInterface,
   parseTldList,
+  prompt,
   readLanMarker,
   readCustomCertMarker,
   readPersistedProxyState,
@@ -134,8 +147,9 @@ import {
 } from "./cli-utils.js";
 import {
   attemptCATrustRemovalForCleanup,
-  collectStateDirsForCleanup,
+  collectStateDirsForCleanupWithFailures,
   removePortlessStateFiles,
+  type CATrustRemovalResult,
 } from "./clean-utils.js";
 import {
   getLocalNetworkIp,
@@ -198,6 +212,17 @@ const EXIT_TIMEOUT_MS = 2000;
 
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
+
+const PROXY_STOP_TIMEOUT_MS = 5000;
+const PROXY_STOP_POLL_MS = 50;
+const CLEAN_ELEVATED_STEPS_ENV = "PORTLESS_INTERNAL_CLEAN_STEPS";
+const CLEAN_ELEVATED_DIRS_ENV = "PORTLESS_INTERNAL_CLEAN_DIRS";
+const CLEAN_ELEVATED_PRESERVE_PROXY_ENV = "PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY";
+
+/** Cleanup steps that may be retried with elevation. */
+type CleanupStep = "ca" | "files" | "hosts";
+
+const CLEANUP_STEP_ORDER: readonly CleanupStep[] = ["ca", "files", "hosts"];
 
 type ProxyConfigExplicitness = {
   useHttps: boolean;
@@ -528,23 +553,15 @@ function sudoStop(port: number): boolean {
   return result.status === 0;
 }
 
-function runCleanWithSudo(reason: string): boolean {
-  console.log(colors.yellow(`${reason} Requesting sudo...`));
-  const home = process.env.HOME;
+/** Re-run `portless hosts clean` under sudo and report whether it succeeded. */
+function runHostsCleanWithSudo(): boolean {
+  console.log(
+    colors.yellow(`Writing to ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
+  );
   const result = spawnSync(
     "sudo",
-    [
-      "env",
-      ...collectPortlessEnvArgs(),
-      ...(home ? [`HOME=${home}`] : []),
-      process.execPath,
-      getEntryScript(),
-      "clean",
-    ],
-    {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    }
+    ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
+    { stdio: "inherit", timeout: SUDO_SPAWN_TIMEOUT_MS }
   );
   return result.status === 0;
 }
@@ -653,25 +670,89 @@ function addRoutes(
 }
 
 /**
+ * Try to stop every recorded process group once, keyed by group id. Routes that
+ * share a group share one outcome and contribute all of their recorded
+ * identities, so a stale record cannot hide a valid one. Groups are stopped in
+ * parallel so one surviving group does not delay the others.
+ */
+async function stopRecordedGroups(
+  routes: RouteMapping[],
+  signal: NodeJS.Signals
+): Promise<Map<number, ProcessGroupStop>> {
+  const groups = new Map<number, RouteMapping[]>();
+  for (const route of routes) {
+    if (route.childPgid === undefined) continue;
+    const group = groups.get(route.childPgid);
+    if (group) group.push(route);
+    else groups.set(route.childPgid, [route]);
+  }
+  const stopped = await Promise.all(
+    [...groups].map(async ([pgid, group]) => {
+      const stop = await stopProcessGroup(
+        pgid,
+        group.map((route) => route.childStartTime),
+        group.flatMap((route) =>
+          route.orphanPid === undefined
+            ? []
+            : [{ pid: route.orphanPid, startTime: route.orphanStartTime }]
+        ),
+        signal,
+        { port: group[0]!.port }
+      );
+      return [pgid, stop] as const;
+    })
+  );
+  return new Map(stopped);
+}
+
+/**
+ * Whether a stale record still has recovery work that startup cannot finish: a
+ * Tailscale share is unregistered by prune or clean, so its record must stay.
+ */
+function keepsStaleRecordAfterRecovery(route: RouteMapping): boolean {
+  return route.tailscaleHttpsPort !== undefined;
+}
+
+/**
  * Stop dev servers left running by portless sessions that died without
  * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
  * the stored process group is the only remaining link to the orphaned tree.
+ * Shares stay while the group is still running, and a member that outlived
+ * SIGTERM is recorded so `prune --force` can retry it. A record whose group is
+ * verified gone and whose tunnels were stopped is removed, so later runs do not
+ * signal the same tunnel PIDs again.
  */
-function stopOrphanedProcessGroups(store: RouteStore): void {
-  const seen = new Set<number>();
-  for (const route of store.loadRoutesRaw()) {
-    if (route.pid === 0 || isPidAlive(route.pid)) continue;
+async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
+  if (store.untrustedReason()) return;
+  const orphaned = store
+    .loadRoutesRaw()
+    .filter((route) => route.pid !== 0 && !isPidAlive(route.pid));
+  const stops = await stopRecordedGroups(orphaned, "SIGTERM");
+  for (const route of orphaned) {
+    const pgid = route.childPgid;
+    const stop = pgid === undefined ? undefined : stops.get(pgid);
+    if (stop?.survivor) store.recordStaleOrphan(route, stop.survivor.pid, stop.survivor.startTime);
+    if (stop !== undefined && stop.state !== "gone" && stop.state !== "stopped") {
+      console.error(
+        colors.yellow(
+          stop.state === "survived"
+            ? `Orphaned dev server (process group ${pgid}) did not exit. Run: portless prune --force`
+            : `Orphaned process group ${pgid} could not be verified; nothing was stopped. Run: portless prune`
+        )
+      );
+      continue;
+    }
+    if (stop?.state === "stopped") {
+      console.error(
+        colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
+      );
+    }
     for (const t of stopRecordedTunnels(route, true)) {
       const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
       console.error(colors.yellow(message));
     }
-    const pgid = route.childPgid;
-    if (!pgid || seen.has(pgid)) continue;
-    seen.add(pgid);
-    if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
-      console.error(
-        colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
-      );
+    if (!keepsStaleRecordAfterRecovery(route)) {
+      store.removeStaleRoute(route.hostname, route.pid);
     }
   }
 }
@@ -1071,6 +1152,7 @@ function startProxyServer(
       console.warn(colors.yellow("Could not publish hosts sync authorization."));
     }
     // Save PID and port once the server is actually listening
+    writeProxyStartTime(store);
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     writeTlsMarker(store.dir, isTls);
@@ -1078,7 +1160,7 @@ function startProxyServer(
     writeTldsFile(store.dir, tlds);
     writeLanMarker(store.dir, activeLanIp);
     writeUnprivilegedMarker(store.dir, unprivileged);
-    fixOwnership(store.dir, store.pidPath, store.portFilePath);
+    fixOwnership(store.dir, store.pidPath, store.portFilePath, store.startTimePath);
     console.log(
       colors.green(
         `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
@@ -1127,10 +1209,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetProxyMarkers(store);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1149,151 +1228,347 @@ function startProxyServer(
 // Commands
 // ---------------------------------------------------------------------------
 
-function sudoStopOrHint(port: number): void {
+function sudoStopOrHint(port: number): boolean {
   if (!isWindows) {
     if (!sudoStop(port)) {
       console.error(colors.red("Failed to stop proxy with sudo."));
       console.error(colors.blue("Try manually:"));
       console.error(colors.cyan(`  portless proxy stop -p ${port}`));
+      return false;
     }
-  } else {
-    console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
-    console.error(colors.blue("Stop it with:"));
-    console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+    return true;
+  }
+  console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
+  console.error(colors.blue("Stop it with:"));
+  console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+  return false;
+}
+
+/** Read a state file, returning null only when it does not exist. */
+function readStateFile(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf-8").trim();
+  } catch (err: unknown) {
+    if (isErrnoException(err) && err.code === "ENOENT") return null;
+    throw err;
   }
 }
 
-async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
-  const pidPath = store.pidPath;
+/** Remove a state file only while its contents still match the expected value. */
+function removeStateFileIfMatches(file: string, expected: string): boolean {
+  const current = readStateFile(file);
+  if (current === null) return true;
+  if (current !== expected) return false;
+  try {
+    fs.unlinkSync(file);
+  } catch (err: unknown) {
+    if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+  }
+  return true;
+}
 
-  if (!fs.existsSync(pidPath)) {
-    // PID file is missing; check whether something is still listening.
-    // Use plain HTTP: the TLS proxy accepts it via byte-peeking, and this
-    // avoids false negatives from TLS handshake timeouts.
-    if (await isProxyRunning(proxyPort)) {
-      console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
-      const pid = findPidOnPort(proxyPort);
-      if (pid !== null) {
-        try {
-          process.kill(pid, "SIGTERM");
-          try {
-            fs.unlinkSync(store.portFilePath);
-          } catch {
-            // Port file may already be absent; non-fatal
-          }
-          writeTlsMarker(store.dir, false);
-          writeCustomCertMarker(store.dir, false);
-          writeTldFile(store.dir, DEFAULT_TLD);
-          writeLanMarker(store.dir, null);
-          console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
-        } catch (err: unknown) {
-          if (isErrnoException(err) && err.code === "EPERM") {
-            sudoStopOrHint(proxyPort);
-          } else {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error(colors.red(`Failed to stop proxy: ${message}`));
-            console.error(colors.blue("Check if the process is still running:"));
-            console.error(
-              colors.cyan(
-                isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
-              )
-            );
-          }
-        }
-      } else if (!isWindows && process.getuid?.() !== 0) {
-        sudoStopOrHint(proxyPort);
-      } else {
-        console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
-        console.error(colors.blue("Try manually:"));
+/** The kernel's state letters for a live PID, or null when they cannot be read. */
+function readProcessState(pid: number): string | null {
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] || null;
+    }
+    if (process.platform === "darwin") {
+      const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+        encoding: "utf-8",
+        timeout: 2000,
+      });
+      return state.trim() || null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Whether a live PID is still running rather than a zombie or dead entry. */
+function isProcessRunning(pid: number): boolean {
+  if (!isPidAlive(pid)) return false;
+  const state = readProcessState(pid);
+  return state === null ? isPidAlive(pid) : !/^[ZX]/.test(state);
+}
+
+/**
+ * Whether a live PID is suspended by SIGSTOP or a debugger. Returns null when
+ * the platform or a failed lookup cannot report the state.
+ */
+function isProcessSuspended(pid: number): boolean | null {
+  const state = readProcessState(pid);
+  return state === null ? null : /^[Tt]/.test(state);
+}
+
+/** Record the listening proxy's start time, so a later stop can tell it from a recycled PID. */
+function writeProxyStartTime(store: RouteStore): void {
+  const startTime = getProcessStartTime(process.pid);
+  const tempPath = `${store.startTimePath}.tmp`;
+  const discardTemp = () => {
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      return;
+    }
+  };
+  try {
+    discardTemp();
+    if (startTime === null) {
+      fs.rmSync(store.startTimePath, { force: true });
+      return;
+    }
+    fs.writeFileSync(tempPath, startTime, { encoding: "utf-8", mode: FILE_MODE, flag: "wx" });
+    fixOwnership(tempPath);
+    fs.renameSync(tempPath, store.startTimePath);
+  } catch {
+    discardTemp();
+  }
+}
+
+/** Forget the recorded proxy identity and runtime settings once its process is gone. */
+function resetProxyMarkers(store: RouteStore): void {
+  for (const file of [store.startTimePath, `${store.startTimePath}.tmp`]) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      continue;
+    }
+  }
+  writeTlsMarker(store.dir, false);
+  writeCustomCertMarker(store.dir, false);
+  writeTldFile(store.dir, DEFAULT_TLD);
+  writeLanMarker(store.dir, null);
+}
+
+type ProxyIdentity = "proxy" | "recycled" | "unknown";
+
+/**
+ * Decide whether a live PID is the recorded proxy, from its recorded start time
+ * or, when none can be compared, from who holds the proxy port. Returns
+ * "unknown" when neither proves it, and callers must then keep the state.
+ */
+async function identifyRecordedProxy(
+  store: RouteStore,
+  pid: number,
+  proxyPort: number
+): Promise<ProxyIdentity> {
+  const recorded = readStateFile(store.startTimePath);
+  const live = getProcessStartTime(pid);
+  if (recorded !== null && live !== null) return recorded === live ? "proxy" : "recycled";
+  const holders = findPidsOnPort(proxyPort);
+  if (holders.includes(pid)) return "proxy";
+  if (holders.length > 0) return "recycled";
+  if (!(await isPortListening(proxyPort)) && isProcessSuspended(pid) !== true) return "recycled";
+  return "unknown";
+}
+
+/** Clear the port file and runtime markers once the proxy process is gone. */
+async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): Promise<boolean> {
+  if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
+    console.error(
+      colors.red(`Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`)
+    );
+    return false;
+  }
+  if (await isProxyRunning(proxyPort)) {
+    console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
+    return false;
+  }
+  resetProxyMarkers(store);
+  return true;
+}
+
+/** Wait until the recorded PID exits and its listener closes. */
+async function waitForProxyToClose(
+  proxyPort: number,
+  pid: number,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!isProcessRunning(pid) && !(await isProxyRunning(proxyPort))) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, PROXY_STOP_POLL_MS));
+  }
+}
+
+/** What the PID file and the proxy port say about the proxy to stop. */
+type RecordedProxy =
+  | { state: "stopped" | "corrupt" | "dead" | "forbidden" }
+  | { state: "untrusted"; reason: string }
+  | { state: "unrecorded"; pid: number | null }
+  | { state: "running" | "recycled" | "mismatched"; pid: number }
+  | { state: "unverified"; pid: number; identity: Exclude<ProxyIdentity, "recycled"> };
+
+/**
+ * Decide what to do about the recorded proxy. A PID is signaled only when the
+ * state directory is under the user's control and nothing shows the PID is a
+ * different process from the one holding the proxy port.
+ */
+async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<RecordedProxy> {
+  const unsafe = store.untrustedReason();
+  if (unsafe) return { state: "untrusted", reason: unsafe };
+  if (!fs.existsSync(store.pidPath)) {
+    if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
+    return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
+  }
+  const pid = parseInt(fs.readFileSync(store.pidPath, "utf-8"), 10);
+  if (isNaN(pid)) return { state: "corrupt" };
+  try {
+    process.kill(pid, 0);
+  } catch (err: unknown) {
+    return { state: isErrnoException(err) && err.code === "EPERM" ? "forbidden" : "dead" };
+  }
+  const answering = await isProxyRunning(proxyPort);
+  const identity = await identifyRecordedProxy(store, pid, proxyPort);
+  if (identity === "recycled") return { state: answering ? "mismatched" : "recycled", pid };
+  if (answering) return { state: "running", pid };
+  return { state: "unverified", pid, identity };
+}
+
+/** Signal a proxy process and wait for it and its listener to go away. */
+async function terminateProxy(proxyPort: number, pid: number): Promise<boolean> {
+  process.kill(pid, "SIGTERM");
+  if (await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS)) return true;
+  console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
+  return false;
+}
+
+/**
+ * Remove the PID file and clear the proxy state, unless another proxy has taken
+ * them over. `pid` is the recorded PID, or null when no PID file was recorded.
+ */
+async function forgetProxy(
+  store: RouteStore,
+  proxyPort: number,
+  pid: number | null
+): Promise<boolean> {
+  const unchanged =
+    pid === null
+      ? !fs.existsSync(store.pidPath)
+      : removeStateFileIfMatches(store.pidPath, String(pid));
+  if (unchanged) return clearProxyStateAfterStop(store, proxyPort);
+  console.error(
+    colors.red(`Proxy PID file changed to ${readStateFile(store.pidPath)}; leaving it in place.`)
+  );
+  return false;
+}
+
+async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<boolean> {
+  try {
+    const proxy = await readRecordedProxy(store, proxyPort);
+    switch (proxy.state) {
+      case "stopped":
+        console.log(colors.yellow("Proxy is not running."));
+        return true;
+      case "forbidden":
+        return sudoStopOrHint(proxyPort);
+      case "untrusted":
         console.error(
-          colors.cyan(
-            isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
+          colors.red(`Cannot stop the proxy recorded in ${store.dir}: ${proxy.reason}`)
+        );
+        console.error(colors.blue("Nothing was signaled."));
+        return false;
+      case "mismatched":
+        console.error(
+          colors.red(
+            `PID ${proxy.pid} in ${store.pidPath} is not the proxy answering on port ${proxyPort}.`
           )
         );
+        console.error(colors.blue("It was not signaled, and the proxy state is kept."));
+        console.error(
+          colors.cyan(
+            isWindows
+              ? `Find the proxy with: netstat -ano | findstr :${proxyPort}`
+              : `Find the proxy with: lsof -ti tcp:${proxyPort} -sTCP:LISTEN`
+          )
+        );
+        return false;
+      case "corrupt":
+        console.error(colors.red("Corrupted PID file. Removing it."));
+        fs.unlinkSync(store.pidPath);
+        resetProxyMarkers(store);
+        return true;
+      case "dead":
+        console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
+        fs.unlinkSync(store.pidPath);
+        fs.rmSync(store.portFilePath, { force: true });
+        resetProxyMarkers(store);
+        return true;
+      case "unrecorded": {
+        console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
+        if (proxy.pid === null) {
+          if (!isWindows && process.getuid?.() !== 0) return sudoStopOrHint(proxyPort);
+          console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
+          console.error(colors.blue("Try manually:"));
+          console.error(
+            colors.cyan(
+              isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
+            )
+          );
+          return false;
+        }
+        const stopped =
+          (await terminateProxy(proxyPort, proxy.pid)) &&
+          (await forgetProxy(store, proxyPort, null));
+        if (stopped) console.log(colors.green(`Killed process ${proxy.pid}. Proxy stopped.`));
+        return stopped;
       }
-    } else {
-      console.log(colors.yellow("Proxy is not running."));
-    }
-    return;
-  }
-
-  try {
-    const pid = parseInt(fs.readFileSync(pidPath, "utf-8"), 10);
-    if (isNaN(pid)) {
-      console.error(colors.red("Corrupted PID file. Removing it."));
-      fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return;
-    }
-
-    // Check if the process is still alive before trying to kill it
-    try {
-      process.kill(pid, 0);
-    } catch (err: unknown) {
-      if (isErrnoException(err) && err.code === "EPERM") {
-        sudoStopOrHint(proxyPort);
-        return;
+      case "recycled":
+        if (!(await forgetProxy(store, proxyPort, proxy.pid))) return false;
+        console.log(
+          colors.yellow(
+            `PID ${proxy.pid} is not a proxy listening on port ${proxyPort}. Removed stale proxy state.`
+          )
+        );
+        return true;
+      case "unverified": {
+        const { pid, identity } = proxy;
+        console.error(
+          colors.red(
+            identity === "proxy"
+              ? `Proxy PID ${pid} is not responding on port ${proxyPort}.`
+              : `Could not verify that PID ${pid} is the proxy on port ${proxyPort}.`
+          )
+        );
+        console.error(colors.blue("It was not signaled, and its state and CA files are kept."));
+        if (!isWindows && isProcessSuspended(pid) === true) {
+          console.error(colors.cyan(`The process is suspended. Resume it with: kill -CONT ${pid}`));
+        } else if (identity === "proxy") {
+          console.error(
+            colors.cyan(
+              `If it stays unresponsive, stop it with: ${
+                isWindows ? `taskkill /F /PID ${pid}` : `sudo kill ${pid}`
+              }`
+            )
+          );
+        }
+        return false;
       }
-      console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
-      fs.unlinkSync(pidPath);
-      try {
-        fs.unlinkSync(store.portFilePath);
-      } catch {
-        // Port file may already be absent; non-fatal
+      case "running": {
+        const stopped =
+          (await terminateProxy(proxyPort, proxy.pid)) &&
+          (await forgetProxy(store, proxyPort, proxy.pid));
+        if (stopped) console.log(colors.green("Proxy stopped."));
+        return stopped;
       }
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return;
     }
-
-    // Verify the process is actually running a proxy on the expected port.
-    // If the PID was recycled by an unrelated process, the port won't be listening.
-    // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
-    if (!(await isProxyRunning(proxyPort))) {
-      console.log(
-        colors.yellow(
-          `PID file exists but port ${proxyPort} is not listening. The PID may have been recycled.`
-        )
-      );
-      console.log(colors.yellow("Removing stale PID file."));
-      fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return;
-    }
-
-    process.kill(pid, "SIGTERM");
-    fs.unlinkSync(pidPath);
-    try {
-      fs.unlinkSync(store.portFilePath);
-    } catch {
-      // Port file may already be removed; non-fatal
-    }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
-    console.log(colors.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      sudoStopOrHint(proxyPort);
-    } else {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(colors.red(`Failed to stop proxy: ${message}`));
-      console.error(colors.blue("Check if the process is still running:"));
-      console.error(
-        colors.cyan(
-          isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
-        )
-      );
+      return sudoStopOrHint(proxyPort);
     }
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(colors.red(`Failed to stop proxy: ${message}`));
+    console.error(colors.blue("Check if the process is still running:"));
+    console.error(
+      colors.cyan(
+        isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+      )
+    );
+    return false;
   }
 }
 
@@ -1655,7 +1930,7 @@ async function runApp(
     console.error(colors.green(`  Using port ${port}`));
   }
 
-  stopOrphanedProcessGroups(store);
+  await stopOrphanedProcessGroups(store);
 
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
@@ -2309,7 +2584,8 @@ ${colors.bold("Options:")}
   --foreground                  Run proxy in foreground (for debugging)
   --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
   --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
-  --state-dir <path>            Use a custom state directory with service install
+  --state-dir <path>            Use a custom state directory with service install.
+                                Other users must not be able to change it
   --app-port <number>           Use a fixed port for the app (skip auto-assignment)
   --tailscale                   Share the app on your Tailscale network (tailnet)
   --funnel                      Share the app publicly via Tailscale Funnel
@@ -2385,6 +2661,10 @@ Generates the local CA first if it does not exist yet. Browsers and other
 clients then accept portless HTTPS certificates. The OS may ask for
 authorization or sudo.
 
+On macOS and Linux, the state directory and each parent directory must be
+owned by you or root and not writable by group or others. A sticky parent
+such as /tmp is allowed. Otherwise trust exits with the reason.
+
 ${colors.bold("Usage:")}
   ${colors.cyan("portless trust")}
 
@@ -2396,8 +2676,11 @@ ${colors.bold("Options:")}
 async function handleTrust(args: string[] = []): Promise<void> {
   parseCommandArgs("trust", args.slice(1), {}, 0);
   const { dir, port, tls } = await discoverState();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) ensureStateDir(dir);
+  const unsafe = explainUnsafeStateDir(dir);
+  if (unsafe) {
+    console.error(colors.red(`Cannot trust the CA in ${dir}: ${unsafe}`));
+    process.exit(1);
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
@@ -2452,6 +2735,128 @@ async function handleTrust(args: string[] = []): Promise<void> {
   process.exit(1);
 }
 
+/** Parse the internal allowlist of cleanup steps requested by a sudo retry. */
+function parseCleanupSteps(value: string | undefined): CleanupStep[] | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const requested = new Set(trimmed.split(",").map((step) => step.trim()));
+  for (const step of requested) {
+    if (!CLEANUP_STEP_ORDER.includes(step as CleanupStep)) {
+      throw new Error(`Unknown cleanup step: ${step}`);
+    }
+  }
+  return CLEANUP_STEP_ORDER.filter((step) => requested.has(step));
+}
+
+/** Parse the exact state directories approved by the parent clean invocation. */
+function parseCleanupDirs(value: string | undefined): string[] {
+  if (!value) return [];
+  const parsed: unknown = JSON.parse(value);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((entry) => typeof entry !== "string" || !path.isAbsolute(entry))
+  ) {
+    throw new Error("Invalid cleanup directories");
+  }
+  return [...new Set(parsed)];
+}
+
+function cleanupStepLabel(step: CleanupStep): string {
+  if (step === "ca") return "CA trust removal";
+  if (step === "files") return "state files";
+  return "hosts file";
+}
+
+/** Whether CA identity must survive because removal or trust refresh is unfinished. */
+function shouldPreserveCAIdentity(stateDir: string, failedCAStateDirs: Set<string>): boolean {
+  return (
+    failedCAStateDirs.has(stateDir) || isCATrustRefreshPending(stateDir) || isCATrusted(stateDir)
+  );
+}
+
+/** Whether the unprivileged process can inspect a state directory. */
+function canInspectStateDir(stateDir: string): boolean {
+  try {
+    fs.accessSync(stateDir, fs.constants.R_OK | fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remove allowlisted state files and return every path that remains. */
+function removeStateFilesForCleanup(
+  stateDirs: string[],
+  failedCAStateDirs: Set<string>,
+  preserveProxyRuntime: boolean
+): string[] {
+  const failures = new Set<string>();
+  for (const stateDir of stateDirs) {
+    const removed = removePortlessStateFiles(stateDir, {
+      preserveCAIdentity:
+        preserveProxyRuntime || shouldPreserveCAIdentity(stateDir, failedCAStateDirs),
+      preserveProxyRuntime,
+    });
+    for (const file of removed) failures.add(file);
+  }
+  return [...failures];
+}
+
+/** Run the given cleanup steps against the state directories and report what is left. */
+function runCleanupSteps(
+  steps: readonly CleanupStep[],
+  stateDirs: string[],
+  preserveProxyRuntime: boolean
+) {
+  const caResults = steps.includes("ca")
+    ? attemptCATrustRemovalForCleanup(stateDirs, untrustCA)
+    : new Map<string, CATrustRemovalResult>();
+  const failedCAStateDirs = new Set(
+    [...caResults].filter(([, result]) => !result.removed).map(([stateDir]) => stateDir)
+  );
+  const stateFailures = steps.includes("files")
+    ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime)
+    : [];
+  const hostsCleaned = !steps.includes("hosts") || cleanHostsFile();
+  return { caResults, failedCAStateDirs, stateFailures, hostsCleaned };
+}
+
+/**
+ * Retry only the failed privileged cleanup steps under sudo. The elevated
+ * process receives the exact approved state directories and runs the internal
+ * allowlist instead of the full clean command.
+ */
+function runElevatedCleanup(
+  steps: CleanupStep[],
+  stateDirs: string[],
+  preserveProxyRuntime: boolean
+): number | null {
+  if (steps.length === 0) return 0;
+  const labels = steps.map(cleanupStepLabel).join(", ");
+  console.log(colors.yellow(`Cleanup needs elevated privileges. Requesting sudo for ${labels}...`));
+  const home = process.env.HOME;
+  const result = spawnSync(
+    "sudo",
+    [
+      "env",
+      ...(home ? [`HOME=${home}`] : []),
+      `${CLEAN_ELEVATED_STEPS_ENV}=${steps.join(",")}`,
+      `${CLEAN_ELEVATED_DIRS_ENV}=${JSON.stringify(stateDirs)}`,
+      ...(preserveProxyRuntime ? [`${CLEAN_ELEVATED_PRESERVE_PROXY_ENV}=1`] : []),
+      process.execPath,
+      getEntryScript(),
+      "clean",
+      "--yes",
+    ],
+    { stdio: "inherit", timeout: SUDO_SPAWN_TIMEOUT_MS }
+  );
+  if (result.error) {
+    console.error(colors.red(`Could not run sudo: ${result.error.message}`));
+    return null;
+  }
+  return result.status;
+}
+
 function printCleanHelp(): void {
   console.log(`
 ${colors.bold("portless clean")} - Remove portless artifacts from this machine.
@@ -2466,20 +2871,78 @@ Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
 fails, the CA certificate and key are retained so clean can safely retry.
 
-macOS/Linux may prompt for sudo when the proxy, trust store, or ${HOSTS_DISPLAY}
-require elevated privileges. On Windows, run as Administrator if needed.
+On macOS and Linux, a state directory that another user owns or can write to
+is left alone. Clean prints the reason and exits nonzero. A /tmp/portless
+directory that fails the check is skipped without an error.
+
+On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
+or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
+steps against the same allowlisted state directories. If the proxy cannot be
+confirmed stopped, its PID, port, runtime marker files, and CA files are kept
+and the CA stays trusted. On Windows, run as Administrator if needed.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless clean")}
 
 ${colors.bold("Options:")}
+  --yes, -y              Confirm cleanup without prompting
   --help, -h             Show this help
 `);
 }
 
 async function handleClean(args: string[]): Promise<void> {
-  parseCommandArgs("clean", args.slice(1), {}, 0);
+  const parsed = parseCommandArgs(
+    "clean",
+    args.slice(1),
+    { "--yes": "boolean", "-y": "boolean" },
+    0
+  );
 
+  const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
+  if (requestedCleanupSteps) {
+    if (!parsed.has("--yes") && !parsed.has("-y")) {
+      throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
+    }
+    const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
+    const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
+    const cleanableDirs = approvedDirs.filter(isCleanableStateDir);
+    const left = runCleanupSteps(requestedCleanupSteps, cleanableDirs, preserveProxyRuntime);
+    const clean =
+      cleanableDirs.length === approvedDirs.length &&
+      left.failedCAStateDirs.size === 0 &&
+      left.stateFailures.length === 0 &&
+      left.hostsCleaned;
+    process.exitCode = clean ? 0 : 1;
+    return;
+  }
+
+  const collectedStateDirs = collectStateDirsForCleanupWithFailures();
+  const stateDirs = collectedStateDirs.dirs;
+  console.error("Clean will:");
+  console.error("  Stop the proxy");
+  console.error("  Remove the startup service if installed");
+  console.error("  Remove the CA from the trust store");
+  console.error(
+    `  Delete known state files in: ${stateDirs.join(", ") || "no existing state directories"}`
+  );
+  console.error(`  Remove the portless block from ${HOSTS_DISPLAY}`);
+  for (const failed of collectedStateDirs.failures) {
+    const reason = explainUnsafeStateDir(failed) ?? "it cannot be resolved";
+    console.error(colors.yellow(`  Leave ${failed} alone: ${reason}`));
+  }
+
+  if (!parsed.has("--yes") && !parsed.has("-y")) {
+    if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.CI) {
+      throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
+    }
+    const answer = await prompt("Continue? [y/N] ");
+    if (answer !== "y" && answer !== "yes") {
+      console.error("Clean canceled.");
+      process.exit(1);
+    }
+  }
+
+  let problems = collectedStateDirs.failures.length;
   const serviceResult = tryUninstallService(getEntryScript());
   if (serviceResult.removed) {
     console.log(colors.green("Removed startup service."));
@@ -2498,6 +2961,7 @@ async function handleClean(args: string[]): Promise<void> {
       process.exit(1);
     }
     console.warn(colors.yellow(message));
+    problems++;
   }
 
   console.log(colors.cyan("Stopping proxy if it is running..."));
@@ -2505,12 +2969,20 @@ async function handleClean(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  await stopProxy(store, port, tls);
+  let proxyStopped = await stopProxy(store, port, tls);
+  if (!proxyStopped) {
+    problems++;
+  } else if (await isProxyRunning(port, tls)) {
+    console.error(colors.red(`Proxy is still running on port ${port}. Stop it and retry clean.`));
+    proxyStopped = false;
+    problems++;
+  }
+  const preserveProxyRuntime = !proxyStopped;
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
   let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
   try {
-    routesForClean = store.loadRoutesRaw();
+    routesForClean = store.untrustedReason() ? [] : store.loadRoutesRaw();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
@@ -2524,66 +2996,117 @@ async function handleClean(args: string[]): Promise<void> {
         // Tailscale may not be installed; non-fatal
       }
     }
-    for (const t of stopRecordedTunnels(route)) {
+    for (const t of stopRecordedTunnels(route, true)) {
       console.log(colors.green(`Stopped ${t.label} tunnel for ${route.hostname}.`));
     }
   }
 
-  const stateDirs = collectStateDirsForCleanup();
-  const failedCAStateDirs = new Set<string>();
-  const caRemovalResults = attemptCATrustRemovalForCleanup(stateDirs, untrustCA);
+  if (!proxyStopped) {
+    console.warn(colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed."));
+  }
+  const outcome = runCleanupSteps(
+    proxyStopped ? CLEANUP_STEP_ORDER : ["files", "hosts"],
+    stateDirs,
+    preserveProxyRuntime
+  );
+  const { caResults: caRemovalResults, failedCAStateDirs } = outcome;
+  let { stateFailures, hostsCleaned } = outcome;
+
+  const retrySteps: CleanupStep[] = [];
+  if (failedCAStateDirs.size > 0) retrySteps.push("ca");
+  if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
+  if (!hostsCleaned) retrySteps.push("hosts");
+  if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
+    const elevatedStatus = runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
+    if (elevatedStatus === 0) {
+      failedCAStateDirs.clear();
+      if (retrySteps.includes("files")) stateFailures = [];
+      if (retrySteps.includes("hosts")) hostsCleaned = true;
+    } else {
+      for (const stateDir of [...failedCAStateDirs]) {
+        if (
+          canInspectStateDir(stateDir) &&
+          !isCATrustRefreshPending(stateDir) &&
+          !isCATrusted(stateDir)
+        ) {
+          failedCAStateDirs.delete(stateDir);
+        }
+      }
+      if (retrySteps.includes("ca") || retrySteps.includes("files")) {
+        stateFailures = removeStateFilesForCleanup(
+          stateDirs,
+          failedCAStateDirs,
+          preserveProxyRuntime
+        );
+      }
+      if (!hostsCleaned) hostsCleaned = cleanHostsFile();
+    }
+  }
+
   for (const [stateDir, untrustResult] of caRemovalResults) {
-    if (untrustResult.removed) {
+    if (!failedCAStateDirs.has(stateDir)) {
       console.log(colors.green("Removed local CA from the system trust store."));
     } else {
-      failedCAStateDirs.add(stateDir);
+      problems++;
       console.warn(
         colors.yellow(
           `Could not remove CA from trust store: ${untrustResult.error ?? "unknown error"}\n` +
-            `Try: sudo portless clean (Linux), or delete the certificate manually.`
+            `Delete the certificate manually, then rerun clean.`
         )
       );
     }
   }
 
-  for (const stateDir of stateDirs) {
-    removePortlessStateFiles(stateDir, {
-      preserveCAIdentity: failedCAStateDirs.has(stateDir),
-    });
+  for (const file of stateFailures) {
+    console.warn(colors.yellow(`Could not remove state file: ${file}`));
   }
-  console.log(colors.green("Removed portless state files from known state directories."));
+  problems += stateFailures.length;
+  if (stateFailures.length === 0) {
+    console.log(colors.green("Removed portless state files from known state directories."));
+  }
   if (failedCAStateDirs.size > 0) {
     console.warn(
       colors.yellow("Retained CA identity files so trust removal can be retried safely.")
     );
   }
 
-  if (cleanHostsFile()) {
+  if (hostsCleaned) {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
-  } else if (!isWindows && process.getuid?.() !== 0) {
-    if (!runCleanWithSudo(`Updating ${HOSTS_DISPLAY} requires elevated privileges.`)) {
-      console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
-      process.exit(1);
-    }
   } else {
     console.warn(
       colors.yellow(
         `Could not remove portless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
       )
     );
+    problems++;
   }
 
-  console.log(colors.green("Clean finished."));
+  if (problems > 0) {
+    console.error(`Clean finished with ${problems} problem(s).`);
+    process.exitCode = 1;
+  } else {
+    console.log(colors.green("Clean finished."));
+  }
 }
 
 function printPruneHelp(): void {
   console.log(`
-${colors.bold("portless prune")} - Kill orphaned dev servers left behind by crashed portless sessions.
+${colors.bold("portless prune")} - Clean up routes left by crashed portless sessions.
 
-When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
-may survive and continue holding their ports. This command finds those orphans
-by checking routes whose owning CLI process is dead but whose port is still in
-use, then terminates them and cleans up the stale route entries.
+Finds routes whose owning portless process is gone, including groups kept from
+an earlier run. On macOS and Linux, it signals the recorded dev server process
+group only if its leader matches, or a previously recorded surviving member
+matches on retry, and reports the group stopped only after every member has
+exited. A group that outlives the signal keeps its route and shares even after
+it closes its port, and the member that survived is recorded so a retry with
+--force can stop it. A group that cannot be verified is reported and kept,
+never signaled, except that a member holding its port while the recorded
+leader is gone is recorded so --force can retry it. Stale routes and their
+Tailscale and tunnel shares are removed only once the recorded group is gone. A
+port holder that cannot be proven part of the recorded group is reported and
+kept, never killed. On Windows, process groups cannot be verified or signaled.
+Recorded ngrok and cloudflared tunnels are stopped only when their executable
+names match, including on Windows.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2605,67 +3128,105 @@ async function handlePrune(args: string[]): Promise<void> {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  const stale = store.pruneStaleRoutes();
+  const unsafe = store.untrustedReason();
+  if (unsafe) {
+    console.error(colors.red(`Cannot prune routes recorded in ${dir}: ${unsafe}`));
+    console.error(colors.blue("Nothing was signaled."));
+    process.exit(1);
+  }
+
+  const stale = store.findStaleRoutes();
   if (stale.length === 0) {
     console.log("No orphaned routes found.");
     return;
   }
+  const liveTailscalePorts = new Set(
+    store
+      .loadRoutes()
+      .flatMap((route) =>
+        route.tailscaleHttpsPort === undefined ? [] : [route.tailscaleHttpsPort]
+      )
+  );
 
+  let pruned = 0;
+  let skipped = 0;
+  const signal = forceKill ? "SIGKILL" : "SIGTERM";
+  const stops = await stopRecordedGroups(stale, signal);
   for (const route of stale) {
-    if (route.tailscaleHttpsPort) {
+    const pgid = route.childPgid;
+    const stop = pgid === undefined ? undefined : stops.get(pgid);
+    if (stop?.state === "survived") {
+      if (stop.survivor) store.recordStaleOrphan(route, stop.survivor.pid, stop.survivor.startTime);
+      skipped++;
+      console.log(
+        `  ${route.hostname} :${route.port} - process group ${pgid} did not exit${
+          forceKill
+            ? " after SIGKILL; route kept"
+            : "; route kept. Retry with portless prune --force"
+        }`
+      );
+      continue;
+    }
+    if (stop?.state === "unverified") {
+      const leaderGone = pgid !== undefined && !isPidAlive(pgid);
+      const holder = leaderGone
+        ? findPidsOnPort(route.port).find((pid) => getProcessGroupId(pid) === pgid)
+        : undefined;
+      const holderStartTime = holder === undefined ? null : getProcessStartTime(holder);
+      const recorded =
+        holder !== undefined &&
+        holderStartTime !== null &&
+        store.recordStaleOrphan(route, holder, holderStartTime);
+      skipped++;
+      console.log(
+        recorded
+          ? `  ${route.hostname} :${route.port} - process group ${pgid} outlived its leader; route kept and process ${holder} recorded. Retry with portless prune --force`
+          : `  ${route.hostname} :${route.port} - process group ${pgid} could not be verified; route kept and nothing was killed`
+      );
+      continue;
+    }
+    const holders = findPidsOnPort(route.port);
+    const held = holders.length > 0 || (await isPortListening(route.port));
+    if (!store.removeStaleRoute(route.hostname, route.pid)) {
+      console.log(
+        `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
+      );
+      skipped++;
+      continue;
+    }
+    pruned++;
+    const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
+    console.log(
+      `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
+    );
+    if (route.tailscaleHttpsPort && !liveTailscalePorts.has(route.tailscaleHttpsPort)) {
       try {
         unregisterTailscale(route);
         console.log(
           `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
         );
       } catch {
-        // Tailscale CLI may not be installed; non-fatal during prune
+        console.warn(colors.yellow(`  ${route.hostname} - could not remove tailscale serve`));
       }
     }
-    for (const t of stopRecordedTunnels(route)) {
+    for (const t of stopRecordedTunnels(route, true)) {
       console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
   }
 
   let killed = 0;
-  const signal = forceKill ? "SIGKILL" : "SIGTERM";
-  const killedGroups = new Set<number>();
-  for (const route of stale) {
-    const pgid = route.childPgid;
-    if (
-      pgid &&
-      !killedGroups.has(pgid) &&
-      killOrphanedProcessGroup(pgid, route.childStartTime, signal)
-    ) {
-      killedGroups.add(pgid);
-      killed++;
-      console.log(`  ${route.hostname} - killed process group ${pgid} (${signal})`);
-    }
+  for (const [pgid, stop] of stops) {
+    if (stop.state !== "stopped" || !stop.signaled) continue;
+    killed++;
+    console.log(`  killed process group ${pgid} (${signal})`);
   }
-
-  for (const route of stale) {
-    if (route.childPgid && killedGroups.has(route.childPgid)) continue;
-    const pids = findPidsOnPort(route.port);
-    if (pids.length === 0) {
-      console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
-      continue;
-    }
-    for (const pid of pids) {
-      try {
-        process.kill(pid, signal);
-        killed++;
-        console.log(`  ${route.hostname} :${route.port} - killed PID ${pid} (${signal})`);
-      } catch {
-        console.log(`  ${route.hostname} :${route.port} - PID ${pid} already exited`);
-      }
-    }
-  }
-
-  const routeWord = stale.length === 1 ? "route" : "routes";
+  const routeWord = pruned === 1 ? "route" : "routes";
   const procWord = killed === 1 ? "process" : "processes";
+  const skippedSummary =
+    skipped === 0 ? "" : `, skipped ${skipped} ${skipped === 1 ? "route" : "routes"}`;
   console.log(
     colors.green(
-      `\nPruned ${stale.length} stale ${routeWord}, killed ${killed} orphaned ${procWord}.`
+      `\nPruned ${pruned} stale ${routeWord}, killed ${killed} orphaned ${procWord}${skippedSummary}.`
     )
   );
 }
@@ -2940,22 +3501,7 @@ async function handleHosts(args: string[]): Promise<void> {
       return;
     }
 
-    if (!isWindows && process.getuid?.() !== 0) {
-      console.log(
-        colors.yellow(
-          `Writing to ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`
-        )
-      );
-      const result = spawnSync(
-        "sudo",
-        ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
-        {
-          stdio: "inherit",
-          timeout: SUDO_SPAWN_TIMEOUT_MS,
-        }
-      );
-      if (result.status === 0) return;
-    }
+    if (!isWindows && process.getuid?.() !== 0 && runHostsCleanWithSudo()) return;
 
     console.error(
       colors.red(`Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`)
@@ -2968,6 +3514,12 @@ async function handleHosts(args: string[]): Promise<void> {
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+
+  const unsafe = store.untrustedReason();
+  if (unsafe) {
+    console.error(colors.red(`Cannot sync hosts from routes recorded in ${dir}: ${unsafe}`));
+    process.exit(1);
+  }
 
   const routes = store.loadRoutes();
   const hostnames = routes.map((r) => r.hostname);
@@ -3440,6 +3992,15 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
+${colors.bold("Stop:")}
+  Signals the recorded proxy only when nothing shows it is a different
+  process from the one answering on the proxy port, and never from a state
+  directory another user owns or can write to.
+
+${colors.bold("State directory:")}
+  As root, the proxy exits instead of running on a state directory another
+  user owns, can write to, or can redirect.
+
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
   LAN mode explicitly binds the proxy to 0.0.0.0 and ::.
@@ -3483,13 +4044,13 @@ async function handleProxy(args: string[]): Promise<void> {
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(colors.yellow(msg)),
       });
-      await stopProxy(store, explicitPort, false);
+      if (!(await stopProxy(store, explicitPort, false))) process.exitCode = 1;
     } else {
       const { dir, port, tls } = await discoverState();
       const store = new RouteStore(dir, {
         onWarning: (msg) => console.warn(colors.yellow(msg)),
       });
-      await stopProxy(store, port, tls);
+      if (!(await stopProxy(store, port, tls))) process.exitCode = 1;
     }
     return;
   }
@@ -3798,6 +4359,7 @@ async function handleProxy(args: string[]): Promise<void> {
     console.log(
       colors.yellow(`Port ${proxyPort} requires elevated privileges. Requesting sudo...`)
     );
+    if (fs.existsSync(store.dir)) store.ensureDir();
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -5189,6 +5751,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
 
   const project = source.name;
   const files = composeStatePaths(dir, project);
+  store.ensureDir();
   fs.mkdirSync(path.dirname(files.model), { recursive: true });
   fixOwnership(path.dirname(files.model));
   assertUniqueProjectLabel(dir, project);

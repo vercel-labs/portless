@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
+import { explainUnsafeStateDir, isCleanableStateDir } from "./utils.js";
 
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
@@ -9,6 +10,8 @@ const PORTLESS_STATE_FILES = [
   "routes.lock",
   "proxy.pid",
   "proxy.port",
+  "proxy.start",
+  "proxy.start.tmp",
   "proxy.log",
   "proxy.tls",
   "proxy.custom-cert",
@@ -31,9 +34,24 @@ const PORTLESS_STATE_FILES = [
 
 const HOST_CERTS_DIR = "host-certs";
 const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem", "ca.trust-refresh-pending"]);
+const PROXY_RUNTIME_FILES = new Set([
+  "proxy.pid",
+  "proxy.port",
+  "proxy.start",
+  "proxy.start.tmp",
+  "proxy.log",
+  "proxy.hosts-sync-token",
+  "proxy.hosts-sync-token.tmp",
+  "proxy.tls",
+  "proxy.custom-cert",
+  "proxy.tld",
+  "proxy.tlds",
+  "proxy.lan",
+]);
 
 export type RemovePortlessStateFilesOptions = {
   preserveCAIdentity?: boolean;
+  preserveProxyRuntime?: boolean;
 };
 
 export type CATrustRemovalResult = {
@@ -41,22 +59,41 @@ export type CATrustRemovalResult = {
   error?: string;
 };
 
+export type CollectedStateDirs = {
+  dirs: string[];
+  failures: string[];
+};
+
 /**
- * Unique existing state directories to consider for cleanup: user dir, system
- * dir, and PORTLESS_STATE_DIR when set.
+ * Canonicalize configured state directories and report invalid paths.
+ * Skip legacy system directories that are symlinked or owned by another user.
  */
-export function collectStateDirsForCleanup(): string[] {
+export function collectStateDirsForCleanupWithFailures(): CollectedStateDirs {
   const dirs = new Set<string>();
-  const add = (d: string | undefined) => {
+  const failures = new Set<string>();
+  const add = (d: string | undefined, allowSymlink = true) => {
     const trimmed = d?.trim();
     if (!trimmed) return;
     const resolved = path.resolve(trimmed);
-    if (fs.existsSync(resolved)) dirs.add(resolved);
+    if (!allowSymlink && !isCleanableStateDir(resolved)) return;
+    let canonical: string;
+    try {
+      canonical = fs.realpathSync(resolved);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      failures.add(resolved);
+      return;
+    }
+    if (explainUnsafeStateDir(resolved) !== null) {
+      if (allowSymlink) failures.add(resolved);
+      return;
+    }
+    dirs.add(canonical);
   };
   add(USER_STATE_DIR);
-  add(LEGACY_SYSTEM_STATE_DIR);
+  add(LEGACY_SYSTEM_STATE_DIR, false);
   add(process.env.PORTLESS_STATE_DIR);
-  return [...dirs];
+  return { dirs: [...dirs], failures: [...failures] };
 }
 
 /** Attempt CA trust removal wherever cleanup finds a CA certificate. */
@@ -66,7 +103,26 @@ export function attemptCATrustRemovalForCleanup(
 ): Map<string, CATrustRemovalResult> {
   const results = new Map<string, CATrustRemovalResult>();
   for (const stateDir of stateDirs) {
-    if (!fs.existsSync(path.join(stateDir, "ca.pem"))) continue;
+    if (!isCleanableStateDir(stateDir)) continue;
+    try {
+      const caPath = path.join(stateDir, "ca.pem");
+      if (fs.lstatSync(caPath).isSymbolicLink()) {
+        results.set(stateDir, {
+          removed: false,
+          error: "Could not inspect CA certificate: refusing symlinked ca.pem",
+        });
+        continue;
+      }
+      fs.statSync(caPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      const message = error instanceof Error ? error.message : String(error);
+      results.set(stateDir, {
+        removed: false,
+        error: `Could not inspect CA certificate: ${message}`,
+      });
+      continue;
+    }
     results.set(stateDir, untrust(stateDir));
   }
   return results;
@@ -79,18 +135,35 @@ export function attemptCATrustRemovalForCleanup(
 export function removePortlessStateFiles(
   dir: string,
   options: RemovePortlessStateFilesOptions = {}
-): void {
+): string[] {
+  try {
+    fs.lstatSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [dir];
+  }
+  if (!isCleanableStateDir(dir)) return [dir];
+
+  const failures: string[] = [];
   for (const f of PORTLESS_STATE_FILES) {
     if (options.preserveCAIdentity && CA_IDENTITY_FILES.has(f)) continue;
+    if (options.preserveProxyRuntime && PROXY_RUNTIME_FILES.has(f)) continue;
+    const file = path.join(dir, f);
     try {
-      fs.unlinkSync(path.join(dir, f));
-    } catch {
-      // ENOENT or permission; non-fatal
+      if (f === "routes.lock") fs.rmSync(file, { recursive: true, force: true });
+      else fs.unlinkSync(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(file);
     }
   }
+  if (options.preserveProxyRuntime) return failures;
+  const hostCerts = path.join(dir, HOST_CERTS_DIR);
   try {
-    fs.rmSync(path.join(dir, HOST_CERTS_DIR), { recursive: true, force: true });
-  } catch {
-    // non-fatal
+    const stat = fs.lstatSync(hostCerts);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) fs.unlinkSync(hostCerts);
+    else fs.rmSync(hostCerts, { recursive: true, force: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(hostCerts);
   }
+  return failures;
 }
