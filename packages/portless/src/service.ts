@@ -1260,7 +1260,7 @@ export async function handleService(
   const action = args[1];
   const runner = options.runner || defaultRunner;
 
-  if (!action || action === "--help" || action === "-h") {
+  if (!action) {
     printServiceHelp();
     process.exit(0);
   }

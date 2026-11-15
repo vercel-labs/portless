@@ -471,11 +471,14 @@ Tools accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments, except `tools
 PORTLESS=0 pnpm dev
 ```
 
-Runs the command directly without the proxy.
+Runs the command directly without the proxy. Commands such as `portless get` and `portless list` still run normally.
 
 ## Info
 
 ```bash
 portless --help
+portless list --help
 portless --version
 ```
+
+`--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command: `portless run next dev --help` passes `--help` to Next.js. A misspelled command such as `portless lsit` suggests the closest match.
