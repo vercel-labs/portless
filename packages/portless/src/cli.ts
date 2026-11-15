@@ -2825,6 +2825,10 @@ async function handleAlias(args: string[]): Promise<void> {
   }
   if (!isRemove && !aliasName) throw new UsageError("Missing alias name.", usageHints);
   if (!isRemove && !aliasPortValue) throw new UsageError("Missing port.", usageHints);
+  const removeValues = parsed.values("--remove");
+  if (removeValues.length > 1) {
+    throw new UsageError("--remove may be specified only once.", ["See: portless alias --help"]);
+  }
   const upstreamValues = parsed.values("--upstream");
   if (upstreamValues.length > 1) {
     throw new UsageError("--upstream may be specified only once.", ["See: portless alias --help"]);
@@ -5066,7 +5070,7 @@ async function handleCompose(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  if (isPortlessSkipped()) process.exit(await spawnDockerCompose(composeArgs).exited);
+  if (isPortlessSkipped()) process.exit(await spawnDockerCompose(dockerArgs).exited);
 
   if (!globalHelp) assertComposeGlobals(globals);
 
@@ -5411,6 +5415,7 @@ async function main() {
     if (index >= limit) return limit;
     const mode = args[index];
     if (mode === "mcp") return index;
+    if (mode === "compose") return index;
     if (mode === "run") {
       index++;
       const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
