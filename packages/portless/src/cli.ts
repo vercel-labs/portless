@@ -4495,8 +4495,9 @@ async function handleDefaultMode(
 }
 
 /**
- * Forward arguments through a package script, adding the `--` separators any
- * nested wrappers or delegated scripts consume and rejecting compound scripts.
+ * Forward arguments through a package script, adding the `--` separators that
+ * nested wrappers, delegated scripts, and Turbo consume, and rejecting
+ * compound scripts.
  */
 function forwardScriptExtraArgs(
   scriptName: string,
@@ -4504,13 +4505,15 @@ function forwardScriptExtraArgs(
   extraArgs: readonly string[]
 ): string[] {
   if (extraArgs.length === 0) return [];
-  const forwarding = resolveScriptArgForwarding(scriptName, packageDir);
+  const turbo = resolveTurboRootForwarding(scriptName, packageDir);
+  const forwarding =
+    turbo.kind === "forward" ? turbo : resolveScriptArgForwarding(scriptName, packageDir);
   if (forwarding.kind === "unsafe") {
     const forwarded = extraArgs.join(" ");
     throw new UsageError(
       `Cannot forward arguments through the "${forwarding.scriptName}" script. It has shell operators or a comment.`,
       [
-        `Run the command directly: portless run <command> -- ${forwarded}`,
+        `Run the command directly: portless run <command> ${forwarded}`,
         `Or change the "${forwarding.scriptName}" script to a single command.`,
       ]
     );
@@ -4518,7 +4521,7 @@ function forwardScriptExtraArgs(
   if (forwarding.kind === "too-deep") {
     throw new UsageError(
       `Cannot forward arguments through the "${scriptName}" script. It runs through too many package scripts, or the scripts call each other in a loop.`,
-      [`Run the command directly: portless run <command> -- ${extraArgs.join(" ")}`]
+      [`Run the command directly: portless run <command> ${extraArgs.join(" ")}`]
     );
   }
   const separators = forwarding.kind === "forward" ? forwarding.separators : 0;
@@ -4800,7 +4803,7 @@ async function handleDefaultMulti(
             `  Change the root "${scriptName}" script to a single command, such as "turbo ${scriptName}".`,
           ]
         : [
-            `  Run the command directly: portless run <command> -- ${forwarded}`,
+            `  Run the command directly: portless run <command> ${forwarded}`,
             `  Or change the root "${scriptName}" script to a single command.`,
           ];
       throw new UsageError(

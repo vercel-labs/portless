@@ -6904,6 +6904,45 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
+      "passes arguments through a root Turbo script when PORTLESS=0 skips portless",
+      () => {
+        const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-skip-"));
+        const binDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-skip-bin-"));
+        const log = path.join(root, "turbo.log");
+
+        try {
+          fs.writeFileSync(
+            path.join(root, "package.json"),
+            JSON.stringify({
+              name: "args-turbo-skip",
+              private: true,
+              packageManager: "npm@10.0.0",
+              scripts: { dev: "turbo dev" },
+            })
+          );
+          fs.writeFileSync(
+            path.join(binDir, "turbo"),
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\nexit 0\n',
+            { mode: 0o755 }
+          );
+
+          const env = childEnv(log, {
+            PORTLESS: "0",
+            STUB_LOG: log,
+            PATH: [binDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+          });
+          const result = spawnCli(root, env, ["--", "--marker", "one"]);
+          expect(result.status, result.output).toBe(0);
+          expect(fs.readFileSync(log, "utf-8").trim()).toBe("dev -- --marker one");
+        } finally {
+          fs.rmSync(root, { recursive: true, force: true });
+          fs.rmSync(binDir, { recursive: true, force: true });
+        }
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
       "passes arguments through wrapped Turbo root scripts",
       () => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-args-turbo-wrap-"));
@@ -7152,7 +7191,7 @@ describe("CLI", { timeout: 15_000 }, () => {
               "turbo dev # note",
               'Change the root "dev" script to a single command, such as "turbo dev"',
             ],
-            ["node mark-root.cjs && node mark-root.cjs", "portless run <command> -- --marker one"],
+            ["node mark-root.cjs && node mark-root.cjs", "portless run <command> --marker one"],
           ]) {
             writeDev(dev);
             fs.rmSync(markFile, { force: true });
