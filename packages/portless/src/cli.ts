@@ -724,9 +724,7 @@ function keepsStaleRecordAfterRecovery(route: RouteMapping): boolean {
  */
 async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
   if (store.untrustedReason()) return;
-  const orphaned = store
-    .loadRoutesRaw()
-    .filter((route) => route.pid !== 0 && !isPidAlive(route.pid));
+  const orphaned = store.findStaleRoutes();
   const stops = await stopRecordedGroups(orphaned, "SIGTERM");
   for (const route of orphaned) {
     const pgid = route.childPgid;
