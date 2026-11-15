@@ -2321,6 +2321,41 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
 
     it.skipIf(process.platform === "win32")(
+      "leaves --ip= and --script= after a compose subcommand for docker",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-run-flags-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(
+            docker,
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\necho "docker $*"\nexit 7\n',
+            { mode: 0o755 }
+          );
+          const env = { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: undefined };
+          for (const [args, expected] of [
+            [
+              ["compose", "run", "web", "node", "s.js", "--script=x"],
+              "compose run web node s.js --script=x",
+            ],
+            [
+              ["compose", "run", "web", "node", "s.js", "--ip=127.0.0.1"],
+              "compose run web node s.js --ip=127.0.0.1",
+            ],
+          ] as const) {
+            fs.rmSync(log, { force: true });
+            const { status, stdout } = run([...args], { env });
+            expect(status).toBe(7);
+            expect(stdout).toContain(`docker ${expected}`);
+            expect(fs.readFileSync(log, "utf-8").trim()).toBe(expected);
+          }
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
       "keeps the wrapper's -- off the docker down command",
       () => {
         const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-down-sep-"));
@@ -2368,6 +2403,30 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the wrapper's -- off the docker command when PORTLESS=0",
+      () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-compose-bypass-sep-"));
+        const log = path.join(tmpDir, "docker.log");
+        try {
+          const docker = path.join(tmpDir, "docker");
+          fs.writeFileSync(
+            docker,
+            '#!/bin/sh\nprintf "%s\\n" "$*" >> "$STUB_LOG"\necho "docker $*"\nexit 9\n',
+            { mode: 0o755 }
+          );
+          const { status, stdout } = run(["compose", "--", "version"], {
+            env: { PATH: `${tmpDir}:${process.env.PATH}`, STUB_LOG: log, PORTLESS: "0" },
+          });
+          expect(status).toBe(9);
+          expect(stdout).toContain("docker compose version");
+          expect(fs.readFileSync(log, "utf-8").trim()).toBe("compose version");
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
   });
 
   describe("prune", () => {
@@ -2795,6 +2854,39 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("named mode help", () => {
+    it.each(["--help", "-h"])(
+      "prints run help for named mode %s without running anything",
+      (flag) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-named-help-"));
+        try {
+          const bin = path.join(tmpDir, "bin");
+          const home = path.join(tmpDir, "home");
+          const state = path.join(tmpDir, "state");
+          fs.mkdirSync(bin);
+          fs.mkdirSync(home);
+          fs.mkdirSync(state);
+          const { status, stdout, stderr } = run(["myapp", flag], {
+            cwd: tmpDir,
+            env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
+          });
+          expect(status).toBe(0);
+          expect(stdout).toBe(run(["run", "--help"], { env: { PORTLESS: undefined } }).stdout);
+          expect(stderr).toBe("");
+          expect(fs.readdirSync(state)).toEqual([]);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.each(["--help", "-h"])("passes %s after the named command to the child", (flag) => {
+      const { status, args } = captureBypassedExpo(["myapp", "expo", "start", flag]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", flag]);
+    });
+  });
+
   describe("--app-port flag", () => {
     it("passes --app-port through in bypass mode (PORTLESS=0)", () => {
       const { status, stdout } = run(["run", "--app-port", "4567", "echo", "ok"], {
@@ -2944,6 +3036,12 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["alias", "--remove"]);
       expect(status).toBe(2);
       expect(stderr).toContain("--remove requires a value");
+    });
+
+    it("rejects a repeated --remove", () => {
+      const { status, stderr } = run(["alias", "--remove", "a", "--remove", "b"]);
+      expect(status).toBe(2);
+      expect(stderr).toContain("--remove may be specified only once.");
     });
 
     it("prints help without registering a route when --help follows the arguments", () => {

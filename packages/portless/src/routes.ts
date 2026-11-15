@@ -329,14 +329,14 @@ export class RouteStore {
       throw new RoutesFileError(
         file,
         "corrupt",
-        `Corrupted routes file (invalid JSON): ${file}. Move it aside or run portless clean.`
+        `Corrupted routes file (invalid JSON): ${file}. Move it aside.`
       );
     }
     if (!Array.isArray(parsed)) {
       throw new RoutesFileError(
         file,
         "corrupt",
-        `Corrupted routes file (expected array): ${file}. Move it aside or run portless clean.`
+        `Corrupted routes file (expected array): ${file}. Move it aside.`
       );
     }
     const routes = orderActiveFirst(parsed.filter(isValidRoute));
