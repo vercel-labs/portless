@@ -1013,6 +1013,7 @@ function isTargetMissing(result: CommandResult): boolean {
 function runRemovalStep(runner: CommandRunner, command: string, args: string[]): void {
   const result = runner(command, args);
   if (result.status !== 0 && !isTargetMissing(result)) {
+    if (result.error) throw result.error;
     throw new Error(commandFailure(result, command));
   }
 }

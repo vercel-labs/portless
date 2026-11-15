@@ -2260,6 +2260,8 @@ const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--funnel": "boolean",
   "--ngrok": "boolean",
   "--cloudflare": "boolean",
+  "--help": "boolean",
+  "-h": "boolean",
 };
 
 function enableSharingFlag(flag: string): void {
@@ -2379,6 +2381,10 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   let appPort: number | undefined;
 
   const readFlag = (flag: string, value: string | undefined): void => {
+    if (flag === "--help" || flag === "-h") {
+      printRunHelp();
+      process.exit(0);
+    }
     if (flag === "--force") force = true;
     else if (flag === "--app-port") appPort = parseAppPort(value);
     else enableSharingFlag(flag);
@@ -2389,7 +2395,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   let commandArgs = afterLeading.slice(1);
 
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
-  if (commandArgs.length > 0 && commandArgs[0].startsWith("--")) {
+  if (commandArgs.length > 0 && (commandArgs[0].startsWith("--") || commandArgs[0] === "-h")) {
     commandArgs = visitLeadingFlags("", commandArgs, APP_FLAG_SPEC, readFlag);
   }
 
@@ -2442,7 +2448,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state and trust entry
-  ${colors.cyan("portless prune")}                   Kill orphaned dev servers
+  ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
@@ -2834,14 +2840,17 @@ async function handleClean(args: string[]): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
+    problems++;
   }
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
         console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
-      } catch {
-        // Tailscale may not be installed; non-fatal
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(message));
+        problems++;
       }
     }
     for (const t of stopRecordedTunnels(route, true)) {
@@ -3237,6 +3246,10 @@ async function handleAlias(args: string[]): Promise<void> {
   }
   if (!isRemove && !aliasName) throw new UsageError("Missing alias name.", usageHints);
   if (!isRemove && !aliasPortValue) throw new UsageError("Missing port.", usageHints);
+  const removeValues = parsed.values("--remove");
+  if (removeValues.length > 1) {
+    throw new UsageError("--remove may be specified only once.", ["See: portless alias --help"]);
+  }
   const upstreamValues = parsed.values("--upstream");
   if (upstreamValues.length > 1) {
     throw new UsageError("--upstream may be specified only once.", ["See: portless alias --help"]);
@@ -5569,7 +5582,7 @@ async function handleCompose(args: string[]): Promise<void> {
     process.exit(0);
   }
 
-  if (isPortlessSkipped()) process.exit(await spawnDockerCompose(composeArgs).exited);
+  if (isPortlessSkipped()) process.exit(await spawnDockerCompose(dockerArgs).exited);
 
   if (!globalHelp) assertComposeGlobals(globals);
 
@@ -5915,6 +5928,7 @@ async function main() {
     if (index >= limit) return limit;
     const mode = args[index];
     if (mode === "mcp") return index;
+    if (mode === "compose") return index;
     if (mode === "run") {
       index++;
       const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
