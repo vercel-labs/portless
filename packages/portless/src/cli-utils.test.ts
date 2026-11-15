@@ -2130,6 +2130,7 @@ describe("resolveScriptArgForwarding", () => {
   it.each([
     ["node server.js", {}, undefined, 0],
     ["npm run start", { start: "node server.js" }, "npm@10.0.0", 1],
+    ["npm run --silent start", { start: "node server.js" }, "npm@10.0.0", 1],
     ["npm run start --", { start: "node server.js" }, "npm@10.0.0", 0],
     ["npm run mid", { mid: "npm run start", start: "node server.js" }, "npm@10.0.0", 2],
     ["pnpm run start", { start: "node server.js" }, "pnpm@11.1.3", 0],

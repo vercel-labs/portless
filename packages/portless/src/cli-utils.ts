@@ -2219,9 +2219,7 @@ function unwrapCommand(tokens: string[], packageDir: string): Unwrapped | null {
     const subcommand = spec.subcommands?.[command[options.index] ?? ""];
     if (subcommand) {
       wrapped = subcommand;
-      options = subcommand.script
-        ? { index: options.index + 1, separator: false }
-        : skipRunnerPrefix(command, options.index + 1, spec);
+      options = skipRunnerPrefix(command, options.index + 1, spec);
     } else if (spec.bare === false) {
       return { command, consumed, packageSpec, script };
     }
