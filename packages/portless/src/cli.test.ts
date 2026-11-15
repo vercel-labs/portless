@@ -1487,6 +1487,39 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("named mode help", () => {
+    it.each(["--help", "-h"])(
+      "prints run help for named mode %s without running anything",
+      (flag) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-named-help-"));
+        try {
+          const bin = path.join(tmpDir, "bin");
+          const home = path.join(tmpDir, "home");
+          const state = path.join(tmpDir, "state");
+          fs.mkdirSync(bin);
+          fs.mkdirSync(home);
+          fs.mkdirSync(state);
+          const { status, stdout, stderr } = run(["myapp", flag], {
+            cwd: tmpDir,
+            env: { PATH: bin, HOME: home, PORTLESS_STATE_DIR: state, PORTLESS: undefined },
+          });
+          expect(status).toBe(0);
+          expect(stdout).toBe(run(["run", "--help"], { env: { PORTLESS: undefined } }).stdout);
+          expect(stderr).toBe("");
+          expect(fs.readdirSync(state)).toEqual([]);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.each(["--help", "-h"])("passes %s after the named command to the child", (flag) => {
+      const { status, args } = captureBypassedExpo(["myapp", "expo", "start", flag]);
+      expect(status).toBe(0);
+      expect(args).toEqual(["start", flag]);
+    });
+  });
+
   describe("--app-port flag", () => {
     it("passes --app-port through in bypass mode (PORTLESS=0)", () => {
       const { status, stdout } = run(["run", "--app-port", "4567", "echo", "ok"], {

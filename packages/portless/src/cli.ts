@@ -1948,6 +1948,8 @@ const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--funnel": "boolean",
   "--ngrok": "boolean",
   "--cloudflare": "boolean",
+  "--help": "boolean",
+  "-h": "boolean",
 };
 
 function enableSharingFlag(flag: string): void {
@@ -2064,6 +2066,10 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   let appPort: number | undefined;
 
   const readFlag = (flag: string, value: string | undefined): void => {
+    if (flag === "--help" || flag === "-h") {
+      printRunHelp();
+      process.exit(0);
+    }
     if (flag === "--force") force = true;
     else if (flag === "--app-port") appPort = parseAppPort(value);
     else enableSharingFlag(flag);
@@ -2074,7 +2080,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   let commandArgs = afterLeading.slice(1);
 
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
-  if (commandArgs.length > 0 && commandArgs[0].startsWith("--")) {
+  if (commandArgs.length > 0 && (commandArgs[0].startsWith("--") || commandArgs[0] === "-h")) {
     commandArgs = visitLeadingFlags("", commandArgs, APP_FLAG_SPEC, readFlag);
   }
 
