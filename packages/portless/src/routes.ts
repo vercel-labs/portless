@@ -285,20 +285,10 @@ export class RouteStore {
   /**
    * Load the routes a caller should act on: entries whose portless process is
    * still alive, plus aliases. Stale entries stay in the file for `prune`.
-   * With `persistCleanup` the caller holds the lock and ordinary stale entries
-   * are dropped from disk, while records with recovery data are kept.
    */
-  loadRoutes(persistCleanup = false): RouteMapping[] {
+  loadRoutes(): RouteMapping[] {
     const routes = this.readRouteFile(this.routesPath);
-    const kept = retainStaleRecords(routes);
-    if (persistCleanup && kept.length !== routes.length) {
-      try {
-        this.saveRoutes(kept);
-      } catch {
-        // Write may fail (permissions); non-fatal
-      }
-    }
-    return kept.filter((route) => !isStaleRoute(route));
+    return routes.filter((route) => !isStaleRoute(route));
   }
 
   private withLock<T>(run: () => T): T {
@@ -505,11 +495,7 @@ export class RouteStore {
    * throws because it cannot be moved.
    */
   recoverCorruptRoutesFile(): boolean {
-    this.ensureDir();
-    if (!this.acquireLock()) {
-      throw new Error("Failed to acquire route lock");
-    }
-    try {
+    return this.withLock(() => {
       try {
         this.readRouteFile(this.routesPath);
         return false;
@@ -520,9 +506,7 @@ export class RouteStore {
         this.onWarning?.(`Moved corrupted routes file to ${backup}. Starting with no routes.`);
         return true;
       }
-    } finally {
-      this.releaseLock();
-    }
+    });
   }
 
   /**

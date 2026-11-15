@@ -3321,12 +3321,48 @@ describe("CLI", { timeout: 15_000 }, () => {
               NODE_OPTIONS: undefined,
             },
           });
-          expect(result.status, result.stderr).toBe(0);
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain("Could not read routes for tunnel cleanup");
           expect(fs.existsSync(path.join(stateDir, "routes.lock"))).toBe(false);
           expect(fs.existsSync(path.join(stateDir, "routes.json"))).toBe(false);
         } finally {
           fs.rmSync(tmpDir, { recursive: true, force: true });
         }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "reports a failure when a tailscale share cannot be removed",
+      async () => {
+        const bin = path.join(tmpDir, "bin");
+        fs.mkdirSync(bin);
+        fs.writeFileSync(
+          path.join(bin, "tailscale"),
+          '#!/bin/sh\necho "permission denied" >&2\nexit 1\n',
+          { mode: 0o755 }
+        );
+        fs.writeFileSync(
+          path.join(stateDir, "routes.json"),
+          JSON.stringify([
+            { hostname: "app.localhost", port: 4001, pid: 0, tailscaleHttpsPort: 8443 },
+          ])
+        );
+        const result = runWithHostsFileMock(["clean", "--yes"], {
+          content: "",
+          stateDir,
+          uid: 1000,
+          sudoStatus: 0,
+          extraEnv: {
+            HOME: home,
+            PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+            PORTLESS_PORT: String(await getFreePort()),
+            PORTLESS_HTTPS: "0",
+          },
+        });
+
+        expect(result.status, result.stderr).toBe(1);
+        expect(result.stderr).toContain("Failed to remove tailscale serve on port 8443");
+        expect(result.stderr).toContain("Clean finished with 1 problem(s).");
       }
     );
 
@@ -3461,13 +3497,23 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it.skipIf(process.platform === "win32")(
       "requests CA and files retry when an approved state dir cannot be inspected",
-      async () => {
+      async (ctx) => {
         fs.writeFileSync(path.join(stateDir, "ca.pem"), "certificate");
         fs.writeFileSync(path.join(stateDir, "ca-key.pem"), "private key");
         fs.writeFileSync(path.join(stateDir, "ca.trust-refresh-pending"), "1");
         fs.writeFileSync(path.join(stateDir, "routes.json"), "[]");
         fs.chmodSync(stateDir, 0o000);
         try {
+          let readable = true;
+          try {
+            fs.readdirSync(stateDir);
+          } catch {
+            readable = false;
+          }
+          if (readable) {
+            fs.chmodSync(stateDir, 0o700);
+            ctx.skip();
+          }
           const result = runWithHostsFileMock(["clean", "--yes"], {
             content: "",
             stateDir,

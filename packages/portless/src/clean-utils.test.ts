@@ -351,12 +351,22 @@ describe("attemptCATrustRemovalForCleanup", () => {
 
   it.skipIf(process.platform === "win32" || process.getuid?.() === 0)(
     "reports a real unreadable CA path on POSIX",
-    () => {
+    (ctx) => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-trust-denied-"));
       const untrust = vi.fn(() => ({ removed: true }));
       try {
         fs.writeFileSync(path.join(tmpDir, "ca.pem"), "certificate");
         fs.chmodSync(tmpDir, 0o000);
+        let readable = true;
+        try {
+          fs.readdirSync(tmpDir);
+        } catch {
+          readable = false;
+        }
+        if (readable) {
+          fs.chmodSync(tmpDir, 0o700);
+          ctx.skip();
+        }
 
         const results = attemptCATrustRemovalForCleanup([tmpDir], untrust);
 

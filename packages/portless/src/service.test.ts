@@ -555,7 +555,7 @@ describe("tryUninstallService", () => {
     const runner = vi.fn(() => {
       const err = new Error("spawn systemctl ENOENT") as NodeJS.ErrnoException;
       err.code = "ENOENT";
-      throw err;
+      return { status: null, error: err };
     });
 
     const result = tryUninstallService("/fake/cli.js", runner);

@@ -2448,7 +2448,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
   ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
-  ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
+  ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
@@ -2989,14 +2989,17 @@ async function handleClean(args: string[]): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
+    problems++;
   }
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
         console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
-      } catch {
-        // Tailscale may not be installed; non-fatal
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(message));
+        problems++;
       }
     }
     for (const t of stopRecordedTunnels(route, true)) {

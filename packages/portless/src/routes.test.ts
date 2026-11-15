@@ -235,7 +235,7 @@ describe("RouteStore", () => {
       expect(loaded[0].hostname).toBe("alive.localhost");
     });
 
-    it("does not persist cleanup when persistCleanup is false (default)", () => {
+    it("does not drop stale entries from disk when loading routes", () => {
       const deadPid = 999999;
       const routes = [
         { hostname: "alive.localhost", port: 4001, pid: process.pid },
@@ -248,22 +248,6 @@ describe("RouteStore", () => {
       // Re-read the file directly; stale entries should still be on disk
       const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(raw).toHaveLength(2);
-    });
-
-    it("persists cleaned-up routes when persistCleanup is true", () => {
-      const deadPid = 999999;
-      const routes = [
-        { hostname: "alive.localhost", port: 4001, pid: process.pid },
-        { hostname: "dead.localhost", port: 4002, pid: deadPid },
-      ];
-      store.ensureDir();
-      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
-      store.loadRoutes(true);
-
-      // Re-read the file directly to verify it was cleaned up
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-      expect(raw).toHaveLength(1);
-      expect(raw[0].hostname).toBe("alive.localhost");
     });
 
     it("keeps routes whose process exists but cannot be signaled (EPERM)", () => {
@@ -280,7 +264,7 @@ describe("RouteStore", () => {
         store.ensureDir();
         fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
 
-        expect(store.loadRoutes(true).map((r) => r.hostname)).toEqual(["denied.localhost"]);
+        expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["denied.localhost"]);
         const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
         expect(raw).toHaveLength(1);
         expect(() => store.addRoute("denied.localhost", 4002, process.pid)).toThrow(

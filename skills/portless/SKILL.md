@@ -327,7 +327,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 ## CLI Reference
 
-Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, missing value or argument, extra argument). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
+Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
 
 | Command                                           | Description                                                    |
 | ------------------------------------------------- | -------------------------------------------------------------- |
@@ -347,7 +347,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
 | `portless prune`                                  | Remove stale routes and shares; stop matching process groups   |
-| `portless prune --force`                          | Kill orphans with SIGKILL instead of SIGTERM                   |
+| `portless prune --force`                          | Send SIGKILL instead of SIGTERM on a retry                     |
 | `portless proxy start`                            | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
 | `portless proxy start --no-tls`                   | Start without HTTPS (plain HTTP on port 80)                    |
 | `portless proxy start --lan`                      | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
