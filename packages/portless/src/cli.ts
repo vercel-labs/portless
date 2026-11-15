@@ -918,7 +918,7 @@ function startProxyServer(
   // Cache routes in memory and reload on file change (debounced)
   let cachedRoutes: ReturnType<RouteStore["loadRoutes"]> = [];
   try {
-    cachedRoutes = store.loadRoutes();
+    cachedRoutes = store.loadTrustedRoutes();
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes: ${message}`));
@@ -984,7 +984,7 @@ function startProxyServer(
     if (!autoSyncHosts) return "disabled";
     let hostnames: string[];
     try {
-      hostnames = store.loadRoutes().map((route) => route.hostname);
+      hostnames = store.loadTrustedRoutes().map((route) => route.hostname);
     } catch {
       hostnames = cachedRoutes.map((route) => route.hostname);
     }
@@ -995,7 +995,7 @@ function startProxyServer(
   const reloadRoutes = () => {
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
-      cachedRoutes = store.loadRoutes();
+      cachedRoutes = store.loadTrustedRoutes();
       routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
@@ -2280,7 +2280,7 @@ ${colors.bold("Usage:")}
   Ctrl+C is forwarded to the command. Portless waits for its process tree to
   exit and terminates remaining descendants after a short grace period.
 
-  On macOS and Linux, --force exits without signaling when another user owns
+  On macOS and Linux, portless exits with the reason when another user owns
   or can write to the state directory.
 
 ${colors.bold("Options:")}
@@ -3330,7 +3330,7 @@ ${colors.bold("Options:")}
   --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
   --help, -h                Show this help
 
-On macOS and Linux, --force exits without signaling when another user owns or
+On macOS and Linux, portless exits with the reason when another user owns or
 can write to the state directory.
 
 The positional port always dials loopback. The value "https" enables TLS and
@@ -4004,8 +4004,8 @@ ${colors.bold("Stop:")}
   directory another user owns or can write to.
 
 ${colors.bold("State directory:")}
-  As root, the proxy exits instead of running on a state directory another
-  user owns, can write to, or can redirect.
+  The proxy exits instead of running on a state directory another user owns,
+  can write to, or can redirect.
 
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.

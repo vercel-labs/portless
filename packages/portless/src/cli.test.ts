@@ -4151,11 +4151,13 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe.skipIf(process.platform === "win32")("privileged proxy startup", () => {
+    /** Preload that makes the CLI see a non-root uid that still owns the state directory. */
     function writeNonRootPreload(dir: string): string {
       const preloadPath = path.join(dir, "non-root-preload.cjs");
+      const uid = process.getuid?.() || 1000;
       fs.writeFileSync(
         preloadPath,
-        'Object.defineProperty(process, "getuid", { value: () => 1000, configurable: true });\n'
+        `Object.defineProperty(process, "getuid", { value: () => ${uid}, configurable: true });\n`
       );
       return preloadPath;
     }
