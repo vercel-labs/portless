@@ -7,6 +7,7 @@ import {
   tryUninstallService,
   parseServiceInstallConfig,
 } from "./service.js";
+import { UsageError } from "./args.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const mod = await importOriginal<typeof import("node:fs")>();
@@ -278,6 +279,83 @@ describe("buildServiceSpec", () => {
     expect(config).toMatchObject({ unprivileged: true, useHttps: false, proxyPort: 80 });
   });
 
+  it("accepts --flag=value for install options", () => {
+    const config = parseServiceInstallConfig(
+      ["service", "install", "--port=8443", "--tld=mydb"],
+      {}
+    );
+    expect(config).toMatchObject({ proxyPort: 8443, tld: "mydb" });
+  });
+
+  it("lets the last TLS option decide HTTPS", () => {
+    expect(
+      parseServiceInstallConfig(["service", "install", "--no-tls", "--https"], {}).useHttps
+    ).toBe(true);
+    expect(
+      parseServiceInstallConfig(["service", "install", "--https", "--no-tls"], {}).useHttps
+    ).toBe(false);
+
+    const certThenNoTls = parseServiceInstallConfig(
+      ["service", "install", "--cert", "a.pem", "--key", "b.pem", "--no-tls"],
+      {}
+    );
+    expect(certThenNoTls.useHttps).toBe(false);
+    expect(certThenNoTls.customCertPath).toBe("a.pem");
+
+    const noTlsThenCert = parseServiceInstallConfig(
+      ["service", "install", "--no-tls", "--cert", "a.pem", "--key", "b.pem"],
+      {}
+    );
+    expect(noTlsThenCert.useHttps).toBe(true);
+  });
+
+  it("keeps the last value of a repeated scalar flag", () => {
+    expect(
+      parseServiceInstallConfig(["service", "install", "--port", "1000", "-p", "2000"], {})
+        .proxyPort
+    ).toBe(2000);
+    expect(
+      parseServiceInstallConfig(["service", "install", "-p", "1000", "--port=2000"], {}).proxyPort
+    ).toBe(2000);
+    expect(
+      parseServiceInstallConfig(["service", "install", "--ip", "10.0.0.1", "--ip", "10.0.0.2"], {})
+        .lanIp
+    ).toBe("10.0.0.2");
+    expect(
+      parseServiceInstallConfig(
+        ["service", "install", "--state-dir", "/one", "--state-dir", "/two"],
+        {}
+      ).stateDir
+    ).toBe("/two");
+  });
+
+  it("accumulates repeated --tld flags in order", () => {
+    const config = parseServiceInstallConfig(
+      ["service", "install", "--tld=one", "--tld", "two"],
+      {}
+    );
+    expect(config.tlds).toEqual(["one", "two"]);
+    expect(config.tld).toBe("one");
+  });
+
+  it("rejects an invalid --port value as a usage error", () => {
+    expect(() => parseServiceInstallConfig(["service", "install", "--port=abc"], {})).toThrow(
+      "Invalid port number: abc"
+    );
+  });
+
+  it("rejects a value given to a boolean install flag", () => {
+    expect(() => parseServiceInstallConfig(["service", "install", "--https=1"], {})).toThrow(
+      "--https does not take a value."
+    );
+  });
+
+  it("rejects an invalid --tld value as a usage error", () => {
+    expect(() => parseServiceInstallConfig(["service", "install", "--tld=_bad"], {})).toThrow(
+      UsageError
+    );
+  });
+
   it.each([
     [["--unprivileged", "--https"], {}],
     [["--unprivileged"], { PORTLESS_HTTPS: "1" }],
@@ -430,14 +508,12 @@ describe("handleService", () => {
     expect(output).toContain("service status");
   });
 
-  it("exits 1 for unknown subcommand", async () => {
+  it("throws a usage error for an unknown subcommand", async () => {
     const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
     await expect(
       handleService(["service", "bogus"], { entryScript: "/fake/cli.js", runner })
-    ).rejects.toThrow("process.exit");
-    expect(exitSpy).toHaveBeenCalledWith(1);
-    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
-    expect(output).toContain("bogus");
+    ).rejects.toThrow('Unknown service command "bogus".');
+    expect(runner).not.toHaveBeenCalled();
   });
 
   it("rejects unsupported LAN service installs before writing a Windows task", async () => {
@@ -453,14 +529,13 @@ describe("handleService", () => {
         entryScript: "/fake/cli.js",
         runner,
       })
-    ).rejects.toThrow("process.exit");
+    ).rejects.toThrow("LAN mode requires mDNS publishing");
 
-    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
     expect(runner).not.toHaveBeenCalled();
     expect(mkdirSync).not.toHaveBeenCalled();
     expect(writeFileSync).not.toHaveBeenCalled();
-    const output = errorSpy.mock.calls.map((c: unknown[]) => c.join(" ")).join("\n");
-    expect(output).toContain("LAN mode requires mDNS publishing");
   });
 
   it("registers the Windows task with no execution time limit before starting it", async () => {
@@ -531,7 +606,7 @@ describe("handleService", () => {
           entryScript: "C:\\cli.js",
           runner,
         })
-      ).rejects.toThrow("process.exit");
+      ).rejects.toThrow("registration failed");
     } finally {
       if (originalUserProfile === undefined) {
         delete process.env.USERPROFILE;
@@ -545,12 +620,13 @@ describe("handleService", () => {
       }
     }
 
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
     const calls = runner.mock.calls.map(([command, args]) => ({ command, args }));
     expect(calls.some((call) => call.command === "powershell.exe")).toBe(false);
     expect(calls.some((call) => call.command === "schtasks" && call.args[0] === "/Run")).toBe(
       false
     );
-    expect(errorSpy.mock.calls.flat().join(" ")).toContain("registration failed");
   });
 
   it("does not stop the previous Windows task when replacement registration fails", async () => {
@@ -571,7 +647,7 @@ describe("handleService", () => {
           entryScript: "C:\\cli.js",
           runner,
         })
-      ).rejects.toThrow("process.exit");
+      ).rejects.toThrow("registration failed");
     } finally {
       if (originalUserProfile === undefined) {
         delete process.env.USERPROFILE;
@@ -585,6 +661,8 @@ describe("handleService", () => {
       }
     }
 
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
     const taskCalls = runner.mock.calls
       .filter(([command]) => command === "schtasks")
       .map(([, args]) => args[0]);

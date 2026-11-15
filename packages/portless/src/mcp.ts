@@ -108,7 +108,7 @@ const TLD_PROPERTY = {
   type: "array",
   items: { type: "string" },
   minItems: 1,
-  description: "One or more TLDs to serve.",
+  description: "One or more TLDs to serve. Invalid TLDs are usage errors (CLI exit code 2).",
 };
 const ALIAS_TLD_PROPERTY = {
   ...TLD_PROPERTY,
@@ -626,7 +626,7 @@ export function createServer(profiles: string[]): {
         const instructions = [
           `Portless MCP server. Active profiles: ${profiles.join(", ")}.`,
           lookup.length > 0 ? `Use ${lookup.join(", ")}.` : "",
-          "Start dev servers with `portless run <cmd>` in a shell; MCP does not run them.",
+          "Start dev servers with `portless run <cmd>` in a shell; value flags accept `--flag <value>` or `--flag=<value>`. MCP does not run them.",
           enabled.has("tools_profiles")
             ? "Call the tools_profiles tool to see other tool profiles."
             : "",
@@ -820,7 +820,7 @@ export async function runMcp(args: string[]): Promise<void> {
   const usageError = (message: string): void => {
     console.error(colors.red(`Error: ${message}`));
     console.error("Usage: portless mcp [--tools <profiles>]");
-    process.exit(1);
+    process.exit(2);
   };
 
   for (let index = 0; index < args.length; index += 1) {

@@ -13,6 +13,7 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
+import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
 import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
@@ -202,14 +203,6 @@ function parsePortValue(value: string, source: string): number {
   return port;
 }
 
-function getFlagValue(args: string[], index: number, flag: string): string {
-  const value = args[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new Error(`${flag} requires a value.`);
-  }
-  return value;
-}
-
 function resolveServicePath(value: string): string {
   const expanded =
     value === "~"
@@ -238,6 +231,31 @@ function collectServiceExtraEnv(
     if (value) extraEnv[key] = value;
   }
   return extraEnv;
+}
+
+const SERVICE_INSTALL_FLAGS: Readonly<Record<string, FlagKind>> = {
+  "-p": "value",
+  "--port": "value",
+  "--https": "boolean",
+  "--no-tls": "boolean",
+  "--lan": "boolean",
+  "--ip": "value",
+  "--tld": "value",
+  "--wildcard": "boolean",
+  "--unprivileged": "boolean",
+  "--cert": "value",
+  "--key": "value",
+  "--state-dir": "value",
+};
+
+const SERVICE_RUNTIME_FLAGS: Readonly<Record<string, FlagKind>> = {
+  "--foreground": "boolean",
+  "--skip-trust": "boolean",
+};
+
+function serviceInstallSpec(allowRuntimeFlags: boolean | undefined): Record<string, FlagKind> {
+  if (!allowRuntimeFlags) return { ...SERVICE_INSTALL_FLAGS };
+  return { ...SERVICE_INSTALL_FLAGS, ...SERVICE_RUNTIME_FLAGS };
 }
 
 export function parseServiceInstallConfig(
@@ -293,78 +311,92 @@ export function parseServiceInstallConfig(
   }
 
   const tokens = args[0] === "service" ? args.slice(2) : args;
+  let portFlagSeen = false;
   let tldFlagSeen = false;
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    switch (token) {
-      case "-p":
-      case "--port":
-        config.proxyPort = parsePortValue(getFlagValue(tokens, i, token), token);
-        i += 1;
-        break;
-      case "--https":
-        config.useHttps = true;
-        httpsExplicit = true;
-        break;
-      case "--no-tls":
-        config.useHttps = false;
-        httpsExplicit = true;
-        break;
-      case "--lan":
-        config.lanMode = true;
-        break;
-      case "--ip":
-        config.lanMode = true;
-        config.lanIp = getFlagValue(tokens, i, token);
-        config.lanIpExplicit = true;
-        i += 1;
-        break;
-      case "--tld": {
-        const tlds = parseTldList(getFlagValue(tokens, i, token));
-        config.tlds = normalizeTlds([...(tldFlagSeen ? config.tlds : []), ...tlds]);
-        config.tld = primaryTld(config.tlds);
-        tldFlagSeen = true;
-        i += 1;
-        break;
-      }
-      case "--wildcard":
-        config.useWildcard = true;
-        break;
-      case "--unprivileged":
-        config.unprivileged = true;
-        break;
-      case "--cert":
-        config.customCertPath = getFlagValue(tokens, i, token);
-        config.useHttps = true;
-        httpsExplicit = true;
-        i += 1;
-        break;
-      case "--key":
-        config.customKeyPath = getFlagValue(tokens, i, token);
-        config.useHttps = true;
-        httpsExplicit = true;
-        i += 1;
-        break;
-      case "--state-dir":
-        config.stateDir = getFlagValue(tokens, i, token);
-        i += 1;
-        break;
-      case "--foreground":
-      case "--skip-trust":
-        if (!options.allowRuntimeFlags) {
-          throw new Error(`Unknown service install option "${token}".`);
+  let tldFlagValues: string[] = [];
+
+  const rest = visitLeadingFlags(
+    "service install",
+    tokens,
+    serviceInstallSpec(options.allowRuntimeFlags),
+    (flag, value) => {
+      const flagValue = value ?? "";
+      switch (flag) {
+        case "-p":
+        case "--port": {
+          const port = parsePort(flagValue);
+          if (port === null) {
+            throw new UsageError(`Invalid port number: ${flagValue}`, [
+              "Port must be between 1 and 65535.",
+            ]);
+          }
+          config.proxyPort = port;
+          portFlagSeen = true;
+          break;
         }
-        break;
-      default:
-        throw new Error(`Unknown service install option "${token}".`);
+        case "--https":
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--no-tls":
+          config.useHttps = false;
+          httpsExplicit = true;
+          break;
+        case "--lan":
+          config.lanMode = true;
+          break;
+        case "--ip":
+          config.lanMode = true;
+          config.lanIp = flagValue;
+          config.lanIpExplicit = true;
+          break;
+        case "--tld":
+          try {
+            tldFlagValues = [...tldFlagValues, ...parseTldList(flagValue)];
+          } catch (err) {
+            throw new UsageError((err as Error).message, ["See: portless service install --help"]);
+          }
+          tldFlagSeen = true;
+          break;
+        case "--wildcard":
+          config.useWildcard = true;
+          break;
+        case "--unprivileged":
+          config.unprivileged = true;
+          break;
+        case "--cert":
+          config.customCertPath = flagValue;
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--key":
+          config.customKeyPath = flagValue;
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--state-dir":
+          config.stateDir = flagValue;
+          break;
+      }
     }
+  );
+
+  if (rest.length > 0) {
+    throw new UsageError(`Unexpected argument "${rest[0]}" for portless service install.`, [
+      "See: portless service install --help",
+    ]);
+  }
+
+  if (tldFlagSeen) {
+    config.tlds = normalizeTlds(tldFlagValues);
+    config.tld = primaryTld(config.tlds);
   }
 
   if (
     (config.customCertPath && !config.customKeyPath) ||
     (!config.customCertPath && config.customKeyPath)
   ) {
-    throw new Error("--cert and --key must be used together.");
+    throw new UsageError("--cert and --key must be used together.");
   }
 
   // Match proxy start: unprivileged mode serves plain HTTP on 80 unless
@@ -373,7 +405,7 @@ export function parseServiceInstallConfig(
     config.useHttps = false;
   }
 
-  if (!env.PORTLESS_PORT && !tokens.includes("--port") && !tokens.includes("-p")) {
+  if (!env.PORTLESS_PORT && !portFlagSeen) {
     config.proxyPort = getProtocolPort(config.useHttps);
   }
 
@@ -1246,6 +1278,7 @@ ${colors.bold("Install options:")}
   --state-dir <path>               Use a custom service state directory
 
 ${colors.bold("Notes:")}
+  Value flags accept both --flag <value> and --flag=<value>.
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.
@@ -1265,26 +1298,19 @@ export async function handleService(
     process.exit(0);
   }
 
-  try {
-    if (action === "install") {
-      await installService(options.entryScript, runner, args);
-      return;
-    }
-    if (action === "uninstall") {
-      await uninstallService(options.entryScript, runner);
-      return;
-    }
-    if (action === "status") {
-      await printServiceStatus(options.entryScript, runner);
-      return;
-    }
-
-    console.error(colors.red(`Error: Unknown service command "${action}".`));
-    printServiceHelp();
-    process.exit(1);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(colors.red("Error:"), message);
-    process.exit(1);
+  if (action === "install") {
+    await installService(options.entryScript, runner, args);
+    return;
   }
+  if (action !== "uninstall" && action !== "status") {
+    throw new UsageError(`Unknown service command "${action}".`, ["See: portless service --help"]);
+  }
+  if (args.length > 2) {
+    throw new UsageError(`Unexpected argument "${args[2]}" for portless service ${action}.`);
+  }
+  if (action === "uninstall") {
+    await uninstallService(options.entryScript, runner);
+    return;
+  }
+  await printServiceStatus(options.entryScript, runner);
 }

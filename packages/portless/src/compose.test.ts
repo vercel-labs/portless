@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   allocatePorts,
   buildUpArgs,
+  composeGlobalError,
   explicitProject,
   isDetachedUp,
   parseContainers,
@@ -32,6 +33,7 @@ describe("splitComposeArgs", () => {
       globals: ["-f", "a.yml", "--profile", "dev"],
       subcommand: "up",
       rest: ["-d", "web"],
+      dockerArgs: ["-f", "a.yml", "--profile", "dev", "up", "-d", "web"],
     });
   });
 
@@ -40,6 +42,40 @@ describe("splitComposeArgs", () => {
       globals: ["--file=a.yml", "--dry-run"],
       subcommand: "down",
       rest: [],
+      dockerArgs: ["--file=a.yml", "--dry-run", "down"],
+    });
+  });
+
+  it("keeps attached shorthand values together", () => {
+    expect(splitComposeArgs(["-fcompose.yml", "-p=demo", "--profile", "dev", "up"])).toEqual({
+      globals: ["-fcompose.yml", "-p=demo", "--profile", "dev"],
+      subcommand: "up",
+      rest: [],
+      dockerArgs: ["-fcompose.yml", "-p=demo", "--profile", "dev", "up"],
+    });
+  });
+
+  it("ends the wrapper's globals at -- and keeps it from docker", () => {
+    expect(splitComposeArgs(["-f", "a.yml", "--", "up", "-d"])).toEqual({
+      globals: ["-f", "a.yml"],
+      subcommand: "up",
+      rest: ["-d"],
+      dockerArgs: ["-f", "a.yml", "up", "-d"],
+    });
+    expect(splitComposeArgs(["--"])).toEqual({
+      globals: [],
+      subcommand: undefined,
+      rest: [],
+      dockerArgs: [],
+    });
+  });
+
+  it("keeps a -- that belongs to the subcommand", () => {
+    expect(splitComposeArgs(["up", "--", "--build"])).toEqual({
+      globals: [],
+      subcommand: "up",
+      rest: ["--", "--build"],
+      dockerArgs: ["up", "--", "--build"],
     });
   });
 });
@@ -69,7 +105,51 @@ describe("buildUpArgs", () => {
     };
     expect(dir([])).toBe("/app");
     expect(dir(["-f", "infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
+    expect(dir(["-finfra/compose.yml"])).toBe(path.resolve("/app", "infra"));
+    expect(dir(["-f=infra/compose.yml"])).toBe(path.resolve("/app", "infra"));
     expect(dir(["--file=infra/compose.yml", "--project-directory", "/other"])).toBe("/other");
+    expect(dir(["--workdir", "/work"])).toBe("/work");
+    expect(dir(["--workdir=/work", "--project-directory", "/other"])).toBe("/other");
+  });
+
+  it("strips attached file, project, and directory flags", () => {
+    expect(
+      buildUpArgs({
+        ...base,
+        globals: [
+          "-fcompose.yml",
+          "-p=demo",
+          "--project-directory=/other",
+          "--workdir=/old",
+          "--profile",
+          "dev",
+        ],
+      })
+    ).toEqual([
+      "-p",
+      "shop",
+      "--project-directory",
+      "/other",
+      "-f",
+      "/state/shop.json",
+      "--profile",
+      "dev",
+      "up",
+      "-d",
+    ]);
+  });
+
+  it("strips an attached stdin file and keeps cwd", () => {
+    expect(buildUpArgs({ ...base, globals: ["-f-"] })).toEqual([
+      "-p",
+      "shop",
+      "--project-directory",
+      "/app",
+      "-f",
+      "/state/shop.json",
+      "up",
+      "-d",
+    ]);
   });
 
   it("takes the project directory from COMPOSE_FILE when no -f is given", () => {
@@ -315,12 +395,16 @@ describe("staleAliases", () => {
 describe("readsComposeFromStdin and explicitProject", () => {
   it("detects -f - in any form", () => {
     expect(readsComposeFromStdin(["-f", "-"])).toBe(true);
+    expect(readsComposeFromStdin(["-f-"])).toBe(true);
+    expect(readsComposeFromStdin(["-f=-"])).toBe(true);
     expect(readsComposeFromStdin(["--file=-"])).toBe(true);
     expect(readsComposeFromStdin(["-f", "compose.yml"])).toBe(false);
   });
 
-  it("reads the last -p", () => {
+  it("reads the last -p in any form", () => {
     expect(explicitProject(["-p", "a", "--project-name=b"])).toBe("b");
+    expect(explicitProject(["-pdemo"])).toBe("demo");
+    expect(explicitProject(["-p=demo"])).toBe("demo");
     expect(explicitProject(["-f", "x.yml"])).toBeUndefined();
   });
 });
@@ -407,5 +491,31 @@ describe("allocatePorts", () => {
     await expect(
       allocatePorts(["web:80"], {}, { ...base, reserved: new Set([14000, 14001, 14002, 14003]) })
     ).rejects.toThrow(/No free port/);
+  });
+});
+
+describe("composeGlobalError", () => {
+  it.each([
+    [["-f", "compose.yml", "--profile", "dev", "--ansi=never", "--dry-run"]],
+    [["-fcompose.yml", "-f=compose.yml", "-pdemo", "-p=demo", "-f-", "-f=-"]],
+    [["--workdir", "/app", "--workdir=/app"]],
+    [["--dry-run=true", "--dry-run=false", "--dry-run=1", "-h", "-h=false"]],
+  ])("accepts %j", (globals) => {
+    expect(composeGlobalError(globals)).toBeNull();
+  });
+
+  it.each([
+    [["--bad"], 'Unknown flag "--bad" for portless compose.'],
+    [["-x"], 'Unknown flag "-x" for portless compose.'],
+    [["-w", "/app"], 'Unknown flag "-w" for portless compose.'],
+    [["-f"], "-f requires a value."],
+    [["-f="], "-f requires a value."],
+    [["-f", ""], "-f requires a value."],
+    [["--file", "", "ps"], "--file requires a value."],
+    [["--env-file="], "--env-file requires a value."],
+    [["--dry-run=yes"], "--dry-run takes true or false."],
+    [["-h=yes"], "-h takes true or false."],
+  ])("rejects %j", (globals, message) => {
+    expect(composeGlobalError(globals)).toBe(message);
   });
 });

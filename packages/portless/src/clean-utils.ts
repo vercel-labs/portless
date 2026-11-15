@@ -5,6 +5,7 @@ import { LEGACY_SYSTEM_STATE_DIR, USER_STATE_DIR } from "./cli-utils.js";
 /** Filenames portless creates under a state directory (allowlisted for clean). */
 const PORTLESS_STATE_FILES = [
   "routes.json",
+  "routes.json.tmp",
   "routes.lock",
   "proxy.pid",
   "proxy.port",
