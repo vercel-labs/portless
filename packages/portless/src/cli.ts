@@ -3174,13 +3174,16 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless alias <name> <port>")}                 Register a route
   ${colors.cyan("portless alias <name> <port> --upstream https")}  Use HTTPS to the local backend
   ${colors.cyan("portless alias --remove <name>")}               Remove static routes, preserve process-owned routes
-  ${colors.cyan("portless alias <name> <port> --force")}          Override an existing route
+  ${colors.cyan("portless alias <name> <port> --force")}          Take over a running app's route
 
 ${colors.bold("Options:")}
-  --force                   Override a route; stop a conflicting app if any
+  --force                   Take over a running app's route and stop the app
   --tld <tld>               Only these configured TLDs (repeatable, comma-separated)
   --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
   --help, -h                Show this help
+
+Registering a name that already has an alias replaces that alias, including
+its upstream, without --force.
 
 On macOS and Linux, portless exits with the reason when another user owns or
 can write to the state directory.

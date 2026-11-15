@@ -115,7 +115,7 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `wo
 }
 ```
 
-The `package.json` `"portless"` key takes precedence over `portless.json` app entries but is overridden by CLI flags.
+Portless reads the `"portless"` key only when the same directory has no `portless.json`. When you run portless from a workspace root, a package's own config, from either file, takes precedence over its entry in the root `portless.json` `apps` map. CLI flags override both.
 
 ### Monorepo
 
@@ -154,7 +154,13 @@ For turborepo projects, use `portless` as the `dev` script and the real command 
 }
 ```
 
-`pnpm dev` at the root runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy. No `turbo.json` or `turbo.jsonc` changes are needed.
+`pnpm dev` at the root runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy. With portless defaults, no `turbo.json` or `turbo.jsonc` changes are needed. If you configure portless with `PORTLESS_*` environment variables, such as `PORTLESS_STATE_DIR` or `PORTLESS_PORT`, Turbo's default strict environment mode removes them before the package script runs, and the nested `portless` falls back to its defaults. Pass them through in `turbo.json` or `turbo.jsonc`:
+
+```json
+{
+  "globalPassThroughEnv": ["PORTLESS_*"]
+}
+```
 
 When `portless` runs from a workspace root, it uses the existing Turbo integration to preserve task ordering when either `turbo.json` or `turbo.jsonc` is readable. Set `"turbo": false` in the root portless configuration to use direct spawning instead.
 
@@ -164,11 +170,13 @@ People without portless installed can run `pnpm run dev:app` directly.
 
 Closest config wins, like Prettier and ESLint:
 
-For `name`: CLI `--name` flag > `package.json` `"portless"` key > `portless.json` app entry > `package.json` inference.
+For `name`: CLI `--name` flag > package config > root `portless.json` `apps` entry > `package.json` inference.
 
-For `script`: CLI `--script` flag > `package.json` `"portless"` key > `portless.json` app entry > default `"dev"`.
+For `script`: CLI `--script` flag > package config > root `portless.json` `apps` entry > default `"dev"`.
 
-For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > `package.json` `"portless"` key > `portless.json` app entry > auto-assigned.
+For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > package config > root `portless.json` `apps` entry > auto-assigned.
+
+The package config is the package directory's `portless.json`, or its `package.json` `"portless"` key when that directory has no `portless.json`. The root `apps` entry applies when you run portless from the workspace root.
 
 For the worktree label: CLI `--prefix` flag (`portless run`) > `PORTLESS_PREFIX` env var > branch of a linked worktree.
 
