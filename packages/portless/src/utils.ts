@@ -539,8 +539,8 @@ function setStateDirMode(canonical: string): boolean {
 /**
  * Create a state directory if it is missing and make it writable only by its
  * owner, whatever the umask. The mode and owner are changed only on a
- * directory that passes findStateDirProblem, or on one its own unprivileged
- * owner is repairing. Returns why the directory is still unsafe, or null.
+ * directory that passes findStateDirProblem. Returns why the directory is
+ * still unsafe, or null.
  */
 export function ensureStateDir(dir: string): string | null {
   let located = locateStateDir(dir);
@@ -555,8 +555,6 @@ export function ensureStateDir(dir: string): string | null {
     fixOwnership(canonical);
     return null;
   }
-  const ownerRepair = problem.reason === "writable-by-others" && process.getuid?.() !== 0;
-  if (ownerRepair && setStateDirMode(canonical)) return null;
   return describeStateDirProblem(problem);
 }
 

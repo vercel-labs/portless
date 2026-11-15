@@ -2280,6 +2280,9 @@ ${colors.bold("Usage:")}
   Ctrl+C is forwarded to the command. Portless waits for its process tree to
   exit and terminates remaining descendants after a short grace period.
 
+  On macOS and Linux, --force exits without signaling when another user owns
+  or can write to the state directory.
+
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --prefix <label>       Override the worktree label (an empty value disables it)
@@ -3326,6 +3329,9 @@ ${colors.bold("Options:")}
   --tld <tld>               Only these configured TLDs (repeatable, comma-separated)
   --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
   --help, -h                Show this help
+
+On macOS and Linux, --force exits without signaling when another user owns or
+can write to the state directory.
 
 The positional port always dials loopback. The value "https" enables TLS and
 preserves Host. An "https://" authority enables TLS and overrides Host with the full
