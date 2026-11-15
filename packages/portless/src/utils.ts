@@ -559,13 +559,12 @@ export function ensureStateDir(dir: string): string | null {
 }
 
 /**
- * Prepare a state directory for use. As root, throws when the directory fails
- * findStateDirProblem, so a privileged process never runs on state another
- * user controls.
+ * Prepare a state directory for use. Throws when the directory fails
+ * findStateDirProblem, so portless never runs on state another user controls.
  */
 export function requireStateDir(dir: string): void {
   const unsafe = ensureStateDir(dir);
-  if (unsafe && process.platform !== "win32" && process.getuid?.() === 0) {
-    throw new Error(`Cannot use state directory ${dir} as root: ${unsafe}`);
+  if (unsafe && process.platform !== "win32") {
+    throw new Error(`Cannot use state directory ${dir}: ${unsafe}`);
   }
 }

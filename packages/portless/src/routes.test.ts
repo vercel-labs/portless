@@ -57,15 +57,18 @@ describe("RouteStore", () => {
     );
 
     it.skipIf(process.platform === "win32")(
-      "leaves a directory other users can write to unchanged when a route is written",
+      "refuses a route write in a directory other users can write to and leaves it unchanged",
       () => {
         const writable = path.join(tmpDir, "writable");
         fs.mkdirSync(writable);
         fs.chmodSync(writable, 0o777);
         const writableStore = new RouteStore(writable);
-        writableStore.addRoute("app.localhost", 4000, process.pid);
+        expect(() => writableStore.addRoute("app.localhost", 4000, process.pid)).toThrow(
+          "Cannot use state directory"
+        );
         expect(fs.statSync(writable).mode & 0o777).toBe(0o777);
         expect(writableStore.untrustedReason()).toContain("other users can write to it");
+        expect(fs.existsSync(writableStore.getRoutesPath())).toBe(false);
       }
     );
 
@@ -78,24 +81,6 @@ describe("RouteStore", () => {
         fs.symlinkSync(real, link);
         expect(ensureStateDir(link)).toBeNull();
         expect(fs.statSync(real).mode & 0o777).toBe(0o755);
-      }
-    );
-
-    it.skipIf(process.platform === "win32")(
-      "refuses, as root, a directory that fails the check and leaves it unchanged",
-      () => {
-        const shared = path.join(tmpDir, "group-writable");
-        fs.mkdirSync(shared);
-        fs.chmodSync(shared, 0o775);
-        const getuid = vi.spyOn(process, "getuid").mockReturnValue(0);
-        try {
-          expect(() => new RouteStore(shared).ensureDir()).toThrow(
-            `Cannot use state directory ${shared} as root`
-          );
-        } finally {
-          getuid.mockRestore();
-        }
-        expect(fs.statSync(shared).mode & 0o777).toBe(0o775);
       }
     );
 
@@ -120,6 +105,22 @@ describe("RouteStore", () => {
   });
 
   describe("loadRoutes", () => {
+    it.skipIf(process.platform === "win32")(
+      "refuses trusted route loading from a directory other users can write to",
+      () => {
+        store.addRoute("app.localhost", 4000, process.pid);
+        fs.chmodSync(tmpDir, 0o777);
+        try {
+          expect(() => store.loadTrustedRoutes()).toThrow("Cannot use state directory");
+        } finally {
+          fs.chmodSync(tmpDir, 0o755);
+        }
+        expect(store.loadTrustedRoutes()).toMatchObject([
+          { hostname: "app.localhost", port: 4000 },
+        ]);
+      }
+    );
+
     it("returns empty array when routes file does not exist", () => {
       expect(store.loadRoutes()).toEqual([]);
     });
@@ -525,7 +526,7 @@ describe("RouteStore", () => {
           store.addRoute("app.localhost", 4001, otherPid);
           fs.chmodSync(tmpDir, 0o777);
           expect(() => store.addRoute("app.localhost", 4002, process.pid, true)).toThrow(
-            "Nothing was signaled"
+            "Cannot use state directory"
           );
           expect(isAlive(otherPid)).toBe(true);
           expect(store.loadRoutes().find((route) => route.hostname === "app.localhost")?.pid).toBe(

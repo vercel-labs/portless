@@ -211,6 +211,13 @@ export class RouteStore {
     return fs.existsSync(this.dir) ? explainUnsafeStateDir(this.dir) : null;
   }
 
+  /** Routes for the proxy to serve. Throws when untrustedReason() rejects the directory. */
+  loadTrustedRoutes(): RouteMapping[] {
+    const unsafe = this.untrustedReason();
+    if (unsafe) throw new Error(`Cannot use state directory ${this.dir}: ${unsafe}`);
+    return this.loadRoutes();
+  }
+
   getRoutesPath(): string {
     return this.routesPath;
   }
@@ -423,9 +430,8 @@ export class RouteStore {
   /**
    * Register a route. When `force` is true and the hostname is already claimed
    * by another live process, that process is sent SIGTERM before the route is
-   * replaced. The signal is refused if the state directory fails its safety
-   * check. Returns the PID of the killed process (if any) so the caller can log
-   * it. A stale record for the same hostname is left for `prune`.
+   * replaced. Returns the PID of the killed process (if any) so the caller can
+   * log it. A stale record for the same hostname is left for `prune`.
    */
   addRoute(
     hostname: string,
@@ -453,12 +459,6 @@ export class RouteStore {
           }
           // --force: kill the existing process before taking over; an alias has none
           if (!isAlias) {
-            const reason = this.untrustedReason();
-            if (reason) {
-              throw new Error(
-                `Cannot take over "${hostname}" from PID ${existing.pid} recorded in ${this.dir}: ${reason}\nNothing was signaled.`
-              );
-            }
             try {
               process.kill(existing.pid, "SIGTERM");
               killedPid = existing.pid;

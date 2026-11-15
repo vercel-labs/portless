@@ -156,7 +156,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_add",
     "Add alias",
-    "Register a static route for a service portless does not run, such as a database. The optional upstream accepts https, https://<host>[:<port>], or http://<host>[:<port>]. The alias's positional port always dials loopback; an upstream authority overrides Host and supplies HTTPS SNI for DNS hostnames only, without the port. IP addresses are not sent as SNI. Upstream TLS supports HTTP/1.1 only and disables certificate verification, so it does not authenticate backend identity, including through an SSH tunnel, and does not change client-facing proxy TLS. Restart the proxy daemon after upgrading. Registers it for every configured TLD unless tld selects specific ones.",
+    "Register a static route for a service portless does not run, such as a database. The optional upstream accepts https, https://<host>[:<port>], or http://<host>[:<port>]. The alias's positional port always dials loopback; an upstream authority overrides Host and supplies HTTPS SNI for DNS hostnames only, without the port. IP addresses are not sent as SNI. Upstream TLS supports HTTP/1.1 only and disables certificate verification, so it does not authenticate backend identity, including through an SSH tunnel, and does not change client-facing proxy TLS. Restart the proxy daemon after upgrading. Registers it for every configured TLD unless tld selects specific ones. A state directory that another user owns or can write to is refused.",
     {
       name: NAME_PROPERTY,
       port: PORT_PROPERTY,
@@ -169,7 +169,7 @@ export const TOOLS: ToolDef[] = [
       force: {
         type: "boolean",
         description:
-          "Stop a conflicting app, if any, and replace its route; replacing a static alias stops nothing, and the stopped app's routes on other TLDs can also disappear. Refuses a state directory that another user owns or can write to, and signals nothing.",
+          "Stop a conflicting app, if any, and replace its route; replacing a static alias stops nothing, and the stopped app's routes on other TLDs can also disappear.",
       },
     },
     ["name", "port"],
@@ -210,7 +210,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_start",
     "Start proxy",
-    "Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass skipTrust to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code.",
+    "Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass skipTrust to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code. A state directory that another user owns or can write to is refused.",
     {
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },
