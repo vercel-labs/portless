@@ -160,6 +160,8 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
+Use `portless get <name> --json` to print the input name, hostname, and URL as JSON.
+
 Worktree config is read from the current directory, including workspace root defaults, not from the named service's package; `cd` into a package to use its per-app options. Use `--no-worktree` to skip worktree config and all worktree naming. Without it, an invalid config in the current directory or workspace fails instead of printing a guessed URL.
 
 ## Alias (static routes)
@@ -247,7 +249,7 @@ Each routed service gets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev
 portless list
 ```
 
-Shows active routes, their assigned ports, and how long each app has been running.
+Shows active routes, their assigned ports, and how long each app has been running. Use `portless list --json` to print the routes as JSON.
 
 ## Doctor
 
@@ -255,7 +257,7 @@ Shows active routes, their assigned ports, and how long each app has been runnin
 portless doctor
 ```
 
-Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
 For upstream 502 errors, stop the running proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
 
