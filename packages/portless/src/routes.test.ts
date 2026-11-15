@@ -626,6 +626,7 @@ describe("RouteStore", () => {
       ngrokPid: 5151,
       registeredAt: Date.now() - 60_000,
     };
+    const retiredRoute = { ...staleRoute, retired: true };
 
     const writeRoutes = (routes: unknown[]) =>
       fs.writeFileSync(path.join(tmpDir, "routes.json"), JSON.stringify(routes));
@@ -657,7 +658,7 @@ describe("RouteStore", () => {
       expect(store.transferRoute("other.localhost", process.pid, process.ppid)).toBe(true);
       store.removeRoute("other.localhost", process.ppid);
 
-      expect(readRaw()).toEqual([staleRoute]);
+      expect(readRaw()).toEqual([retiredRoute]);
       expect(store.loadRoutes()).toEqual([]);
     });
 
@@ -675,7 +676,21 @@ describe("RouteStore", () => {
         port: 4999,
         pid: process.pid,
       });
-      expect(readRaw()[1]).toEqual(staleRoute);
+      expect(readRaw()[1]).toEqual(retiredRoute);
+    });
+
+    it("keeps a retained record inactive after its PID is reused", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+      store.addRoute("stale.localhost", 4999, process.pid);
+
+      writeRoutes(
+        readRaw().map((route) => (route.pid === deadPid ? { ...route, pid: process.ppid } : route))
+      );
+      store.removeRoute("stale.localhost", process.pid);
+
+      expect(store.loadRoutes()).toEqual([]);
+      expect(store.findStaleRoutes()).toHaveLength(1);
     });
 
     it("returns the active entry first for a legacy file with a stale record first", () => {
@@ -698,7 +713,7 @@ describe("RouteStore", () => {
 
       const raw = readRaw();
       expect(raw[0]).toEqual({ ...live, ngrokUrl: "https://live.ngrok.app" });
-      expect(raw[1]).toEqual(staleRoute);
+      expect(raw[1]).toEqual(retiredRoute);
     });
 
     it("records a verified member only on the matching stale record", () => {
@@ -711,7 +726,7 @@ describe("RouteStore", () => {
       expect(store.recordStaleOrphan(staleRoute, 4343, "member-start")).toBe(true);
 
       expect(readRaw()).toEqual([
-        { ...staleRoute, orphanPid: 4343, orphanStartTime: "member-start" },
+        { ...retiredRoute, orphanPid: 4343, orphanStartTime: "member-start" },
       ]);
     });
 
@@ -722,7 +737,7 @@ describe("RouteStore", () => {
 
       expect(store.removeStaleRoute("stale.localhost", 111111)).toBe(false);
       expect(store.removeStaleRoute("stale.localhost", deadPid)).toBe(true);
-      expect(readRaw()).toEqual([second]);
+      expect(readRaw()).toEqual([{ ...second, retired: true }]);
     });
 
     it("drops stale entries without recovery data on the next write", () => {

@@ -27,6 +27,8 @@ export const FILE_MODE = 0o644;
 
 export interface RouteMapping extends RouteInfo {
   pid: number;
+  /** Set when a write keeps this record after its owner died, so a reused PID cannot make it active again. */
+  retired?: true;
   /** Process group of the command portless spawned for this route. */
   childPgid?: number;
   /** Start time of the process group leader, as reported by `ps`. */
@@ -111,9 +113,12 @@ function isSameRouteRecord(a: RouteMapping, b: RouteMapping): boolean {
   );
 }
 
-/** Whether the portless process that registered an entry is gone; aliases never go stale. */
+/**
+ * Whether the portless process that registered an entry is gone. A retired
+ * record stays stale whatever runs under its PID now; aliases never go stale.
+ */
 function isStaleRoute(route: RouteMapping): boolean {
-  return route.pid !== 0 && !isPidAlive(route.pid);
+  return route.retired === true || (route.pid !== 0 && !isPidAlive(route.pid));
 }
 
 /** Whether a stale entry still records a process group, share or member worth recovering. */
@@ -129,9 +134,15 @@ function hasRecoveryData(route: RouteMapping): boolean {
   );
 }
 
-/** Entries a write keeps: every live route plus stale records that still hold recovery data. */
+/**
+ * Entries a write keeps: every live route plus stale records that still hold
+ * recovery data. Each kept stale record is retired.
+ */
 function retainStaleRecords(routes: RouteMapping[]): RouteMapping[] {
-  return routes.filter((route) => !isStaleRoute(route) || hasRecoveryData(route));
+  return routes.flatMap((route) => {
+    if (!isStaleRoute(route)) return [route];
+    return hasRecoveryData(route) ? [{ ...route, retired: true as const }] : [];
+  });
 }
 
 /**
@@ -275,11 +286,7 @@ export class RouteStore {
 
   /** Whether the process that owns `route` is still running. */
   isRouteOwnerAlive(route: RouteMapping): boolean {
-    return route.pid === 0 || this.isProcessAlive(route.pid);
-  }
-
-  private isProcessAlive(pid: number): boolean {
-    return pid === 0 || isPidAlive(pid);
+    return !isStaleRoute(route);
   }
 
   /**
