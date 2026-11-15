@@ -2096,10 +2096,13 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
   i++;
 
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
-  while (i < args.length && args[i].startsWith("--")) {
+  while (i < args.length && (args[i].startsWith("--") || args[i] === "-h")) {
     if (args[i] === "--") {
       i++;
       break;
+    } else if (args[i] === "--help" || args[i] === "-h") {
+      printRunHelp();
+      process.exit(0);
     } else if (args[i] === "--force") {
       force = true;
     } else if (args[i] === "--app-port") {
