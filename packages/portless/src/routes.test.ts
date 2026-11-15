@@ -57,13 +57,15 @@ describe("RouteStore", () => {
     );
 
     it.skipIf(process.platform === "win32")(
-      "repairs a group-writable directory its owner created",
+      "leaves a directory other users can write to unchanged when a route is written",
       () => {
-        const own = path.join(tmpDir, "own");
-        fs.mkdirSync(own);
-        fs.chmodSync(own, 0o775);
-        expect(ensureStateDir(own)).toBeNull();
-        expect(fs.statSync(own).mode & 0o777).toBe(0o755);
+        const writable = path.join(tmpDir, "writable");
+        fs.mkdirSync(writable);
+        fs.chmodSync(writable, 0o777);
+        const writableStore = new RouteStore(writable);
+        writableStore.addRoute("app.localhost", 4000, process.pid);
+        expect(fs.statSync(writable).mode & 0o777).toBe(0o777);
+        expect(writableStore.untrustedReason()).toContain("other users can write to it");
       }
     );
 
@@ -514,6 +516,27 @@ describe("RouteStore", () => {
         }
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "refuses a --force takeover recorded in a directory other users can write to",
+      () => {
+        const otherPid = spawnSleeper();
+        try {
+          store.addRoute("app.localhost", 4001, otherPid);
+          fs.chmodSync(tmpDir, 0o777);
+          expect(() => store.addRoute("app.localhost", 4002, process.pid, true)).toThrow(
+            "Nothing was signaled"
+          );
+          expect(isAlive(otherPid)).toBe(true);
+          expect(store.loadRoutes().find((route) => route.hostname === "app.localhost")?.pid).toBe(
+            otherPid
+          );
+        } finally {
+          fs.chmodSync(tmpDir, 0o755);
+          if (isAlive(otherPid)) process.kill(otherPid, "SIGTERM");
+        }
+      }
+    );
 
     it("replaces the route when --force kills the existing process", () => {
       const otherPid = spawnSleeper();
