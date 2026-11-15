@@ -2450,7 +2450,8 @@ Every command accepts --help or -h, which only prints help. After run <cmd>,
 compose <subcommand>, or --, they belong to the wrapped command.
 Value flags for run and named apps accept both --flag <value> and --flag=<value>.
 Forwarding arguments into a script with shell operators or a comment exits 2;
-run the command directly or make the script a single command.
+run the command directly or make the script a single command. In Turbo mode
+only the root script is checked.
 
 ${colors.bold("Examples:")}
   portless
@@ -4511,9 +4512,7 @@ function forwardScriptExtraArgs(
   extraArgs: readonly string[]
 ): string[] {
   if (extraArgs.length === 0) return [];
-  const turbo = resolveTurboRootForwarding(scriptName, packageDir);
-  const forwarding =
-    turbo.kind === "forward" ? turbo : resolveScriptArgForwarding(scriptName, packageDir);
+  const forwarding = resolveScriptArgForwarding(scriptName, packageDir);
   if (forwarding.kind === "unsafe") {
     const forwarded = extraArgs.join(" ");
     throw new UsageError(
@@ -4815,6 +4814,12 @@ async function handleDefaultMulti(
       throw new UsageError(
         `Cannot forward arguments through the "${scriptName}" root script. It has shell operators or a comment.`,
         hints
+      );
+    }
+    if (forwarding.kind === "too-deep") {
+      throw new UsageError(
+        `Cannot forward arguments through the "${scriptName}" script. It runs through too many package scripts, or the scripts call each other in a loop.`,
+        [`Run the command directly: portless run <command> ${extraArgs.join(" ")}`]
       );
     }
   }

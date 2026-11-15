@@ -2078,6 +2078,18 @@ describe("resolveTurboRootForwarding", () => {
     });
   });
 
+  it("reports when Turbo delegation exceeds the depth limit", () => {
+    const nested = {
+      one: "npm run two",
+      two: "npm run three",
+      three: "npm run four",
+      four: "npm run five",
+      five: "npm run six",
+      six: "turbo dev",
+    };
+    expect(resolve("npm run one", nested, "npm@10.0.0")).toEqual({ kind: "too-deep" });
+  });
+
   it("returns none when the script is missing", () => {
     writePackage({});
     expect(resolveTurboRootForwarding("dev", pkgDir)).toEqual({ kind: "none" });
@@ -2132,13 +2144,28 @@ describe("resolveScriptArgForwarding", () => {
     expect(resolve(dev, extra, pm)).toEqual({ kind: "forward", separators });
   });
 
-  it("reports an unsafe nested script and stops at a delegation cycle", () => {
+  it("keeps a parent separator when the leaf has a literal separator", () => {
+    expect(resolve("npm run start", { start: "node a.cjs -- --a" }, "npm@10.0.0")).toEqual({
+      kind: "forward",
+      separators: 1,
+    });
+  });
+
+  it("stops delegation when a workspace target loops to the current script", () => {
+    expect(resolve("npm run dev -w web", {}, "npm@10.0.0")).toEqual({
+      kind: "forward",
+      separators: 1,
+    });
+  });
+
+  it("reports unsafe nested scripts and treats delegation cycles as leaves", () => {
     expect(resolve("npm run start", { start: "node a.js && node b.js" }, "npm@10.0.0")).toEqual({
       kind: "unsafe",
       scriptName: "start",
     });
     expect(resolve("npm run start", { start: "npm run dev" }, "npm@10.0.0")).toEqual({
-      kind: "too-deep",
+      kind: "forward",
+      separators: 2,
     });
   });
 });

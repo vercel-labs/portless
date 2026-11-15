@@ -34,7 +34,7 @@ portless
 # -> runs "dev", https://<project>.localhost
 ```
 
-Pass arguments to the script after `--`, so `portless -- --inspect` runs `dev` with `--inspect`. Forwarding arguments into a script with shell operators or a comment exits 2, in Turbo and outside it; run the command directly or make the script a single command.
+Pass arguments to the script after `--`, so `portless -- --inspect` runs `dev` with `--inspect`. Forwarding arguments into a script with shell operators or a comment exits 2; run the command directly or make the script a single command. In Turbo mode only the root script is checked, and Turbo passes the arguments to each package script unchanged.
 
 The name comes from `package.json`, the git root, or the directory. Pass a name and a command to choose both:
 

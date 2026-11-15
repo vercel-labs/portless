@@ -2534,41 +2534,67 @@ export function resolveFrameworkBasename(
 export type TurboRootForwarding =
   | { kind: "none" }
   | { kind: "forward"; separators: number }
-  | { kind: "unsafe"; turbo: boolean };
+  | { kind: "unsafe"; turbo: boolean }
+  | { kind: "too-deep" };
 
 /** How many package scripts a root script may delegate through before portless stops following. */
 const MAX_SCRIPT_DELEGATION_DEPTH = 5;
 
-function resolveTurboScript(
-  scriptName: string,
-  packageDir: string,
-  depth: number,
-  consumedSeparators: number,
-  inheritedSeparators: number
-): TurboRootForwarding {
+type ScriptWalkResult =
+  | { kind: "missing" }
+  | { kind: "unsafe"; scriptName: string; turbo: boolean }
+  | { kind: "too-deep" }
+  | { kind: "leaf"; separators: number; turbo: boolean };
+
+function walkScript(scriptName: string, packageDir: string, chain: string[]): ScriptWalkResult {
   const raw = resolveScriptRaw(scriptName, packageDir);
   const tokens = resolveScript(scriptName, packageDir);
-  if (!raw || !tokens) return { kind: "none" };
-  if (isUnsafeToAppendArgs(raw)) return { kind: "unsafe", turbo: mentionsTurbo(tokens) };
+  if (!raw || !tokens) return { kind: "missing" };
+  if (isUnsafeToAppendArgs(raw)) {
+    return { kind: "unsafe", scriptName, turbo: mentionsTurbo(tokens) };
+  }
   const unwrapped = unwrapCommand(tokens, packageDir);
-  if (!unwrapped) return { kind: "none" };
+  if (!unwrapped) return { kind: "leaf", separators: 0, turbo: false };
   const { command, packageSpec, script } = unwrapped;
-  const consumed = consumedSeparators + unwrapped.consumed;
-  const existing = inheritedSeparators + command.slice(1).filter((arg) => arg === "--").length;
-  if (script !== "always" && isTurboCommand(command[0], packageSpec)) {
-    return { kind: "forward", separators: Math.max(0, 1 + consumed - existing) };
+  const literalSeparators = command.slice(1).filter((arg) => arg === "--").length;
+  const turbo = script !== "always" && isTurboCommand(command[0], packageSpec);
+  if (turbo) {
+    return {
+      kind: "leaf",
+      separators: Math.max(0, unwrapped.consumed + 1 - literalSeparators),
+      turbo: true,
+    };
   }
-  if (!script || depth >= MAX_SCRIPT_DELEGATION_DEPTH || !resolveScript(command[0], packageDir)) {
-    return { kind: "none" };
+  if (!script || chain.includes(command[0]) || !resolveScript(command[0], packageDir)) {
+    return {
+      kind: "leaf",
+      separators: Math.max(0, unwrapped.consumed - literalSeparators),
+      turbo: false,
+    };
   }
-  return resolveTurboScript(command[0], packageDir, depth + 1, consumed, existing);
+  if (chain.length - 1 >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "too-deep" };
+  const child = walkScript(command[0], packageDir, [...chain, command[0]]);
+  if (child.kind === "too-deep" || child.kind === "unsafe") return child;
+  const childSeparators = child.kind === "leaf" ? child.separators : 0;
+  const childTurbo = child.kind === "leaf" && child.turbo;
+  return {
+    kind: "leaf",
+    separators: Math.max(0, unwrapped.consumed + childSeparators - literalSeparators),
+    turbo: childTurbo,
+  };
 }
 
 export function resolveTurboRootForwarding(
   scriptName: string,
   packageDir: string
 ): TurboRootForwarding {
-  return resolveTurboScript(scriptName, packageDir, 0, 0, 0);
+  const result = walkScript(scriptName, packageDir, [scriptName]);
+  if (result.kind === "unsafe") return { kind: "unsafe", turbo: result.turbo };
+  if (result.kind === "too-deep") return result;
+  if (result.kind === "leaf" && result.turbo) {
+    return { kind: "forward", separators: result.separators };
+  }
+  return { kind: "none" };
 }
 
 export type ScriptArgForwarding =
@@ -2576,30 +2602,6 @@ export type ScriptArgForwarding =
   | { kind: "forward"; separators: number }
   | { kind: "unsafe"; scriptName: string }
   | { kind: "too-deep" };
-
-function resolveScriptArgForwardingStep(
-  scriptName: string,
-  packageDir: string,
-  depth: number,
-  consumedSeparators: number,
-  inheritedSeparators: number
-): ScriptArgForwarding {
-  const raw = resolveScriptRaw(scriptName, packageDir);
-  const tokens = resolveScript(scriptName, packageDir);
-  if (!raw || !tokens) return { kind: "missing" };
-  if (isUnsafeToAppendArgs(raw)) return { kind: "unsafe", scriptName };
-  const unwrapped = unwrapCommand(tokens, packageDir);
-  if (!unwrapped)
-    return { kind: "forward", separators: Math.max(0, consumedSeparators - inheritedSeparators) };
-  const { command, script } = unwrapped;
-  const consumed = consumedSeparators + unwrapped.consumed;
-  const existing = inheritedSeparators + command.slice(1).filter((arg) => arg === "--").length;
-  if (!script || !resolveScript(command[0], packageDir)) {
-    return { kind: "forward", separators: Math.max(0, consumed - existing) };
-  }
-  if (depth >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "too-deep" };
-  return resolveScriptArgForwardingStep(command[0], packageDir, depth + 1, consumed, existing);
-}
 
 /**
  * Resolve how forwarded arguments pass through a package script, following
@@ -2609,7 +2611,11 @@ export function resolveScriptArgForwarding(
   scriptName: string,
   packageDir: string
 ): ScriptArgForwarding {
-  return resolveScriptArgForwardingStep(scriptName, packageDir, 0, 0, 0);
+  const result = walkScript(scriptName, packageDir, [scriptName]);
+  if (result.kind === "missing") return result;
+  if (result.kind === "unsafe") return { kind: "unsafe", scriptName: result.scriptName };
+  if (result.kind === "too-deep") return result;
+  return { kind: "forward", separators: result.separators };
 }
 
 /**
