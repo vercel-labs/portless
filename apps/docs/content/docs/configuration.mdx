@@ -154,11 +154,11 @@ For turborepo projects, use `portless` as the `dev` script and the real command 
 }
 ```
 
-`pnpm dev` at the root runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy. With portless defaults, no `turbo.json` or `turbo.jsonc` changes are needed. If you configure portless with `PORTLESS_*` environment variables, such as `PORTLESS_STATE_DIR` or `PORTLESS_PORT`, Turbo's default strict environment mode removes them before the package script runs, and the nested `portless` falls back to its defaults. Pass them through in `turbo.json` or `turbo.jsonc`:
+`pnpm dev` at the root runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy. With portless defaults, no `turbo.json` or `turbo.jsonc` changes are needed. If you configure portless with `PORTLESS` or `PORTLESS_*` environment variables, such as `PORTLESS=0`, `PORTLESS_STATE_DIR`, or `PORTLESS_PORT`, Turbo's default strict environment mode removes them before the package script runs, and the nested `portless` falls back to its defaults. Pass them through in `turbo.json` or `turbo.jsonc`:
 
 ```json
 {
-  "globalPassThroughEnv": ["PORTLESS_*"]
+  "globalPassThroughEnv": ["PORTLESS", "PORTLESS_*"]
 }
 ```
 
