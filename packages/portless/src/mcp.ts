@@ -108,7 +108,7 @@ const TLD_PROPERTY = {
   type: "array",
   items: { type: "string" },
   minItems: 1,
-  description: "One or more TLDs to serve.",
+  description: "One or more TLDs to serve. Invalid TLDs are usage errors (CLI exit code 2).",
 };
 const ALIAS_TLD_PROPERTY = {
   ...TLD_PROPERTY,
@@ -120,8 +120,10 @@ export const TOOLS: ToolDef[] = [
   tool(
     "list",
     "List routes",
-    "List active routes with their URLs, ports, PIDs, and uptime.",
-    {},
+    "List active routes with their URLs, ports, PIDs, uptime, and upstream settings.",
+    {
+      json: { type: "boolean", description: "Return routes as JSON, including upstream settings." },
+    },
     [],
     {
       readOnlyHint: true,
@@ -141,6 +143,7 @@ export const TOOLS: ToolDef[] = [
         description:
           "Skip worktree config and naming: PORTLESS_PREFIX, portless.json worktree style and template, and git worktree detection, so the URL has no worktree label.",
       },
+      json: { type: "boolean", description: "Return the name, hostname, and URL as JSON." },
     },
     ["name"],
     {
@@ -153,10 +156,15 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_add",
     "Add alias",
-    "Register a static route for a service portless does not run, such as a database. Registers it for every configured TLD unless tld selects specific ones.",
+    "Register a static route for a service portless does not run, such as a database. The optional upstream accepts https, https://<host>[:<port>], or http://<host>[:<port>]. The alias's positional port always dials loopback; an upstream authority overrides Host and supplies HTTPS SNI for DNS hostnames only, without the port. IP addresses are not sent as SNI. Upstream TLS supports HTTP/1.1 only and disables certificate verification, so it does not authenticate backend identity, including through an SSH tunnel, and does not change client-facing proxy TLS. Restart the proxy daemon after upgrading. Registers it for every configured TLD unless tld selects specific ones. A state directory that another user owns or can write to is refused.",
     {
       name: NAME_PROPERTY,
       port: PORT_PROPERTY,
+      upstream: {
+        type: "string",
+        description:
+          'Use "https" for loopback TLS without changing Host, "https://<host>[:<port>]" for TLS with Host override and SNI set to a DNS hostname without its port (IP addresses are not sent as SNI), or "http://<host>[:<port>]" for cleartext with Host override. Host uses the full supplied authority, including its optional port. The authority accepts only a hostname or IP address with an optional port, without credentials, path, query, fragment, or whitespace.',
+      },
       tld: ALIAS_TLD_PROPERTY,
       force: {
         type: "boolean",
@@ -202,7 +210,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_start",
     "Start proxy",
-    'Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass extraArgs ["--skip-trust"] to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code.',
+    "Start the shared portless proxy as a background daemon. Without port, HTTPS uses 443 which may need sudo; MCP cannot answer a sudo prompt, so pass unprivileged for a port below 1024 without sudo, or port (for example 1355). HTTPS may show an OS dialog to trust the local CA; pass skipTrust to skip it. The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection. A backend listening on both families may accept an extra connection that closes without an HTTP request. Connection failures in the proxy log include each loopback address and error code. A state directory that another user owns or can write to is refused.",
     {
       port: PORT_PROPERTY,
       noTls: { type: "boolean", description: "Serve plain HTTP instead of HTTPS." },
@@ -217,6 +225,17 @@ export const TOOLS: ToolDef[] = [
         description:
           "Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers only. Serves plain HTTP on port 80 unless HTTPS is requested, and turns off hosts sync.",
       },
+      https: {
+        type: "boolean",
+        description: "Serve HTTPS even with unprivileged or PORTLESS_HTTPS=0.",
+      },
+      skipTrust: {
+        type: "boolean",
+        description: "Do not add the local CA to the system trust store.",
+      },
+      cert: { type: "string", description: "Custom TLS certificate path; requires key." },
+      key: { type: "string", description: "Custom TLS private key path; requires cert." },
+      ip: { type: "string", description: "LAN IP to pin; use with lan." },
     },
     [],
     {
@@ -229,7 +248,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "proxy_stop",
     "Stop proxy",
-    "Stop the shared portless proxy. Pass port when the proxy runs on a non-default port.",
+    "Stop the shared portless proxy. Pass port when the proxy runs on a non-default port. A recorded process that cannot be verified as the proxy is reported and left running, never signaled. A state directory that another user owns or can write to is refused.",
     { port: PORT_PROPERTY },
     [],
     {
@@ -243,7 +262,7 @@ export const TOOLS: ToolDef[] = [
     "doctor",
     "Run doctor",
     "Check local portless health, including the proxy, certificates, and routes.",
-    {},
+    { json: { type: "boolean", description: "Return the report as JSON." } },
     [],
     {
       readOnlyHint: true,
@@ -255,7 +274,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "prune",
     "Prune servers",
-    "Kill orphaned dev servers left by crashed sessions.",
+    "Remove stale routes and shares, and stop matching recorded process groups. A group keeps its route and shares while any member is still running, even after it closes its port, and the surviving member is recorded for a retry. A group that cannot be verified is reported and kept, never signaled. A port holder that cannot be proven part of the recorded group is reported and kept, never killed. Stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups and unrelated port holders are not killed. Refuses a state directory that another user owns or can write to, and signals nothing.",
     {
       force: {
         type: "boolean",
@@ -415,17 +434,22 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
   switch (toolName) {
     case "list":
       argv.push("list");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     case "get": {
       const name = readRequiredName(args, "name");
       argv.push("get", name);
       if (readBoolean(args, "noWorktree") === true) argv.push("--no-worktree");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     }
     case "alias_add": {
       const name = readRequiredName(args, "name");
       const port = readPort(args, "port", true);
+      if (args.upstream === null) fail("upstream must be a string");
+      const upstream = readString(args, "upstream", false);
       argv.push("alias", name, String(port));
+      if (upstream !== undefined) argv.push("--upstream", upstream);
       for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "force") === true) argv.push("--force");
       break;
@@ -452,6 +476,12 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "wildcard") === true) argv.push("--wildcard");
       if (readBoolean(args, "unprivileged") === true) argv.push("--unprivileged");
+      if (readBoolean(args, "https") === true) argv.push("--https");
+      if (readBoolean(args, "skipTrust") === true) argv.push("--skip-trust");
+      for (const flag of ["cert", "key", "ip"] as const) {
+        const value = readString(args, flag, false);
+        if (value !== undefined) argv.push(`--${flag}`, value);
+      }
       break;
     }
     case "proxy_stop": {
@@ -462,6 +492,7 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
     }
     case "doctor":
       argv.push("doctor");
+      if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     case "prune":
       argv.push("prune");
@@ -618,7 +649,7 @@ export function createServer(profiles: string[]): {
         const instructions = [
           `Portless MCP server. Active profiles: ${profiles.join(", ")}.`,
           lookup.length > 0 ? `Use ${lookup.join(", ")}.` : "",
-          "Start dev servers with `portless run <cmd>` in a shell; MCP does not run them.",
+          "Start dev servers with `portless run <cmd>` in a shell; value flags accept `--flag <value>` or `--flag=<value>`. MCP does not run them.",
           enabled.has("tools_profiles")
             ? "Call the tools_profiles tool to see other tool profiles."
             : "",
@@ -780,9 +811,9 @@ export function printMcpHelp(): void {
       ),
       "",
       "Common tools:",
-      "  list            List active routes.",
-      "  get             Print an app URL.",
-      "  alias_add       Register a static route.",
+      "  list            List active routes (json: true for JSON).",
+      "  get             Print an app URL (json: true for JSON).",
+      "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
       "",
       "Worktree options inherit from the workspace root into package directories.",
@@ -791,6 +822,7 @@ export function printMcpHelp(): void {
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",
       "to append CLI flags that are not typed into the tool schema.",
+      "Zero-arg run is CLI-only; Turbo mode exits 2 for forwarded arguments through a root script with shell operators or a comment.",
       "",
       "Environment:",
       "  PORTLESS_STATE_DIR  Directory for portless state.",
@@ -812,7 +844,7 @@ export async function runMcp(args: string[]): Promise<void> {
   const usageError = (message: string): void => {
     console.error(colors.red(`Error: ${message}`));
     console.error("Usage: portless mcp [--tools <profiles>]");
-    process.exit(1);
+    process.exit(2);
   };
 
   for (let index = 0; index < args.length; index += 1) {

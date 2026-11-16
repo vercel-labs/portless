@@ -4,11 +4,16 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
 import { spawn } from "node:child_process";
-import { RouteStore, RouteConflictError } from "./routes.js";
+import { RouteStore, RouteConflictError, RoutesFileError } from "./routes.js";
+import { ensureStateDir } from "./utils.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
-  return { ...actual, mkdirSync: vi.fn(actual.mkdirSync) };
+  return {
+    ...actual,
+    mkdirSync: vi.fn(actual.mkdirSync),
+    writeFileSync: vi.fn(actual.writeFileSync),
+  };
 });
 
 describe("RouteStore", () => {
@@ -36,41 +41,125 @@ describe("RouteStore", () => {
       store.ensureDir();
       expect(() => store.ensureDir()).not.toThrow();
     });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps the directory owner-writable only under a group-writable umask",
+      () => {
+        const previous = process.umask(0o002);
+        try {
+          const created = path.join(tmpDir, "umask");
+          new RouteStore(created).ensureDir();
+          expect(fs.statSync(created).mode & 0o777).toBe(0o755);
+        } finally {
+          process.umask(previous);
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "refuses a route write in a directory other users can write to and leaves it unchanged",
+      () => {
+        const writable = path.join(tmpDir, "writable");
+        fs.mkdirSync(writable);
+        fs.chmodSync(writable, 0o777);
+        const writableStore = new RouteStore(writable);
+        expect(() => writableStore.addRoute("app.localhost", 4000, process.pid)).toThrow(
+          "Cannot use state directory"
+        );
+        expect(fs.statSync(writable).mode & 0o777).toBe(0o777);
+        expect(writableStore.untrustedReason()).toContain("other users can write to it");
+        expect(fs.existsSync(writableStore.getRoutesPath())).toBe(false);
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "follows a symlink only another user could not have planted",
+      () => {
+        const real = path.join(tmpDir, "real");
+        fs.mkdirSync(real, { mode: 0o700 });
+        const link = path.join(tmpDir, "link");
+        fs.symlinkSync(real, link);
+        expect(ensureStateDir(link)).toBeNull();
+        expect(fs.statSync(real).mode & 0o777).toBe(0o755);
+      }
+    );
+
+    for (const kind of ["directory", "file"] as const) {
+      it.skipIf(process.platform === "win32")(
+        `never changes the mode of a ${kind} behind a symlink in a shared directory`,
+        () => {
+          const target = path.join(tmpDir, "protected");
+          if (kind === "directory") fs.mkdirSync(target, { mode: 0o700 });
+          else fs.writeFileSync(target, "secret", { mode: 0o600 });
+          const shared = path.join(tmpDir, "shared");
+          fs.mkdirSync(shared);
+          fs.chmodSync(shared, 0o777);
+          const link = path.join(shared, "state");
+          fs.symlinkSync(target, link);
+
+          expect(ensureStateDir(link)).toContain("other users can redirect it through");
+          expect(fs.statSync(target).mode & 0o777).toBe(kind === "directory" ? 0o700 : 0o600);
+        }
+      );
+    }
   });
 
   describe("loadRoutes", () => {
+    it.skipIf(process.platform === "win32")(
+      "refuses trusted route loading from a directory other users can write to",
+      () => {
+        store.addRoute("app.localhost", 4000, process.pid);
+        fs.chmodSync(tmpDir, 0o777);
+        try {
+          expect(() => store.loadTrustedRoutes()).toThrow("Cannot use state directory");
+        } finally {
+          fs.chmodSync(tmpDir, 0o755);
+        }
+        expect(store.loadTrustedRoutes()).toMatchObject([
+          { hostname: "app.localhost", port: 4000 },
+        ]);
+      }
+    );
+
     it("returns empty array when routes file does not exist", () => {
       expect(store.loadRoutes()).toEqual([]);
     });
 
-    it("returns empty array for invalid JSON", () => {
+    it("throws for invalid JSON instead of returning an empty table", () => {
       store.ensureDir();
       fs.writeFileSync(store.getRoutesPath(), "not json");
+      expect(() => store.loadRoutes()).toThrow(RoutesFileError);
+      expect(() => store.loadRoutes()).toThrow(/invalid JSON/);
+    });
+
+    it("leaves a corrupt routes file in place", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), "not json");
+      expect(() => store.loadRoutes()).toThrow(/invalid JSON/);
+      expect(fs.readFileSync(store.getRoutesPath(), "utf-8")).toBe("not json");
+    });
+
+    it("throws when the routes file is not an array", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify({ not: "array" }));
+      expect(() => store.loadRoutes()).toThrow(/expected array/);
+    });
+
+    it("moves a corrupt routes file aside for a write path", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), "not json");
+      expect(store.recoverCorruptRoutesFile()).toBe(true);
       expect(store.loadRoutes()).toEqual([]);
+      const backup = fs.readdirSync(tmpDir).find((name) => name.startsWith("routes.json.corrupt-"));
+      expect(backup).toBeDefined();
+      expect(fs.readFileSync(path.join(tmpDir, backup!), "utf-8")).toBe("not json");
     });
 
-    it("calls onWarning for invalid JSON", () => {
-      const warnings: string[] = [];
-      const warnStore = new RouteStore(tmpDir, {
-        onWarning: (msg) => warnings.push(msg),
-      });
-      warnStore.ensureDir();
-      fs.writeFileSync(warnStore.getRoutesPath(), "not json");
-      warnStore.loadRoutes();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain("invalid JSON");
-    });
-
-    it("calls onWarning when routes file is not an array", () => {
-      const warnings: string[] = [];
-      const warnStore = new RouteStore(tmpDir, {
-        onWarning: (msg) => warnings.push(msg),
-      });
-      warnStore.ensureDir();
-      fs.writeFileSync(warnStore.getRoutesPath(), JSON.stringify({ not: "array" }));
-      warnStore.loadRoutes();
-      expect(warnings).toHaveLength(1);
-      expect(warnings[0]).toContain("expected array");
+    it("leaves a valid routes file alone when recovering", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), "[]");
+      expect(store.recoverCorruptRoutesFile()).toBe(false);
+      expect(store.loadRoutes()).toEqual([]);
     });
 
     it("filters out entries with invalid schema", () => {
@@ -86,6 +175,40 @@ describe("RouteStore", () => {
       const loaded = store.loadRoutes();
       expect(loaded).toHaveLength(1);
       expect(loaded[0].hostname).toBe("valid.localhost");
+    });
+
+    it("rejects malformed or unknown upstream fields while retaining valid routes", () => {
+      const valid = { hostname: "valid.localhost", port: 4001, pid: 0 };
+      const upstreams = [
+        null,
+        [],
+        "https",
+        { tls: "true" },
+        { host: 123 },
+        { host: "" },
+        { host: "api.internal:0" },
+        { host: "api.internal:65536" },
+        { host: "api.internal:000001" },
+        { host: "256.1.1.1" },
+        { host: "127.0.0" },
+        { host: "127.00.0.1" },
+        { host: "user@api.internal" },
+        { host: "api.internal/path" },
+        { host: "[not-ipv6]" },
+        { tls: true, extra: 1 },
+      ];
+      const routes = [
+        valid,
+        { ...valid, hostname: "tls.localhost", upstream: { tls: true, host: "api.internal:8443" } },
+        ...upstreams.map((upstream, index) => ({
+          ...valid,
+          hostname: `invalid${index}.localhost`,
+          upstream,
+        })),
+      ];
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      expect(store.loadRoutes()).toEqual(routes.slice(0, 2));
     });
 
     it("loads routes from file", () => {
@@ -112,7 +235,7 @@ describe("RouteStore", () => {
       expect(loaded[0].hostname).toBe("alive.localhost");
     });
 
-    it("does not persist cleanup when persistCleanup is false (default)", () => {
+    it("does not drop stale entries from disk when loading routes", () => {
       const deadPid = 999999;
       const routes = [
         { hostname: "alive.localhost", port: 4001, pid: process.pid },
@@ -125,22 +248,6 @@ describe("RouteStore", () => {
       // Re-read the file directly; stale entries should still be on disk
       const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
       expect(raw).toHaveLength(2);
-    });
-
-    it("persists cleaned-up routes when persistCleanup is true", () => {
-      const deadPid = 999999;
-      const routes = [
-        { hostname: "alive.localhost", port: 4001, pid: process.pid },
-        { hostname: "dead.localhost", port: 4002, pid: deadPid },
-      ];
-      store.ensureDir();
-      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
-      store.loadRoutes(true);
-
-      // Re-read the file directly to verify it was cleaned up
-      const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
-      expect(raw).toHaveLength(1);
-      expect(raw[0].hostname).toBe("alive.localhost");
     });
 
     it("keeps routes whose process exists but cannot be signaled (EPERM)", () => {
@@ -157,7 +264,7 @@ describe("RouteStore", () => {
         store.ensureDir();
         fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
 
-        expect(store.loadRoutes(true).map((r) => r.hostname)).toEqual(["denied.localhost"]);
+        expect(store.loadRoutes().map((r) => r.hostname)).toEqual(["denied.localhost"]);
         const raw = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
         expect(raw).toHaveLength(1);
         expect(() => store.addRoute("denied.localhost", 4002, process.pid)).toThrow(
@@ -166,6 +273,95 @@ describe("RouteStore", () => {
       } finally {
         kill.mockRestore();
       }
+    });
+  });
+
+  describe("unsupported stored routes", () => {
+    const unsupported = {
+      hostname: "future.localhost",
+      port: 4001,
+      pid: 0,
+      upstream: { tls: true, futureOption: { value: 1 } },
+      extra: "preserve",
+    };
+    const malformed = { hostname: "malformed.localhost", port: 4002, pid: 0, upstream: null };
+    const incomplete = { hostname: "incomplete.localhost", upstream: { tls: true } };
+    const alias = { hostname: "alias.localhost", port: 4003, pid: 0 };
+    const owned = { hostname: "owned.localhost", port: 4004, pid: process.pid };
+    const stale = { hostname: "stale.localhost", port: 4005, pid: 999999 };
+
+    function seed(): void {
+      fs.writeFileSync(
+        store.getRoutesPath(),
+        JSON.stringify([unsupported, malformed, incomplete, alias, owned, stale])
+      );
+    }
+
+    function disk(): unknown[] {
+      return JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+    }
+
+    it("preserves skipped entries while adding, updating, transferring and removing valid routes", () => {
+      seed();
+      expect(store.loadRoutes()).toEqual([alias, owned]);
+      expect(store.loadRoutesRaw()).toEqual([alias, owned, stale]);
+
+      store.addRoute("new.localhost", 4006, 0, false, { tls: true });
+      expect(disk()).toEqual(
+        expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
+      );
+      expect(disk()).not.toContainEqual(stale);
+      store.updateRoute("owned.localhost", { ngrokUrl: "https://example.test" });
+      expect(disk()).toContainEqual({ ...owned, ngrokUrl: "https://example.test" });
+      expect(store.transferRoute("owned.localhost", process.pid, process.ppid)).toBe(true);
+      store.removeRoute("alias.localhost", 0);
+
+      expect(disk()).toEqual(expect.arrayContaining([unsupported, malformed, incomplete]));
+      expect(disk()).not.toContainEqual(alias);
+      expect(store.loadRoutes()).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ hostname: "new.localhost", upstream: { tls: true } }),
+          expect.objectContaining({ hostname: "owned.localhost", pid: process.ppid }),
+        ])
+      );
+      expect(store.loadRoutes().map((route) => route.hostname)).not.toContain("future.localhost");
+    });
+
+    it("prunes dead supported routes without removing skipped entries", () => {
+      seed();
+      const dead = store.findStaleRoutes();
+      expect(dead).toEqual([stale]);
+      expect(store.removeStaleRoute(dead[0]!.hostname, dead[0]!.pid)).toBe(true);
+      expect(disk()).toEqual(
+        expect.arrayContaining([unsupported, malformed, incomplete, alias, owned])
+      );
+      expect(disk()).not.toContainEqual(stale);
+    });
+
+    it.each([unsupported, malformed, incomplete])(
+      "requires force to replace a skipped hostname",
+      (entry) => {
+        seed();
+        expect(() => store.addRoute(entry.hostname, 4444, 0)).toThrow(
+          "has an invalid or unsupported stored route. Use --force to replace it."
+        );
+        expect(disk()).toContainEqual(entry);
+        store.addRoute(entry.hostname, 4444, 0, true);
+        const matching = (disk() as { hostname?: string }[]).filter(
+          (route) => route.hostname === entry.hostname
+        );
+        expect(matching).toHaveLength(1);
+        expect(matching[0]).toMatchObject({ hostname: entry.hostname, port: 4444, pid: 0 });
+        expect(matching[0]).not.toHaveProperty("upstream");
+      }
+    );
+
+    it("continues to reject invalid new upstreams without changing the file", () => {
+      seed();
+      expect(() =>
+        store.addRoute("new.localhost", 4444, 0, false, { tls: "yes" } as never)
+      ).toThrow("Invalid upstream configuration");
+      expect(disk()).toEqual([unsupported, malformed, incomplete, alias, owned, stale]);
     });
   });
 
@@ -185,9 +381,40 @@ describe("RouteStore", () => {
       s.addRoute("test.localhost", 4001, process.pid);
       expect(fs.existsSync(s.getRoutesPath())).toBe(true);
     });
+
+    it("never exposes a partially written routes file to readers", () => {
+      store.addRoute("app.localhost", 4001, process.pid);
+      const stable = fs.readFileSync(store.getRoutesPath(), "utf-8");
+      fs.writeFileSync(`${store.getRoutesPath()}.tmp`, "stale", { mode: 0o444 });
+      const write = vi.mocked(fs.writeFileSync);
+      const writeActual = write.getMockImplementation()!;
+      let observedDuringWrite: string | undefined;
+      write.mockImplementationOnce((target, data, options) => {
+        const text = String(data);
+        writeActual(target, text.slice(0, Math.floor(text.length / 2)), options);
+        observedDuringWrite = fs.readFileSync(store.getRoutesPath(), "utf-8");
+        writeActual(target, text);
+      });
+
+      store.updateRoute("app.localhost", { childPgid: 4242 });
+
+      expect(observedDuringWrite).toBe(stable);
+      expect(store.loadRoutes()[0].childPgid).toBe(4242);
+    });
   });
 
   describe("addRoute", () => {
+    it("persists and reloads upstream settings and clears them on replacement", () => {
+      const upstream = { tls: true, host: "api.internal:8443" };
+      store.addRoute("api.localhost", 4001, 0, false, upstream);
+      const saved = JSON.parse(fs.readFileSync(store.getRoutesPath(), "utf-8"));
+      expect(saved[0].upstream).toEqual(upstream);
+      expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toEqual(upstream);
+
+      store.addRoute("api.localhost", 4002, 0, true);
+      expect(new RouteStore(tmpDir).loadRoutes()[0].upstream).toBeUndefined();
+    });
+
     it("adds a route to empty store", () => {
       const before = Date.now();
       store.addRoute("myapp.localhost", 4001, process.pid);
@@ -274,6 +501,27 @@ describe("RouteStore", () => {
         }
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "refuses a --force takeover recorded in a directory other users can write to",
+      () => {
+        const otherPid = spawnSleeper();
+        try {
+          store.addRoute("app.localhost", 4001, otherPid);
+          fs.chmodSync(tmpDir, 0o777);
+          expect(() => store.addRoute("app.localhost", 4002, process.pid, true)).toThrow(
+            "Cannot use state directory"
+          );
+          expect(isAlive(otherPid)).toBe(true);
+          expect(store.loadRoutes().find((route) => route.hostname === "app.localhost")?.pid).toBe(
+            otherPid
+          );
+        } finally {
+          fs.chmodSync(tmpDir, 0o755);
+          if (isAlive(otherPid)) process.kill(otherPid, "SIGTERM");
+        }
+      }
+    );
 
     it("replaces the route when --force kills the existing process", () => {
       const otherPid = spawnSleeper();
@@ -363,6 +611,143 @@ describe("RouteStore", () => {
       const routes = store.loadRoutes();
       expect(routes).toHaveLength(1);
       expect(routes[0].pid).toBe(newOwnerPid);
+    });
+  });
+
+  describe("stale recovery records", () => {
+    const deadPid = 999999;
+    const staleRoute = {
+      hostname: "stale.localhost",
+      port: 4310,
+      pid: deadPid,
+      childPgid: 4242,
+      childStartTime: "leader-start",
+      tailscaleHttpsPort: 8443,
+      ngrokPid: 5151,
+      registeredAt: Date.now() - 60_000,
+    };
+    const retiredRoute = { ...staleRoute, retired: true };
+
+    const writeRoutes = (routes: unknown[]) =>
+      fs.writeFileSync(path.join(tmpDir, "routes.json"), JSON.stringify(routes));
+    const readRaw = () =>
+      JSON.parse(fs.readFileSync(path.join(tmpDir, "routes.json"), "utf-8")) as Array<{
+        hostname: string;
+        pid: number;
+        port: number;
+        orphanPid?: number;
+        orphanStartTime?: string;
+        ngrokUrl?: string;
+      }>;
+
+    it("keeps a stale record out of the active view", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(store.loadRoutes()).toEqual([]);
+      expect(store.loadRoutesRaw()).toEqual([staleRoute]);
+      expect(store.findStaleRoutes()).toEqual([staleRoute]);
+    });
+
+    it("keeps the record through add, update, transfer and remove of other routes", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+      store.updateRoute("other.localhost", { ngrokUrl: "https://other.ngrok.app" });
+      expect(store.transferRoute("other.localhost", process.pid, process.ppid)).toBe(true);
+      store.removeRoute("other.localhost", process.ppid);
+
+      expect(readRaw()).toEqual([retiredRoute]);
+      expect(store.loadRoutes()).toEqual([]);
+    });
+
+    it("keeps the record when the same hostname is registered again", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(() => store.addRoute("stale.localhost", 4999, process.pid)).not.toThrow();
+
+      expect(store.loadRoutes()).toHaveLength(1);
+      expect(store.loadRoutes()[0]!.port).toBe(4999);
+      expect(readRaw()).toHaveLength(2);
+      expect(readRaw()[0]).toMatchObject({
+        hostname: "stale.localhost",
+        port: 4999,
+        pid: process.pid,
+      });
+      expect(readRaw()[1]).toEqual(retiredRoute);
+    });
+
+    it("keeps a retained record inactive after its PID is reused", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+      store.addRoute("stale.localhost", 4999, process.pid);
+
+      writeRoutes(
+        readRaw().map((route) => (route.pid === deadPid ? { ...route, pid: process.ppid } : route))
+      );
+      store.removeRoute("stale.localhost", process.pid);
+
+      expect(store.loadRoutes()).toEqual([]);
+      expect(store.findStaleRoutes()).toHaveLength(1);
+    });
+
+    it("returns the active entry first for a legacy file with a stale record first", () => {
+      store.ensureDir();
+      const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
+      writeRoutes([staleRoute, live]);
+
+      expect(store.loadRoutesRaw()).toEqual([live, staleRoute]);
+      expect(store.loadRoutesRaw().find((route) => route.hostname === "stale.localhost")).toEqual(
+        live
+      );
+    });
+
+    it("updates the live entry, not the stale record, for a shared hostname", () => {
+      store.ensureDir();
+      const live = { hostname: "stale.localhost", port: 4999, pid: process.pid };
+      writeRoutes([staleRoute, live]);
+
+      store.updateRoute("stale.localhost", { ngrokUrl: "https://live.ngrok.app" });
+
+      const raw = readRaw();
+      expect(raw[0]).toEqual({ ...live, ngrokUrl: "https://live.ngrok.app" });
+      expect(raw[1]).toEqual(retiredRoute);
+    });
+
+    it("records a verified member only on the matching stale record", () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+
+      expect(store.recordStaleOrphan({ ...staleRoute, childStartTime: "other" }, 4343, "m")).toBe(
+        false
+      );
+      expect(store.recordStaleOrphan(staleRoute, 4343, "member-start")).toBe(true);
+
+      expect(readRaw()).toEqual([
+        { ...retiredRoute, orphanPid: 4343, orphanStartTime: "member-start" },
+      ]);
+    });
+
+    it("removes only the dead owner's record", () => {
+      store.ensureDir();
+      const second = { ...staleRoute, hostname: "second.localhost", port: 4311 };
+      writeRoutes([staleRoute, second]);
+
+      expect(store.removeStaleRoute("stale.localhost", 111111)).toBe(false);
+      expect(store.removeStaleRoute("stale.localhost", deadPid)).toBe(true);
+      expect(readRaw()).toEqual([{ ...second, retired: true }]);
+    });
+
+    it("drops stale entries without recovery data on the next write", () => {
+      store.ensureDir();
+      const plain = { hostname: "plain.localhost", port: 4312, pid: deadPid, registeredAt: 1 };
+      writeRoutes([plain]);
+
+      store.addRoute("other.localhost", 4001, process.pid);
+
+      expect(readRaw().map((route) => route.hostname)).toEqual(["other.localhost"]);
     });
   });
 

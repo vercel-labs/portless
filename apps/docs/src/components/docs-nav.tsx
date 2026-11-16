@@ -24,6 +24,7 @@ function Sidebar() {
             <Link
               key={href}
               href={href}
+              aria-current={active ? "page" : undefined}
               className={`block rounded-md px-3 py-1.5 text-sm transition-colors ${
                 active
                   ? "bg-neutral-100 font-medium text-neutral-900 dark:bg-neutral-800 dark:text-neutral-100"

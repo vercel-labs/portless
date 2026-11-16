@@ -14,7 +14,10 @@ Runs the `"dev"` script from `package.json` through the proxy. The app name is i
 portless                      # single app: run dev script
 portless                      # monorepo root: start all apps
 portless --script start       # run "start" instead of "dev"
+portless -- --inspect         # pass arguments to the script
 ```
+
+Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command. In Turbo mode only the root script is checked, and Turbo passes the arguments to each package script unchanged.
 
 Use a `portless.json` to override defaults. See [Configuration](/configuration).
 
@@ -27,7 +30,7 @@ portless <name> <cmd> [args...]
 
 `portless run` infers the project name from `portless.json`, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
-`portless <name>` uses an explicit name with no inference or prefixing.
+`portless <name>` uses an explicit name with no inference or prefixing. Value flags for `portless run` and named apps accept either `--flag value` or `--flag=value`.
 
 ```bash
 portless run                             # run dev script through proxy
@@ -60,7 +63,7 @@ portless docs.myapp next dev
     </tr>
     <tr>
       <td>`--app-port <number>`</td>
-      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`.</td>
+      <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`. A monorepo run refuses `PORTLESS_APP_PORT` when several proxied apps would start; set a per-app `appPort` instead.</td>
     </tr>
     <tr>
       <td>`--force`</td>
@@ -179,6 +182,8 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
+Use `portless get <name> --json` to print the input name, hostname, and URL as JSON.
+
 Worktree config is read from the current directory, including workspace root defaults, not from the named service's package; `cd` into a package to use its per-app options. Use `--no-worktree` to skip worktree config and all worktree naming. Without it, an invalid config in the current directory or workspace fails instead of printing a guessed URL.
 
 ## Alias (static routes)
@@ -187,6 +192,9 @@ Worktree config is read from the current directory, including workspace root def
 portless alias <name> <port>
 portless alias <name> <port> --force
 portless alias <name> <port> --tld <tld>
+portless alias <name> <port> --upstream https
+portless alias <name> <port> --upstream https://api.internal
+portless alias <name> <port> --upstream http://api.internal
 portless alias --remove <name>
 portless alias --remove <name> --tld <tld>
 ```
@@ -197,11 +205,25 @@ An alias covers every configured TLD by default. Pass `--tld <tld>` after the al
 
 `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
+The positional port always dials loopback. `--upstream https` enables TLS and preserves
+the incoming Host header. A URL authority such as `https://api.internal:8443` enables
+TLS and overrides Host with the full authority, including its optional port. SNI uses
+a DNS hostname without the port; IP addresses are not sent as SNI. An `http://`
+authority overrides Host without TLS. This
+setting does not change client-facing proxy TLS. Authorities accept only a hostname or
+IP address with an optional port, without credentials, paths, queries, fragments, or
+whitespace.
+
+Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
+certificate verification, so TLS does not authenticate backend identity, including
+through an SSH tunnel. Restart the proxy daemon after upgrading portless.
+
 ```bash
-portless alias my-postgres 5432     # -> https://my-postgres.localhost
-portless alias redis 6379           # -> https://redis.localhost
-portless alias redis 6379 --tld test # -> https://redis.test only
-portless alias --remove my-postgres # remove the alias
+portless alias my-postgres 5432                         # -> https://my-postgres.localhost
+portless alias redis 6379                               # -> https://redis.localhost
+portless alias redis 6379 --tld test                    # -> https://redis.test only
+portless alias api 8080 --upstream https://api.internal # TLS, Host and SNI override
+portless alias --remove my-postgres                    # remove the alias
 ```
 
 ## Docker Compose
@@ -249,7 +271,7 @@ Each routed service gets `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so a Vite dev
 portless list
 ```
 
-Shows active routes, their assigned ports, and how long each app has been running.
+Shows active routes, their assigned ports, and how long each app has been running. Use `portless list --json` to print the routes as JSON.
 
 ## Doctor
 
@@ -257,7 +279,7 @@ Shows active routes, their assigned ports, and how long each app has been runnin
 portless doctor
 ```
 
-Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes.
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
 For upstream 502 errors, stop the running proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
 
@@ -271,13 +293,15 @@ portless trust
 
 Adds the portless certificate authority to your system trust store. Required once for HTTPS with auto-generated certs.
 
+On macOS and Linux, `portless trust`, `portless proxy stop`, `portless prune`, `portless hosts sync`, `portless service install`, and `portless clean` act on a state directory only when no other user can change it. The directory and each of its parent directories must be owned by you or root and must not be writable by group or others. A parent with the sticky bit set, such as `/tmp`, is allowed. A symlink on the path counts only when you or root own it and it sits in a directory that passes the same check. `portless trust`, `portless proxy stop`, `portless prune`, `portless hosts sync`, and `portless service install` exit with the reason when the directory fails this check. Nothing is signaled and the hosts file is not changed. The proxy does not start from such a directory, and commands that register a route, such as `portless run` and `portless alias`, exit with the same reason. A proxy that is already running keeps the routes it has loaded and stops reloading them. portless never changes the permissions or owner of a state directory that fails it. Run `chmod go-w <dir>` on the directory it names, or point `PORTLESS_STATE_DIR` at a directory only you can write to.
+
 ## Clean up
 
 ```bash
 portless clean
 ```
 
-Stops the proxy if it is running, removes the portless CA from the OS trust store when portless installed it, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. May prompt for elevated privileges. Custom `--cert` / `--key` paths are not removed. If trust-store removal fails, portless keeps its CA certificate and key so a later `portless clean` can retry.
+Stops the proxy if it is running, removes the startup service and portless CA from the OS trust store when installed, deletes allowlisted files under `~/.portless`, the system state directory, and `PORTLESS_STATE_DIR` when set, and removes the portless block from `/etc/hosts`. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. On macOS and Linux, failed CA, state-file, and hosts steps are retried with sudo against the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. Custom `--cert` / `--key` paths are not removed. If trust-store removal still fails, portless keeps its CA certificate and key so a later `portless clean` can retry. A state directory that another user owns or can write to is left alone: clean prints the reason and exits nonzero, and a `/tmp/portless` directory that fails the check is skipped without an error. See [Trust the CA](#trust-the-ca) for the rule.
 
 ## Prune orphans
 
@@ -286,9 +310,9 @@ portless prune
 portless prune --force
 ```
 
-Finds and kills orphaned dev server processes left behind by crashed portless sessions. When the CLI is killed with `kill -9` or crashes, child dev servers may survive and continue holding their ports. This command checks routes whose owning process is dead but whose port is still in use, terminates the orphans, and removes the stale route entries. Use `--force` to send SIGKILL instead of SIGTERM.
+Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares once the recorded group is gone. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time, or if a member recorded by an earlier run still matches, and it reports the group stopped only after every member has exited. While any member is still running, even one that closed its port after SIGTERM, prune keeps the route and its shares and records the member that survived, so a retry with `portless prune --force` verifies that member and sends SIGKILL. A group prune cannot verify is kept and reported, never signaled, except that a member holding its port while the recorded leader is gone is recorded so a retry can stop it. Prune reports unrelated port holders without killing them.
 
-On macOS and Linux, prune stops the whole process group portless started for the route, including processes that do not hold the port. A group is only signaled when its leader still has the start time portless recorded at spawn, so a reused PID is never targeted. `portless run` does the same cleanup on startup for routes whose session died.
+On Windows, prune cannot verify or signal process groups. It removes stale routes and Tailscale shares and reports any port holders. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. `portless run` also attempts to stop recorded orphaned process groups on startup.
 
 ## Proxy control
 
@@ -325,7 +349,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--https`</td>
-      <td>Enable HTTPS (default, accepted for compatibility)</td>
+      <td>Serve HTTPS, even with `PORTLESS_HTTPS=0`. With `--unprivileged`, it turns HTTPS on and uses port 443.</td>
     </tr>
     <tr>
       <td>`--lan`</td>
@@ -358,7 +382,7 @@ portless proxy start
   </tbody>
 </table>
 
-When auto-starting, portless reuses the configuration (port, TLS, TLDs, LAN mode) from the most recent proxy run, so a restart or reboot does not revert to defaults. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority.
+When auto-starting, portless reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, so the next start uses the flags and environment variables it is given. Explicit flags and environment variables such as `PORTLESS_PORT` and `PORTLESS_HTTPS` take priority, so `PORTLESS_PORT` starts the proxy on that port instead of the saved one.
 
 ### Unprivileged mode
 
@@ -389,6 +413,8 @@ On a Mac with the application firewall turned on, the first wildcard bind shows 
 portless proxy stop
 ```
 
+Stops the proxy recorded in the state directory. portless signals the recorded PID only when nothing shows it is a different process from the one answering on the proxy port. When the recorded start time or the port's listener points to another process, it reports the mismatch, signals nothing, and exits nonzero. A `/tmp/portless` directory from a version before 0.11 is used only when it passes the state directory check in [Trust the CA](#trust-the-ca).
+
 ## OS startup service
 
 ```bash
@@ -416,7 +442,7 @@ portless proxy start --lan --ip 192.168.1.42   # manual IP override
 
 Without LAN mode, the proxy and HTTP redirect listener bind only to `127.0.0.1` and `::1`. LAN mode explicitly binds them to `0.0.0.0` and `::`.
 
-Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless also remembers LAN mode via `proxy.lan`, so a stopped LAN proxy starts in LAN mode again unless you override it with `PORTLESS_LAN=0` for that start.
+Make it permanent by adding `export PORTLESS_LAN=1` to your shell profile. Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpected proxy exit leaves it for auto-start. A normal `portless proxy stop` clears it, so the next start uses its flags and `PORTLESS_LAN`.
 
 Uses `dns-sd` on macOS (built-in) and `avahi-publish-address` on Linux (`avahi-utils`). Not supported on Windows.
 
@@ -473,11 +499,18 @@ Tools accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments, except `tools
 PORTLESS=0 pnpm dev
 ```
 
-Runs the command directly without the proxy.
+Runs the command directly without the proxy. Commands such as `portless get` and `portless list` still run normally.
 
 ## Info
 
 ```bash
 portless --help
+portless list --help
 portless --version
 ```
+
+`--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command: `portless run next dev --help` passes `--help` to Next.js. A misspelled command such as `portless lsit` suggests the closest match.
+
+## Exit codes
+
+`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, a missing flag value or required argument, an extra argument, or a command that needs `--yes` when no terminal is attached. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
