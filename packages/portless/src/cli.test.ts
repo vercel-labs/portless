@@ -2177,6 +2177,7 @@ describe("CLI", { timeout: 15_000 }, () => {
           });
           expect(status).toBe(2);
           expect(stderr).toContain(message);
+          expect(stderr).not.toContain("--lan-ip-auto");
           expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
         }
       } finally {

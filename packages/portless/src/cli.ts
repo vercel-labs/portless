@@ -2283,16 +2283,13 @@ function applyGlobalFlag(flag: string, value?: string): void {
   } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
   else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
   else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
-  else if (flag === "--ip") {
+  else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
     if (isIP(value ?? "") === 0) {
-      throw new UsageError(`--ip requires an IP address, but got "${value}".`, [
+      throw new UsageError(`${flag} requires an IP address, but got "${value}".`, [
         "  portless --lan --ip 192.168.1.42 run <command>",
       ]);
     }
-    process.env.PORTLESS_LAN_IP = value;
-    process.env.PORTLESS_LAN = "1";
-  } else if (flag === INTERNAL_LAN_IP_FLAG) {
-    process.env[INTERNAL_LAN_IP_ENV] = value;
+    process.env[flag === "--ip" ? "PORTLESS_LAN_IP" : INTERNAL_LAN_IP_ENV] = value;
     process.env.PORTLESS_LAN = "1";
   }
 }
@@ -3958,9 +3955,14 @@ async function handleProxy(args: string[]): Promise<void> {
     return;
   }
 
+  const startArgs = args.slice(2);
+  const autoIpIndex = startArgs.indexOf(INTERNAL_LAN_IP_FLAG);
+  if (autoIpIndex !== -1) {
+    applyGlobalFlag(INTERNAL_LAN_IP_FLAG, startArgs.splice(autoIpIndex, 2)[1]);
+  }
   const startFlags = parseCommandArgs(
     "proxy start",
-    args.slice(2),
+    startArgs,
     {
       "--foreground": "boolean",
       "--skip-trust": "boolean",
@@ -3974,11 +3976,10 @@ async function handleProxy(args: string[]): Promise<void> {
       "-p": "value",
       "--tld": "value",
       ...LAN_FLAG_SPEC,
-      [INTERNAL_LAN_IP_FLAG]: "value",
     },
     0
   );
-  for (const flag of [...Object.keys(LAN_FLAG_SPEC), INTERNAL_LAN_IP_FLAG]) {
+  for (const flag of Object.keys(LAN_FLAG_SPEC)) {
     if (startFlags.has(flag)) applyGlobalFlag(flag, startFlags.value(flag));
   }
   const isForeground = startFlags.has("--foreground");
@@ -5962,12 +5963,13 @@ async function main() {
     return index;
   };
 
-  const globalFlagEnd = (): number => {
+  const globalFlagEnd = (flag: string): number => {
     const limit = flagLimit();
     const index = skipFlags(0, LEADING_FLAG_SPEC);
     if (index >= limit) return limit;
     const mode = args[index];
     if (mode === "run") return skipFlags(index + 1, RUN_FLAG_SPEC);
+    if (!APP_FLAG_SPEC[flag]) return 0;
     if (isCommandName(mode)) return index;
     if (mode === "--version" || mode === "-v") return limit;
     return skipFlags(index + (mode === "--name" ? 2 : 1), APP_FLAG_SPEC);
@@ -5984,19 +5986,23 @@ async function main() {
   }
 
   const stripGlobalFlag = (flag: string, hasValue: boolean): string | boolean | null => {
-    const end = globalFlagEnd();
+    const end = globalFlagEnd(flag);
     const idx = args.findIndex(
       (arg, index) => index < end && (arg === flag || (hasValue && arg.startsWith(`${flag}=`)))
     );
     if (idx === -1) return null;
     if (!hasValue) {
       args.splice(idx, 1);
+      stripGlobalFlag(flag, false);
       return true;
     }
     const equalsIndex = args[idx].indexOf("=");
     const value = equalsIndex === -1 ? args[idx + 1] : args[idx].slice(equalsIndex + 1);
     if (!value || value.startsWith("-")) return false;
     args.splice(idx, equalsIndex === -1 ? 2 : 1);
+    if (stripGlobalFlag(flag, true) !== null) {
+      throw new UsageError(`${flag} can only be given once.`);
+    }
     return value;
   };
 
