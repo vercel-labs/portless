@@ -606,10 +606,10 @@ function buildHostnames(
 }
 
 /**
- * The TLD a route hostname outside the configured TLDs was registered with: the
- * longest of `tlds` the hostname ends with, else its last label.
+ * The TLD a route hostname was registered with: the longest of `tlds` the
+ * hostname ends with, else its last label.
  */
-function formerAliasTld(hostname: string, tlds: readonly string[]): string {
+function aliasRouteTld(hostname: string, tlds: readonly string[]): string {
   return (
     [...tlds].sort((a, b) => b.length - a.length).find((t) => hostname.endsWith(`.${t}`)) ??
     hostname.slice(hostname.lastIndexOf(".") + 1)
@@ -3324,10 +3324,8 @@ async function handleAlias(args: string[]): Promise<void> {
       .loadRoutes()
       .filter((route) => {
         if (route.pid !== 0) return false;
-        if (tlds.some((tld) => route.hostname.endsWith(`.${tld}`))) {
-          return hostnames.includes(route.hostname);
-        }
-        const tld = formerAliasTld(route.hostname, targetTlds ?? []);
+        const tld = aliasRouteTld(route.hostname, [...tlds, ...(targetTlds ?? [])]);
+        if (tlds.includes(tld)) return hostnames.includes(route.hostname);
         return (
           (!targetTlds || targetTlds.includes(tld)) &&
           buildHostnames(removeName!, [...tlds, tld], [tld])[0] === route.hostname
