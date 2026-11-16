@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isProcessAlive } from "./utils.js";
 
 export interface ManifestEntry {
   PORT: string;
@@ -11,7 +12,7 @@ export interface ManifestEntry {
 
 /** Path of the env loader owned by this portless run. */
 export function loaderPath(baseDir: string): string {
-  return path.join(baseDir, `turbo-env-loader-${process.pid}.cjs`);
+  return path.resolve(baseDir, `turbo-env-loader-${process.pid}.cjs`);
 }
 
 /**
@@ -25,9 +26,13 @@ if (entry) Object.assign(process.env, entry);
 `;
 }
 
-/** Write this run's loader. Other runs keep their own loaders, so only this run may remove it. */
+/** Write this run's loader and remove loaders left by runs that are no longer alive. */
 export function writeEnvLoader(entries: Record<string, ManifestEntry>, baseDir: string): void {
   fs.mkdirSync(baseDir, { recursive: true, mode: 0o755 });
+  for (const name of fs.readdirSync(baseDir)) {
+    const pid = /^turbo-env-loader-(\d+)\.cjs$/.exec(name)?.[1];
+    if (pid && !isProcessAlive(Number(pid))) fs.rmSync(path.join(baseDir, name), { force: true });
+  }
   fs.writeFileSync(loaderPath(baseDir), loaderSource(entries), { mode: 0o644 });
 }
 
