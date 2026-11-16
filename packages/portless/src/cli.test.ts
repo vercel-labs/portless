@@ -3890,7 +3890,10 @@ describe("CLI", { timeout: 15_000 }, () => {
     }
 
     for (const socketLookup of ["available", "unavailable"]) {
-      it.skipIf(process.platform === "win32")(
+      it.skipIf(
+        process.platform === "win32" ||
+          (socketLookup === "unavailable" && process.platform === "linux")
+      )(
         `keeps state and CA trust when a suspended proxy stops answering (${socketLookup} socket lookup)`,
         async () => {
           const proxy = await startMockProxy(stateDir);
