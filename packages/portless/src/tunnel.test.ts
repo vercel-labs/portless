@@ -163,17 +163,37 @@ describe("ngrok", () => {
       await expect(startNgrok(4123, { spawner })).rejects.toThrow("ngrok CLI not found");
     });
 
-    it("throws an auth hint when ngrok exits with auth output", async () => {
+    it("throws an auth hint when ngrok has no authtoken", async () => {
       const child = new MockNgrokChild();
       const promise = startNgrok(4123, {
         spawner: createSpawner(child),
         timeoutMs: 1000,
       });
 
-      child.stderr.write("ERROR authtoken is required\n");
+      child.stderr.write(
+        "ERROR:  authentication failed: This ngrok session is not authenticated.\nERROR:  ERR_NGROK_4018\n"
+      );
       child.emit("exit", 1, null);
 
       await expect(promise).rejects.toThrow("authentication is not configured");
+    });
+
+    it("throws ngrok's own error when the authtoken is rejected", async () => {
+      const child = new MockNgrokChild();
+      const promise = startNgrok(4123, {
+        spawner: createSpawner(child),
+        timeoutMs: 1000,
+      });
+
+      child.stdout.write('t=now lvl=crit msg="command failed" err="authentication failed"\n');
+      child.stderr.write(
+        "ERROR:  authentication failed: The authtoken you specified does not look like a proper ngrok authtoken.\nERROR:  \nERROR:  ERR_NGROK_105\n"
+      );
+      child.emit("exit", 1, null);
+
+      await expect(promise).rejects.toThrow(
+        "Failed to start ngrok tunnel: authentication failed: The authtoken you specified does not look like a proper ngrok authtoken. ERR_NGROK_105 (exit 1)"
+      );
     });
 
     it("kills ngrok when no public URL appears before the timeout", async () => {
