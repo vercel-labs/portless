@@ -155,6 +155,7 @@ import {
 } from "./clean-utils.js";
 import {
   getLocalNetworkIp,
+  getMdnsDaemonProblem,
   isMdnsSupported,
   publish,
   startLanIpMonitor,
@@ -1006,12 +1007,10 @@ function startProxyServer(
         const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
         for (const route of cachedRoutes) {
           const previousPort = previousRoutes.get(route.hostname);
-          if (previousPort === undefined) {
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-          } else if (previousPort !== route.port) {
+          if (previousPort !== undefined && previousPort !== route.port) {
             unpublish(route.hostname);
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
           }
+          publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
         }
         for (const hostname of previousRoutes.keys()) {
           if (!currentRoutes.has(hostname)) {
@@ -1169,7 +1168,14 @@ function startProxyServer(
     );
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
-      console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
+      const mdnsDaemonProblem = getMdnsDaemonProblem();
+      console.log(
+        mdnsDaemonProblem
+          ? chalk.yellow(
+              `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
+            )
+          : chalk.gray("Services are discoverable as <name>.local on your network")
+      );
       if (isTls && !customCert) {
         console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
         console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
@@ -3768,7 +3774,14 @@ async function handleDoctor(args: string[]): Promise<void> {
 
   if (state.lanMode || isLanEnvEnabled()) {
     const mdns = isMdnsSupported();
-    if (mdns.supported) {
+    const mdnsDaemonProblem = mdns.supported && getMdnsDaemonProblem();
+    if (mdnsDaemonProblem) {
+      add(
+        "warn",
+        `LAN mode is enabled but the mDNS daemon is unavailable, so .local names are not published: ${mdnsDaemonProblem}`,
+        "Run: sudo systemctl enable --now avahi-daemon"
+      );
+    } else if (mdns.supported) {
       add("ok", "mDNS publishing support is available for LAN mode.");
     } else {
       add("fail", `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`);

@@ -19,8 +19,13 @@ type LanIpMonitorOptions = {
   onError?: (error: unknown) => void;
 };
 
-/** Map of hostname -> running dns-sd/avahi child process. */
-const activePublishers = new Map<string, ChildProcess>();
+/** Lifecycle of one hostname's mDNS record. A hostname with no entry is unpublished. */
+type Publication =
+  | { state: "publishing"; child: ChildProcess }
+  | { state: "failed"; error: string };
+
+/** Map of hostname -> mDNS publication. */
+const publications = new Map<string, Publication>();
 
 /** Polling interval (ms) for refreshing the auto-detected LAN IP. */
 export const LAN_IP_POLL_INTERVAL_MS = 5000;
@@ -49,7 +54,7 @@ function getMdnsPublisher(): MdnsPublisher | null {
       probeArgs: ["--help"],
       missingReason:
         "avahi-publish-address not found. Install avahi-utils: sudo apt install avahi-utils",
-      buildArgs: (fqdn, _name, _port, ip) => ["-R", fqdn, ip],
+      buildArgs: (fqdn, _name, _port, ip) => ["-f", "-R", fqdn, ip],
     };
   }
 
@@ -123,6 +128,25 @@ export function isMdnsSupported(): { supported: boolean; reason?: string } {
 }
 
 /**
+ * Check that the system mDNS daemon accepts clients, returning why not or null.
+ * Only Linux needs this: avahi-daemon is optional there, while macOS always runs mDNSResponder.
+ */
+export function getMdnsDaemonProblem(): string | null {
+  if (process.platform !== "linux") return null;
+  const result = spawnSync("avahi-browse", ["--cache", "_http._tcp"], {
+    encoding: "utf8",
+    stdio: ["ignore", "ignore", "pipe"],
+    timeout: 1000,
+  });
+  if (result.status === 0) return null;
+  return (
+    result.stderr?.trim() ||
+    result.error?.message ||
+    `avahi-browse exited with code ${result.status}`
+  );
+}
+
+/**
  * Extract the service name from a hostname for dns-sd registration.
  * e.g., "myapp.local" -> "myapp", "api.myapp.local" -> "api.myapp"
  */
@@ -136,10 +160,12 @@ function serviceName(hostname: string): string {
  * On macOS: spawns `dns-sd -P` which publishes both a DNS-SD service record
  * and an A record mapping the hostname to the given IP.
  *
- * On Linux: spawns `avahi-publish-address` to create an mDNS A record.
+ * On Linux: spawns `avahi-publish-address` to create an mDNS A record. It
+ * waits for avahi-daemon when the daemon is not running yet.
  *
  * The child process stays alive to maintain the record. Call unpublish()
- * or cleanupAll() to remove it.
+ * or cleanupAll() to remove it. If it exits on its own, onError gets its
+ * error (unless it repeats the previous one) and the next publish() retries.
  */
 export function publish(
   hostname: string,
@@ -147,8 +173,9 @@ export function publish(
   ip: string,
   onError?: (msg: string) => void
 ): void {
+  const previous = publications.get(hostname);
   // Don't double-publish
-  if (activePublishers.has(hostname)) return;
+  if (previous?.state === "publishing") return;
 
   const fqdn = hostname.endsWith(".local") ? hostname : `${hostname}.local`;
   const name = serviceName(fqdn);
@@ -158,49 +185,51 @@ export function publish(
   }
 
   const child = spawn(publisher.command, publisher.buildArgs(fqdn, name, port, ip), {
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "pipe"],
     detached: false,
   });
+  let stderr = "";
+  child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+    stderr += chunk;
+  });
+
+  const fail = (error: string) => {
+    const current = publications.get(hostname);
+    if (current?.state !== "publishing" || current.child !== child) return;
+    publications.set(hostname, { state: "failed", error });
+    if (previous?.error !== error) onError?.(`mDNS publishing for ${hostname} failed: ${error}`);
+  };
 
   child.on("error", (err) => {
-    activePublishers.delete(hostname);
-    const msg =
-      (err as NodeJS.ErrnoException).code === "ENOENT"
-        ? publisher.missingReason
-        : `mDNS publish error for ${hostname}: ${err.message}`;
-    onError?.(msg);
+    fail((err as NodeJS.ErrnoException).code === "ENOENT" ? publisher.missingReason : err.message);
   });
 
-  child.on("exit", () => {
-    activePublishers.delete(hostname);
+  child.on("close", (code, signal) => {
+    fail(
+      signal
+        ? `${publisher.command} was stopped by ${signal}`
+        : stderr.trim().split("\n").pop() || `${publisher.command} exited with code ${code}`
+    );
   });
 
-  activePublishers.set(hostname, child);
+  publications.set(hostname, { state: "publishing", child });
 }
 
 /**
  * Unpublish a previously published mDNS record by killing its child process.
  */
 export function unpublish(hostname: string): void {
-  const child = activePublishers.get(hostname);
-  if (!child) return;
-  activePublishers.delete(hostname);
-  child.kill("SIGTERM");
+  const publication = publications.get(hostname);
+  publications.delete(hostname);
+  if (publication?.state === "publishing") publication.child.kill("SIGTERM");
 }
 
 /**
  * Kill all active mDNS publisher processes. Called during proxy shutdown.
  */
 export function cleanupAll(): void {
-  for (const child of activePublishers.values()) {
-    child.kill("SIGTERM");
+  for (const publication of publications.values()) {
+    if (publication.state === "publishing") publication.child.kill("SIGTERM");
   }
-  activePublishers.clear();
-}
-
-/**
- * Return the list of currently published hostnames.
- */
-export function getPublished(): string[] {
-  return [...activePublishers.keys()];
+  publications.clear();
 }
