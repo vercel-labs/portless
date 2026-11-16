@@ -590,7 +590,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
 
   fs.chmodSync(serverKeyPath, 0o600);
   fs.chmodSync(serverCertPath, 0o644);
-  fixOwnership(serverKeyPath, serverCertPath);
+  fixOwnership(serverKeyPath, serverCertPath, srlPath);
 
   return { certPath: serverCertPath, keyPath: serverKeyPath };
 }
@@ -965,7 +965,7 @@ async function generateHostCertAsync(
 
   await fs.promises.chmod(keyPath, 0o600);
   await fs.promises.chmod(certPath, 0o644);
-  fixOwnership(keyPath, certPath);
+  fixOwnership(keyPath, certPath, srlPath);
 
   return { certPath, keyPath };
 }
