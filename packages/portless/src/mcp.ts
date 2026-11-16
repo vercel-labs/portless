@@ -227,7 +227,8 @@ export const TOOLS: ToolDef[] = [
       },
       https: {
         type: "boolean",
-        description: "Serve HTTPS even with unprivileged or PORTLESS_HTTPS=0.",
+        description:
+          "Serve HTTPS even with unprivileged or PORTLESS_HTTPS=0. Do not combine with noTls.",
       },
       skipTrust: {
         type: "boolean",

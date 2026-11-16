@@ -330,7 +330,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 ## CLI Reference
 
-Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
+Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
 
 | Command                                           | Description                                                    |
 | ------------------------------------------------- | -------------------------------------------------------------- |
