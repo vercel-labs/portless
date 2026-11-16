@@ -185,13 +185,16 @@ export function publish(
   }
 
   const child = spawn(publisher.command, publisher.buildArgs(fqdn, name, port, ip), {
-    stdio: ["ignore", "ignore", "pipe"],
+    stdio: ["ignore", "pipe", "pipe"],
     detached: false,
   });
-  let stderr = "";
-  child.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-    stderr += chunk;
-  });
+  let lastLine = "";
+  const keepLastLine = (chunk: string) => {
+    const output = lastLine + chunk;
+    lastLine = output.slice(output.trimEnd().lastIndexOf("\n") + 1);
+  };
+  child.stdout?.setEncoding("utf8").on("data", keepLastLine);
+  child.stderr?.setEncoding("utf8").on("data", keepLastLine);
 
   const fail = (error: string) => {
     const current = publications.get(hostname);
@@ -208,7 +211,7 @@ export function publish(
     fail(
       signal
         ? `${publisher.command} was stopped by ${signal}`
-        : stderr.trim().split("\n").pop() || `${publisher.command} exited with code ${code}`
+        : lastLine.trim() || `${publisher.command} exited with code ${code}`
     );
   });
 

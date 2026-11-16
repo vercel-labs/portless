@@ -872,6 +872,16 @@ function reportHostsSyncHere(
   );
 }
 
+/** Say whether LAN services are discoverable as .local names now, or why not yet. */
+function describeMdnsDiscovery(): string {
+  const mdnsDaemonProblem = getMdnsDaemonProblem();
+  return mdnsDaemonProblem
+    ? chalk.yellow(
+        `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
+      )
+    : chalk.gray("Services are discoverable as <name>.local on your network");
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -1168,14 +1178,7 @@ function startProxyServer(
     );
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
-      const mdnsDaemonProblem = getMdnsDaemonProblem();
-      console.log(
-        mdnsDaemonProblem
-          ? chalk.yellow(
-              `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
-            )
-          : chalk.gray("Services are discoverable as <name>.local on your network")
-      );
+      console.log(describeMdnsDiscovery());
       if (isTls && !customCert) {
         console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
         console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
@@ -4436,7 +4439,7 @@ async function handleProxy(args: string[]): Promise<void> {
   await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps, lanMode);
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
-    console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
+    console.log(describeMdnsDiscovery());
   }
 }
 
