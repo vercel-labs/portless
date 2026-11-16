@@ -585,6 +585,19 @@ function isEnabledEnv(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+/** Whether `--quiet` or `PORTLESS_QUIET=1` hides the run status lines. */
+function isQuietRun(): boolean {
+  return isEnabledEnv(process.env.PORTLESS_QUIET);
+}
+
+/**
+ * Print an informational run status line unless quiet mode is on. App URLs,
+ * warnings, errors, and proxy startup output go to stderr directly and always print.
+ */
+function printRunStatus(message: string): void {
+  if (!isQuietRun()) console.error(message);
+}
+
 /**
  * Whether the proxy should be accepted as already running. Shared with the
  * multi-app collision preflight so both agree on which TLDs are in effect.
@@ -1828,7 +1841,7 @@ async function runApp(
 ) {
   let store = initialStore;
   initialStore.recoverCorruptRoutesFile();
-  console.error(chalk.blue.bold(`\nportless\n`));
+  printRunStatus(chalk.blue.bold(`\nportless\n`));
 
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
@@ -1909,7 +1922,7 @@ async function runApp(
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
     tlds = runningConfig.tlds;
-    console.error(chalk.gray("  Proxy is running"));
+    printRunStatus(chalk.gray("  Proxy is running"));
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
@@ -1929,22 +1942,22 @@ async function runApp(
   }
 
   if (lanIp) {
-    console.error(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
+    printRunStatus(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
   } else {
-    console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
+    printRunStatus(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    console.error(chalk.gray(`  Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
+    printRunStatus(chalk.gray(`  Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
-      console.error(chalk.gray(`  Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+      printRunStatus(chalk.gray(`  Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
   }
 
   const port = desiredPort ?? (await findFreePort());
   if (desiredPort) {
-    console.error(colors.green(`  Using port ${port} (fixed)`));
+    printRunStatus(colors.green(`  Using port ${port} (fixed)`));
   } else {
-    console.error(colors.green(`  Using port ${port}`));
+    printRunStatus(colors.green(`  Using port ${port}`));
   }
 
   await stopOrphanedProcessGroups(store);
@@ -1967,16 +1980,17 @@ async function runApp(
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   const allUrls = formatUrls(hostnames, proxyPort, tls);
-  console.error(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+  // Quiet mode keeps the URLs, without the blank lines that frame them.
+  console.error(chalk.cyan.bold(isQuietRun() ? `  -> ${finalUrl}` : `\n  -> ${finalUrl}\n`));
   for (const extraUrl of allUrls.slice(1)) {
     console.error(chalk.cyan(`  also -> ${extraUrl}`));
   }
   if (allUrls.length > 1) {
-    console.error("");
+    printRunStatus("");
   }
   if (lanIp) {
-    console.error(chalk.green(`  LAN -> ${finalUrl}`));
-    console.error(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+    printRunStatus(chalk.green(`  LAN -> ${finalUrl}`));
+    printRunStatus(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
   // Tailscale sharing: register with tailscale serve (or funnel).
@@ -2045,9 +2059,9 @@ async function runApp(
     const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
     console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
     if (wantsFunnel) {
-      console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+      printRunStatus(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
     } else {
-      console.error(chalk.gray("  (accessible from your tailnet)\n"));
+      printRunStatus(chalk.gray("  (accessible from your tailnet)\n"));
     }
 
     try {
@@ -2072,7 +2086,7 @@ async function runApp(
         configPath: path.join(store.dir, "cloudflared.yml"),
       });
       console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
-      console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
+      printRunStatus(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
 
       try {
         store.updateRoute(hostname, {
@@ -2149,7 +2163,7 @@ async function runApp(
   const caFragment = caEnv.NODE_EXTRA_CA_CERTS
     ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
     : "";
-  console.error(
+  printRunStatus(
     chalk.gray(
       `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
     )
@@ -2267,6 +2281,7 @@ const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--app-port": "value",
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
+  "--quiet": "boolean",
   "--help": "boolean",
   "-h": "boolean",
 };
@@ -2279,6 +2294,7 @@ const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--script": "value",
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
+  "--quiet": "boolean",
   "--help": "boolean",
   "-h": "boolean",
 };
@@ -2288,7 +2304,10 @@ const LEADING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--script": "value",
 };
 
-/** Sets the environment a LAN or sharing flag stands for. Rejects an --ip value that is not an IP address. */
+/**
+ * Sets the environment a LAN, sharing, or --quiet flag stands for. Rejects an
+ * --ip value that is not an IP address.
+ */
 function applyGlobalFlag(flag: string, value?: string): void {
   if (flag === "--tailscale") process.env.PORTLESS_TAILSCALE = "1";
   else if (flag === "--funnel") {
@@ -2296,6 +2315,7 @@ function applyGlobalFlag(flag: string, value?: string): void {
     process.env.PORTLESS_TAILSCALE = "1";
   } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
   else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
+  else if (flag === "--quiet") process.env.PORTLESS_QUIET = "1";
   else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
   else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
     if (isIP(value ?? "") === 0) {
@@ -2342,6 +2362,7 @@ ${colors.bold("Options:")}
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
   --cloudflare           Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
+  --quiet                Print only app URLs, warnings, and errors (or PORTLESS_QUIET=1)
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -2520,6 +2541,7 @@ ${colors.bold("Options:")}
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
+  --quiet                       Print only app URLs, warnings, and errors for app commands
   --                            Stop flag parsing and pass remaining arguments to the app
 
 ${colors.bold("Options for run and <name> <command>:")}
@@ -2535,6 +2557,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
   PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
+  PORTLESS_QUIET=1              Same as --quiet
 
 Precedence: flags override PORTLESS_* variables, which override portless.json.
 Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
@@ -5066,7 +5089,7 @@ async function handleDefaultMulti(
     );
   }
 
-  console.error(chalk.blue.bold(`\nportless\n`));
+  printRunStatus(chalk.blue.bold(`\nportless\n`));
 
   let { dir, port, tls, tlds, lanMode } = await discoverState();
 
@@ -5210,7 +5233,7 @@ async function runWithTurbo(
       console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.error("");
+  printRunStatus("");
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
@@ -5322,7 +5345,7 @@ async function runWithDirectSpawn(
       console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.error("");
+  printRunStatus("");
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
@@ -6071,6 +6094,7 @@ async function main() {
   for (const flag of Object.keys(SHARE_FLAG_SPEC)) {
     if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
   }
+  if (stripGlobalFlag("--quiet", false)) applyGlobalFlag("--quiet");
 
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);

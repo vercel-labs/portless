@@ -5176,6 +5176,87 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("quiet mode", () => {
+    let tmpDir: string;
+    let proxy: { port: number; child: ReturnType<typeof spawn> };
+    const appCommand = ["node", "-e", 'console.log("app output")'];
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cli-quiet-test-"));
+      proxy = await startMockProxy(tmpDir);
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+    });
+
+    afterEach(async () => {
+      await stopChild(proxy.child);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    function runApp(args: string[], env: Record<string, string | undefined> = {}) {
+      return run(args, {
+        env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0", PORTLESS_QUIET: undefined, ...env },
+      });
+    }
+
+    it("prints the full status banner by default", () => {
+      const { status, stdout, stderr } = runApp(["run", "--name", "quietapp", ...appCommand]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("app output");
+      for (const line of [
+        "portless",
+        "Proxy is running",
+        "quietapp.localhost (auto-resolves to 127.0.0.1)",
+        "Using port",
+        `-> http://quietapp.localhost:${proxy.port}`,
+        "Running: PORT=",
+      ]) {
+        expect(stderr).toContain(line);
+      }
+    });
+
+    it.each([
+      ["run --quiet", ["run", "--quiet", "--name", "quietapp", ...appCommand], {}],
+      ["<name> --quiet", ["quietapp", "--quiet", ...appCommand], {}],
+      ["a leading --quiet", ["--quiet", "quietapp", ...appCommand], {}],
+      ["PORTLESS_QUIET=1", ["run", "--name", "quietapp", ...appCommand], { PORTLESS_QUIET: "1" }],
+    ])("prints only the app URL with %s", (_label, args, env) => {
+      const { status, stdout, stderr } = runApp(args, env);
+      expect(status).toBe(0);
+      expect(stdout).toContain("app output");
+      expect(stderr.split("\n").filter(Boolean)).toEqual([
+        `  -> http://quietapp.localhost:${proxy.port}`,
+      ]);
+    });
+
+    const quietRunArgs = ["run", "--quiet", "--name", "quietapp", ...appCommand];
+
+    it("still prints warnings", () => {
+      fs.writeFileSync(path.join(tmpDir, "routes.json"), "{");
+      const { status, stdout, stderr } = runApp(quietRunArgs);
+      expect(status).toBe(0);
+      expect(stdout).toContain("app output");
+      expect(stderr).toContain("Moved corrupted routes file to");
+      expect(stderr).not.toContain("Running:");
+    });
+
+    it("still prints errors and their guidance", () => {
+      const mismatch = runApp(quietRunArgs, { PORTLESS_TLD: "test" });
+      expect(mismatch.status).toBe(1);
+      expect(mismatch.stdout).not.toContain("app output");
+      expect(mismatch.stderr).toContain("with a different config");
+      expect(mismatch.stderr).toContain("portless proxy stop");
+
+      fs.writeFileSync(
+        path.join(tmpDir, "routes.json"),
+        JSON.stringify([{ hostname: "quietapp.localhost", port: 4999, pid: 0 }])
+      );
+      const conflict = runApp(quietRunArgs);
+      expect(conflict.status).toBe(1);
+      expect(conflict.stdout).not.toContain("app output");
+      expect(conflict.stderr).toContain('Error: "quietapp.localhost" is a static alias.');
+    });
+  });
+
   describe("get subcommand", () => {
     let tmpDir: string;
 
