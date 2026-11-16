@@ -2,16 +2,8 @@ import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
-import {
-  ensureEnvLoader,
-  writeManifest,
-  removeManifest,
-  buildNodeOptions,
-  hasTurboConfig,
-  loaderPath,
-  manifestPath,
-  loaderSource,
-} from "./turbo.js";
+import { spawnSync } from "node:child_process";
+import { writeEnvLoader, buildNodeOptions, hasTurboConfig, loaderPath } from "./turbo.js";
 
 function createTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "portless-turbo-test-"));
@@ -56,90 +48,32 @@ describe("hasTurboConfig", () => {
   });
 });
 
-describe("ensureEnvLoader", () => {
+describe("writeEnvLoader", () => {
   let tmpDir: string;
 
   beforeEach(() => {
-    tmpDir = createTmpDir();
+    tmpDir = fs.realpathSync(createTmpDir());
   });
 
   afterEach(() => {
     cleanupDir(tmpDir);
   });
 
-  it("creates the loader file", () => {
-    ensureEnvLoader(tmpDir);
-    const target = loaderPath(tmpDir);
-    expect(fs.existsSync(target)).toBe(true);
-    const content = fs.readFileSync(target, "utf-8");
-    expect(content).toContain("dev-manifest.json");
-    expect(content).toContain("process.env");
-  });
-
-  it("is idempotent", () => {
-    ensureEnvLoader(tmpDir);
-    const first = fs.readFileSync(loaderPath(tmpDir), "utf-8");
-    ensureEnvLoader(tmpDir);
-    const second = fs.readFileSync(loaderPath(tmpDir), "utf-8");
-    expect(first).toBe(second);
-  });
-
-  it("updates the loader if source changes", () => {
-    const target = loaderPath(tmpDir);
-    fs.writeFileSync(target, "old content");
-    ensureEnvLoader(tmpDir);
-    const content = fs.readFileSync(target, "utf-8");
-    expect(content).toBe(loaderSource(tmpDir));
-  });
-});
-
-describe("writeManifest / removeManifest", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = createTmpDir();
-  });
-
-  afterEach(() => {
-    cleanupDir(tmpDir);
-  });
-
-  it("writes and reads manifest JSON", () => {
-    const entries = {
-      "/path/to/app": {
-        PORT: "3001",
-        HOST: "127.0.0.1",
-        PORTLESS_URL: "https://app.project.local",
-      },
-    };
-    writeManifest(entries, tmpDir);
-    const raw = fs.readFileSync(manifestPath(tmpDir), "utf-8");
-    expect(JSON.parse(raw)).toEqual(entries);
-  });
-
-  it("includes NODE_EXTRA_CA_CERTS when provided", () => {
-    const entries = {
-      "/path/to/app": {
-        PORT: "3001",
-        HOST: "127.0.0.1",
-        PORTLESS_URL: "https://app.project.local",
-        NODE_EXTRA_CA_CERTS: "/home/user/.portless/ca.pem",
-      },
-    };
-    writeManifest(entries, tmpDir);
-    const raw = fs.readFileSync(manifestPath(tmpDir), "utf-8");
-    expect(JSON.parse(raw)["/path/to/app"].NODE_EXTRA_CA_CERTS).toBe("/home/user/.portless/ca.pem");
-  });
-
-  it("removeManifest deletes the file", () => {
-    writeManifest({}, tmpDir);
-    expect(fs.existsSync(manifestPath(tmpDir))).toBe(true);
-    removeManifest(tmpDir);
-    expect(fs.existsSync(manifestPath(tmpDir))).toBe(false);
-  });
-
-  it("removeManifest is safe when file does not exist", () => {
-    expect(() => removeManifest(tmpDir)).not.toThrow();
+  it("sets the env vars of the package directory a Node process starts in", () => {
+    const pkgDir = path.join(tmpDir, "web");
+    fs.mkdirSync(pkgDir);
+    writeEnvLoader(
+      { [pkgDir]: { PORT: "4123", HOST: "127.0.0.1", PORTLESS_URL: "http://web.localhost" } },
+      tmpDir
+    );
+    const portIn = (cwd: string) =>
+      spawnSync(process.execPath, ["-e", "process.stdout.write(process.env.PORT || '')"], {
+        cwd,
+        encoding: "utf-8",
+        env: { ...process.env, PORT: "", NODE_OPTIONS: buildNodeOptions(tmpDir) },
+      }).stdout;
+    expect(portIn(pkgDir)).toBe("4123");
+    expect(portIn(tmpDir)).toBe("");
   });
 });
 
@@ -178,22 +112,5 @@ describe("buildNodeOptions", () => {
     fs.mkdirSync(spacedDir, { recursive: true });
     const result = buildNodeOptions(spacedDir);
     expect(result).toBe(`--require "${loaderPath(spacedDir)}"`);
-  });
-});
-
-describe("loaderSource", () => {
-  it("references the correct manifest path", () => {
-    const source = loaderSource("/custom/base");
-    expect(source).toContain("/custom/base");
-    expect(source).toContain("dev-manifest.json");
-  });
-
-  it("escapes backslashes for Windows paths", () => {
-    const source = loaderSource("C:\\Users\\test\\.portless");
-    expect(source).toContain("dev-manifest.json");
-    // JSON.stringify produces doubled backslashes in the JS source text.
-    // Verify exactly doubled (not quadrupled from a redundant manual escape).
-    expect(source).toContain("C:\\\\Users\\\\test\\\\.portless");
-    expect(source).not.toContain("C:\\\\\\\\Users");
   });
 });

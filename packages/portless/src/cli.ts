@@ -177,13 +177,7 @@ import {
 import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
-import {
-  ensureEnvLoader,
-  writeManifest,
-  removeManifest,
-  buildNodeOptions,
-  hasTurboConfig,
-} from "./turbo.js";
+import { writeEnvLoader, removeEnvLoader, buildNodeOptions, hasTurboConfig } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
 import {
   buildServiceUninstallSudoArgs,
@@ -5101,8 +5095,7 @@ async function runWithTurbo(
     manifest[app.pkg.dir] = entry;
   }
 
-  ensureEnvLoader();
-  writeManifest(manifest);
+  writeEnvLoader(manifest, stateDir);
 
   if (appUrls.length > 0) {
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
@@ -5135,7 +5128,7 @@ async function runWithTurbo(
     cwd: wsRoot,
     env: {
       ...process.env,
-      NODE_OPTIONS: buildNodeOptions(),
+      NODE_OPTIONS: buildNodeOptions(stateDir),
     },
     ...(isWindows ? {} : { detached: true }),
   });
@@ -5158,7 +5151,6 @@ async function runWithTurbo(
     for (const { hostnames } of routes) {
       removeRoutes(store, hostnames, process.pid);
     }
-    removeManifest();
   };
 
   process.on("SIGINT", cleanup);
@@ -5170,6 +5162,7 @@ async function runWithTurbo(
   });
 
   cleanup();
+  removeEnvLoader(stateDir);
 
   if (exitCode !== 0 && exitCode !== null) {
     process.exit(exitCode);
