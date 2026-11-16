@@ -2755,7 +2755,7 @@ describe("reportHostsSync", () => {
       triggered = true;
       return "acted";
     });
-    expect(triggered).toBe(false);
+    expect(triggered).toBe(true);
     expect(warnings).toEqual([]);
   });
 });

@@ -1276,7 +1276,6 @@ export async function reportHostsSync(
   const managed = lanMode
     ? hostnames.filter((hostname) => !hostname.endsWith(".local"))
     : hostnames;
-  if (managed.length === 0) return;
   const found = await trigger(port, tls);
 
   const unresolved = async () => {
