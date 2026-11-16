@@ -4701,6 +4701,7 @@ async function spawnProxiedApp(
 
     addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
+    injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
     env = {
       ...pkgEnv,
