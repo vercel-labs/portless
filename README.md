@@ -60,6 +60,8 @@ To reach an app from another device or share it, use [LAN mode](https://portless
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
+To hide the startup status lines when portless runs an app, pass `--quiet` or set `PORTLESS_QUIET=1`. The app URL, warnings, errors, and proxy startup output still print.
+
 ### Upstream aliases
 
 Use `--upstream` to route an alias to an HTTP or HTTPS service listening on loopback:
