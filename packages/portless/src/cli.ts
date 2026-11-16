@@ -606,14 +606,14 @@ function buildHostnames(
 }
 
 /**
- * Splits a route hostname into the alias name and TLD it was registered with. The TLD
- * is the longest of `tlds` the hostname ends with, else its last label.
+ * The TLD a route hostname outside the configured TLDs was registered with: the
+ * longest of `tlds` the hostname ends with, else its last label.
  */
-function splitAliasHostname(hostname: string, tlds: readonly string[]): [string, string] {
-  const tld =
+function formerAliasTld(hostname: string, tlds: readonly string[]): string {
+  return (
     [...tlds].sort((a, b) => b.length - a.length).find((t) => hostname.endsWith(`.${t}`)) ??
-    hostname.slice(hostname.lastIndexOf(".") + 1);
-  return [hostname.slice(0, -tld.length - 1), tld];
+    hostname.slice(hostname.lastIndexOf(".") + 1)
+  );
 }
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
@@ -3316,21 +3316,26 @@ async function handleAlias(args: string[]): Promise<void> {
   store.recoverCorruptRoutesFile();
 
   if (isRemove) {
-    const [name] = splitAliasHostname(buildHostnames(removeName!, tlds)[0]!, tlds);
-    const knownTlds = [...tlds, ...(targetTlds ?? [])];
+    const hostnames =
+      targetTlds && !targetTlds.some((tld) => tlds.includes(tld))
+        ? []
+        : buildHostnames(removeName!, tlds, targetTlds);
     const aliases = store
       .loadRoutes()
       .filter((route) => {
-        const [routeName, routeTld] = splitAliasHostname(route.hostname, knownTlds);
+        if (route.pid !== 0) return false;
+        if (tlds.some((tld) => route.hostname.endsWith(`.${tld}`))) {
+          return hostnames.includes(route.hostname);
+        }
+        const tld = formerAliasTld(route.hostname, targetTlds ?? []);
         return (
-          route.pid === 0 &&
-          (routeName === name || route.hostname === name) &&
-          (!targetTlds || targetTlds.includes(routeTld))
+          (!targetTlds || targetTlds.includes(tld)) &&
+          buildHostnames(removeName!, [...tlds, tld], [tld])[0] === route.hostname
         );
       })
       .map((route) => route.hostname);
     if (aliases.length === 0) {
-      console.error(colors.red(`Error: No alias found for "${name}".`));
+      console.error(colors.red(`Error: No alias found for "${removeName}".`));
       process.exit(1);
     }
     // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
