@@ -1372,11 +1372,49 @@ export function parsePidFromNetstat(output: string, port: number): number | null
 }
 
 /**
+ * PIDs holding a listening TCP socket on `port`, read from /proc. Like lsof
+ * without root, it sees only processes whose file descriptors are readable.
+ */
+function findPidsOnPortFromProc(port: number): number[] {
+  const sockets = new Set<string>();
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    if (!fs.existsSync(table)) continue;
+    for (const line of fs.readFileSync(table, "utf-8").split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields[3] === "0A" && parseInt(fields[1].split(":")[1], 16) === port) {
+        sockets.add(`socket:[${fields[9]}]`);
+      }
+    }
+  }
+  if (sockets.size === 0) return [];
+  return fs
+    .readdirSync("/proc")
+    .filter((entry) => /^\d+$/.test(entry))
+    .filter((pid) => {
+      let fds: string[];
+      try {
+        fds = fs.readdirSync(`/proc/${pid}/fd`);
+      } catch {
+        return false;
+      }
+      return fds.some((fd) => {
+        try {
+          return sockets.has(fs.readlinkSync(`/proc/${pid}/fd/${fd}`));
+        } catch {
+          return false;
+        }
+      });
+    })
+    .map(Number);
+}
+
+/**
  * Find all PIDs listening on the given TCP port.
- * Uses lsof on macOS/Linux and netstat on Windows.
+ * Reads /proc on Linux, uses lsof on macOS and netstat on Windows.
  */
 export function findPidsOnPort(port: number): number[] {
   try {
+    if (process.platform === "linux") return findPidsOnPortFromProc(port);
     if (isWindows) {
       const output = execSync("netstat -ano -p tcp", {
         encoding: "utf-8",
@@ -1635,7 +1673,7 @@ export async function stopProcessGroup(
 
 /**
  * Try to find the PID of a process listening on the given TCP port.
- * Uses lsof on macOS/Linux and netstat on Windows.
+ * Reads /proc on Linux, uses lsof on macOS and netstat on Windows.
  * Returns null if the PID cannot be determined.
  */
 export function findPidOnPort(port: number): number | null {
