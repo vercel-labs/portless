@@ -10,35 +10,90 @@ export interface ManifestEntry {
   NODE_EXTRA_CA_CERTS?: string;
 }
 
-/** Path of the env loader owned by this portless run. */
-export function loaderPath(baseDir: string): string {
-  return path.resolve(baseDir, `turbo-env-loader-${process.pid}.cjs`);
+const DATA_FILE_PATTERN = /^turbo-env-(\d+)\.json$/;
+
+const LOADER_SOURCE = `"use strict";
+var fs = require("fs");
+var path = require("path");
+var cwd = process.cwd();
+var names = fs.readdirSync(__dirname);
+for (var i = 0; i < names.length; i++) {
+  var match = ${DATA_FILE_PATTERN}.exec(names[i]);
+  if (!match || !isAlive(Number(match[1]))) continue;
+  var entry = readData(path.join(__dirname, names[i]))[cwd];
+  if (entry) {
+    Object.assign(process.env, entry);
+    break;
+  }
 }
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+function readData(file) {
+  var raw;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw err;
+  }
+  return JSON.parse(raw);
+}
+`;
+
+/** Path of the env loader shared by every portless run using a state directory. */
+export function loaderPath(baseDir: string): string {
+  return path.resolve(baseDir, "turbo-env-loader.cjs");
+}
+
+function dataPath(baseDir: string): string {
+  return path.resolve(baseDir, `turbo-env-${process.pid}.json`);
+}
+
+function writeFileAtomic(file: string, content: string): void {
+  const tempPath = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, content, { mode: 0o644 });
+  fs.renameSync(tempPath, file);
+}
+
+type EnvPublicationState = "unpublished" | "published" | "retired";
 
 /**
- * Generate a CJS loader that sets the env vars of the package directory a
- * Node process starts in. Keys are absolute paths to package directories.
+ * Lifecycle of this run's env data file for the shared loader:
+ * unpublished, then published, then retired. Retire is idempotent and final.
  */
-export function loaderSource(entries: Record<string, ManifestEntry>): string {
-  return `"use strict";
-var entry = ${JSON.stringify(entries)}[process.cwd()];
-if (entry) Object.assign(process.env, entry);
-`;
-}
+export class EnvPublication {
+  private state: EnvPublicationState = "unpublished";
 
-/** Write this run's loader and remove loaders left by runs that are no longer alive. */
-export function writeEnvLoader(entries: Record<string, ManifestEntry>, baseDir: string): void {
-  fs.mkdirSync(baseDir, { recursive: true, mode: 0o755 });
-  for (const name of fs.readdirSync(baseDir)) {
-    const pid = /^turbo-env-loader-(\d+)\.cjs$/.exec(name)?.[1];
-    if (pid && !isProcessAlive(Number(pid))) fs.rmSync(path.join(baseDir, name), { force: true });
+  constructor(private readonly baseDir: string) {}
+
+  /** Write the shared loader and this run's entries, removing data left by dead runs. */
+  publish(entries: Record<string, ManifestEntry>): void {
+    if (this.state !== "unpublished") {
+      throw new Error(`Cannot publish Turbo env entries in state ${this.state}`);
+    }
+    fs.mkdirSync(this.baseDir, { recursive: true, mode: 0o755 });
+    for (const name of fs.readdirSync(this.baseDir)) {
+      const pid = DATA_FILE_PATTERN.exec(name)?.[1];
+      if (pid && !isProcessAlive(Number(pid))) {
+        fs.rmSync(path.join(this.baseDir, name), { force: true });
+      }
+    }
+    writeFileAtomic(loaderPath(this.baseDir), LOADER_SOURCE);
+    writeFileAtomic(dataPath(this.baseDir), JSON.stringify(entries));
+    this.state = "published";
   }
-  fs.writeFileSync(loaderPath(baseDir), loaderSource(entries), { mode: 0o644 });
-}
 
-/** Remove this run's loader. */
-export function removeEnvLoader(baseDir: string): void {
-  fs.rmSync(loaderPath(baseDir), { force: true });
+  /** Remove this run's entries. The shared loader stays for processes that outlive the run. */
+  retire(): void {
+    if (this.state === "published") fs.rmSync(dataPath(this.baseDir), { force: true });
+    this.state = "retired";
+  }
 }
 
 /**

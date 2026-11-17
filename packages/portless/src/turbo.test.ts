@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import * as os from "node:os";
 import { spawnSync } from "node:child_process";
-import { writeEnvLoader, buildNodeOptions, hasTurboConfig, loaderPath } from "./turbo.js";
+import { EnvPublication, buildNodeOptions, hasTurboConfig, loaderPath } from "./turbo.js";
 
 function createTmpDir(): string {
   return fs.mkdtempSync(path.join(os.tmpdir(), "portless-turbo-test-"));
@@ -48,7 +48,7 @@ describe("hasTurboConfig", () => {
   });
 });
 
-describe("writeEnvLoader", () => {
+describe("EnvPublication", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -59,21 +59,25 @@ describe("writeEnvLoader", () => {
     cleanupDir(tmpDir);
   });
 
-  it("sets the env vars of the package directory a Node process starts in", () => {
+  it("sets the env vars of the package directory a Node process starts in until retired", () => {
     const pkgDir = path.join(tmpDir, "web");
     fs.mkdirSync(pkgDir);
-    writeEnvLoader(
-      { [pkgDir]: { PORT: "4123", HOST: "127.0.0.1", PORTLESS_URL: "http://web.localhost" } },
-      tmpDir
-    );
+    const publication = new EnvPublication(tmpDir);
+    publication.publish({
+      [pkgDir]: { PORT: "4123", HOST: "127.0.0.1", PORTLESS_URL: "http://web.localhost" },
+    });
     const portIn = (cwd: string) =>
       spawnSync(process.execPath, ["-e", "process.stdout.write(process.env.PORT || '')"], {
         cwd,
         encoding: "utf-8",
         env: { ...process.env, PORT: "", NODE_OPTIONS: buildNodeOptions(tmpDir) },
-      }).stdout;
-    expect(portIn(pkgDir)).toBe("4123");
-    expect(portIn(tmpDir)).toBe("");
+      });
+    expect(portIn(pkgDir).stdout).toBe("4123");
+    expect(portIn(tmpDir).stdout).toBe("");
+    publication.retire();
+    const afterRetire = portIn(pkgDir);
+    expect(afterRetire.status).toBe(0);
+    expect(afterRetire.stdout).toBe("");
   });
 });
 
