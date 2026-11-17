@@ -51,6 +51,7 @@ import {
   parseHostname,
   parseHostnames,
   parsePort,
+  stripTld,
 } from "./utils.js";
 import {
   checkHostResolution,
@@ -3328,7 +3329,7 @@ async function handleAlias(args: string[]): Promise<void> {
         if (tlds.includes(tld)) return hostnames.includes(route.hostname);
         return (
           (!targetTlds || targetTlds.includes(tld)) &&
-          buildHostnames(removeName!, [...tlds, tld], [tld])[0] === route.hostname
+          route.hostname === `${stripTld(removeName!, [...tlds, tld])}.${tld}`
         );
       })
       .map((route) => route.hostname);
