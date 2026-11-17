@@ -1006,15 +1006,8 @@ function startProxyServer(
   };
 
   const onHostsSyncRequest = (): "acted" | "disabled" => {
-    if (!autoSyncHosts) return "disabled";
-    let hostnames: string[];
-    try {
-      hostnames = store.loadTrustedRoutes().map((route) => route.hostname);
-    } catch {
-      hostnames = cachedRoutes.map((route) => route.hostname);
-    }
-    syncHostsAndLatch(hostnames);
-    return "acted";
+    reloadRoutes();
+    return autoSyncHosts ? "acted" : "disabled";
   };
 
   const reloadRoutes = () => {
