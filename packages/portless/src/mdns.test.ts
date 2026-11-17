@@ -95,3 +95,75 @@ describe("startLanIpMonitor", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 });
+
+describe("publish", () => {
+  afterEach(() => {
+    vi.doUnmock("node:child_process");
+    vi.resetModules();
+  });
+
+  async function loadWithFakeSpawn() {
+    vi.resetModules();
+    const { EventEmitter } = await import("node:events");
+    type FakeChild = InstanceType<typeof EventEmitter> & { kill: ReturnType<typeof vi.fn> };
+    const children: FakeChild[] = [];
+    vi.doMock("node:child_process", () => ({
+      spawnSync: vi.fn(() => ({})),
+      spawn: vi.fn(() => {
+        const child = Object.assign(new EventEmitter(), { kill: vi.fn() }) as FakeChild;
+        children.push(child);
+        return child;
+      }),
+    }));
+    const mdns = await import("./mdns.js");
+    return { mdns, children };
+  }
+
+  it.runIf(process.platform === "darwin" || process.platform === "linux")(
+    "keeps tracking a replacement publisher when the old one exits late",
+    async () => {
+      const { mdns, children } = await loadWithFakeSpawn();
+
+      mdns.publish("myapp.local", 443, "192.168.1.10");
+      // Port change: unpublish + republish before the old child exits.
+      mdns.unpublish("myapp.local");
+      mdns.publish("myapp.local", 443, "192.168.1.10");
+      children[0].emit("exit", null, "SIGTERM");
+
+      expect(mdns.getPublished()).toEqual(["myapp.local"]);
+
+      // The route is removed later; the live publisher must still be killed.
+      mdns.unpublish("myapp.local");
+      expect(children[1].kill).toHaveBeenCalledWith("SIGTERM");
+    }
+  );
+
+  it.runIf(process.platform === "darwin" || process.platform === "linux")(
+    "keeps tracking republished hostnames after cleanupAll on LAN IP change",
+    async () => {
+      const { mdns, children } = await loadWithFakeSpawn();
+
+      mdns.publish("a.local", 443, "192.168.1.10");
+      mdns.publish("b.local", 443, "192.168.1.10");
+      mdns.cleanupAll();
+      mdns.publish("a.local", 443, "192.168.1.20");
+      mdns.publish("b.local", 443, "192.168.1.20");
+      children[0].emit("exit", null, "SIGTERM");
+      children[1].emit("error", new Error("late"));
+
+      expect(mdns.getPublished().sort()).toEqual(["a.local", "b.local"]);
+    }
+  );
+
+  it.runIf(process.platform === "darwin" || process.platform === "linux")(
+    "forgets a publisher that exits on its own",
+    async () => {
+      const { mdns, children } = await loadWithFakeSpawn();
+
+      mdns.publish("myapp.local", 443, "192.168.1.10");
+      children[0].emit("exit", 1, null);
+
+      expect(mdns.getPublished()).toEqual([]);
+    }
+  );
+});

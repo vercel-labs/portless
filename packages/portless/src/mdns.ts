@@ -162,8 +162,17 @@ export function publish(
     detached: false,
   });
 
+  // Only forget this hostname if the map still points at this child. unpublish()
+  // followed by publish() (port change) and cleanupAll() followed by a republish
+  // (LAN IP change) register a replacement before the old child has exited, so
+  // an unconditional delete here would drop the replacement. The orphaned
+  // publisher would then keep advertising after its route is gone.
+  const forget = () => {
+    if (activePublishers.get(hostname) === child) activePublishers.delete(hostname);
+  };
+
   child.on("error", (err) => {
-    activePublishers.delete(hostname);
+    forget();
     const msg =
       (err as NodeJS.ErrnoException).code === "ENOENT"
         ? publisher.missingReason
@@ -171,9 +180,7 @@ export function publish(
     onError?.(msg);
   });
 
-  child.on("exit", () => {
-    activePublishers.delete(hostname);
-  });
+  child.on("exit", forget);
 
   activePublishers.set(hostname, child);
 }
