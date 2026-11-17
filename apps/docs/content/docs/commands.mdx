@@ -59,7 +59,7 @@ portless docs.myapp next dev
     </tr>
     <tr>
       <td>`--script <name>`</td>
-      <td>Run a specific `package.json` script instead of the default (`"dev"`). Global flag.</td>
+      <td>Run a specific `package.json` script instead of the default (`"dev"`). Only for zero-arg mode and `portless run`.</td>
     </tr>
     <tr>
       <td>`--app-port <number>`</td>
@@ -201,9 +201,9 @@ portless alias --remove <name> --tld <tld>
 
 Register a route for a service not managed by portless (e.g. a Docker container). Aliases persist across stale-route cleanup.
 
-An alias covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments to cover only selected configured TLDs; repeat the flag or pass a comma-separated list, and the selected TLD replaces any configured TLD suffix on the name. A value that is missing, empty, or not configured stops the command before any route changes, and `--help` after the arguments prints usage without changing routes.
+An alias covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments to cover only selected configured TLDs; repeat the flag or pass a comma-separated list, and the selected TLD replaces any configured TLD suffix on the name. A value that is missing or empty stops the command before any route changes, as does a value that is not configured when adding, and `--help` after the arguments prints usage without changing routes.
 
-`portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
+`portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. It also removes the name on TLDs the proxy no longer serves, taking the last label of such a hostname as its TLD. For a former multi-segment TLD, pass `--tld` or the full hostname. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
 The positional port always dials loopback. `--upstream https` enables TLS and preserves
 the incoming Host header. A URL authority such as `https://api.internal:8443` enables
@@ -279,7 +279,7 @@ Shows active routes, their assigned ports, and how long each app has been runnin
 portless doctor
 ```
 
-Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON. Use `portless doctor --lan` to run the LAN mode checks when the proxy is not in LAN mode. `--ip <address>` does the same and must be a valid IP address.
 
 For upstream 502 errors, stop the running proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
 
@@ -349,7 +349,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--https`</td>
-      <td>Serve HTTPS, even with `PORTLESS_HTTPS=0`. With `--unprivileged`, it turns HTTPS on and uses port 443.</td>
+      <td>Serve HTTPS, even with `PORTLESS_HTTPS=0`. With `--unprivileged`, it turns HTTPS on and uses port 443. Combining it with `--no-tls` exits 2.</td>
     </tr>
     <tr>
       <td>`--lan`</td>
@@ -513,4 +513,4 @@ portless --version
 
 ## Exit codes
 
-`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, a missing flag value or required argument, an extra argument, or a command that needs `--yes` when no terminal is attached. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
+`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, a missing flag value or required argument, an extra argument, or a command that needs `--yes` when no terminal is attached. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.

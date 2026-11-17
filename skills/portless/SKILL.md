@@ -182,7 +182,7 @@ When portless itself returns an error (404 for an unknown host, 421 for a misdir
 
 Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. When configured TLDs overlap (e.g. `example.com` and `dev.example.com`), hostnames are matched against the longest TLD first, regardless of configuration order. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
-`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected configured TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing, empty, or unconfigured value fails before any route changes, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
+`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing or empty value fails before any route changes, as does an unconfigured value when adding, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. It also removes the name on TLDs the proxy no longer serves, taking the last label of such a hostname as its TLD; for a former multi-segment TLD, pass `--tld` or the full hostname. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
 
 Use `--upstream https` for TLS to loopback while preserving Host. Use
 `--upstream https://api.internal[:port]` to enable TLS, override Host with the full
@@ -341,7 +341,7 @@ The chosen service configuration is written into launchd, systemd, or Task Sched
 
 ## CLI Reference
 
-Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
+Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
 
 | Command                                           | Description                                                    |
 | ------------------------------------------------- | -------------------------------------------------------------- |
@@ -384,7 +384,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless alias --remove <name>`                  | Remove PID 0 routes                                            |
 | `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                      |
 | `portless alias <name> <port> --upstream https`   | Use TLS to the loopback backend while preserving Host          |
-| `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected configured TLDs               |
+| `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected TLDs                          |
 | `portless compose up [args...]`                   | Run a Docker Compose project with a route per service          |
 | `portless compose down [args...]`                 | Stop the compose project and remove its routes                 |
 | `portless.enable` / `.name` / `.ports` labels     | Skip a compose service, rename its route, or pick its ports    |
@@ -454,7 +454,7 @@ Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.
 
 ### Run diagnostics
 
-Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites. Use `portless doctor --json` to print the report as JSON.
+Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites. Use `portless doctor --json` to print the report as JSON. Use `portless doctor --lan` to run the LAN mode checks when the proxy is not in LAN mode. `--ip <address>` does the same and must be a valid IP address.
 
 The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection, without a timer that abandons either family. A backend listening on both families may accept an extra connection that closes without an HTTP request. Later requests reuse the winning connection when possible.
 

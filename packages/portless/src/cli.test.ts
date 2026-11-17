@@ -2158,20 +2158,29 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(stderr).toContain('Unknown proxy subcommand "unknown"');
     });
 
-    it("rejects an unknown start flag before starting the proxy", async () => {
+    it("rejects an unknown or conflicting start flag before starting the proxy", async () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-proxy-args-"));
       const testPort = await getFreePort();
       try {
-        const { status, stderr } = run(["proxy", "start", "--forground"], {
-          env: {
-            PORTLESS_STATE_DIR: tmpDir,
-            PORTLESS_PORT: String(testPort),
-            PORTLESS_HTTPS: "0",
-          },
-        });
-        expect(status).toBe(2);
-        expect(stderr).toContain("Unknown flag");
-        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+        for (const [flags, message] of [
+          [["--forground"], "Unknown flag"],
+          [["--cloudflare"], 'Unknown flag "--cloudflare" for portless proxy start.'],
+          [["--no-tls", "--https"], "--https and --no-tls cannot be used together."],
+          [["--https", "--no-tls"], "--https and --no-tls cannot be used together."],
+          [["--ip", "10.1.1.1", "--ip", "10.2.2.2"], "--ip can only be given once."],
+        ]) {
+          const { status, stderr } = run(["proxy", "start", ...flags], {
+            env: {
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_PORT: String(testPort),
+              PORTLESS_HTTPS: "0",
+            },
+          });
+          expect(status).toBe(2);
+          expect(stderr).toContain(message);
+          expect(stderr).not.toContain("--lan-ip-auto");
+          expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+        }
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -2669,13 +2678,17 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
 
     it("rejects a value on a boolean flag before running the child", () => {
-      for (const args of [
-        ["run", "--force=false", "echo", "ran"],
-        ["myapp", "--force=true", "echo", "ran"],
+      for (const [mode, flag] of [
+        ["run", "--force"],
+        ["myapp", "--force"],
+        ["run", "--lan"],
+        ["myapp", "--lan"],
       ]) {
-        const { status, stdout, stderr } = run(args, { env: { PORTLESS: "0" } });
+        const { status, stdout, stderr } = run([mode, `${flag}=1`, "echo", "ran"], {
+          env: { PORTLESS: "0" },
+        });
         expect(status).toBe(2);
-        expect(stderr).toContain("--force does not take a value.");
+        expect(stderr).toContain(`${flag} does not take a value.`);
         expect(stdout).not.toContain("ran");
       }
     });
@@ -3092,6 +3105,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         const cases: Array<[string, string]> = [
           ["--frce", 'Unknown flag "--frce"'],
           ["--remove", "--remove requires a value"],
+          ["--cloudflare", 'Unknown flag "--cloudflare" for portless alias.'],
         ];
         for (const [flag, message] of cases) {
           const { status, stderr } = run(["alias", "mydb", "5432", flag], {
@@ -3192,7 +3206,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("keeps live app routes when removing an alias across TLDs", () => {
+    it("keeps live app routes when removing an alias across current and former TLDs", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-remove-live-"));
       const routesPath = path.join(tmpDir, "routes.json");
       const env = { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" };
@@ -3208,14 +3222,18 @@ describe("CLI", { timeout: 15_000 }, () => {
           JSON.stringify([
             { hostname: "mydb.localhost", port: 4101, pid: process.pid },
             { hostname: "mydb.test", port: 4102, pid: 0 },
+            { hostname: "mydb.old", port: 4103, pid: 0 },
+            { hostname: "mydb.v2.old", port: 4104, pid: 0 },
           ])
         );
 
         const removed = run(["alias", "--remove", "mydb"], { env });
         expect(removed.status).toBe(0);
-        expect(removed.stdout).toContain("mydb.test");
-        expect(removed.stdout).not.toContain("mydb.localhost");
-        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+        expect(removed.stdout).toContain("Removed alias: mydb.test, mydb.old");
+        expect(routes()).toEqual([
+          { hostname: "mydb.localhost", port: 4101, pid: process.pid },
+          { hostname: "mydb.v2.old", port: 4104, pid: 0 },
+        ]);
 
         const repeated = run(["alias", "--remove", "mydb"], { env });
         expect(repeated.status).toBe(1);
@@ -3223,8 +3241,11 @@ describe("CLI", { timeout: 15_000 }, () => {
 
         const liveTld = run(["alias", "--remove", "mydb", "--tld", "localhost"], { env });
         expect(liveTld.status).toBe(1);
-        expect(liveTld.stderr).toContain('No alias found for "mydb.localhost"');
-        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+        expect(liveTld.stderr).toContain('No alias found for "mydb".');
+        expect(routes()).toEqual([
+          { hostname: "mydb.localhost", port: 4101, pid: process.pid },
+          { hostname: "mydb.v2.old", port: 4104, pid: 0 },
+        ]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }

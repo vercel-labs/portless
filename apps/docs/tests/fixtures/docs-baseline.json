@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "4a4c75285e4e7745c7d3bad7f2d25b8322ec696db63faa9e0c38bc2c41b12ac4",
-      "markdownBodySha256": "4a4c75285e4e7745c7d3bad7f2d25b8322ec696db63faa9e0c38bc2c41b12ac4",
+      "mdxSha256": "095022ecfbd70ffdeb2f5f96fb9aa90e0399d550f6ec0fdb7bfea2eabd517b71",
+      "markdownBodySha256": "095022ecfbd70ffdeb2f5f96fb9aa90e0399d550f6ec0fdb7bfea2eabd517b71",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -139,8 +139,8 @@
       "title": "Changelog | portless",
       "markdownTitle": "Changelog",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "a0b82f7b90d859108972a036b9eecd25d39015fe490bd4b2530a7abfaa1eba3c",
-      "markdownBodySha256": "a0b82f7b90d859108972a036b9eecd25d39015fe490bd4b2530a7abfaa1eba3c",
+      "mdxSha256": "de965d2aba3d74f2bf6868dd70afff34bf35307a15a381c758eedb206fc702a2",
+      "markdownBodySha256": "de965d2aba3d74f2bf6868dd70afff34bf35307a15a381c758eedb206fc702a2",
       "ssr": [
         "Agent-readable documentation",
         "Framework flags through package scripts",

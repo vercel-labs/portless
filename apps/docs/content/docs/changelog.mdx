@@ -2,6 +2,29 @@
 title: "Changelog"
 ---
 
+## 0.18.0
+
+### New Features
+
+- **JSON output**: `portless list`, `portless get`, and `portless doctor` accept `--json` and write one JSON document to stdout, so scripts can read routes, URLs, upstream settings, and doctor findings without parsing tables. `list --json` keeps the tunnel fields, including `tailscaleFunnel`, and `doctor --json` reports every finding and the summary counts and exits `1` when a finding fails. The MCP tools can pass `--json` too. (#558)
+
+### Improvements
+
+- **Help text**: `portless --help` is shorter and lists only what the root command accepts. Proxy options moved to `portless proxy --help`, and `--name`, `--force`, and `--app-port` are listed under the commands that take them. The documented precedence now holds: `--https` wins over `PORTLESS_HTTPS=0`, `PORTLESS_APP_PORT` wins over `portless.json` `appPort`, and `--script` wins over a per-app script. (#560)
+- **TypeScript 7**: move the remaining packages to TypeScript 7. The published package is unchanged. (#580)
+
+### Bug Fixes
+
+- **Usage errors**: every command parses its flags with one parser, so an unknown or misspelled flag, a missing value, an extra argument, or a boolean written as `--force=false` exits `2` with a usage message before the proxy starts, a route changes, or a child process runs. `--flag=value` is accepted for every flag that takes a value, `--ip` must be an IPv4 or IPv6 address, and a repeated `--remove` is rejected. Commands that wrap another command pass its arguments through unchanged and keep its exit code, and `--help` prints help before anything runs, including `portless <app> --help`. (#556, #557)
+- **Clean and prune**: `portless clean` prints its plan, asks for confirmation on a terminal, requires `--yes` otherwise, and exits `1` when a step fails. It waits for the proxy to stop before reporting success, and retries the failed CA, state file, and hosts steps with sudo. `portless prune` keeps a route while an unidentified process holds its port and removes it once the port is free, and only a recorded PID and start time authorize a signal. A route kept for a retry stays in the route store as a retired record, so the next registration wins and a reused PID cannot route to the old port. (#559)
+- **State directory ownership**: on macOS and Linux, the proxy and the commands that use the state directory (`trust`, `proxy stop`, `clean`, `prune`, `hosts sync`, `service install`, and `--force`) now refuse a directory that another user owns, can write to, or can redirect through a symlink, and they stop signalling a PID named by such a directory. A state directory is created with mode `0755`, private keys are created under a umask that hides them, and `trust` says why it refused a directory. (#559)
+- **Output streams**: run mode, proxy start, and compose status lines go to stderr, so stdout carries only the app's or container's output. `NO_COLOR` and `FORCE_COLOR` are honored, and color is decided for each stream from whether that stream is a terminal. A corrupt or unreadable `routes.json` is reported instead of shown as an empty table, and write paths move the bad file aside with a warning. (#558)
+- **Forwarding arguments**: zero-argument and multi-app commands forward arguments after `--` to each app they start, with the separator each package manager needs, including npm, pnpm, Yarn Classic, Yarn Berry, bun, and Turbo root scripts. Arguments through a compound script such as `foo && bar` exit `2` before anything starts, `PORTLESS_APP_PORT` is refused when several apps start in favor of per-app `appPort`, and a package's own `portless.json` now applies in multi-app mode. (#560)
+
+### Documentation
+
+- **Docs site**: the chat input sizes itself with `field-sizing` and ignores an Enter that confirms an IME composition. The search dialog labels its input and clear button, and the desktop and mobile navigation mark the active page with `aria-current`. (#586)
+
 ## 0.17.0
 
 ### New Features
