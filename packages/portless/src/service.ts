@@ -2,6 +2,7 @@ import colors from "./colors.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isIP } from "node:net";
 import { spawnSync } from "node:child_process";
 import { ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import {
@@ -346,6 +347,11 @@ export function parseServiceInstallConfig(
           config.lanMode = true;
           break;
         case "--ip":
+          if (isIP(flagValue) === 0) {
+            throw new UsageError(`--ip requires an IP address, but got "${flagValue}".`, [
+              "See: portless service install --help",
+            ]);
+          }
           config.lanMode = true;
           config.lanIp = flagValue;
           config.lanIpExplicit = true;

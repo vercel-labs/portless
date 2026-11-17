@@ -59,7 +59,7 @@ portless docs.myapp next dev
     </tr>
     <tr>
       <td>`--script <name>`</td>
-      <td>Run a specific `package.json` script instead of the default (`"dev"`). Global flag.</td>
+      <td>Run a specific `package.json` script instead of the default (`"dev"`). Only for zero-arg mode and `portless run`.</td>
     </tr>
     <tr>
       <td>`--app-port <number>`</td>
@@ -260,7 +260,7 @@ Shows active routes, their assigned ports, and how long each app has been runnin
 portless doctor
 ```
 
-Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON. Use `portless doctor --lan` to run the LAN mode checks when the proxy is not in LAN mode. `--ip <address>` does the same and must be a valid IP address.
 
 For upstream 502 errors, stop the running proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
 
@@ -330,7 +330,7 @@ portless proxy start
     </tr>
     <tr>
       <td>`--https`</td>
-      <td>Serve HTTPS, even with `PORTLESS_HTTPS=0`. With `--unprivileged`, it turns HTTPS on and uses port 443.</td>
+      <td>Serve HTTPS, even with `PORTLESS_HTTPS=0`. With `--unprivileged`, it turns HTTPS on and uses port 443. Combining it with `--no-tls` exits 2.</td>
     </tr>
     <tr>
       <td>`--lan`</td>
@@ -494,4 +494,4 @@ portless --version
 
 ## Exit codes
 
-`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, a missing flag value or required argument, an extra argument, or a command that needs `--yes` when no terminal is attached. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
+`portless` exits with `0` on success, `1` when a command fails, and `2` for a usage error: an unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, a missing flag value or required argument, an extra argument, or a command that needs `--yes` when no terminal is attached. Scripts and CI can check the code to tell a typo from a real failure. `run`, named apps, and `compose` exit with the wrapped command's own code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
