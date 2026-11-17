@@ -1,8 +1,22 @@
 # Changelog
 
-## 0.18.0
+## 0.18.1
 
 <!-- release:start -->
+
+### Bug Fixes
+
+- **Concurrent Turbo runs**: concurrent root Turbo runs no longer share one `~/.portless/dev-manifest.json`, so one run cannot overwrite or delete another's entries and start its apps with `PORT` undefined. Each run publishes and retires only its own data file, a relative `PORTLESS_STATE_DIR` works, data from dead runs is swept, and processes that outlive the run can still start Node. (#599)
+- **Command flags**: `get`, `alias`, `list`, `prune`, `doctor`, `hosts sync`, and `proxy start` now accept only the global flags in their own flag spec, so `--cloudflare`, `--ngrok`, `--tailscale`, `--funnel`, and `--script` are rejected instead of silently ignored. `--lan` and `--ip` keep working on `proxy start`, `service install`, and `doctor`, leading flags before a command go to that command, a repeated `--script` or `--ip` exits `2`, `run --lan=1` reports that `--lan` takes no value, `proxy start --https --no-tls` exits `2`, and a mismatched `--cert`/`--key` fails before the daemon starts. (#600)
+- **Alias removal**: `portless alias --remove` now removes an alias's static routes on TLDs the proxy no longer serves, and `--tld` on remove accepts those TLDs. Routes under configured TLDs are matched exactly the way alias adds them, so overlapping TLDs no longer remove another alias's routes, a former TLD nested under a configured one can be selected with `--tld`, and a long name no longer fails on a route under a longer former TLD. (#601)
+
+### Contributors
+
+- @lahfir
+
+<!-- release:end -->
+
+## 0.18.0
 
 ### New Features
 
@@ -29,8 +43,6 @@
 
 - @lahfir
 - @ctate
-
-<!-- release:end -->
 
 ## 0.17.0
 
