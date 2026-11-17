@@ -13,6 +13,7 @@ import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
 import {
   createLoopbackConnection,
   findStateDirProblem,
+  fixOwnership,
   parsePort,
   resolveUserHome,
 } from "./utils.js";
@@ -515,6 +516,7 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, TLS_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
@@ -541,6 +543,7 @@ export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, UNPRIVILEGED_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
@@ -562,6 +565,7 @@ export function writeCustomCertMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, CUSTOM_CERT_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
@@ -598,6 +602,7 @@ export function writeLanMarker(dir: string, ip: string | null): void {
     }
   } else {
     fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+    fixOwnership(markerPath);
   }
 }
 
@@ -757,6 +762,7 @@ export function writeTldsFile(dir: string, tlds: readonly string[]): void {
   } else {
     fs.writeFileSync(tldsPath, uniqueTlds.join("\n") + "\n", { mode: 0o644 });
     fs.writeFileSync(tldPath, uniqueTlds[0] ?? DEFAULT_TLD, { mode: 0o644 });
+    fixOwnership(tldsPath, tldPath);
   }
 }
 
