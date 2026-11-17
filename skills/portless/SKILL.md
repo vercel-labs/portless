@@ -259,7 +259,7 @@ portless proxy start --lan --ip 192.168.1.42
 
 Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpected proxy exit leaves it for auto-start. A normal `portless proxy stop` clears the saved port, TLS, TLD, and LAN settings, so the next start uses its flags and env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
-LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling).
+LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling). Linux also needs a running `avahi-daemon`. While it is stopped, `portless doctor` warns and `.local` names are published once it starts.
 
 - **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
 
