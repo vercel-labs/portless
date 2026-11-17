@@ -260,7 +260,7 @@ Shows active routes, their assigned ports, and how long each app has been runnin
 portless doctor
 ```
 
-Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
+Checks local portless health without changing state. It reports Node.js compatibility, state directory permissions, proxy liveness, route entries, HTTPS CA trust, hostname resolution, and LAN mode prerequisites, then prints suggested fixes. Use `portless doctor --json` to print the report as JSON. Use `portless doctor --lan` to run the LAN mode checks when the proxy is not in LAN mode. `--ip <address>` does the same and must be a valid IP address.
 
 For upstream 502 errors, stop the running proxy with `portless proxy stop`, then run `portless proxy start --foreground` to see each failed loopback connection and its error code.
 

@@ -263,7 +263,14 @@ export const TOOLS: ToolDef[] = [
     "doctor",
     "Run doctor",
     "Check local portless health, including the proxy, certificates, and routes.",
-    { json: { type: "boolean", description: "Return the report as JSON." } },
+    {
+      json: { type: "boolean", description: "Return the report as JSON." },
+      lan: {
+        type: "boolean",
+        description: "Check LAN mode prerequisites even if the proxy is not in LAN mode.",
+      },
+      ip: { type: "string", description: "Same as lan; must be a valid IP address." },
+    },
     [],
     {
       readOnlyHint: true,
@@ -491,10 +498,14 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       if (port !== undefined) argv.push("-p", String(port));
       break;
     }
-    case "doctor":
+    case "doctor": {
       argv.push("doctor");
       if (readBoolean(args, "json") === true) argv.push("--json");
+      if (readBoolean(args, "lan") === true) argv.push("--lan");
+      const ip = readString(args, "ip", false);
+      if (ip !== undefined) argv.push("--ip", ip);
       break;
+    }
     case "prune":
       argv.push("prune");
       if (readBoolean(args, "force") === true) argv.push("--force");

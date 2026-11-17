@@ -194,7 +194,13 @@ import {
 } from "./service.js";
 import { printMcpHelp, runMcp } from "./mcp.js";
 import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
-import { parseCommandArgs, visitLeadingFlags, UsageError, type FlagKind } from "./args.js";
+import {
+  parseCommandArgs,
+  visitLeadingFlags,
+  UsageError,
+  type FlagKind,
+  type ParsedArgs,
+} from "./args.js";
 
 const chalk = colors;
 
@@ -2294,6 +2300,15 @@ function applyGlobalFlag(flag: string, value?: string): void {
   }
 }
 
+/** Applies the --lan and --ip flags a command parsed. Rejects a repeated --ip. */
+function applyLanFlags(parsed: ParsedArgs): void {
+  for (const flag of Object.keys(LAN_FLAG_SPEC)) {
+    const values = parsed.values(flag);
+    if (values.length > 1) throw new UsageError(`${flag} can only be given once.`);
+    if (parsed.has(flag)) applyGlobalFlag(flag, values[0]);
+  }
+}
+
 function printRunHelp(): void {
   console.log(`
 ${colors.bold("portless run")} - Infer project name and run through the proxy.
@@ -3517,7 +3532,7 @@ function printDoctorHelp(): void {
 ${colors.bold("portless doctor")} - Check local portless health and print suggested fixes.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless doctor [--json]")}
+  ${colors.cyan("portless doctor [--json] [--lan] [--ip <address>]")}
 
 Checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA
 trust, hostname resolution, and LAN mode prerequisites. It does not start,
@@ -3525,6 +3540,8 @@ stop, clean, prune, trust, or modify portless state.
 
 ${colors.bold("Options:")}
   --json                 Print the report as JSON
+  --lan                  Check LAN mode prerequisites even if the proxy is not in LAN mode
+  --ip <address>         Same as --lan; the address must be a valid IP
   --help, -h             Show this help
 
 ${colors.bold("Exit codes:")}
@@ -3541,9 +3558,7 @@ async function handleDoctor(args: string[]): Promise<void> {
     { "--json": "boolean", ...LAN_FLAG_SPEC },
     0
   );
-  for (const flag of Object.keys(LAN_FLAG_SPEC)) {
-    if (parsed.has(flag)) applyGlobalFlag(flag, parsed.value(flag));
-  }
+  applyLanFlags(parsed);
   const json = parsed.has("--json");
 
   const findings: DoctorFinding[] = [];
@@ -3979,9 +3994,7 @@ async function handleProxy(args: string[]): Promise<void> {
     },
     0
   );
-  for (const flag of Object.keys(LAN_FLAG_SPEC)) {
-    if (startFlags.has(flag)) applyGlobalFlag(flag, startFlags.value(flag));
-  }
+  applyLanFlags(startFlags);
   const isForeground = startFlags.has("--foreground");
   const skipTrust = startFlags.has("--skip-trust");
   const hasUnprivilegedFlag = startFlags.has("--unprivileged");

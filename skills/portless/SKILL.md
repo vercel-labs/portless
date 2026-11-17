@@ -442,7 +442,7 @@ Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.
 
 ### Run diagnostics
 
-Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites. Use `portless doctor --json` to print the report as JSON.
+Use `portless doctor` first when local routing or HTTPS behavior looks wrong. It is read-only and checks Node.js, state directory permissions, proxy liveness, route entries, hostname resolution, local CA trust, and LAN mode prerequisites. Use `portless doctor --json` to print the report as JSON. Use `portless doctor --lan` to run the LAN mode checks when the proxy is not in LAN mode. `--ip <address>` does the same and must be a valid IP address.
 
 The proxy connects to IPv4 and IPv6 loopback in parallel and uses the first successful connection, without a timer that abandons either family. A backend listening on both families may accept an extra connection that closes without an HTTP request. Later requests reuse the winning connection when possible.
 

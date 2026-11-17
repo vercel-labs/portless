@@ -2167,6 +2167,7 @@ describe("CLI", { timeout: 15_000 }, () => {
           [["--cloudflare"], 'Unknown flag "--cloudflare" for portless proxy start.'],
           [["--no-tls", "--https"], "--https and --no-tls cannot be used together."],
           [["--https", "--no-tls"], "--https and --no-tls cannot be used together."],
+          [["--ip", "10.1.1.1", "--ip", "10.2.2.2"], "--ip can only be given once."],
         ]) {
           const { status, stderr } = run(["proxy", "start", ...flags], {
             env: {
