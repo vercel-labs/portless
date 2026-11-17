@@ -4757,6 +4757,10 @@ async function spawnProxiedApp(
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
 
+  if (lanMode && !process.env.PORTLESS_LAN) {
+    process.env.PORTLESS_LAN = "1";
+  }
+
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
 
@@ -4782,6 +4786,7 @@ async function spawnProxiedApp(
 
     addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
+    injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
     env = {
       ...pkgEnv,

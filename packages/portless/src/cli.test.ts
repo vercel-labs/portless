@@ -6643,14 +6643,16 @@ describe("CLI", { timeout: 15_000 }, () => {
             })
           );
           const dir = path.join(root, "packages", "web");
-          fs.mkdirSync(dir, { recursive: true });
+          const binDir = path.join(dir, "node_modules", ".bin");
+          fs.mkdirSync(binDir, { recursive: true });
           fs.writeFileSync(
-            path.join(dir, "capture.cjs"),
-            `require("node:fs").writeFileSync(${JSON.stringify(capturePath)}, process.env.PORT || "");\n`
+            path.join(binDir, "vite"),
+            `#!/usr/bin/env node\nrequire("node:fs").writeFileSync(${JSON.stringify(capturePath)}, [process.env.PORT, ...process.argv.slice(2)].join(" "));\n`,
+            { mode: 0o755 }
           );
           fs.writeFileSync(
             path.join(dir, "package.json"),
-            JSON.stringify({ name: "web", version: "0.0.0", scripts: { dev: "node capture.cjs" } })
+            JSON.stringify({ name: "web", version: "0.0.0", scripts: { dev: "vite" } })
           );
           fs.writeFileSync(
             path.join(dir, "portless.json"),
@@ -6687,7 +6689,9 @@ describe("CLI", { timeout: 15_000 }, () => {
             if (captured) break;
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
-          expect(captured, output).toBe(String(envPort));
+          expect(captured, output).toBe(
+            `${envPort} --port ${envPort} --strictPort --host 127.0.0.1`
+          );
 
           await stopChild(cli);
           cli = undefined;
@@ -6712,7 +6716,9 @@ describe("CLI", { timeout: 15_000 }, () => {
             if (captured) break;
             await new Promise((resolve) => setTimeout(resolve, 500));
           }
-          expect(captured, output).toBe(String(configPort));
+          expect(captured, output).toBe(
+            `${configPort} --port ${configPort} --strictPort --host 127.0.0.1`
+          );
         } finally {
           if (cli) await stopChild(cli);
           run(["proxy", "stop"], { env: { PORTLESS_STATE_DIR: stateDir, PORTLESS_HTTPS: "0" } });
