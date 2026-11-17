@@ -183,8 +183,11 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_remove",
     "Remove alias",
-    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD unless tld selects specific ones.",
-    { name: NAME_PROPERTY, tld: ALIAS_TLD_PROPERTY },
+    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD and from TLDs the proxy no longer serves, taking the last label of such a hostname as its TLD, unless tld selects specific ones.",
+    {
+      name: NAME_PROPERTY,
+      tld: { ...TLD_PROPERTY, description: "Only these TLDs, configured or not; omit for all." },
+    },
     ["name"],
     {
       readOnlyHint: false,

@@ -3206,7 +3206,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
-    it("keeps live app routes when removing an alias across TLDs", () => {
+    it("keeps live app routes when removing an alias across current and former TLDs", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-alias-remove-live-"));
       const routesPath = path.join(tmpDir, "routes.json");
       const env = { PORTLESS_STATE_DIR: tmpDir, PORTLESS_SYNC_HOSTS: "0" };
@@ -3222,14 +3222,18 @@ describe("CLI", { timeout: 15_000 }, () => {
           JSON.stringify([
             { hostname: "mydb.localhost", port: 4101, pid: process.pid },
             { hostname: "mydb.test", port: 4102, pid: 0 },
+            { hostname: "mydb.old", port: 4103, pid: 0 },
+            { hostname: "mydb.v2.old", port: 4104, pid: 0 },
           ])
         );
 
         const removed = run(["alias", "--remove", "mydb"], { env });
         expect(removed.status).toBe(0);
-        expect(removed.stdout).toContain("mydb.test");
-        expect(removed.stdout).not.toContain("mydb.localhost");
-        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+        expect(removed.stdout).toContain("Removed alias: mydb.test, mydb.old");
+        expect(routes()).toEqual([
+          { hostname: "mydb.localhost", port: 4101, pid: process.pid },
+          { hostname: "mydb.v2.old", port: 4104, pid: 0 },
+        ]);
 
         const repeated = run(["alias", "--remove", "mydb"], { env });
         expect(repeated.status).toBe(1);
@@ -3237,8 +3241,11 @@ describe("CLI", { timeout: 15_000 }, () => {
 
         const liveTld = run(["alias", "--remove", "mydb", "--tld", "localhost"], { env });
         expect(liveTld.status).toBe(1);
-        expect(liveTld.stderr).toContain('No alias found for "mydb.localhost"');
-        expect(routes()).toEqual([{ hostname: "mydb.localhost", port: 4101, pid: process.pid }]);
+        expect(liveTld.stderr).toContain('No alias found for "mydb".');
+        expect(routes()).toEqual([
+          { hostname: "mydb.localhost", port: 4101, pid: process.pid },
+          { hostname: "mydb.v2.old", port: 4104, pid: 0 },
+        ]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
