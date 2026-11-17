@@ -684,7 +684,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             }
           }
           res.writeHead(proxyRes.statusCode || 502, responseHeaders);
-          proxyRes.on("error", () => {
+          proxyRes.on("error", (err) => {
             if (!res.headersSent) {
               res.writeHead(502, { "Content-Type": "text/plain" });
               res.end();
@@ -692,7 +692,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
               // Headers already sent (mid-stream): destroy instead of end to
               // send RST_STREAM. Calling res.end() here can cause a
               // content-length mismatch that Chrome treats as a session error.
-              res.destroy();
+              res.destroy(err);
             }
           });
           proxyRes.pipe(res);
@@ -1033,7 +1033,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         delete responseHeaders[h];
       }
       res.writeHead(proxyRes.statusCode || 502, responseHeaders);
-      proxyRes.on("error", () => req.stream.destroy());
+      proxyRes.on("error", (err) => req.stream.destroy(err));
       proxyRes.pipe(res);
     });
 
@@ -1050,7 +1050,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             : "Bad Gateway: the target app is not responding\n"
         );
       } else {
-        req.stream.destroy();
+        req.stream.destroy(err);
       }
     });
 
