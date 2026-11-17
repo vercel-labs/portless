@@ -51,6 +51,7 @@ import {
   parseHostname,
   parseHostnames,
   parsePort,
+  stripTld,
 } from "./utils.js";
 import {
   checkHostResolution,
@@ -603,6 +604,17 @@ function buildHostnames(
   targetTlds?: readonly string[]
 ): string[] {
   return parseHostnames(name, normalizeTlds(tlds), targetTlds);
+}
+
+/**
+ * The TLD a route hostname was registered with: the longest of `tlds` the
+ * hostname ends with, else its last label.
+ */
+function aliasRouteTld(hostname: string, tlds: readonly string[]): string {
+  return (
+    [...tlds].sort((a, b) => b.length - a.length).find((t) => hostname.endsWith(`.${t}`)) ??
+    hostname.slice(hostname.lastIndexOf(".") + 1)
+  );
 }
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
@@ -3178,9 +3190,13 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Options:")}
   --force                   Override a route; stop a conflicting app if any
-  --tld <tld>               Only these configured TLDs (repeatable, comma-separated)
+  --tld <tld>               Only these TLDs (repeatable, comma-separated); adding needs configured ones
   --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
   --help, -h                Show this help
+
+--remove also removes the name on TLDs the proxy no longer serves, taking the
+last label of such a hostname as its TLD. For a former multi-segment TLD, pass
+--tld or the full hostname.
 
 On macOS and Linux, portless exits with the reason when another user owns or
 can write to the state directory.
@@ -3286,7 +3302,7 @@ async function handleAlias(args: string[]): Promise<void> {
   }
 
   const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
-  if (targetTlds) {
+  if (targetTlds && !isRemove) {
     const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
     if (unconfigured) {
       console.error(
@@ -3301,13 +3317,24 @@ async function handleAlias(args: string[]): Promise<void> {
   store.recoverCorruptRoutesFile();
 
   if (isRemove) {
-    const hostnames = buildHostnames(removeName!, tlds, targetTlds);
-    const routes = store.loadRoutes();
-    const aliases = hostnames.filter((hostname) =>
-      routes.some((route) => route.hostname === hostname && route.pid === 0)
-    );
+    const hostnames =
+      targetTlds && !targetTlds.some((tld) => tlds.includes(tld))
+        ? []
+        : buildHostnames(removeName!, tlds, targetTlds);
+    const aliases = store
+      .loadRoutes()
+      .filter((route) => {
+        if (route.pid !== 0) return false;
+        const tld = aliasRouteTld(route.hostname, [...tlds, ...(targetTlds ?? [])]);
+        if (tlds.includes(tld)) return hostnames.includes(route.hostname);
+        return (
+          (!targetTlds || targetTlds.includes(tld)) &&
+          route.hostname === `${stripTld(removeName!, [...tlds, tld])}.${tld}`
+        );
+      })
+      .map((route) => route.hostname);
     if (aliases.length === 0) {
-      console.error(colors.red(`Error: No alias found for "${hostnames.join(", ")}".`));
+      console.error(colors.red(`Error: No alias found for "${removeName}".`));
       process.exit(1);
     }
     // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
