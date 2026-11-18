@@ -594,6 +594,28 @@ export class RouteStore {
   }
 
   /**
+   * Record a Tailscale HTTPS port on the active route for `hostname` unless
+   * another active route already holds it. Checking and recording under one
+   * lock keeps two apps that start together from claiming the same port.
+   * Returns the hostname that holds the port, or null once it is claimed.
+   */
+  claimTailscalePort(hostname: string, httpsPort: number): string | null {
+    return this.mutateRoutes((routes) => {
+      const holder = routes.find(
+        (route) =>
+          route.hostname !== hostname &&
+          !isStaleRoute(route) &&
+          route.tailscaleHttpsPort === httpsPort
+      );
+      if (holder) return { value: holder.hostname, changed: false };
+      const route = findActiveRoute(routes, hostname);
+      if (!route) return { value: null, changed: false };
+      route.tailscaleHttpsPort = httpsPort;
+      return { value: null, changed: true };
+    });
+  }
+
+  /**
    * Hand a route over to another process. Only applies while the route is
    * still owned by `fromPid`, so a `--force` takeover is never overwritten.
    */

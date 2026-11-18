@@ -6408,27 +6408,38 @@ describe("CLI", { timeout: 15_000 }, () => {
         return { env, readServeCalls, tearDown, tmpDir };
       };
 
-      it("serves on the given HTTPS port and removes it when the app exits", async () => {
-        const { env, readServeCalls, tearDown } = await setUp();
-        try {
-          const { status, stderr } = run(
-            ["--tailscale-port", String(tailscalePort), "myapp", process.execPath, "-e", ""],
-            { env }
-          );
-          expect(status).toBe(0);
-          expect(stderr).toContain(
-            `Tailscale -> https://portless-test.tail1234.ts.net:${tailscalePort}`
-          );
-          expect(readServeCalls()).toEqual([
-            expect.stringMatching(
-              new RegExp(`^serve --bg --yes --https=${tailscalePort} http://127\\.0\\.0\\.1:\\d+$`)
-            ),
-            `serve --yes --https=${tailscalePort} off`,
-          ]);
-        } finally {
-          await tearDown();
+      it.each([
+        { label: "--tailscale-port", flags: ["--tailscale-port", String(tailscalePort)], vars: {} },
+        {
+          label: "PORTLESS_TAILSCALE_PORT alone",
+          flags: [],
+          vars: { PORTLESS_TAILSCALE_PORT: String(tailscalePort) },
+        },
+      ])(
+        "serves on the HTTPS port $label sets and removes it when the app exits",
+        async ({ flags, vars }) => {
+          const { env, readServeCalls, tearDown } = await setUp();
+          try {
+            const { status, stderr } = run([...flags, "myapp", process.execPath, "-e", ""], {
+              env: { ...env, ...vars },
+            });
+            expect(status).toBe(0);
+            expect(stderr).toContain(
+              `Tailscale -> https://portless-test.tail1234.ts.net:${tailscalePort}`
+            );
+            expect(readServeCalls()).toEqual([
+              expect.stringMatching(
+                new RegExp(
+                  `^serve --bg --yes --https=${tailscalePort} http://127\\.0\\.0\\.1:\\d+$`
+                )
+              ),
+              `serve --yes --https=${tailscalePort} off`,
+            ]);
+          } finally {
+            await tearDown();
+          }
         }
-      });
+      );
 
       it("refuses a port another running app is sharing on", async () => {
         const { env, readServeCalls, tearDown, tmpDir } = await setUp();

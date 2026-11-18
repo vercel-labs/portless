@@ -1001,6 +1001,41 @@ describe("RouteStore", () => {
       expect(routes[0].tailscaleHttpsPort).toBeUndefined();
     });
 
+    it("claims a Tailscale HTTPS port no other active route holds", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      store.addRoute("other.localhost", 4124, process.pid);
+      store.updateRoute("other.localhost", { tailscaleHttpsPort: 8443 });
+
+      expect(store.claimTailscalePort("myapp.localhost", 8500)).toBeNull();
+      expect(
+        store.loadRoutes().find((route) => route.hostname === "myapp.localhost")
+      ).toMatchObject({ tailscaleHttpsPort: 8500 });
+    });
+
+    it("refuses a Tailscale HTTPS port another active route holds", () => {
+      store.addRoute("myapp.localhost", 4123, process.pid);
+      store.addRoute("other.localhost", 4124, process.pid);
+      store.updateRoute("other.localhost", { tailscaleHttpsPort: 8500 });
+
+      expect(store.claimTailscalePort("myapp.localhost", 8500)).toBe("other.localhost");
+      expect(
+        store.loadRoutes().find((route) => route.hostname === "myapp.localhost")
+      ).not.toHaveProperty("tailscaleHttpsPort");
+    });
+
+    it("claims a Tailscale HTTPS port that only a stale route still records", () => {
+      store.ensureDir();
+      fs.writeFileSync(
+        store.getRoutesPath(),
+        JSON.stringify([
+          { hostname: "gone.localhost", port: 4124, pid: 999999, tailscaleHttpsPort: 8500 },
+        ])
+      );
+      store.addRoute("myapp.localhost", 4123, process.pid);
+
+      expect(store.claimTailscalePort("myapp.localhost", 8500)).toBeNull();
+    });
+
     it("updateRoute is a no-op for nonexistent hostname", () => {
       store.addRoute("myapp.localhost", 4123, process.pid);
       store.updateRoute("noexist.localhost", {

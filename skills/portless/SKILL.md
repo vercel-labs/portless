@@ -228,7 +228,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_SYNC_HOSTS`     | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
 | `PORTLESS_TAILSCALE`      | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
 | `PORTLESS_FUNNEL`         | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_TAILSCALE_PORT` | Use a fixed Tailscale HTTPS port when sharing (same as `--tailscale-port`)     |
+| `PORTLESS_TAILSCALE_PORT` | Share on the tailnet at a fixed HTTPS port (same as `--tailscale-port`)        |
 | `PORTLESS_NGROK`          | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
 | `PORTLESS_CLOUDFLARE`     | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
 | `PORTLESS_STATE_DIR`      | Override the state directory                                                   |

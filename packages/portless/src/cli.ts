@@ -1834,7 +1834,10 @@ async function runApp(
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
-  const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
+  const wantsTailscale =
+    wantsFunnel ||
+    isEnabledEnv(process.env.PORTLESS_TAILSCALE) ||
+    Boolean(process.env.PORTLESS_TAILSCALE_PORT);
   const fixedTailscalePort = wantsTailscale ? tailscalePortFromEnv(wantsFunnel) : undefined;
   const tunnels = PROCESS_TUNNELS.filter((t) => isEnabledEnv(process.env[t.env]));
   let tsBaseUrl: string | undefined;
@@ -2024,15 +2027,11 @@ async function runApp(
     if (fixedTailscalePort !== undefined) {
       // Tailscale replaces an existing background serve on the same port, so
       // refuse a port that another running portless app is sharing on.
-      const holder = store
-        .loadRoutes()
-        .find(
-          (route) => route.hostname !== hostname && route.tailscaleHttpsPort === fixedTailscalePort
-        );
+      const holder = store.claimTailscalePort(hostname, fixedTailscalePort);
       if (holder) {
         console.error(
           colors.red(
-            `Error: Tailscale HTTPS port ${fixedTailscalePort} is already used by ${holder.hostname}. Choose another --tailscale-port.`
+            `Error: Tailscale HTTPS port ${fixedTailscalePort} is already used by ${holder}. Choose another --tailscale-port.`
           )
         );
         process.exit(1);
@@ -2055,6 +2054,10 @@ async function runApp(
         const message = err instanceof Error ? err.message : String(err);
         const isConflict = message.includes("already in use");
         if (isConflict && attempt < maxAttempts) continue;
+        if (fixedTailscalePort !== undefined) {
+          // Release the claim so the unregistered port is free for other apps.
+          store.updateRoute(hostname, { tailscaleHttpsPort: null });
+        }
         console.error(colors.red(`Error: ${message}`));
         process.exit(1);
       }
@@ -2350,7 +2353,6 @@ function applyGlobalFlag(flag: string, value?: string): void {
       ]);
     }
     process.env.PORTLESS_TAILSCALE_PORT = value;
-    process.env.PORTLESS_TAILSCALE = "1";
   } else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
   else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
     if (isIP(value ?? "") === 0) {
@@ -2590,7 +2592,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_PORT=<number>        Set the default proxy port
   PORTLESS_APP_PORT=<number>    Set a fixed port for the app
   PORTLESS_TAILSCALE_PORT=<number>
-                                Set a fixed Tailscale HTTPS port when sharing
+                                Share on the tailnet at a fixed HTTPS port
   PORTLESS_HTTPS=0              Disable HTTPS for the proxy
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
