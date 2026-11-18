@@ -74,6 +74,7 @@ import {
   findAvailableServePort,
   formatTailscaleUrl,
   getUsedServePorts,
+  isFunnelPort,
   registerFunnel,
   registerServe,
   unregisterTailscale,
@@ -1834,6 +1835,7 @@ async function runApp(
   // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
   const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
+  const fixedTailscalePort = wantsTailscale ? tailscalePortFromEnv(wantsFunnel) : undefined;
   const tunnels = PROCESS_TUNNELS.filter((t) => isEnabledEnv(process.env[t.env]));
   let tsBaseUrl: string | undefined;
 
@@ -2019,10 +2021,29 @@ async function runApp(
   };
 
   if (wantsTailscale && tsBaseUrl) {
-    const maxAttempts = 3;
+    if (fixedTailscalePort !== undefined) {
+      // Tailscale replaces an existing background serve on the same port, so
+      // refuse a port that another running portless app is sharing on.
+      const holder = store
+        .loadRoutes()
+        .find(
+          (route) => route.hostname !== hostname && route.tailscaleHttpsPort === fixedTailscalePort
+        );
+      if (holder) {
+        console.error(
+          colors.red(
+            `Error: Tailscale HTTPS port ${fixedTailscalePort} is already used by ${holder.hostname}. Choose another --tailscale-port.`
+          )
+        );
+        process.exit(1);
+      }
+    }
+    // A fixed port has nothing to fall back to, so a conflict ends the run.
+    const maxAttempts = fixedTailscalePort === undefined ? 3 : 1;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const usedPorts = getUsedServePorts();
-      tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
+      tailscaleHttpsPort =
+        fixedTailscalePort ??
+        findAvailableServePort(getUsedServePorts(), wantsFunnel ? "funnel" : "serve");
       try {
         if (wantsFunnel) {
           registerFunnel(port, tailscaleHttpsPort);
@@ -2253,6 +2274,28 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+/** Reads PORTLESS_TAILSCALE_PORT, set directly or by --tailscale-port. Funnel accepts only its own ports. */
+function tailscalePortFromEnv(funnel: boolean): number | undefined {
+  const envVal = process.env.PORTLESS_TAILSCALE_PORT;
+  if (!envVal) return undefined;
+  const port = parsePort(envVal);
+  if (port === null) {
+    console.error(
+      colors.red(`Error: Invalid PORTLESS_TAILSCALE_PORT="${envVal}". Must be 1-65535.`)
+    );
+    process.exit(1);
+  }
+  if (funnel && !isFunnelPort(port)) {
+    console.error(
+      colors.red(
+        `Error: Tailscale Funnel cannot use port ${port}. Funnel supports ports 443, 8443, and 10000.`
+      )
+    );
+    process.exit(1);
+  }
+  return port;
+}
+
 const LAN_FLAG_SPEC = { "--lan": "boolean", "--ip": "value" } as const;
 
 const SHARE_FLAG_SPEC = {
@@ -2262,11 +2305,14 @@ const SHARE_FLAG_SPEC = {
   "--cloudflare": "boolean",
 } as const;
 
+const TAILSCALE_PORT_FLAG = "--tailscale-port";
+
 const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--force": "boolean",
   "--app-port": "value",
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
+  [TAILSCALE_PORT_FLAG]: "value",
   "--help": "boolean",
   "-h": "boolean",
 };
@@ -2279,6 +2325,7 @@ const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--script": "value",
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
+  [TAILSCALE_PORT_FLAG]: "value",
   "--help": "boolean",
   "-h": "boolean",
 };
@@ -2296,7 +2343,15 @@ function applyGlobalFlag(flag: string, value?: string): void {
     process.env.PORTLESS_TAILSCALE = "1";
   } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
   else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
-  else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
+  else if (flag === TAILSCALE_PORT_FLAG) {
+    if (!value || parsePort(value) === null) {
+      throw new UsageError(`${flag} requires a port number (1-65535).`, [
+        "  portless myapp --tailscale-port 8443 next dev",
+      ]);
+    }
+    process.env.PORTLESS_TAILSCALE_PORT = value;
+    process.env.PORTLESS_TAILSCALE = "1";
+  } else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
   else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
     if (isIP(value ?? "") === 0) {
       throw new UsageError(`${flag} requires an IP address, but got "${value}".`, [
@@ -2339,6 +2394,8 @@ ${colors.bold("Options:")}
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
+  --tailscale-port <number>
+                         Use a fixed Tailscale HTTPS port (implies --tailscale)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
   --cloudflare           Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
@@ -2517,6 +2574,7 @@ ${colors.bold("Options:")}
   --lan                         Enable LAN access for app commands
   --ip <address>                Pin the LAN IP (implies --lan)
   --tailscale                   Share the app on your tailnet
+  --tailscale-port <number>     Use a fixed Tailscale HTTPS port (implies --tailscale)
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
@@ -2531,6 +2589,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS=0                    Run app commands directly without the proxy
   PORTLESS_PORT=<number>        Set the default proxy port
   PORTLESS_APP_PORT=<number>    Set a fixed port for the app
+  PORTLESS_TAILSCALE_PORT=<number>
+                                Set a fixed Tailscale HTTPS port when sharing
   PORTLESS_HTTPS=0              Disable HTTPS for the proxy
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
@@ -6067,6 +6127,14 @@ async function main() {
 
   for (const flag of Object.keys(SHARE_FLAG_SPEC)) {
     if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
+  }
+
+  const tailscalePortResult = stripGlobalFlag(TAILSCALE_PORT_FLAG, true);
+  if (tailscalePortResult !== null) {
+    applyGlobalFlag(
+      TAILSCALE_PORT_FLAG,
+      typeof tailscalePortResult === "string" ? tailscalePortResult : undefined
+    );
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

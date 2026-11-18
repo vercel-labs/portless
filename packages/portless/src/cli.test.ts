@@ -6346,6 +6346,123 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("--tailscale-port flag", () => {
+    it.each([
+      { label: "global", args: ["--tailscale-port", "not-a-port", "myapp", "echo", "hi"] },
+      { label: "after the app name", args: ["myapp", "--tailscale-port=0", "echo", "hi"] },
+      { label: "run", args: ["run", "--tailscale-port", "70000", "echo", "hi"] },
+    ])("rejects a value that is not a port ($label)", ({ args }) => {
+      const { status, stderr } = run(args, { env: { PATH: "/tmp/portless-no-ts-path" } });
+      expect(status).toBe(2);
+      expect(stderr).toContain("--tailscale-port requires a port number (1-65535).");
+    });
+
+    it("rejects a Funnel port that Funnel does not support", () => {
+      const { status, stderr } = run(["--funnel", "myapp", "echo", "hi"], {
+        env: { PATH: "/tmp/portless-no-ts-path", PORTLESS_TAILSCALE_PORT: "26100" },
+      });
+      expect(status).toBe(1);
+      expect(stderr).toContain("Tailscale Funnel cannot use port 26100");
+    });
+
+    describe.skipIf(process.platform === "win32")("with a Tailscale CLI", () => {
+      const tailscalePort = 26100;
+
+      const setUp = async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tailscale-port-"));
+        const binDir = path.join(tmpDir, "bin");
+        const logPath = path.join(tmpDir, "tailscale.log");
+        fs.mkdirSync(binDir);
+        fs.writeFileSync(
+          path.join(binDir, "tailscale"),
+          [
+            "#!/bin/sh",
+            `echo "$*" >> ${JSON.stringify(logPath)}`,
+            'case "$1" in',
+            "  version) echo 1.80.0 ;;",
+            '  status) printf \'%s\\n\' \'{"Self":{"DNSName":"portless-test.tail1234.ts.net.","Capabilities":["https"]}}\' ;;',
+            '  serve) if [ "$2" = status ]; then echo "{}"; fi ;;',
+            "esac",
+            "exit 0",
+            "",
+          ].join("\n"),
+          { mode: 0o755 }
+        );
+        const proxy = await startMockProxy(tmpDir);
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), proxy.port.toString());
+        const env = {
+          PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_HTTPS: "0",
+          PORTLESS: undefined,
+        };
+        const readServeCalls = () =>
+          fs
+            .readFileSync(logPath, "utf-8")
+            .split("\n")
+            .filter((line) => line.startsWith("serve ") && !line.startsWith("serve status"));
+        const tearDown = async () => {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        };
+        return { env, readServeCalls, tearDown, tmpDir };
+      };
+
+      it("serves on the given HTTPS port and removes it when the app exits", async () => {
+        const { env, readServeCalls, tearDown } = await setUp();
+        try {
+          const { status, stderr } = run(
+            ["--tailscale-port", String(tailscalePort), "myapp", process.execPath, "-e", ""],
+            { env }
+          );
+          expect(status).toBe(0);
+          expect(stderr).toContain(
+            `Tailscale -> https://portless-test.tail1234.ts.net:${tailscalePort}`
+          );
+          expect(readServeCalls()).toEqual([
+            expect.stringMatching(
+              new RegExp(`^serve --bg --yes --https=${tailscalePort} http://127\\.0\\.0\\.1:\\d+$`)
+            ),
+            `serve --yes --https=${tailscalePort} off`,
+          ]);
+        } finally {
+          await tearDown();
+        }
+      });
+
+      it("refuses a port another running app is sharing on", async () => {
+        const { env, readServeCalls, tearDown, tmpDir } = await setUp();
+        try {
+          fs.writeFileSync(
+            path.join(tmpDir, "routes.json"),
+            JSON.stringify([
+              {
+                hostname: "other.localhost",
+                port: 4999,
+                pid: process.pid,
+                tailscaleHttpsPort: tailscalePort,
+              },
+            ])
+          );
+          const { status, stderr } = run(["myapp", process.execPath, "-e", ""], {
+            env: {
+              ...env,
+              PORTLESS_TAILSCALE: "1",
+              PORTLESS_TAILSCALE_PORT: String(tailscalePort),
+            },
+          });
+          expect(status).toBe(1);
+          expect(stderr).toContain(
+            `Tailscale HTTPS port ${tailscalePort} is already used by other.localhost`
+          );
+          expect(readServeCalls()).toEqual([]);
+        } finally {
+          await tearDown();
+        }
+      });
+    });
+  });
+
   describe("--ngrok flag", () => {
     it("shows --ngrok in help output", () => {
       const { status, stdout } = run(["--help"]);
