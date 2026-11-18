@@ -5198,34 +5198,43 @@ describe("CLI", { timeout: 15_000 }, () => {
       });
     }
 
+    /** Status lines quiet mode hides, matched within a trimmed stderr line. */
+    const statusLines = [
+      "Proxy is running",
+      "quietapp.localhost (auto-resolves to 127.0.0.1)",
+      "Using port",
+      "Running: PORT=",
+    ];
+
     it("prints the full status banner by default", () => {
       const { status, stdout, stderr } = runApp(["run", "--name", "quietapp", ...appCommand]);
       expect(status).toBe(0);
       expect(stdout).toContain("app output");
-      for (const line of [
-        "portless",
-        "Proxy is running",
-        "quietapp.localhost (auto-resolves to 127.0.0.1)",
-        "Using port",
-        `-> http://quietapp.localhost:${proxy.port}`,
-        "Running: PORT=",
-      ]) {
-        expect(stderr).toContain(line);
+      const lines = stderr.split("\n").map((line) => line.trim());
+      expect(lines).toContain("portless");
+      expect(lines).toContain(`-> http://quietapp.localhost:${proxy.port}`);
+      for (const statusLine of statusLines) {
+        expect(lines.some((line) => line.includes(statusLine))).toBe(true);
       }
     });
 
+    // Assert what is hidden rather than that stderr holds only the URL: a
+    // hostname that does not resolve here adds a hosts warning, which quiet keeps.
     it.each([
       ["run --quiet", ["run", "--quiet", "--name", "quietapp", ...appCommand], {}],
       ["<name> --quiet", ["quietapp", "--quiet", ...appCommand], {}],
       ["a leading --quiet", ["--quiet", "quietapp", ...appCommand], {}],
       ["PORTLESS_QUIET=1", ["run", "--name", "quietapp", ...appCommand], { PORTLESS_QUIET: "1" }],
-    ])("prints only the app URL with %s", (_label, args, env) => {
+    ])("hides the status lines but keeps the app URL with %s", (_label, args, env) => {
       const { status, stdout, stderr } = runApp(args, env);
       expect(status).toBe(0);
       expect(stdout).toContain("app output");
-      expect(stderr.split("\n").filter(Boolean)).toEqual([
-        `  -> http://quietapp.localhost:${proxy.port}`,
-      ]);
+      const lines = stderr.split("\n").map((line) => line.trim());
+      expect(lines).toContain(`-> http://quietapp.localhost:${proxy.port}`);
+      expect(lines).not.toContain("portless");
+      for (const statusLine of statusLines) {
+        expect(lines.some((line) => line.includes(statusLine))).toBe(false);
+      }
     });
 
     const quietRunArgs = ["run", "--quiet", "--name", "quietapp", ...appCommand];
