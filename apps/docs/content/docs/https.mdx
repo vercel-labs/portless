@@ -14,6 +14,33 @@ Portless sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the por
 
 On WSL, portless updates both the Linux trust store and the Windows current-user Root store. Windows browsers can then verify portless HTTPS certificates served from WSL.
 
+## Vite HMR connects to the app port
+
+If a Vite-based tool such as Storybook loads through portless but its hot module replacement (HMR) socket connects to the app's port, set the client's WebSocket protocol and port from `PORTLESS_URL`. Portless sets this variable to the URL you open in your browser.
+
+Use these settings in `vite.config.ts`.
+
+```ts
+import { defineConfig } from "vite";
+
+const url = process.env.PORTLESS_URL;
+const proxy = url ? new URL(url) : undefined;
+const secure = proxy?.protocol === "https:";
+
+export default defineConfig({
+  server: {
+    hmr: proxy
+      ? {
+          protocol: secure ? "wss" : "ws",
+          clientPort: Number(proxy.port) || (secure ? 443 : 80),
+        }
+      : undefined,
+  },
+});
+```
+
+In Vite 8.1 and later, use [`server.ws`](https://vite.dev/config/server-options#server-ws) in place of `server.hmr`. In Storybook, merge these settings into the existing Vite config with [`viteFinal`](https://storybook.js.org/docs/api/main-config/main-config-vite-final).
+
 ## Custom certificates
 
 Use your own certs (e.g., from mkcert):
