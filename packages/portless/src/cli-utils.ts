@@ -2019,24 +2019,348 @@ const FRAMEWORKS_NEEDING_PORT: Record<string, FrameworkSpec> = {
   },
 };
 
+type RunnerOptionSpec = {
+  valueFlags?: readonly string[];
+  booleanFlags?: readonly string[];
+  targetFlags?: readonly string[];
+  scriptOnlyFlags?: readonly string[];
+  cwdFlags?: readonly string[];
+  attachedShortValues?: true;
+};
+
+type SkippedPrefix = {
+  index: number;
+  separator: boolean;
+  unknownFlag: boolean;
+  targetsOtherPackage: boolean;
+  scriptOnly: boolean;
+  cwd?: string;
+};
+
 type PackageRunnerSpec = {
   subcommands: string[];
-  valueFlags?: string[];
+  valueFlags?: readonly string[];
+  attachedShortValues?: true;
   separatorRequired?: boolean;
 };
+
+const NPM_SHARED_VALUE_FLAGS = [
+  "-C",
+  "--prefix",
+  "-w",
+  "--workspace",
+  "-L",
+  "--location",
+  "--loglevel",
+  "--userconfig",
+  "--cache",
+  "--registry",
+  "--reg",
+  "--scope",
+  "--tag",
+  "--otp",
+  "--node-options",
+  "--script-shell",
+  "--proxy",
+  "--https-proxy",
+  "--noproxy",
+  "--cafile",
+  "--cert",
+  "--key",
+  "--shell",
+  "--umask",
+] as const;
+
+const NPM_EXEC_VALUE_FLAGS = ["-c", "--call", "--package", "--allow-scripts"] as const;
+
+const NPX_VALUE_FLAGS = [...NPM_SHARED_VALUE_FLAGS, ...NPM_EXEC_VALUE_FLAGS, "-p"] as const;
+
+const NPM_SHARED_BOOLEAN_FLAGS = [
+  "-s",
+  "--silent",
+  "-q",
+  "--quiet",
+  "-d",
+  "--dd",
+  "--ddd",
+  "--verbose",
+  "-y",
+  "--yes",
+  "-n",
+  "--no",
+  "-l",
+  "--long",
+  "-g",
+  "--global",
+  "--parseable",
+  "--ws",
+  "--workspaces",
+  "--include-workspace-root",
+  "--iwr",
+  "--if-present",
+  "--ignore-scripts",
+  "--foreground-scripts",
+  "--offline",
+  "--prefer-offline",
+  "--prefer-online",
+  "--json",
+  "--color",
+  "--progress",
+  "--strict-allow-scripts",
+  "--dangerously-allow-all-scripts",
+] as const;
+
+const PNPM_VALUE_FLAGS = [
+  "-F",
+  "--filter",
+  "--filter-prod",
+  "-C",
+  "--dir",
+  "--env-file",
+  "--store-dir",
+  "--state-dir",
+  "--npmrc-auth-file",
+  "--userconfig",
+  "--workspace-packages",
+  "--registry",
+  "--https-proxy",
+  "--http-proxy",
+  "--no-proxy",
+  "--reporter",
+  "--loglevel",
+  "--workspace-concurrency",
+  "--test-pattern",
+  "--changed-files-ignore-pattern",
+] as const;
+
+const PNPM_DLX_VALUE_FLAGS = [
+  "-p",
+  "--package",
+  "--allow-build",
+  "--cpu",
+  "--os",
+  "--libc",
+] as const;
+
+const PNPM_BOOLEAN_FLAGS = [
+  "-s",
+  "--sequential",
+  "--silent",
+  "--if-present",
+  "--dry-run",
+  "--json",
+  "-y",
+  "--yes",
+  "--ignore-workspace",
+  "--color",
+  "--stream",
+  "--aggregate-output",
+  "--use-stderr",
+  "-r",
+  "--recursive",
+  "-w",
+  "--workspace-root",
+  "--fail-if-no-match",
+  "--include-workspace-root",
+  "--sort",
+  "--reverse",
+  "--parallel",
+  "--offline",
+  "--prefer-offline",
+] as const;
+
+const YARN_VALUE_FLAGS = [
+  "--cwd",
+  "--cache-folder",
+  "--global-folder",
+  "--https-proxy",
+  "--link-folder",
+  "--modules-folder",
+  "--mutex",
+  "--network-concurrency",
+  "--network-timeout",
+  "--otp",
+  "--preferred-cache-folder",
+  "--proxy",
+  "--registry",
+  "--use-yarnrc",
+  "--mode",
+] as const;
+
+const YARN_DLX_VALUE_FLAGS = ["-p", "--package"] as const;
+
+const YARN_BOOLEAN_FLAGS = [
+  "-s",
+  "--silent",
+  "-q",
+  "--quiet",
+  "--verbose",
+  "--ignore-scripts",
+  "--json",
+  "--offline",
+  "--prefer-offline",
+  "--force",
+  "--frozen-lockfile",
+  "--strict-semver",
+  "--non-interactive",
+  "-T",
+  "--top-level",
+  "-B",
+  "--binaries-only",
+  "--inspect",
+  "--inspect-brk",
+] as const;
+
+const BUN_VALUE_FLAGS = [
+  "--cwd",
+  "--env-file",
+  "-r",
+  "--preload",
+  "--require",
+  "--import",
+  "--install",
+  "-e",
+  "--eval",
+  "-p",
+  "--print",
+  "--port",
+  "--conditions",
+  "--fetch-preconnect",
+  "--max-http-header-size",
+  "--dns-result-order",
+  "--redirect-warnings",
+  "--disable-warning",
+  "--title",
+  "--unhandled-rejections",
+  "--console-depth",
+  "--user-agent",
+  "--cron-title",
+  "--cron-period",
+  "--main-fields",
+  "--extension-order",
+  "--tsconfig-override",
+  "-d",
+  "--define",
+  "--drop",
+  "--feature",
+  "-l",
+  "--loader",
+  "--jsx-factory",
+  "--jsx-fragment",
+  "--jsx-import-source",
+  "--jsx-runtime",
+  "--cpu-prof-name",
+  "--cpu-prof-dir",
+  "--cpu-prof-interval",
+  "--heap-prof-name",
+  "--heap-prof-dir",
+  "--heap-prof-interval",
+  "--watch-kill-signal",
+] as const;
+
+const BUN_BOOLEAN_FLAGS = [
+  "-b",
+  "--bun",
+  "-c",
+  "--config",
+  "--inspect",
+  "--inspect-wait",
+  "--inspect-brk",
+  "--silent",
+  "--watch",
+  "--hot",
+  "--check",
+  "--smol",
+  "--interactive",
+  "--if-present",
+  "-i",
+  "--prefer-offline",
+  "--prefer-latest",
+  "--cpu-prof",
+  "--cpu-prof-md",
+  "--heap-prof",
+  "--heap-prof-md",
+  "--experimental-http2-fetch",
+  "--experimental-http3-fetch",
+  "--insecure-http-parser",
+  "--experimental-stream-iter",
+  "--expose-gc",
+  "--throw-deprecation",
+  "--trace-warnings",
+  "--trace-deprecation",
+  "--pending-deprecation",
+  "--zero-fill-buffers",
+  "--use-system-ca",
+  "--use-openssl-ca",
+  "--use-bundled-ca",
+  "--tls-min-v1.0",
+  "--tls-min-v1.1",
+  "--tls-min-v1.2",
+  "--tls-min-v1.3",
+  "--tls-max-v1.2",
+  "--tls-max-v1.3",
+  "--redis-preconnect",
+  "--sql-preconnect",
+  "--preserve-symlinks",
+  "--preserve-symlinks-main",
+  "--jsx-side-effects",
+  "--ignore-dce-annotations",
+] as const;
+
+const BUN_X_VALUE_FLAGS = [
+  "-p",
+  "--package",
+  "--cwd",
+  "--env-file",
+  "--minimum-release-age",
+  "--registry",
+  "--ca",
+  "--cafile",
+  "-r",
+  "--preload",
+  "--require",
+  "--import",
+] as const;
+
+const BUN_X_BOOLEAN_FLAGS = [
+  "-b",
+  "--bun",
+  "-c",
+  "--config",
+  "--silent",
+  "--verbose",
+  "--trust",
+  "--ignore-scripts",
+  "--smol",
+  "--hot",
+  "--watch",
+  "--prefer-offline",
+  "--prefer-latest",
+] as const;
 
 const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
   npx: {
     subcommands: [],
-    valueFlags: ["-c", "--call", "-p", "--package", "-w", "--workspace", "--allow-scripts"],
+    valueFlags: NPX_VALUE_FLAGS,
   },
-  bunx: { subcommands: [] },
-  pnpx: { subcommands: [], valueFlags: ["-p", "--package"] },
-  yarn: { subcommands: ["dlx", "exec"] },
-  pnpm: { subcommands: ["dlx", "exec"] },
+  bunx: { subcommands: [], valueFlags: BUN_X_VALUE_FLAGS, attachedShortValues: true },
+  pnpx: {
+    subcommands: [],
+    valueFlags: [...PNPM_VALUE_FLAGS, ...PNPM_DLX_VALUE_FLAGS],
+    attachedShortValues: true,
+  },
+  yarn: {
+    subcommands: ["dlx", "exec"],
+    valueFlags: [...YARN_VALUE_FLAGS, ...YARN_DLX_VALUE_FLAGS],
+  },
+  pnpm: {
+    subcommands: ["dlx", "exec"],
+    valueFlags: [...PNPM_VALUE_FLAGS, ...PNPM_DLX_VALUE_FLAGS],
+    attachedShortValues: true,
+  },
   npm: {
     subcommands: ["exec", "x"],
-    valueFlags: ["-c", "--call", "--package", "-w", "--workspace", "--prefix"],
+    valueFlags: [...NPM_SHARED_VALUE_FLAGS, ...NPM_EXEC_VALUE_FLAGS],
     separatorRequired: true,
   },
 };
@@ -2056,23 +2380,113 @@ type FrameworkInvocation = {
   separator?: string;
 };
 
+function optionName(token: string): string {
+  const eq = token.indexOf("=");
+  return eq === -1 ? token : token.slice(0, eq);
+}
+
+function optionInlineValue(token: string): string | undefined {
+  const eq = token.indexOf("=");
+  return eq === -1 ? undefined : token.slice(eq + 1);
+}
+
+function mergeFlagList(
+  first?: readonly string[],
+  second?: readonly string[]
+): readonly string[] | undefined {
+  if (!first) return second;
+  if (!second) return first;
+  return [...first, ...second];
+}
+
+function mergeRunnerOptions(base: RunnerOptionSpec, sub?: RunnerOptionSpec): RunnerOptionSpec {
+  if (!sub) return base;
+  return {
+    valueFlags: mergeFlagList(base.valueFlags, sub.valueFlags),
+    booleanFlags: mergeFlagList(base.booleanFlags, sub.booleanFlags),
+    targetFlags: mergeFlagList(base.targetFlags, sub.targetFlags),
+    scriptOnlyFlags: mergeFlagList(base.scriptOnlyFlags, sub.scriptOnlyFlags),
+    cwdFlags: mergeFlagList(base.cwdFlags, sub.cwdFlags),
+    attachedShortValues: base.attachedShortValues || sub.attachedShortValues,
+  };
+}
+
+function hasTrailingTargetFlag(
+  args: string[],
+  start: number,
+  targetFlags: readonly string[]
+): boolean {
+  for (let i = start; i < args.length; i++) {
+    const token = args[i];
+    if (token === "--") break;
+    if (token.startsWith("-") && targetFlags.includes(optionName(token))) return true;
+  }
+  return false;
+}
+
+/**
+ * Scan leading option tokens for a runner or subcommand. When `booleanFlags` is
+ * given, an unrecognized flag without `=` stops the scan as `unknownFlag` so a
+ * value-taking flag's argument is never misread as the target command or script.
+ */
 function skipRunnerPrefix(
   commandArgs: string[],
   start: number,
-  runner: { valueFlags?: string[] }
-): { index: number; separator: boolean } {
+  runner: RunnerOptionSpec
+): SkippedPrefix {
   let index = start;
   let separator = false;
+  let unknownFlag = false;
+  let targetsOtherPackage = false;
+  let scriptOnly = false;
+  let cwd: string | undefined;
+
   while (index < commandArgs.length && commandArgs[index].startsWith("-")) {
-    const option = commandArgs[index];
-    index++;
-    if (option === "--") {
+    const token = commandArgs[index];
+    if (token === "--") {
+      index++;
       separator = true;
       break;
     }
-    if (!option.includes("=") && runner.valueFlags?.includes(option)) index++;
+
+    let name = optionName(token);
+    let hasInlineValue = token.length !== name.length;
+    let inlineValue = hasInlineValue ? optionInlineValue(token) : undefined;
+    if (
+      !hasInlineValue &&
+      runner.attachedShortValues &&
+      token.length > 2 &&
+      token[1] !== "-" &&
+      runner.valueFlags?.includes(token.slice(0, 2))
+    ) {
+      name = token.slice(0, 2);
+      hasInlineValue = true;
+      inlineValue = token.slice(2);
+    }
+
+    const isValueFlag = runner.valueFlags?.includes(name) === true;
+    const isBooleanFlag =
+      runner.booleanFlags?.includes(name) === true || (!isValueFlag && name.startsWith("--no-"));
+
+    if (!hasInlineValue && !isValueFlag && runner.booleanFlags && !isBooleanFlag) {
+      unknownFlag = true;
+      break;
+    }
+
+    if (runner.targetFlags?.includes(name)) targetsOtherPackage = true;
+    if (runner.scriptOnlyFlags?.includes(name)) scriptOnly = true;
+
+    index++;
+    if (isValueFlag) {
+      const value = hasInlineValue ? inlineValue : commandArgs[index];
+      if (!hasInlineValue) index++;
+      if (runner.cwdFlags?.includes(name) && value !== undefined) {
+        cwd = value;
+      }
+    }
   }
-  return { index, separator };
+
+  return { index, separator, unknownFlag, targetsOtherPackage, scriptOnly, cwd };
 }
 
 function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
@@ -2182,7 +2596,7 @@ function mentionsTurbo(commandArgs: string[]): boolean {
 }
 
 /** What a wrapper does to the command it runs and to the arguments forwarded through it. */
-type Wrapped = {
+type Wrapped = RunnerOptionSpec & {
   /** Whether it swallows one `--`: always, or only when its own options do not end with one. */
   consumes?: "always" | "unless separated";
   /** The `--` is swallowed by Yarn Classic only. */
@@ -2194,40 +2608,134 @@ type Wrapped = {
 };
 
 type WrapperSpec = Wrapped & {
-  valueFlags?: string[];
   subcommands?: Record<string, Wrapped>;
   /** False when the command runs nothing without one of its subcommands. */
   bare?: false;
+  /** True when the runner still parses its own flags after the script name until `--`. */
+  parsesTrailingFlags?: true;
 };
 
-const NPM_EXEC: Wrapped = { consumes: "unless separated", packageSpec: true };
+const NPM_EXEC: Wrapped = {
+  consumes: "unless separated",
+  packageSpec: true,
+  valueFlags: NPM_EXEC_VALUE_FLAGS,
+};
+const NPM_RUN: Wrapped = { consumes: "unless separated", script: "always" };
+const PNPM_RUN: Wrapped = { script: "always" };
 
 /** Every command that a root script may put in front of Turbo. */
 const COMMAND_WRAPPERS: Record<string, WrapperSpec> = {
-  env: { valueFlags: ["-u", "--unset"] },
-  "cross-env": {},
-  dotenv: { valueFlags: ["-e", "-v"], consumes: "unless separated" },
-  npx: { valueFlags: PACKAGE_RUNNERS.npx.valueFlags, packageSpec: true },
-  bunx: { packageSpec: true },
-  pnpx: { valueFlags: PACKAGE_RUNNERS.pnpx.valueFlags, packageSpec: true },
-  npm: {
-    valueFlags: PACKAGE_RUNNERS.npm.valueFlags,
-    subcommands: { exec: NPM_EXEC, x: NPM_EXEC, run: { consumes: "always", script: "always" } },
+  env: {
+    valueFlags: ["-u", "--unset", "-C", "--chdir", "-S", "--split-string"],
+    booleanFlags: ["-", "-i", "--ignore-environment", "-0", "--null", "-v", "--debug"],
+    targetFlags: ["-C", "--chdir"],
+    cwdFlags: ["-C", "--chdir"],
+    attachedShortValues: true,
   },
-  pnpm: { subcommands: { exec: {}, dlx: { packageSpec: true }, run: { script: "always" } } },
+  "cross-env": {},
+  dotenv: {
+    valueFlags: ["-e", "-v", "-p"],
+    booleanFlags: ["-o", "--override", "--debug", "-x", "--expand"],
+    attachedShortValues: true,
+    consumes: "unless separated",
+  },
+  npx: {
+    valueFlags: NPX_VALUE_FLAGS,
+    booleanFlags: NPM_SHARED_BOOLEAN_FLAGS,
+    packageSpec: true,
+  },
+  bunx: {
+    valueFlags: BUN_X_VALUE_FLAGS,
+    booleanFlags: BUN_X_BOOLEAN_FLAGS,
+    attachedShortValues: true,
+    packageSpec: true,
+  },
+  pnpx: {
+    valueFlags: [...PNPM_VALUE_FLAGS, ...PNPM_DLX_VALUE_FLAGS],
+    booleanFlags: [...PNPM_BOOLEAN_FLAGS, "-c", "--shell-mode"],
+    attachedShortValues: true,
+    packageSpec: true,
+  },
+  npm: {
+    valueFlags: NPM_SHARED_VALUE_FLAGS,
+    booleanFlags: [...NPM_SHARED_BOOLEAN_FLAGS, "-p"],
+    targetFlags: ["-w", "--workspace", "--workspaces", "--ws", "-C", "--prefix"],
+    parsesTrailingFlags: true,
+    subcommands: {
+      exec: NPM_EXEC,
+      x: NPM_EXEC,
+      run: NPM_RUN,
+      "run-script": NPM_RUN,
+    },
+  },
+  pnpm: {
+    valueFlags: PNPM_VALUE_FLAGS,
+    booleanFlags: PNPM_BOOLEAN_FLAGS,
+    attachedShortValues: true,
+    targetFlags: [
+      "-F",
+      "--filter",
+      "--filter-prod",
+      "-C",
+      "--dir",
+      "-r",
+      "--recursive",
+      "-w",
+      "--workspace-root",
+      "--workspace-packages",
+    ],
+    subcommands: {
+      exec: { booleanFlags: ["-c", "--shell-mode"] },
+      dlx: {
+        packageSpec: true,
+        valueFlags: PNPM_DLX_VALUE_FLAGS,
+        booleanFlags: ["-c", "--shell-mode"],
+      },
+      run: PNPM_RUN,
+      "run-script": PNPM_RUN,
+    },
+  },
   yarn: {
-    consumes: "always",
+    consumes: "unless separated",
     classicOnly: true,
     script: "maybe",
+    valueFlags: YARN_VALUE_FLAGS,
+    booleanFlags: YARN_BOOLEAN_FLAGS,
+    targetFlags: ["--cwd"],
+    parsesTrailingFlags: true,
     subcommands: {
       exec: { consumes: "unless separated", classicOnly: true },
-      dlx: { packageSpec: true },
-      run: { consumes: "always", classicOnly: true, script: "always" },
+      dlx: { packageSpec: true, valueFlags: YARN_DLX_VALUE_FLAGS },
+      run: {
+        consumes: "unless separated",
+        classicOnly: true,
+        script: "always",
+        valueFlags: ["--require"],
+      },
     },
   },
   bun: {
     bare: false,
-    subcommands: { x: { packageSpec: true }, run: { consumes: "always", script: "always" } },
+    valueFlags: BUN_VALUE_FLAGS,
+    booleanFlags: BUN_BOOLEAN_FLAGS,
+    attachedShortValues: true,
+    cwdFlags: ["--cwd"],
+    targetFlags: ["--cwd"],
+    subcommands: {
+      x: {
+        packageSpec: true,
+        valueFlags: BUN_X_VALUE_FLAGS,
+        booleanFlags: BUN_X_BOOLEAN_FLAGS,
+      },
+      run: {
+        consumes: "always",
+        script: "always",
+        valueFlags: ["-F", "--filter", "--shell", "--elide-lines"],
+        booleanFlags: ["--workspaces", "--parallel", "--sequential"],
+        targetFlags: ["-F", "--filter", "--workspaces"],
+        scriptOnlyFlags: ["-F", "--filter", "--workspaces"],
+      },
+    },
   },
 };
 
@@ -2237,7 +2745,8 @@ type Unwrapped = {
   /** `--` separators the wrappers swallow before the command sees forwarded arguments. */
   consumed: number;
   packageSpec: boolean;
-  script: Wrapped["script"];
+  /** Whether the target is a local script (`always`/`maybe`), an external or unidentifiable script (`opaque`), or a command (`undefined`). */
+  script: Wrapped["script"] | "opaque";
 };
 
 /** Strip environment assignments and wrappers from the front of a script's tokens. */
@@ -2246,7 +2755,9 @@ function unwrapCommand(tokens: string[], packageDir: string): Unwrapped | null {
   let command = tokens;
   let consumed = 0;
   let packageSpec = false;
-  let script: Wrapped["script"];
+  let script: Unwrapped["script"];
+  let inOtherDir = false;
+  let currentDir = packageDir;
   for (;;) {
     const first = command[0];
     if (first === undefined) return null;
@@ -2257,22 +2768,56 @@ function unwrapCommand(tokens: string[], packageDir: string): Unwrapped | null {
     const name = commandBasename(first);
     const spec = COMMAND_WRAPPERS[name];
     if (!spec) return { command, consumed, packageSpec, script };
-    let options = skipRunnerPrefix(command, 1, spec);
+
+    const pre = skipRunnerPrefix(command, 1, spec);
+    if (pre.unknownFlag) return { command, consumed, packageSpec, script };
+
+    let options = pre;
     let wrapped: Wrapped = spec;
-    const subcommand = spec.subcommands?.[command[options.index] ?? ""];
+    let effectiveOptions: RunnerOptionSpec = spec;
+    const subcommand = pre.separator ? undefined : spec.subcommands?.[command[pre.index] ?? ""];
     if (subcommand) {
       wrapped = subcommand;
-      options = subcommand.script
-        ? { index: options.index + 1, separator: false }
-        : skipRunnerPrefix(command, options.index + 1, spec);
+      effectiveOptions = mergeRunnerOptions(spec, subcommand);
+      const post = skipRunnerPrefix(command, pre.index + 1, effectiveOptions);
+      options = {
+        index: post.index,
+        separator: post.separator,
+        unknownFlag: post.unknownFlag,
+        targetsOtherPackage: pre.targetsOtherPackage || post.targetsOtherPackage,
+        scriptOnly: pre.scriptOnly || post.scriptOnly,
+        cwd: post.cwd ?? pre.cwd,
+      };
     } else if (spec.bare === false) {
       return { command, consumed, packageSpec, script };
     }
-    if (wrapped.script === "always") {
-      const target = command[options.index];
-      if (target === undefined || target.startsWith("-")) return null;
-      if (name === "bun" && !resolveScript(target, packageDir)) wrapped = {};
+
+    if (
+      !options.unknownFlag &&
+      !options.targetsOtherPackage &&
+      !options.separator &&
+      spec.parsesTrailingFlags &&
+      effectiveOptions.targetFlags &&
+      hasTrailingTargetFlag(command, options.index + 1, effectiveOptions.targetFlags)
+    ) {
+      options = { ...options, targetsOtherPackage: true };
     }
+
+    const targetsOtherPackage: boolean = inOtherDir || options.targetsOtherPackage;
+    const resolvedDir = options.cwd ? path.resolve(currentDir, options.cwd) : currentDir;
+
+    if (wrapped.script === "always") {
+      if (options.unknownFlag) {
+        if (name === "bun" && !options.scriptOnly) wrapped = {};
+      } else {
+        const target = command[options.index];
+        if (target === undefined || target.startsWith("-")) return null;
+        if (name === "bun" && !options.scriptOnly && !resolveScript(target, resolvedDir)) {
+          wrapped = {};
+        }
+      }
+    }
+
     if (
       wrapped.consumes &&
       (!wrapped.classicOnly || classic) &&
@@ -2280,9 +2825,31 @@ function unwrapCommand(tokens: string[], packageDir: string): Unwrapped | null {
     ) {
       consumed++;
     }
+
     packageSpec = wrapped.packageSpec === true;
-    script = wrapped.script;
     command = command.slice(options.index);
+    inOtherDir = targetsOtherPackage;
+    currentDir = resolvedDir;
+
+    if (options.unknownFlag) {
+      return {
+        command,
+        consumed,
+        packageSpec: false,
+        script: wrapped.script ? "opaque" : undefined,
+      };
+    }
+
+    if (wrapped.script && targetsOtherPackage) {
+      return {
+        command,
+        consumed,
+        packageSpec: false,
+        script: wrapped.script === "always" ? "opaque" : undefined,
+      };
+    }
+
+    script = wrapped.script;
     if (script === "always") return { command, consumed, packageSpec, script };
   }
 }
@@ -2600,7 +3167,8 @@ function walkScript(scriptName: string, packageDir: string, chain: string[]): Sc
   if (!unwrapped) return { kind: "leaf", separators: 0, turbo: false };
   const { command, packageSpec, script } = unwrapped;
   const literalSeparators = command.slice(1).filter((arg) => arg === "--").length;
-  const turbo = script !== "always" && isTurboCommand(command[0], packageSpec);
+  const turbo =
+    script !== "always" && script !== "opaque" && isTurboCommand(command[0], packageSpec);
   if (turbo) {
     return {
       kind: "leaf",
@@ -2608,7 +3176,12 @@ function walkScript(scriptName: string, packageDir: string, chain: string[]): Sc
       turbo: true,
     };
   }
-  if (!script || chain.includes(command[0]) || !resolveScript(command[0], packageDir)) {
+  if (
+    !script ||
+    script === "opaque" ||
+    chain.includes(command[0]) ||
+    !resolveScript(command[0], packageDir)
+  ) {
     return {
       kind: "leaf",
       separators: Math.max(0, unwrapped.consumed - literalSeparators),

@@ -1163,6 +1163,24 @@ describe("injectFrameworkFlags", () => {
     ]);
   });
 
+  it("injects flags for pnpm dlx --package vite vite dev", () => {
+    const args = ["pnpm", "dlx", "--package", "vite", "vite", "dev"];
+    injectFrameworkFlags(args, 4567);
+    expect(args).toEqual([
+      "pnpm",
+      "dlx",
+      "--package",
+      "vite",
+      "vite",
+      "dev",
+      "--port",
+      "4567",
+      "--strictPort",
+      "--host",
+      "127.0.0.1",
+    ]);
+  });
+
   it("injects flags for pnpm exec astro dev", () => {
     const args = ["pnpm", "exec", "astro", "dev"];
     injectFrameworkFlags(args, 4567);
@@ -2048,10 +2066,25 @@ describe("resolveTurboRootForwarding", () => {
     ["yarn@1.22.19", "FOO=1 yarn run turbo-dev", "turbo dev", 2],
     ["yarn@4.0.0", "FOO=1 yarn run turbo-dev", "turbo dev", 1],
     ["npm@10.0.0", "npm run turbo-dev", "npx turbo@2 dev", 2],
+    ["npm@10.0.0", "npm run --script-shell sh turbo-dev", "turbo dev", 2],
   ])("normalizes %s one level through %s", (packageManager, dev, nested, separators) => {
-    expect(resolve(dev, { "turbo-dev": nested }, packageManager)).toEqual({
+    expect(resolve(dev, { "turbo-dev": nested, sh: "node mark.cjs" }, packageManager)).toEqual({
       kind: "forward",
       separators,
+    });
+  });
+
+  it("ignores local scripts when a workspace filter targets another package", () => {
+    expect(
+      resolve(
+        "pnpm run --filter web start",
+        { web: "turbo dev", start: "turbo dev" },
+        "pnpm@11.1.3"
+      )
+    ).toEqual({ kind: "none" });
+    expect(resolve("pnpm --filter web exec turbo dev", {}, "pnpm@11.1.3")).toEqual({
+      kind: "forward",
+      separators: 1,
     });
   });
 
@@ -2130,12 +2163,94 @@ describe("resolveScriptArgForwarding", () => {
   it.each([
     ["node server.js", {}, undefined, 0],
     ["npm run start", { start: "node server.js" }, "npm@10.0.0", 1],
+    ["npm run --silent start", { start: "node server.js" }, "npm@10.0.0", 1],
+    ["npm run-script --silent start", { start: "node server.js" }, "npm@10.0.0", 1],
+    ["npm run -- start", { start: "node server.js" }, "npm@10.0.0", 0],
+    [
+      "npm run --script-shell sh start",
+      { sh: "npm run inner", start: "node server.js", inner: "node server.js" },
+      "npm@10.0.0",
+      1,
+    ],
+    [
+      "npm run --script-shell sh start",
+      { sh: "node x.js", start: "npm run inner", inner: "node server.js" },
+      "npm@10.0.0",
+      2,
+    ],
+    [
+      "npm run --unknown-flag foo start",
+      { foo: "npm run inner", start: "node server.js", inner: "node server.js" },
+      "npm@10.0.0",
+      1,
+    ],
+    ["npm run start -w web", { start: "npm run inner", inner: "node server.js" }, "npm@10.0.0", 1],
     ["npm run start --", { start: "node server.js" }, "npm@10.0.0", 0],
     ["npm run mid", { mid: "npm run start", start: "node server.js" }, "npm@10.0.0", 2],
     ["pnpm run start", { start: "node server.js" }, "pnpm@11.1.3", 0],
+    [
+      "pnpm run --filter web start",
+      { web: "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "pnpm@11.1.3",
+      0,
+    ],
+    [
+      "pnpm --filter web run start",
+      { web: "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "pnpm@11.1.3",
+      0,
+    ],
+    [
+      "pnpm -Fweb run start",
+      { web: "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "pnpm@11.1.3",
+      0,
+    ],
+    [
+      "pnpm run --unknown-flag foo start",
+      { foo: "npm run inner", inner: "node server.js" },
+      "pnpm@11.1.3",
+      0,
+    ],
     ["bun run start", { start: "node server.js" }, "bun@1.4.4", 1],
+    [
+      "bun run --inspect start",
+      { start: "npm run inner", inner: "node server.js" },
+      "bun@1.4.4",
+      2,
+    ],
+    [
+      "bun run -Fweb start",
+      { web: "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "bun@1.4.4",
+      1,
+    ],
+    [
+      "bun run --filter web start",
+      { web: "npm run inner", inner: "node server.js" },
+      "bun@1.4.4",
+      1,
+    ],
+    [
+      "bun run --filter web start",
+      { web: "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "bun@1.4.4",
+      1,
+    ],
     ["yarn run start", { start: "node server.js" }, "yarn@1.22.19", 1],
     ["yarn run start", { start: "node server.js" }, "yarn@4.0.0", 0],
+    [
+      "yarn --cwd apps/web run start",
+      { "apps/web": "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "yarn@1.22.19",
+      1,
+    ],
+    [
+      "yarn --cwd apps/web run start",
+      { "apps/web": "npm run inner", start: "npm run inner", inner: "node server.js" },
+      "yarn@4.0.0",
+      0,
+    ],
     ["yarn start", { start: "node server.js" }, "yarn@1.22.19", 1],
     ["yarn start", { start: "node server.js" }, "yarn@4.0.0", 0],
     ["npm exec vite", {}, "npm@10.0.0", 1],
