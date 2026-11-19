@@ -74,6 +74,10 @@ portless docs.myapp next dev
       <td>Share the app on your Tailscale network.</td>
     </tr>
     <tr>
+      <td>`--tailscale-port <number>`</td>
+      <td>Share the app on your Tailscale network at a fixed HTTPS port instead of the next free one. Implies `--tailscale`. Also configurable via `PORTLESS_TAILSCALE_PORT`.</td>
+    </tr>
+    <tr>
       <td>`--funnel`</td>
       <td>Share the app publicly via Tailscale Funnel.</td>
     </tr>
@@ -118,6 +122,14 @@ Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no fr
 portless myapp --tailscale next dev     # -> https://devbox.ts.net
 portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
 ```
+
+The assigned port depends on which apps are already shared, so the tailnet URL can change between runs. To keep it, choose the port with `--tailscale-port`, which implies `--tailscale`:
+
+```bash
+portless api --tailscale-port 8500 pnpm start   # -> https://devbox.ts.net:8500
+```
+
+Portless refuses a port that another running portless app is sharing on. With `--funnel`, the port must be 443, 8443, or 10000.
 
 Use `--funnel` to expose your dev server to the public internet through [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
 

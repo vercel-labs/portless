@@ -16,6 +16,11 @@ const PREFERRED_SERVE_PORTS = [443, 8443, 8444, 8445, 8446, 8447, 8448, 8449, 84
 /** Tailscale Funnel only supports these three ports. */
 const FUNNEL_PORTS = [443, 8443, 10000];
 
+/** Whether Tailscale Funnel can serve on the given HTTPS port. */
+export function isFunnelPort(port: number): boolean {
+  return FUNNEL_PORTS.includes(port);
+}
+
 interface TailscaleCommandResult {
   status: number | null;
   stdout: string;

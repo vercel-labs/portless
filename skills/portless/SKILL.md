@@ -216,24 +216,25 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable                | Description                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
-| `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
-| `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`       | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`          | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`     | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_UNPRIVILEGED` | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)   |
-| `PORTLESS_SYNC_HOSTS`   | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`    | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`       | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`        | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_CLOUDFLARE`   | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
-| `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
-| `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
+| Variable                  | Description                                                                    |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `PORTLESS_PORT`           | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
+| `PORTLESS_APP_PORT`       | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
+| `PORTLESS_PREFIX`         | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
+| `PORTLESS_HTTPS`          | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
+| `PORTLESS_LAN`            | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
+| `PORTLESS_LAN_IP`         | Pin a specific LAN IP for LAN mode                                             |
+| `PORTLESS_TLD`            | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
+| `PORTLESS_WILDCARD`       | Set to `1` to allow unregistered subdomains to fall back to parent             |
+| `PORTLESS_UNPRIVILEGED`   | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)   |
+| `PORTLESS_SYNC_HOSTS`     | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
+| `PORTLESS_TAILSCALE`      | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
+| `PORTLESS_FUNNEL`         | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
+| `PORTLESS_TAILSCALE_PORT` | Share on the tailnet at a fixed HTTPS port (same as `--tailscale-port`)        |
+| `PORTLESS_NGROK`          | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
+| `PORTLESS_CLOUDFLARE`     | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
+| `PORTLESS_STATE_DIR`      | Override the state directory                                                   |
+| `PORTLESS=0`              | Bypass the proxy, run the command directly                                     |
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
@@ -290,7 +291,7 @@ portless myapp --funnel next dev
 
 Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
 
-Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
+Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Pass `--tailscale-port <number>` (or set `PORTLESS_TAILSCALE_PORT`) to keep the same tailnet URL across runs; it implies `--tailscale`, and with `--funnel` it must be 443, 8443, or 10000. Portless refuses a port that another running app is sharing on. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
 
 ### ngrok sharing
 
@@ -383,6 +384,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)              |
+| `portless <name> --tailscale-port <n> <cmd>`      | Share on the tailnet at a fixed Tailscale HTTPS port           |
 | `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                    |
 | `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                               |
 | `portless <name> --cloudflare <cmd>`              | Share the app publicly via a Cloudflare quick tunnel           |
