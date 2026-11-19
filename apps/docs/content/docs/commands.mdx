@@ -85,6 +85,10 @@ portless docs.myapp next dev
       <td>`--cloudflare`</td>
       <td>Share the app publicly via a Cloudflare quick tunnel. Requires `cloudflared`.</td>
     </tr>
+    <tr>
+      <td>`--quiet`</td>
+      <td>Print only the app URLs, warnings, and errors before the command's output. Also configurable via `PORTLESS_QUIET=1`.</td>
+    </tr>
   </tbody>
 </table>
 
@@ -93,6 +97,8 @@ portless myapp --tailscale next dev
 portless myapp --funnel next dev
 portless myapp --ngrok next dev
 ```
+
+With `--quiet`, portless skips its startup status lines: the banner, the proxy status, the hostname and where its name and prefix came from, the assigned port, and the `Running:` line. It still prints the app URL, so you know where to open the app, along with warnings, errors, proxy startup output, and `sudo` prompts. From a monorepo root, `portless --quiet` keeps the table of app URLs.
 
 When you press Ctrl+C, portless forwards the interrupt and waits for the command's process tree to exit. Press Ctrl+C again to forward another interrupt. Any remaining descendants are terminated after a short grace period.
 

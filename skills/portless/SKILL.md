@@ -232,10 +232,13 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_FUNNEL`       | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
 | `PORTLESS_NGROK`        | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
 | `PORTLESS_CLOUDFLARE`   | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
+| `PORTLESS_QUIET`        | Set to `1` to print only app URLs, warnings, and errors (same as `--quiet`)    |
 | `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
 | `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
+
+To hide the startup status lines when portless runs an app, pass `--quiet` or set `PORTLESS_QUIET=1`. The app URL, warnings, errors, and proxy startup output still print.
 
 ### HTTP/2 + HTTPS
 
@@ -387,6 +390,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                               |
 | `portless <name> --cloudflare <cmd>`              | Share the app publicly via a Cloudflare quick tunnel           |
 | `portless <name> --force <cmd>`                   | Kill the existing process and take over its route              |
+| `portless <name> --quiet <cmd>`                   | Print only the app URL, warnings, and errors before app output |
 | `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)      |
 | `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child    |
 | `portless --help` / `-h`                          | Show commands and common app options                           |
