@@ -112,8 +112,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "afb71ee2f5917f9000f13c32bb06a2d1a75a6d369d12509912ff12dffe9d8021",
-      "markdownBodySha256": "afb71ee2f5917f9000f13c32bb06a2d1a75a6d369d12509912ff12dffe9d8021",
+      "mdxSha256": "453051275e9d057d03d73f41688f5a3a9c7cbced4cc74554f1dfe177f5da30e6",
+      "markdownBodySha256": "453051275e9d057d03d73f41688f5a3a9c7cbced4cc74554f1dfe177f5da30e6",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",
