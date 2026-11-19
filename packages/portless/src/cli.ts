@@ -970,7 +970,17 @@ function startProxyServer(
 
   const idleExit = createIdleExitTracker({
     graceMs: idleExitSeconds * 1000,
-    hasLiveRoutes: () => store.loadRoutesRaw().some((route) => store.isRouteOwnerAlive(route)),
+    hasLiveRoutes: () => {
+      try {
+        return store.loadRoutesRaw().some((route) => store.isRouteOwnerAlive(route));
+      } catch (err) {
+        // Routes that cannot be read may still have live owners, so the proxy
+        // stays up and checks again at the next expiry.
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(`Could not read routes for idle exit, staying up: ${message}`));
+        return true;
+      }
+    },
     onIdle: () => {
       console.log(colors.yellow(`No apps for ${idleExitSeconds}s, stopping (idle exit)`));
       keepProxySettings = true;

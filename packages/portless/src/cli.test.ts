@@ -5919,6 +5919,35 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
+    it("stays up while routes.json is unreadable and stops once it is fixed", async () => {
+      const h = await createIdleExitHarness();
+      const routesPath = path.join(h.dir, "routes.json");
+      const logPath = path.join(h.dir, "proxy.log");
+      try {
+        expect(
+          run(["proxy", "start", "--idle-exit", "--idle-exit-after", "3"], { env: h.env }).status
+        ).toBe(0);
+        const proxyPid = h.readProxyPid();
+        const app = await h.startApp("web");
+        await h.waitForServed("web");
+
+        app.child.kill("SIGTERM");
+        await app.exited;
+        fs.writeFileSync(routesPath, "{not json");
+        await waitUntil(
+          () => fs.readFileSync(logPath, "utf-8").includes("staying up"),
+          10_000,
+          "the idle check to fail on routes.json"
+        );
+        expect(isPidRunning(proxyPid)).toBe(true);
+
+        fs.writeFileSync(routesPath, "[]");
+        await h.expectProxyGone(proxyPid);
+      } finally {
+        h.cleanup();
+      }
+    });
+
     it("stops after the last app with other proxy modes on", async () => {
       const h = await createIdleExitHarness();
       try {
