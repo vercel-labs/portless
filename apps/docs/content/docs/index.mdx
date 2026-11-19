@@ -152,7 +152,7 @@ The proxy listens only on the IPv4 and IPv6 loopback addresses, `127.0.0.1` and 
 Browser (myapp.localhost) -> proxy (port 443) -> App (random port)
 ```
 
-When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), browsers get an HTML page. Any client whose `Accept` header does not include `text/html`, such as curl or `fetch`, gets a small JSON body instead, for example `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`. Responses from your own app are forwarded unchanged. Hostnames outside the portless TLDs, such as a site a DNS blocklist points at 127.0.0.1, get 421 Misdirected Request instead of the app list.
+When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), browsers get an HTML page. Any client whose `Accept` header does not include `text/html`, such as curl or `fetch`, gets a small JSON body instead, for example `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`. Responses from your own app are forwarded unchanged. Hostnames outside the portless TLDs, such as a site a DNS blocklist points at 127.0.0.1, never get the app list. Over HTTPS with portless's generated certificates, portless refuses to present a certificate for them, so the TLS handshake fails. With a custom `--cert` and `--key`, on a plain HTTP proxy, or over HTTPS when only the `Host` header names such a host, the request gets 421 Misdirected Request.
 
 ## Proxy between portless apps
 

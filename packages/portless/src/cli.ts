@@ -3220,10 +3220,10 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless alias <name> <port>")}                 Register a route
   ${colors.cyan("portless alias <name> <port> --upstream https")}  Use HTTPS to the local backend
   ${colors.cyan("portless alias --remove <name>")}               Remove static routes, preserve process-owned routes
-  ${colors.cyan("portless alias <name> <port> --force")}          Override an existing route
+  ${colors.cyan("portless alias <name> <port> --force")}          Take over a running app's route
 
 ${colors.bold("Options:")}
-  --force                   Override a route; stop a conflicting app if any
+  --force                   Take over a running app's route and stop the app
   --tld <tld>               Only these TLDs (repeatable, comma-separated); adding needs configured ones
   --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
   --help, -h                Show this help
@@ -3231,6 +3231,9 @@ ${colors.bold("Options:")}
 --remove also removes the name on TLDs the proxy no longer serves, taking the
 last label of such a hostname as its TLD. For a former multi-segment TLD, pass
 --tld or the full hostname.
+
+Registering a name that already has an alias replaces that alias, including
+its upstream, without --force.
 
 On macOS and Linux, portless exits with the reason when another user owns or
 can write to the state directory.

@@ -110,7 +110,7 @@ For turborepo projects, use portless as the `dev` script with the real command i
 }
 ```
 
-`pnpm dev` runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy.
+`pnpm dev` runs turbo, which runs `portless` in each package. Portless detects the package manager and runs `pnpm run dev:app` through the proxy. Turbo's default strict env mode removes `PORTLESS` and `PORTLESS_*` variables before the package script runs, so if you configure portless through them (for example `PORTLESS=0`, `PORTLESS_STATE_DIR`, or `PORTLESS_PORT`), add `"globalPassThroughEnv": ["PORTLESS", "PORTLESS_*"]` to `turbo.json`.
 
 When `portless` runs from a workspace root, it uses the existing Turbo integration to preserve task ordering when either `turbo.json` or `turbo.jsonc` is readable. Set `"turbo": false` in the root portless configuration to use direct spawning instead.
 
@@ -176,13 +176,15 @@ Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4
 
 With `--unprivileged` (or `PORTLESS_UNPRIVILEGED=1`) the proxy takes a port below 1024 without `sudo`: it binds the wildcard addresses, which macOS allows for non-root processes, and refuses every non-loopback peer itself. It serves plain HTTP on port 80 unless `--https` is given, because installing the CA would be a prompt; with `--https` the CA is generated but not installed, so run `portless trust` once yourself. It never writes the hosts file: automatic hosts sync is off, `PORTLESS_SYNC_HOSTS=1` together with it is refused, and Safari or a custom TLD need `portless hosts sync` run once by you. Linux needs `net.ipv4.ip_unprivileged_port_start` to cover the port; portless checks and prints the sysctl command instead of falling back to another port. The mode is remembered for auto-start and never triggers a sudo prompt, so it suits scripts, agents and managed machines.
 
-When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), the body depends on the `Accept` header. Browsers (`text/html`) get an HTML page. curl, `fetch`, and other clients get JSON such as `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`, with `error` set to `not_found`, `misdirected_request`, `bad_gateway`, or `loop_detected`. Parse that JSON instead of scraping HTML. Responses from the app itself are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, get 421 Misdirected Request instead of the app list.
+When portless itself returns an error (404 for an unknown host, 421 for a misdirected request, 502 when the app is unreachable, 508 for a request loop), the body depends on the `Accept` header. Browsers (`text/html`) get an HTML page. curl, `fetch`, and other clients get JSON such as `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`, with `error` set to `not_found`, `misdirected_request`, `bad_gateway`, or `loop_detected`. Parse that JSON instead of scraping HTML. Responses from the app itself are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, never get the app list. Over HTTPS with portless's generated certificates, portless refuses to present a certificate for them, so the TLS handshake fails. With a custom `--cert` and `--key`, on a plain HTTP proxy, or over HTTPS when only the `Host` header names such a host, the request gets 421 Misdirected Request.
 
 `.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `portless hosts sync` to add entries to `/etc/hosts` if needed.
 
 Use `portless proxy start --tld localhost --tld test` to serve the same app names under multiple TLDs from one proxy. `PORTLESS_URL` uses the first configured TLD. When configured TLDs overlap (e.g. `example.com` and `dev.example.com`), hostnames are matched against the longest TLD first, regardless of configuration order. `PORTLESS_TLD` accepts the same comma separated list format, e.g. `PORTLESS_TLD=localhost,test`.
 
-`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing or empty value fails before any route changes, as does an unconfigured value when adding, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. It also removes the name on TLDs the proxy no longer serves, taking the last label of such a hostname as its TLD; for a former multi-segment TLD, pass `--tld` or the full hostname. `--force` stops a conflicting app, if any, and replaces the route, so that app's routes on other TLDs can disappear too.
+`portless alias` covers every configured TLD by default. Pass `--tld <tld>` after the alias arguments, repeated or comma separated, to add or remove only selected TLDs, and the selected TLD replaces any configured TLD suffix on the name. A missing or empty value fails before any route changes, as does an unconfigured value when adding, and `--help` after the arguments prints usage without changing routes. `portless alias --remove` removes and reports only routes with PID 0, including detached Compose routes; process-owned routes are preserved. It also removes the name on TLDs the proxy no longer serves, taking the last label of such a hostname as its TLD; for a former multi-segment TLD, pass `--tld` or the full hostname.
+
+Registering a name that already has an alias replaces that alias, including its upstream, without `--force`. `--force` takes over a route owned by a running app and stops that app, so its routes on other TLDs can disappear too.
 
 Use `--upstream https` for TLS to loopback while preserving Host. Use
 `--upstream https://api.internal[:port]` to enable TLS, override Host with the full
@@ -436,7 +438,7 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `wo
 { "portless": { "name": "myapp", "script": "dev:app" } }
 ```
 
-Precedence (closest wins): CLI flags > package.json `"portless"` key > portless.json app entry > defaults.
+Precedence (closest wins): CLI flags > the package's own config > the root portless.json `apps` entry (when run from the workspace root) > defaults. The package's own config is its portless.json, or its package.json `"portless"` key when the directory has no portless.json.
 
 ## Troubleshooting
 

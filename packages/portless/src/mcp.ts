@@ -169,7 +169,7 @@ export const TOOLS: ToolDef[] = [
       force: {
         type: "boolean",
         description:
-          "Stop a conflicting app, if any, and replace its route; replacing a static alias stops nothing, and the stopped app's routes on other TLDs can also disappear.",
+          "Take over a route owned by a running app and stop that app, whose routes on other TLDs can also disappear. An existing alias is replaced without force.",
       },
     },
     ["name", "port"],
