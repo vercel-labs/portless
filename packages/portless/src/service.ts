@@ -305,6 +305,14 @@ export function parseServiceInstallConfig(
     config.unprivileged = envUnprivileged;
   }
 
+  // A service manager restarts the proxy whenever it exits, so idle exit would
+  // only make it restart in a loop.
+  if (parseBooleanEnv(env.PORTLESS_IDLE_EXIT) === true) {
+    throw new Error(
+      "PORTLESS_IDLE_EXIT cannot be combined with service install: the service manager restarts the proxy whenever it exits. Use portless proxy start --idle-exit without a service instead."
+    );
+  }
+
   if (env.PORTLESS_PORT) {
     config.proxyPort = parsePortValue(env.PORTLESS_PORT, "PORTLESS_PORT");
   } else {
@@ -477,6 +485,8 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
     PORTLESS_LAN: ctx.config.lanMode ? "1" : "0",
     PORTLESS_WILDCARD: ctx.config.useWildcard ? "1" : "0",
     PORTLESS_UNPRIVILEGED: ctx.config.unprivileged ? "1" : "0",
+    // A proxy.idle-exit marker left by an earlier proxy must not stop this one.
+    PORTLESS_IDLE_EXIT: "0",
     ...ctx.config.extraEnv,
   };
 
