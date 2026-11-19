@@ -2761,6 +2761,43 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     ]);
   });
 
+  it("resets the h2 stream with an error when the backend drops a response mid-body", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.write("partial", () => res.socket?.destroy());
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+    try {
+      const rstCode = await new Promise<number>((resolve) => {
+        const req = client.request({ ":path": "/", ":authority": "myapp.localhost" });
+        req.on("error", () => {});
+        req.on("close", () => resolve(req.rstCode));
+        req.resume();
+      });
+      expect(rstCode).toBe(http2.constants.NGHTTP2_INTERNAL_ERROR);
+    } finally {
+      client.close();
+    }
+  });
+
   it("keeps an unframed h2 body from reaching another client's pooled request", async () => {
     const received: { url?: string; auth?: string }[] = [];
     const backend = trackServer(

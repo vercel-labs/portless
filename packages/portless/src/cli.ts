@@ -6,6 +6,7 @@ import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { isIP } from "node:net";
+import { createSecureContext } from "node:tls";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import {
@@ -51,6 +52,7 @@ import {
   parseHostname,
   parseHostnames,
   parsePort,
+  stripTld,
 } from "./utils.js";
 import {
   checkHostResolution,
@@ -155,6 +157,7 @@ import {
 } from "./clean-utils.js";
 import {
   getLocalNetworkIp,
+  getMdnsDaemonProblem,
   isMdnsSupported,
   publish,
   startLanIpMonitor,
@@ -177,13 +180,7 @@ import {
 import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
-import {
-  ensureEnvLoader,
-  writeManifest,
-  removeManifest,
-  buildNodeOptions,
-  hasTurboConfig,
-} from "./turbo.js";
+import { EnvPublication, buildNodeOptions, hasTurboConfig } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
 import {
   buildServiceUninstallSudoArgs,
@@ -193,7 +190,13 @@ import {
 } from "./service.js";
 import { printMcpHelp, runMcp } from "./mcp.js";
 import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
-import { parseCommandArgs, visitLeadingFlags, UsageError, type FlagKind } from "./args.js";
+import {
+  parseCommandArgs,
+  visitLeadingFlags,
+  UsageError,
+  type FlagKind,
+  type ParsedArgs,
+} from "./args.js";
 
 const chalk = colors;
 
@@ -605,6 +608,17 @@ function buildHostnames(
   return parseHostnames(name, normalizeTlds(tlds), targetTlds);
 }
 
+/**
+ * The TLD a route hostname was registered with: the longest of `tlds` the
+ * hostname ends with, else its last label.
+ */
+function aliasRouteTld(hostname: string, tlds: readonly string[]): string {
+  return (
+    [...tlds].sort((a, b) => b.length - a.length).find((t) => hostname.endsWith(`.${t}`)) ??
+    hostname.slice(hostname.lastIndexOf(".") + 1)
+  );
+}
+
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
   return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls));
 }
@@ -871,6 +885,16 @@ function reportHostsSyncHere(
   );
 }
 
+/** Say whether LAN services are discoverable as .local names now, or why not yet. */
+function describeMdnsDiscovery(): string {
+  const mdnsDaemonProblem = getMdnsDaemonProblem();
+  return mdnsDaemonProblem
+    ? chalk.yellow(
+        `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
+      )
+    : chalk.gray("Services are discoverable as <name>.local on your network");
+}
+
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -982,15 +1006,8 @@ function startProxyServer(
   };
 
   const onHostsSyncRequest = (): "acted" | "disabled" => {
-    if (!autoSyncHosts) return "disabled";
-    let hostnames: string[];
-    try {
-      hostnames = store.loadTrustedRoutes().map((route) => route.hostname);
-    } catch {
-      hostnames = cachedRoutes.map((route) => route.hostname);
-    }
-    syncHostsAndLatch(hostnames);
-    return "acted";
+    reloadRoutes();
+    return autoSyncHosts ? "acted" : "disabled";
   };
 
   const reloadRoutes = () => {
@@ -1006,12 +1023,10 @@ function startProxyServer(
         const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
         for (const route of cachedRoutes) {
           const previousPort = previousRoutes.get(route.hostname);
-          if (previousPort === undefined) {
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-          } else if (previousPort !== route.port) {
+          if (previousPort !== undefined && previousPort !== route.port) {
             unpublish(route.hostname);
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
           }
+          publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
         }
         for (const hostname of previousRoutes.keys()) {
           if (!currentRoutes.has(hostname)) {
@@ -1169,7 +1184,7 @@ function startProxyServer(
     );
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
-      console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
+      console.log(describeMdnsDiscovery());
       if (isTls && !customCert) {
         console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
         console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
@@ -2238,37 +2253,68 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
+const LAN_FLAG_SPEC = { "--lan": "boolean", "--ip": "value" } as const;
+
+const SHARE_FLAG_SPEC = {
+  "--tailscale": "boolean",
+  "--funnel": "boolean",
+  "--ngrok": "boolean",
+  "--cloudflare": "boolean",
+} as const;
+
+const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--force": "boolean",
+  "--app-port": "value",
+  ...LAN_FLAG_SPEC,
+  ...SHARE_FLAG_SPEC,
+  "--help": "boolean",
+  "-h": "boolean",
+};
+
 const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--name": "value",
   "--prefix": "text",
   "--force": "boolean",
   "--app-port": "value",
-  "--tailscale": "boolean",
-  "--funnel": "boolean",
-  "--ngrok": "boolean",
-  "--cloudflare": "boolean",
+  "--script": "value",
+  ...LAN_FLAG_SPEC,
+  ...SHARE_FLAG_SPEC,
   "--help": "boolean",
   "-h": "boolean",
 };
 
-const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
-  "--force": "boolean",
-  "--app-port": "value",
-  "--tailscale": "boolean",
-  "--funnel": "boolean",
-  "--ngrok": "boolean",
-  "--cloudflare": "boolean",
-  "--help": "boolean",
-  "-h": "boolean",
+const LEADING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...APP_FLAG_SPEC,
+  "--script": "value",
 };
 
-function enableSharingFlag(flag: string): void {
+/** Sets the environment a LAN or sharing flag stands for. Rejects an --ip value that is not an IP address. */
+function applyGlobalFlag(flag: string, value?: string): void {
   if (flag === "--tailscale") process.env.PORTLESS_TAILSCALE = "1";
   else if (flag === "--funnel") {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
   } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
   else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
+  else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
+  else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
+    if (isIP(value ?? "") === 0) {
+      throw new UsageError(`${flag} requires an IP address, but got "${value}".`, [
+        "  portless --lan --ip 192.168.1.42 run <command>",
+      ]);
+    }
+    process.env[flag === "--ip" ? "PORTLESS_LAN_IP" : INTERNAL_LAN_IP_ENV] = value;
+    process.env.PORTLESS_LAN = "1";
+  }
+}
+
+/** Applies the --lan and --ip flags a command parsed. Rejects a repeated --ip. */
+function applyLanFlags(parsed: ParsedArgs): void {
+  for (const flag of Object.keys(LAN_FLAG_SPEC)) {
+    const values = parsed.values(flag);
+    if (values.length > 1) throw new UsageError(`${flag} can only be given once.`);
+    if (parsed.has(flag)) applyGlobalFlag(flag, values[0]);
+  }
 }
 
 function printRunHelp(): void {
@@ -2354,7 +2400,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
         prefix = value;
         break;
       default:
-        enableSharingFlag(flag);
+        applyGlobalFlag(flag, value);
     }
   });
 
@@ -2385,7 +2431,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
     }
     if (flag === "--force") force = true;
     else if (flag === "--app-port") appPort = parseAppPort(value);
-    else enableSharingFlag(flag);
+    else applyGlobalFlag(flag, value);
   };
 
   const afterLeading = visitLeadingFlags("", args, APP_FLAG_SPEC, readFlag);
@@ -3178,9 +3224,13 @@ ${colors.bold("Usage:")}
 
 ${colors.bold("Options:")}
   --force                   Take over a running app's route and stop the app
-  --tld <tld>               Only these configured TLDs (repeatable, comma-separated)
+  --tld <tld>               Only these TLDs (repeatable, comma-separated); adding needs configured ones
   --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
   --help, -h                Show this help
+
+--remove also removes the name on TLDs the proxy no longer serves, taking the
+last label of such a hostname as its TLD. For a former multi-segment TLD, pass
+--tld or the full hostname.
 
 Registering a name that already has an alias replaces that alias, including
 its upstream, without --force.
@@ -3289,7 +3339,7 @@ async function handleAlias(args: string[]): Promise<void> {
   }
 
   const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
-  if (targetTlds) {
+  if (targetTlds && !isRemove) {
     const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
     if (unconfigured) {
       console.error(
@@ -3304,13 +3354,24 @@ async function handleAlias(args: string[]): Promise<void> {
   store.recoverCorruptRoutesFile();
 
   if (isRemove) {
-    const hostnames = buildHostnames(removeName!, tlds, targetTlds);
-    const routes = store.loadRoutes();
-    const aliases = hostnames.filter((hostname) =>
-      routes.some((route) => route.hostname === hostname && route.pid === 0)
-    );
+    const hostnames =
+      targetTlds && !targetTlds.some((tld) => tlds.includes(tld))
+        ? []
+        : buildHostnames(removeName!, tlds, targetTlds);
+    const aliases = store
+      .loadRoutes()
+      .filter((route) => {
+        if (route.pid !== 0) return false;
+        const tld = aliasRouteTld(route.hostname, [...tlds, ...(targetTlds ?? [])]);
+        if (tlds.includes(tld)) return hostnames.includes(route.hostname);
+        return (
+          (!targetTlds || targetTlds.includes(tld)) &&
+          route.hostname === `${stripTld(removeName!, [...tlds, tld])}.${tld}`
+        );
+      })
+      .map((route) => route.hostname);
     if (aliases.length === 0) {
-      console.error(colors.red(`Error: No alias found for "${hostnames.join(", ")}".`));
+      console.error(colors.red(`Error: No alias found for "${removeName}".`));
       process.exit(1);
     }
     // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
@@ -3497,7 +3558,7 @@ function printDoctorHelp(): void {
 ${colors.bold("portless doctor")} - Check local portless health and print suggested fixes.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless doctor [--json]")}
+  ${colors.cyan("portless doctor [--json] [--lan] [--ip <address>]")}
 
 Checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA
 trust, hostname resolution, and LAN mode prerequisites. It does not start,
@@ -3505,6 +3566,8 @@ stop, clean, prune, trust, or modify portless state.
 
 ${colors.bold("Options:")}
   --json                 Print the report as JSON
+  --lan                  Check LAN mode prerequisites even if the proxy is not in LAN mode
+  --ip <address>         Same as --lan; the address must be a valid IP
   --help, -h             Show this help
 
 ${colors.bold("Exit codes:")}
@@ -3515,7 +3578,14 @@ ${colors.bold("Exit codes:")}
 }
 
 async function handleDoctor(args: string[]): Promise<void> {
-  const json = parseCommandArgs("doctor", args.slice(1), { "--json": "boolean" }, 0).has("--json");
+  const parsed = parseCommandArgs(
+    "doctor",
+    args.slice(1),
+    { "--json": "boolean", ...LAN_FLAG_SPEC },
+    0
+  );
+  applyLanFlags(parsed);
+  const json = parsed.has("--json");
 
   const findings: DoctorFinding[] = [];
   const add = (status: DoctorStatus, message: string, hint?: string) => {
@@ -3771,7 +3841,14 @@ async function handleDoctor(args: string[]): Promise<void> {
 
   if (state.lanMode || isLanEnvEnabled()) {
     const mdns = isMdnsSupported();
-    if (mdns.supported) {
+    const mdnsDaemonProblem = mdns.supported && getMdnsDaemonProblem();
+    if (mdnsDaemonProblem) {
+      add(
+        "warn",
+        `LAN mode is enabled but the mDNS daemon is unavailable, so .local names are not published: ${mdnsDaemonProblem}`,
+        "Run: sudo systemctl enable --now avahi-daemon"
+      );
+    } else if (mdns.supported) {
       add("ok", "mDNS publishing support is available for LAN mode.");
     } else {
       add("fail", `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`);
@@ -3851,7 +3928,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
   ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (also --port)
   ${colors.cyan("portless proxy start --unprivileged")}  Port 80 without sudo (443 with --https); plain HTTP unless --https
-  ${colors.cyan("portless proxy start --https")}        Serve HTTPS, even with --unprivileged or PORTLESS_HTTPS=0
+  ${colors.cyan("portless proxy start --https")}        Serve HTTPS, even with --unprivileged or PORTLESS_HTTPS=0 (not with --no-tls)
   ${colors.cyan("portless proxy start --cert <path> --key <path>")}  Use a custom certificate and key
   ${colors.cyan("portless proxy start --lan --ip <address>")}  Pin the LAN IP
   ${colors.cyan("portless proxy start --skip-trust")}   Do not add the CA to the system trust store
@@ -3926,9 +4003,14 @@ async function handleProxy(args: string[]): Promise<void> {
     return;
   }
 
+  const startArgs = args.slice(2);
+  const autoIpIndex = startArgs.indexOf(INTERNAL_LAN_IP_FLAG);
+  if (autoIpIndex !== -1) {
+    applyGlobalFlag(INTERNAL_LAN_IP_FLAG, startArgs.splice(autoIpIndex, 2)[1]);
+  }
   const startFlags = parseCommandArgs(
     "proxy start",
-    args.slice(2),
+    startArgs,
     {
       "--foreground": "boolean",
       "--skip-trust": "boolean",
@@ -3941,15 +4023,22 @@ async function handleProxy(args: string[]): Promise<void> {
       "--port": "value",
       "-p": "value",
       "--tld": "value",
+      ...LAN_FLAG_SPEC,
     },
     0
   );
+  applyLanFlags(startFlags);
   const isForeground = startFlags.has("--foreground");
   const skipTrust = startFlags.has("--skip-trust");
   const hasUnprivilegedFlag = startFlags.has("--unprivileged");
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
   const hasHttpsFlag = startFlags.has("--https");
+  if (hasHttpsFlag && startFlags.has("--no-tls")) {
+    throw new UsageError("--https and --no-tls cannot be used together.", [
+      "See: portless proxy start --help",
+    ]);
+  }
   const hasNoTls = startFlags.has("--no-tls") || (!hasHttpsFlag && isHttpsEnvDisabled());
   const wantHttps = !hasNoTls;
 
@@ -4292,6 +4381,7 @@ async function handleProxy(args: string[]): Promise<void> {
           process.exit(1);
         }
 
+        createSecureContext({ cert, key });
         tlsOptions = { cert, key };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -4426,7 +4516,7 @@ async function handleProxy(args: string[]): Promise<void> {
   await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps, lanMode);
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
-    console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
+    console.log(describeMdnsDiscovery());
   }
 }
 
@@ -4679,6 +4769,10 @@ async function spawnProxiedApp(
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
 
+  if (lanMode && !process.env.PORTLESS_LAN) {
+    process.env.PORTLESS_LAN = "1";
+  }
+
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
 
@@ -4704,6 +4798,7 @@ async function spawnProxiedApp(
 
     addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
+    injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
     env = {
       ...pkgEnv,
@@ -5104,8 +5199,9 @@ async function runWithTurbo(
     manifest[app.pkg.dir] = entry;
   }
 
-  ensureEnvLoader();
-  writeManifest(manifest);
+  const envPublication = new EnvPublication(stateDir);
+  envPublication.publish(manifest);
+  process.once("exit", () => envPublication.retire());
 
   if (appUrls.length > 0) {
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
@@ -5138,7 +5234,7 @@ async function runWithTurbo(
     cwd: wsRoot,
     env: {
       ...process.env,
-      NODE_OPTIONS: buildNodeOptions(),
+      NODE_OPTIONS: buildNodeOptions(stateDir),
     },
     ...(isWindows ? {} : { detached: true }),
   });
@@ -5161,7 +5257,6 @@ async function runWithTurbo(
     for (const { hostnames } of routes) {
       removeRoutes(store, hostnames, process.pid);
     }
-    removeManifest();
   };
 
   process.on("SIGINT", cleanup);
@@ -5173,6 +5268,7 @@ async function runWithTurbo(
   });
 
   cleanup();
+  envPublication.retire();
 
   if (exitCode !== 0 && exitCode !== null) {
     process.exit(exitCode);
@@ -5892,127 +5988,88 @@ async function main() {
     process.exit(1);
   }
 
-  const globalBooleanFlags = new Set([
-    "--lan",
-    "--tailscale",
-    "--funnel",
-    "--ngrok",
-    "--cloudflare",
-  ]);
-  const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
-
-  const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
+  const advancePortlessFlag = (
+    index: number,
+    spec: Readonly<Record<string, FlagKind>>
+  ): number | null => {
     const arg = args[index];
     const equalsIndex = arg.startsWith("--") ? arg.indexOf("=") : -1;
-    const flag = equalsIndex === -1 ? arg : arg.slice(0, equalsIndex);
-    if (globalBooleanFlags.has(flag) || flag === "--force" || flag === "--help" || flag === "-h") {
-      return index + 1;
-    }
-    if (globalValueFlags.has(flag) || localValueFlags.has(flag)) {
-      return index + (equalsIndex === -1 ? 2 : 1);
-    }
-    return null;
+    const kind = spec[equalsIndex === -1 ? arg : arg.slice(0, equalsIndex)];
+    if (!kind) return null;
+    return index + (kind === "boolean" || equalsIndex !== -1 ? 1 : 2);
   };
 
-  const globalFlagEnd = (): number => {
+  const flagLimit = (): number => {
     const separator = args.indexOf("--");
-    const limit = separator === -1 ? args.length : separator;
-    const leadingValueFlags = new Set(["--app-port"]);
-    let index = 0;
+    return separator === -1 ? args.length : separator;
+  };
 
+  const skipFlags = (start: number, spec: Readonly<Record<string, FlagKind>>): number => {
+    const limit = flagLimit();
+    let index = start;
     while (index < limit) {
-      const next = advancePortlessFlag(index, leadingValueFlags);
-      if (next === null) break;
-      index = next;
-    }
-
-    if (index >= limit) return limit;
-    const mode = args[index];
-    if (mode === "mcp") return index;
-    if (mode === "compose") return index;
-    if (mode === "run") {
-      index++;
-      const runValueFlags = new Set(["--name", "--prefix", "--app-port"]);
-      while (index < limit) {
-        const next = advancePortlessFlag(index, runValueFlags);
-        if (next === null) break;
-        index = next;
-      }
-      return index;
-    }
-    if (isCommandName(mode) || mode === "--version" || mode === "-v") return limit;
-
-    if (mode === "--name" || mode.startsWith("--name=")) {
-      index += mode === "--name" ? 2 : 1;
-    } else {
-      index++;
-    }
-
-    const namedValueFlags = new Set(["--app-port"]);
-    while (index < limit) {
-      const next = advancePortlessFlag(index, namedValueFlags);
+      const next = advancePortlessFlag(index, spec);
       if (next === null) break;
       index = next;
     }
     return index;
   };
 
+  const globalFlagEnd = (flag: string): number => {
+    const limit = flagLimit();
+    const index = skipFlags(0, LEADING_FLAG_SPEC);
+    if (index >= limit) return limit;
+    const mode = args[index];
+    if (mode === "run") return skipFlags(index + 1, RUN_FLAG_SPEC);
+    if (!APP_FLAG_SPEC[flag]) return 0;
+    if (isCommandName(mode)) return index;
+    if (mode === "--version" || mode === "-v") return limit;
+    return skipFlags(index + (mode === "--name" ? 2 : 1), APP_FLAG_SPEC);
+  };
+
+  const commandIndex = skipFlags(0, LEADING_FLAG_SPEC);
+  const leadingCommand = args[commandIndex];
+  if (
+    commandIndex > 0 &&
+    isCommandName(leadingCommand) &&
+    !["run", "mcp", "compose"].includes(leadingCommand)
+  ) {
+    args.push(...args.splice(0, commandIndex));
+  }
+
   const stripGlobalFlag = (flag: string, hasValue: boolean): string | boolean | null => {
-    const end = globalFlagEnd();
+    const end = globalFlagEnd(flag);
     const idx = args.findIndex(
       (arg, index) => index < end && (arg === flag || (hasValue && arg.startsWith(`${flag}=`)))
     );
     if (idx === -1) return null;
     if (!hasValue) {
       args.splice(idx, 1);
+      stripGlobalFlag(flag, false);
       return true;
     }
     const equalsIndex = args[idx].indexOf("=");
     const value = equalsIndex === -1 ? args[idx + 1] : args[idx].slice(equalsIndex + 1);
     if (!value || value.startsWith("-")) return false;
     args.splice(idx, equalsIndex === -1 ? 2 : 1);
+    if (stripGlobalFlag(flag, true) !== null) {
+      throw new UsageError(`${flag} can only be given once.`);
+    }
     return value;
   };
 
-  if (stripGlobalFlag("--lan", false)) {
-    process.env.PORTLESS_LAN = "1";
-  }
+  if (stripGlobalFlag("--lan", false)) applyGlobalFlag("--lan");
 
   const ipResult = stripGlobalFlag("--ip", true);
   if (ipResult === false) {
     throw new UsageError("--ip requires an IP address.", [
       "  portless --lan --ip 192.168.1.42 run <command>",
     ]);
-  } else if (typeof ipResult === "string") {
-    if (isIP(ipResult) === 0) {
-      throw new UsageError(`--ip requires an IP address, but got "${ipResult}".`, [
-        "  portless --lan --ip 192.168.1.42 run <command>",
-      ]);
-    }
-    process.env.PORTLESS_LAN_IP = ipResult;
-    process.env.PORTLESS_LAN = "1";
   }
+  if (typeof ipResult === "string") applyGlobalFlag("--ip", ipResult);
 
-  const autoIpResult = stripGlobalFlag(INTERNAL_LAN_IP_FLAG, true);
-  if (autoIpResult === false) {
-    throw new UsageError(`${INTERNAL_LAN_IP_FLAG} requires an IP address.`);
-  } else if (typeof autoIpResult === "string") {
-    process.env[INTERNAL_LAN_IP_ENV] = autoIpResult;
-    process.env.PORTLESS_LAN = "1";
-  }
-
-  if (stripGlobalFlag("--tailscale", false)) {
-    process.env.PORTLESS_TAILSCALE = "1";
-  }
-  if (stripGlobalFlag("--funnel", false)) {
-    process.env.PORTLESS_FUNNEL = "1";
-    process.env.PORTLESS_TAILSCALE = "1";
-  }
-  if (stripGlobalFlag("--ngrok", false)) {
-    process.env.PORTLESS_NGROK = "1";
-  }
-  if (stripGlobalFlag("--cloudflare", false)) {
-    process.env.PORTLESS_CLOUDFLARE = "1";
+  for (const flag of Object.keys(SHARE_FLAG_SPEC)) {
+    if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

@@ -161,8 +161,7 @@ function writeTrustMarker(stateDir: string): void {
   if (fp) {
     const canonicalDir = fs.realpathSync(stateDir);
     clearTrustRefreshPending(canonicalDir);
-    const marker = isWSL() ? `wsl:${fp}` : fp;
-    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), marker + "\n");
+    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), fp + "\n");
   }
 }
 
@@ -590,7 +589,7 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
 
   fs.chmodSync(serverKeyPath, 0o600);
   fs.chmodSync(serverCertPath, 0o644);
-  fixOwnership(serverKeyPath, serverCertPath);
+  fixOwnership(serverKeyPath, serverCertPath, srlPath);
 
   return { certPath: serverCertPath, keyPath: serverKeyPath };
 }
@@ -654,15 +653,9 @@ export function isCATrusted(stateDir: string): boolean {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) return false;
 
-  // Fast path: if we previously trusted this exact CA, skip the OS check.
-  const marker = readTrustMarker(stateDir);
-  if (marker) {
-    const fp = caFingerprint(stateDir);
-    const expected = fp && isWSL() ? `wsl:${fp}` : fp;
-    if (expected && marker === expected) return true;
-  }
-
   if (process.platform === "darwin") {
+    const marker = readTrustMarker(stateDir);
+    if (marker && marker === caFingerprint(stateDir)) return true;
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
     if (!isCATrustedLinux(stateDir)) return false;
@@ -965,7 +958,7 @@ async function generateHostCertAsync(
 
   await fs.promises.chmod(keyPath, 0o600);
   await fs.promises.chmod(certPath, 0o644);
-  fixOwnership(keyPath, certPath);
+  fixOwnership(keyPath, certPath, srlPath);
 
   return { certPath, keyPath };
 }

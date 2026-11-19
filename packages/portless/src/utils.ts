@@ -272,6 +272,24 @@ export function parseHostname(input: string, tld = "localhost"): string {
   return hostname;
 }
 
+/** Normalize a hostname input and strip the longest of `tlds` it ends with. */
+export function stripTld(input: string, tlds: readonly string[]): string {
+  let baseInput = input
+    .trim()
+    .replace(/^https?:\/\//i, "")
+    .split("/")[0]
+    .toLowerCase();
+
+  for (const tld of [...tlds].sort((a, b) => b.length - a.length)) {
+    const suffix = `.${tld}`;
+    if (baseInput.endsWith(suffix)) {
+      baseInput = baseInput.slice(0, -suffix.length);
+      break;
+    }
+  }
+  return baseInput;
+}
+
 /**
  * Parse a hostname input for every configured TLD, or only for the target
  * TLDs. Strips any configured TLD suffix from the input before expanding.
@@ -285,19 +303,7 @@ export function parseHostnames(
   const expandTlds = targetTlds?.length
     ? uniqueTlds.filter((tld) => targetTlds.includes(tld))
     : uniqueTlds;
-  let baseInput = input
-    .trim()
-    .replace(/^https?:\/\//i, "")
-    .split("/")[0]
-    .toLowerCase();
-
-  for (const tld of [...uniqueTlds].sort((a, b) => b.length - a.length)) {
-    const suffix = `.${tld}`;
-    if (baseInput.endsWith(suffix)) {
-      baseInput = baseInput.slice(0, -suffix.length);
-      break;
-    }
-  }
+  const baseInput = stripTld(input, uniqueTlds);
 
   // Skip a TLD that fails for TLD-specific reasons (e.g. app.TLD exceeds the
   // 253-char DNS limit) instead of losing the valid TLDs in the same list.

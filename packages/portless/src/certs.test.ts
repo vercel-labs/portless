@@ -644,6 +644,17 @@ describe("isCATrusted", () => {
   it("returns false for an empty directory", () => {
     expect(isCATrusted(path.join(tmpDir, "nonexistent"))).toBe(false);
   });
+
+  it.skipIf(process.platform !== "linux")(
+    "checks the Linux trust store even when the trust marker matches",
+    () => {
+      ensureCerts(tmpDir);
+      const pem = fs.readFileSync(path.join(tmpDir, "ca.pem"));
+      const fingerprint = crypto.createHash("sha256").update(pem).digest("hex");
+      fs.writeFileSync(path.join(tmpDir, "ca.trusted"), `${fingerprint}\n`);
+      expect(isCATrusted(tmpDir)).toBe(false);
+    }
+  );
 });
 
 describe("trustCA", () => {

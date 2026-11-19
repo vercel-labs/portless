@@ -183,8 +183,11 @@ export const TOOLS: ToolDef[] = [
   tool(
     "alias_remove",
     "Remove alias",
-    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD unless tld selects specific ones.",
-    { name: NAME_PROPERTY, tld: ALIAS_TLD_PROPERTY },
+    "Remove a static route registered with alias add. Removes only routes with PID 0, including detached Compose routes; process-owned routes are preserved. Removes it from every configured TLD and from TLDs the proxy no longer serves, taking the last label of such a hostname as its TLD, unless tld selects specific ones.",
+    {
+      name: NAME_PROPERTY,
+      tld: { ...TLD_PROPERTY, description: "Only these TLDs, configured or not; omit for all." },
+    },
     ["name"],
     {
       readOnlyHint: false,
@@ -227,7 +230,8 @@ export const TOOLS: ToolDef[] = [
       },
       https: {
         type: "boolean",
-        description: "Serve HTTPS even with unprivileged or PORTLESS_HTTPS=0.",
+        description:
+          "Serve HTTPS even with unprivileged or PORTLESS_HTTPS=0. Do not combine with noTls.",
       },
       skipTrust: {
         type: "boolean",
@@ -262,7 +266,14 @@ export const TOOLS: ToolDef[] = [
     "doctor",
     "Run doctor",
     "Check local portless health, including the proxy, certificates, and routes.",
-    { json: { type: "boolean", description: "Return the report as JSON." } },
+    {
+      json: { type: "boolean", description: "Return the report as JSON." },
+      lan: {
+        type: "boolean",
+        description: "Check LAN mode prerequisites even if the proxy is not in LAN mode.",
+      },
+      ip: { type: "string", description: "Same as lan; must be a valid IP address." },
+    },
     [],
     {
       readOnlyHint: true,
@@ -490,10 +501,14 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       if (port !== undefined) argv.push("-p", String(port));
       break;
     }
-    case "doctor":
+    case "doctor": {
       argv.push("doctor");
       if (readBoolean(args, "json") === true) argv.push("--json");
+      if (readBoolean(args, "lan") === true) argv.push("--lan");
+      const ip = readString(args, "ip", false);
+      if (ip !== undefined) argv.push("--ip", ip);
       break;
+    }
     case "prune":
       argv.push("prune");
       if (readBoolean(args, "force") === true) argv.push("--force");
