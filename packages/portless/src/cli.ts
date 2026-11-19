@@ -289,6 +289,7 @@ function defaultProxyConfig(
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
   persistedUnprivileged: boolean;
+  persistedHttps: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -354,9 +355,10 @@ function resolveProxyConfig(options: {
     : options.persistedUnprivileged;
 
   // Unprivileged mode promises no prompt of any kind, and trusting a
-  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
+  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for,
+  // either now or by the stopped proxy whose remembered mode it resumes.
   if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
-    config.useHttps = false;
+    config.useHttps = !options.explicit.unprivileged && options.persistedHttps;
   }
 
   if (!config.lanMode) {
@@ -1344,7 +1346,11 @@ function writeProxyStartTime(store: RouteStore): void {
   }
 }
 
-/** Forget the recorded proxy identity and runtime settings once its process is gone. */
+/**
+ * Forget the recorded proxy identity and runtime settings once its process is
+ * gone. Unprivileged mode stays remembered for auto-start and serves plain HTTP
+ * unless HTTPS was asked for, so its HTTPS choice is kept with it.
+ */
 function resetProxyMarkers(store: RouteStore): void {
   for (const file of [store.startTimePath, `${store.startTimePath}.tmp`]) {
     try {
@@ -1353,7 +1359,7 @@ function resetProxyMarkers(store: RouteStore): void {
       continue;
     }
   }
-  writeTlsMarker(store.dir, false);
+  if (!readUnprivilegedMarker(store.dir)) writeTlsMarker(store.dir, false);
   writeCustomCertMarker(store.dir, false);
   writeTldFile(store.dir, DEFAULT_TLD);
   writeLanMarker(store.dir, null);
@@ -1668,6 +1674,7 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
     persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
+    persistedHttps: readTlsMarker(resolveStateDir()),
     explicit,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
@@ -4121,6 +4128,7 @@ async function handleProxy(args: string[]): Promise<void> {
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
     persistedUnprivileged: readUnprivilegedMarker(stateDir),
+    persistedHttps: readTlsMarker(stateDir),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
