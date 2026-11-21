@@ -575,6 +575,7 @@ export function writeBindAllMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, BIND_ALL_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
