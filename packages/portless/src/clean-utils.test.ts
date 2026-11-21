@@ -197,6 +197,7 @@ describe("removePortlessStateFiles", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.start.tmp"), "1234");
     fs.writeFileSync(path.join(tmpDir, "proxy.custom-cert"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.tlds"), "localhost\ntest\n");
+    fs.writeFileSync(path.join(tmpDir, "proxy.bind-all"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
     fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-token"), "token");
     fs.writeFileSync(path.join(tmpDir, "proxy.hosts-sync-token.tmp"), "token");
@@ -215,6 +216,7 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "proxy.start"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.start.tmp"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(false);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.bind-all"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-token"))).toBe(false);
     expect(fs.existsSync(path.join(tmpDir, "proxy.hosts-sync-token.tmp"))).toBe(false);

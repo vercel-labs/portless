@@ -19,6 +19,7 @@ const PORTLESS_STATE_FILES = [
   "proxy.tlds",
   "proxy.lan",
   "proxy.unprivileged",
+  "proxy.bind-all",
   "proxy.hosts-sync-token",
   "proxy.hosts-sync-token.tmp",
   "ca.trusted",
@@ -49,6 +50,7 @@ const PROXY_RUNTIME_FILES = new Set([
   "proxy.tlds",
   "proxy.lan",
   "proxy.unprivileged",
+  "proxy.bind-all",
 ]);
 
 export type RemovePortlessStateFilesOptions = {
