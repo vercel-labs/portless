@@ -73,8 +73,31 @@ describe("buildArgv", () => {
   it.each([
     ["get", { name: "backend", noWorktree: true }, ["get", "backend", "--no-worktree"]],
     ["get", { name: "backend", noWorktree: false }, ["get", "backend"]],
+    ["get", { name: "backend", json: true }, ["get", "backend", "--json"]],
+    ["list", { json: true }, ["list", "--json"]],
     ["alias_add", { name: "db", port: 5432, force: true }, ["alias", "db", "5432", "--force"]],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "https" },
+      ["alias", "db", "5432", "--upstream", "https"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "https://api.internal:8443", tld: ["test"] },
+      ["alias", "db", "5432", "--upstream", "https://api.internal:8443", "--tld", "test"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, upstream: "http://api.internal" },
+      ["alias", "db", "5432", "--upstream", "http://api.internal"],
+    ],
+    [
+      "alias_add",
+      { name: "db", port: 5432, tld: ["test", "localhost"], force: true },
+      ["alias", "db", "5432", "--tld", "test", "--tld", "localhost", "--force"],
+    ],
     ["alias_remove", { name: "db" }, ["alias", "--remove", "db"]],
+    ["alias_remove", { name: "db", tld: ["test"] }, ["alias", "--remove", "db", "--tld", "test"]],
     [
       "proxy_start",
       { port: 1355, noTls: true, tld: ["test", "localhost"] },
@@ -97,6 +120,24 @@ describe("buildArgv", () => {
     expect(() => buildArgv("alias_add", { name: "--remove", port: 5432 })).toThrow(
       expect.objectContaining({ code: -32602 })
     );
+  });
+
+  it("rejects an empty tld list with -32602", () => {
+    expect(() => buildArgv("alias_add", { name: "db", port: 5432, tld: [] })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+  });
+
+  it.each([null, 123])("rejects upstream %j before launching the CLI", async (upstream) => {
+    expect(() => buildArgv("alias_add", { name: "db", port: 5432, upstream })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+    const res = await call(["core"], "tools/call", {
+      name: "alias_add",
+      arguments: { name: "db", port: 5432, upstream, cwd: "/definitely/not/a/real/dir" },
+    });
+    expect(res.result.isError).toBe(true);
+    expect(res.result.content[0].text).toContain("upstream must be a string");
   });
 
   it("rejects --foreground for proxy start with -32602", () => {
@@ -144,12 +185,12 @@ describe("tools/call validation", () => {
     expect(res.result.content[0].text).toContain("Tool arguments: name, noWorktree");
     expect(res.result.content[0].text).not.toMatch(/Unknown argument\(s\)[^.]*cwd/);
 
-    const none = await call(["core"], "tools/call", {
+    const list = await call(["core"], "tools/call", {
       name: "list",
       arguments: { bogus: 1 },
     });
-    expect(none.result.isError).toBe(true);
-    expect(none.result.content[0].text).toContain("Tool arguments: none");
+    expect(list.result.isError).toBe(true);
+    expect(list.result.content[0].text).toContain("Tool arguments: json");
   });
 
   it("returns -32602 for an unknown tool and -32700 for a non-JSON line", async () => {
@@ -161,7 +202,7 @@ describe("tools/call validation", () => {
 
     const malformed = await createServer(["core"]).handleLine("not json");
     expect(malformed?.id).toBeNull();
-    expect((malformed?.error as { code: number }).code).toBe(-32700);
+    expect((malformed?.error as { code: number } | undefined)?.code).toBe(-32700);
   });
 
   it("returns an error result when the child cannot spawn", async () => {
@@ -224,6 +265,7 @@ describe("toToolResult", () => {
 const OMITTED_COMMANDS: Record<string, string> = {
   portless: "zero-arg and named mode run foreground dev servers",
   "portless run": "runs a foreground dev server",
+  "portless compose up": "runs Docker Compose, often in the foreground",
   "portless mcp": "the MCP server itself",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",
@@ -291,7 +333,13 @@ describe("CLI coverage", () => {
         if (!owner) continue;
         const emitted = buildArgv(owner.name, sampleArgs(owner, false));
         for (const flag of line.match(/(?<=^|\s)(-p|--[a-z][a-z-]*)\b/g) ?? []) {
-          if (flag === "--help" || emitted.includes(flag)) continue;
+          const portAlias = flag === "-p" ? "--port" : flag === "--port" ? "-p" : undefined;
+          if (
+            flag === "--help" ||
+            emitted.includes(flag) ||
+            (portAlias && emitted.includes(portAlias))
+          )
+            continue;
           expect(
             () => buildArgv(owner.name, { ...sampleArgs(owner, true), extraArgs: [flag] }),
             `"${flag}" is in "portless ${page} --help" but the ${owner.name} tool does not handle it. Type it in mcp.ts or reject it.`

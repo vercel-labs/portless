@@ -2,12 +2,38 @@
 
 declare const __VERSION__: string;
 
-import colors from "./colors.js";
+import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { spawn, spawnSync } from "node:child_process";
+import { isIP } from "node:net";
+import { createSecureContext } from "node:tls";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
-import { createSNICallback, ensureCerts, isCATrusted, trustCA, untrustCA } from "./certs.js";
+import {
+  type ComposeContainers,
+  type ComposeModel,
+  allocatePorts,
+  buildUpArgs,
+  composeGlobalError,
+  explicitProject,
+  isDetachedUp,
+  isGlobalFlagSet,
+  parseContainers,
+  planCompose,
+  projectLabel,
+  readsComposeFromStdin,
+  routePort,
+  splitComposeArgs,
+  staleAliases,
+} from "./compose.js";
+import {
+  createSNICallback,
+  ensureCerts,
+  isCATrusted,
+  isCATrustRefreshPending,
+  trustCA,
+  untrustCA,
+} from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   generateHostsSyncToken,
@@ -15,7 +41,10 @@ import {
   writeHostsSyncToken,
 } from "./hosts-sync-auth.js";
 import {
+  ensureStateDir,
+  explainUnsafeStateDir,
   fixOwnership,
+  isCleanableStateDir,
   formatUptime,
   formatUrl,
   isErrnoException,
@@ -23,6 +52,7 @@ import {
   parseHostname,
   parseHostnames,
   parsePort,
+  stripTld,
 } from "./utils.js";
 import {
   checkHostResolution,
@@ -31,7 +61,14 @@ import {
   cleanHostsFile,
   shouldAutoSyncHosts,
 } from "./hosts.js";
-import { FILE_MODE, RouteConflictError, RouteStore, type RouteMapping } from "./routes.js";
+import {
+  FILE_MODE,
+  RouteConflictError,
+  RouteStore,
+  isValidUpstream,
+  type RouteMapping,
+} from "./routes.js";
+import type { RouteInfo } from "./types.js";
 import {
   ensureTailscaleReady,
   findAvailableServePort,
@@ -50,6 +87,7 @@ import {
   truncateLabel,
   sanitizeForHostname,
 } from "./auto.js";
+import type { WorktreePrefix, WorktreePrefixStyle } from "./auto.js";
 import {
   buildProxyStartConfig,
   canBindProxyPort,
@@ -65,7 +103,10 @@ import {
   findPidOnPort,
   guardWindowsOrphans,
   findPidsOnPort,
-  killOrphanedProcessGroup,
+  findSelfDaemonizedListener,
+  stopProcessGroup,
+  type ProcessGroupStop,
+  getProcessGroupId,
   getProcessStartTime,
   getProcessCommand,
   getDefaultPort,
@@ -82,6 +123,8 @@ import {
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
   resolveFrameworkBasename,
+  resolveScriptArgForwarding,
+  resolveTurboRootForwarding,
   isHttpsEnvDisabled,
   isPortListening,
   isWildcardEnvEnabled,
@@ -91,6 +134,7 @@ import {
   killTree,
   listenOnProxyInterface,
   parseTldList,
+  prompt,
   readLanMarker,
   readCustomCertMarker,
   readPersistedProxyState,
@@ -110,11 +154,13 @@ import {
 } from "./cli-utils.js";
 import {
   attemptCATrustRemovalForCleanup,
-  collectStateDirsForCleanup,
+  collectStateDirsForCleanupWithFailures,
   removePortlessStateFiles,
+  type CATrustRemovalResult,
 } from "./clean-utils.js";
 import {
   getLocalNetworkIp,
+  getMdnsDaemonProblem,
   isMdnsSupported,
   publish,
   startLanIpMonitor,
@@ -125,26 +171,35 @@ import {
   loadConfig,
   resolveAppConfig,
   resolveScriptCommand,
+  scriptRunCommand,
+  packageManagerExec,
   hasScript,
   isServerCommand,
   splitCommand,
   detectPackageManager,
-  loadPackagePortlessConfig,
+  mergeWorktreeConfig,
   ConfigValidationError,
 } from "./config.js";
-import type { AppConfig, LoadedConfig } from "./config.js";
+import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
-import {
-  ensureEnvLoader,
-  writeManifest,
-  removeManifest,
-  buildNodeOptions,
-  hasTurboConfig,
-} from "./turbo.js";
+import { EnvPublication, buildNodeOptions, hasTurboConfig } from "./turbo.js";
 import type { ManifestEntry } from "./turbo.js";
-import { buildServiceUninstallSudoArgs, handleService, tryUninstallService } from "./service.js";
-import { runMcp } from "./mcp.js";
+import {
+  buildServiceUninstallSudoArgs,
+  handleService,
+  printServiceHelp,
+  tryUninstallService,
+} from "./service.js";
+import { printMcpHelp, runMcp } from "./mcp.js";
+import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
+import {
+  parseCommandArgs,
+  visitLeadingFlags,
+  UsageError,
+  type FlagKind,
+  type ParsedArgs,
+} from "./args.js";
 
 const chalk = colors;
 
@@ -166,6 +221,17 @@ const EXIT_TIMEOUT_MS = 2000;
 
 /** Timeout (ms) for the sudo spawn when auto-starting the proxy. */
 const SUDO_SPAWN_TIMEOUT_MS = 30_000;
+
+const PROXY_STOP_TIMEOUT_MS = 5000;
+const PROXY_STOP_POLL_MS = 50;
+const CLEAN_ELEVATED_STEPS_ENV = "PORTLESS_INTERNAL_CLEAN_STEPS";
+const CLEAN_ELEVATED_DIRS_ENV = "PORTLESS_INTERNAL_CLEAN_DIRS";
+const CLEAN_ELEVATED_PRESERVE_PROXY_ENV = "PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY";
+
+/** Cleanup steps that may be retried with elevation. */
+type CleanupStep = "ca" | "files" | "hosts";
+
+const CLEANUP_STEP_ORDER: readonly CleanupStep[] = ["ca", "files", "hosts"];
 
 type ProxyConfigExplicitness = {
   useHttps: boolean;
@@ -520,23 +586,15 @@ function sudoStop(port: number): boolean {
   return result.status === 0;
 }
 
-function runCleanWithSudo(reason: string): boolean {
-  console.log(colors.yellow(`${reason} Requesting sudo...`));
-  const home = process.env.HOME;
+/** Re-run `portless hosts clean` under sudo and report whether it succeeded. */
+function runHostsCleanWithSudo(): boolean {
+  console.log(
+    colors.yellow(`Writing to ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`)
+  );
   const result = spawnSync(
     "sudo",
-    [
-      "env",
-      ...collectPortlessEnvArgs(),
-      ...(home ? [`HOME=${home}`] : []),
-      process.execPath,
-      getEntryScript(),
-      "clean",
-    ],
-    {
-      stdio: "inherit",
-      timeout: SUDO_SPAWN_TIMEOUT_MS,
-    }
+    ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
+    { stdio: "inherit", timeout: SUDO_SPAWN_TIMEOUT_MS }
   );
   return result.status === 0;
 }
@@ -554,14 +612,38 @@ function isEnabledEnv(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+/**
+ * Whether the proxy should be accepted as already running. Shared with the
+ * multi-app collision preflight so both agree on which TLDs are in effect.
+ */
+async function isProxyUp(proxyPort: number, tls: boolean): Promise<boolean> {
+  if (await isProxyRunning(proxyPort, tls)) return true;
+  return !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
+}
+
 function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | null): string {
   if (signal) return ` (signal ${signal})`;
   if (code !== null) return ` (exit ${code})`;
   return "";
 }
 
-function buildHostnames(name: string, tlds: readonly string[]): string[] {
-  return parseHostnames(name, normalizeTlds(tlds));
+function buildHostnames(
+  name: string,
+  tlds: readonly string[],
+  targetTlds?: readonly string[]
+): string[] {
+  return parseHostnames(name, normalizeTlds(tlds), targetTlds);
+}
+
+/**
+ * The TLD a route hostname was registered with: the longest of `tlds` the
+ * hostname ends with, else its last label.
+ */
+function aliasRouteTld(hostname: string, tlds: readonly string[]): string {
+  return (
+    [...tlds].sort((a, b) => b.length - a.length).find((t) => hostname.endsWith(`.${t}`)) ??
+    hostname.slice(hostname.lastIndexOf(".") + 1)
+  );
 }
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
@@ -576,6 +658,25 @@ function formatBindEndpoint(host: string, port: number): string {
   return host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
 }
 
+type AliasUpstream = NonNullable<RouteInfo["upstream"]>;
+
+function parseAliasUpstream(value: string): AliasUpstream {
+  const usage = 'Use "https", "https://<host>[:<port>]", or "http://<host>[:<port>]".';
+  let upstream: AliasUpstream;
+  if (value === "https") {
+    upstream = { tls: true };
+  } else {
+    const match = /^(https?):\/\/(.+)$/.exec(value);
+    if (!match || match[0] !== value) throw new Error(usage);
+    upstream = { tls: match[1] === "https", host: match[2]! };
+  }
+
+  if (!isValidUpstream(upstream)) {
+    throw new Error(`${usage} The authority must be a hostname or IP with an optional port.`);
+  }
+  return upstream;
+}
+
 function isUnavailableIpv6Bind(err: NodeJS.ErrnoException, host: string): boolean {
   return host.includes(":") && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL");
 }
@@ -585,13 +686,15 @@ function addRoutes(
   hostnames: readonly string[],
   port: number,
   pid: number,
-  force = false
+  force = false,
+  upstream?: AliasUpstream
 ): number[] {
+  store.recoverCorruptRoutesFile();
   const registered: string[] = [];
   const killedPids: number[] = [];
   try {
     for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force);
+      const killedPid = store.addRoute(hostname, port, pid, force, upstream);
       registered.push(hostname);
       if (killedPid !== undefined) {
         killedPids.push(killedPid);
@@ -611,25 +714,87 @@ function addRoutes(
 }
 
 /**
+ * Try to stop every recorded process group once, keyed by group id. Routes that
+ * share a group share one outcome and contribute all of their recorded
+ * identities, so a stale record cannot hide a valid one. Groups are stopped in
+ * parallel so one surviving group does not delay the others.
+ */
+async function stopRecordedGroups(
+  routes: RouteMapping[],
+  signal: NodeJS.Signals
+): Promise<Map<number, ProcessGroupStop>> {
+  const groups = new Map<number, RouteMapping[]>();
+  for (const route of routes) {
+    if (route.childPgid === undefined) continue;
+    const group = groups.get(route.childPgid);
+    if (group) group.push(route);
+    else groups.set(route.childPgid, [route]);
+  }
+  const stopped = await Promise.all(
+    [...groups].map(async ([pgid, group]) => {
+      const stop = await stopProcessGroup(
+        pgid,
+        group.map((route) => route.childStartTime),
+        group.flatMap((route) =>
+          route.orphanPid === undefined
+            ? []
+            : [{ pid: route.orphanPid, startTime: route.orphanStartTime }]
+        ),
+        signal,
+        { port: group[0]!.port }
+      );
+      return [pgid, stop] as const;
+    })
+  );
+  return new Map(stopped);
+}
+
+/**
+ * Whether a stale record still has recovery work that startup cannot finish: a
+ * Tailscale share is unregistered by prune or clean, so its record must stay.
+ */
+function keepsStaleRecordAfterRecovery(route: RouteMapping): boolean {
+  return route.tailscaleHttpsPort !== undefined;
+}
+
+/**
  * Stop dev servers left running by portless sessions that died without
  * cleanup (SIGKILL, crash). Their routes are about to be dropped as stale, and
  * the stored process group is the only remaining link to the orphaned tree.
+ * Shares stay while the group is still running, and a member that outlived
+ * SIGTERM is recorded so `prune --force` can retry it. A record whose group is
+ * verified gone and whose tunnels were stopped is removed, so later runs do not
+ * signal the same tunnel PIDs again.
  */
-function stopOrphanedProcessGroups(store: RouteStore): void {
-  const seen = new Set<number>();
-  for (const route of store.loadRoutesRaw()) {
-    if (route.pid === 0 || isPidAlive(route.pid)) continue;
-    for (const t of stopRecordedTunnels(route, true)) {
-      const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
-      console.log(colors.yellow(message));
-    }
+async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
+  if (store.untrustedReason()) return;
+  const orphaned = store.findStaleRoutes();
+  const stops = await stopRecordedGroups(orphaned, "SIGTERM");
+  for (const route of orphaned) {
     const pgid = route.childPgid;
-    if (!pgid || seen.has(pgid)) continue;
-    seen.add(pgid);
-    if (killOrphanedProcessGroup(pgid, route.childStartTime)) {
-      console.log(
+    const stop = pgid === undefined ? undefined : stops.get(pgid);
+    if (stop?.survivor) store.recordStaleOrphan(route, stop.survivor.pid, stop.survivor.startTime);
+    if (stop !== undefined && stop.state !== "gone" && stop.state !== "stopped") {
+      console.error(
+        colors.yellow(
+          stop.state === "survived"
+            ? `Orphaned dev server (process group ${pgid}) did not exit. Run: portless prune --force`
+            : `Orphaned process group ${pgid} could not be verified; nothing was stopped. Run: portless prune`
+        )
+      );
+      continue;
+    }
+    if (stop?.state === "stopped") {
+      console.error(
         colors.yellow(`Stopped orphaned dev server from a previous session (process group ${pgid})`)
       );
+    }
+    for (const t of stopRecordedTunnels(route, true)) {
+      const message = `Stopped orphaned ${t.label} tunnel from a previous session (pid ${route[t.pidField]})`;
+      console.error(colors.yellow(message));
+    }
+    if (!keepsStaleRecordAfterRecovery(route)) {
+      store.removeStaleRoute(route.hostname, route.pid);
     }
   }
 }
@@ -691,6 +856,50 @@ function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?
   }
 }
 
+/**
+ * Keep routes served when the command self-daemonized: its launcher exited
+ * but a listener is still on the assigned port. The routes move to that
+ * listener's pid, so the proxy keeps serving them and they drop on their own
+ * once it exits. A listener that already held the port before the command
+ * started is not the command's daemon, so its routes are left to cleanup.
+ * Issue #411.
+ */
+async function transferRoutesToDaemon(
+  store: RouteStore,
+  hostnames: readonly string[],
+  port: number,
+  processGroupId: number | undefined,
+  preexistingPid: number | null,
+  exitedCleanly: boolean
+): Promise<void> {
+  const listenerPid = await findSelfDaemonizedListener(
+    port,
+    processGroupId,
+    EXIT_TIMEOUT_MS,
+    exitedCleanly
+  );
+  if (listenerPid === null || listenerPid === preexistingPid) return;
+  let transferred = false;
+  for (const hostname of hostnames) {
+    try {
+      transferred = store.transferRoute(hostname, process.pid, listenerPid) || transferred;
+    } catch {
+      // Lock acquisition may fail during cleanup; the exit cleanup removes the route.
+    }
+  }
+  if (!transferred) return;
+  console.warn(
+    colors.yellow(
+      `Command exited but PID ${listenerPid} is still serving port ${port}. Keeping ${hostnames[0]} routed to it. Stop it with: kill ${listenerPid}`
+    )
+  );
+}
+
+/** PID already listening on a port before a command is spawned, if any. */
+async function findPreexistingListener(port: number): Promise<number | null> {
+  return (await isPortListening(port)) ? findPidOnPort(port) : null;
+}
+
 /** Warn on this terminal if a route it registered will not resolve. Issue #364. */
 function reportHostsSyncHere(
   hostnames: string[],
@@ -701,6 +910,16 @@ function reportHostsSyncHere(
   return reportHostsSync(hostnames, port, tls, lanMode, (message) =>
     console.warn(colors.yellow(message))
   );
+}
+
+/** Say whether LAN services are discoverable as .local names now, or why not yet. */
+function describeMdnsDiscovery(): string {
+  const mdnsDaemonProblem = getMdnsDaemonProblem();
+  return mdnsDaemonProblem
+    ? chalk.yellow(
+        `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
+      )
+    : chalk.gray("Services are discoverable as <name>.local on your network");
 }
 
 // ---------------------------------------------------------------------------
@@ -751,7 +970,14 @@ function startProxyServer(
   fixOwnership(routesPath);
 
   // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes = store.loadRoutes();
+  let cachedRoutes: ReturnType<RouteStore["loadRoutes"]> = [];
+  try {
+    cachedRoutes = store.loadTrustedRoutes();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes: ${message}`));
+  }
+  let routesReloadWarningShown = false;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let watcher: fs.FSWatcher | null = null;
   let pollingInterval: ReturnType<typeof setInterval> | null = null;
@@ -809,21 +1035,15 @@ function startProxyServer(
   };
 
   const onHostsSyncRequest = (): "acted" | "disabled" => {
-    if (!autoSyncHosts) return "disabled";
-    let hostnames: string[];
-    try {
-      hostnames = store.loadRoutes().map((route) => route.hostname);
-    } catch {
-      hostnames = cachedRoutes.map((route) => route.hostname);
-    }
-    syncHostsAndLatch(hostnames);
-    return "acted";
+    reloadRoutes();
+    return autoSyncHosts ? "acted" : "disabled";
   };
 
   const reloadRoutes = () => {
     try {
       const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
-      cachedRoutes = store.loadRoutes();
+      cachedRoutes = store.loadTrustedRoutes();
+      routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
@@ -832,12 +1052,10 @@ function startProxyServer(
         const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
         for (const route of cachedRoutes) {
           const previousPort = previousRoutes.get(route.hostname);
-          if (previousPort === undefined) {
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-          } else if (previousPort !== route.port) {
+          if (previousPort !== undefined && previousPort !== route.port) {
             unpublish(route.hostname);
-            publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
           }
+          publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
         }
         for (const hostname of previousRoutes.keys()) {
           if (!currentRoutes.has(hostname)) {
@@ -845,13 +1063,19 @@ function startProxyServer(
           }
         }
       }
-    } catch {
-      // File may be mid-write; keep existing cached routes
+    } catch (err) {
+      // Keep the last known routes, and say why once instead of on every reload.
+      if (!routesReloadWarningShown) {
+        routesReloadWarningShown = true;
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(`Could not reload routes: ${message}`));
+      }
     }
   };
 
   try {
-    watcher = fs.watch(routesPath, () => {
+    watcher = fs.watch(store.dir, (_event, filename) => {
+      if (filename && filename !== path.basename(routesPath)) return;
       if (debounceTimer) clearTimeout(debounceTimer);
       debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
     });
@@ -870,7 +1094,12 @@ function startProxyServer(
 
   const createServer = () =>
     createProxyServer({
-      getRoutes: () => cachedRoutes,
+      // A route handed to a self-daemonized server outlives the file's last
+      // change, so a dead owner triggers a reload instead of serving it.
+      getRoutes: () => {
+        if (!cachedRoutes.every((route) => store.isRouteOwnerAlive(route))) reloadRoutes();
+        return cachedRoutes;
+      },
       proxyPort,
       tld,
       tlds,
@@ -969,6 +1198,7 @@ function startProxyServer(
       console.warn(colors.yellow("Could not publish hosts sync authorization."));
     }
     // Save PID and port once the server is actually listening
+    writeProxyStartTime(store);
     fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
     fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
     writeTlsMarker(store.dir, isTls);
@@ -977,7 +1207,7 @@ function startProxyServer(
     writeLanMarker(store.dir, activeLanIp);
     writeUnprivilegedMarker(store.dir, unprivileged);
     writeBindAllMarker(store.dir, bindAll);
-    fixOwnership(store.dir, store.pidPath, store.portFilePath);
+    fixOwnership(store.dir, store.pidPath, store.portFilePath, store.startTimePath);
     console.log(
       colors.green(
         `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
@@ -985,7 +1215,7 @@ function startProxyServer(
     );
     if (activeLanIp) {
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
-      console.log(chalk.gray("Services are discoverable as <name>.local on your network"));
+      console.log(describeMdnsDiscovery());
       if (isTls && !customCert) {
         console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
         console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
@@ -1026,10 +1256,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
+    resetProxyMarkers(store);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1048,156 +1275,369 @@ function startProxyServer(
 // Commands
 // ---------------------------------------------------------------------------
 
-function sudoStopOrHint(port: number): void {
+function sudoStopOrHint(port: number): boolean {
   if (!isWindows) {
     if (!sudoStop(port)) {
       console.error(colors.red("Failed to stop proxy with sudo."));
       console.error(colors.blue("Try manually:"));
       console.error(colors.cyan(`  portless proxy stop -p ${port}`));
+      return false;
     }
-  } else {
-    console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
-    console.error(colors.blue("Stop it with:"));
-    console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+    return true;
+  }
+  console.error(colors.red("Permission denied. The proxy was started with elevated privileges."));
+  console.error(colors.blue("Stop it with:"));
+  console.error(colors.cyan("  Run portless proxy stop as Administrator"));
+  return false;
+}
+
+/** Read a state file, returning null only when it does not exist. */
+function readStateFile(file: string): string | null {
+  try {
+    return fs.readFileSync(file, "utf-8").trim();
+  } catch (err: unknown) {
+    if (isErrnoException(err) && err.code === "ENOENT") return null;
+    throw err;
   }
 }
 
-async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<void> {
-  const pidPath = store.pidPath;
+/** Remove a state file only while its contents still match the expected value. */
+function removeStateFileIfMatches(file: string, expected: string): boolean {
+  const current = readStateFile(file);
+  if (current === null) return true;
+  if (current !== expected) return false;
+  try {
+    fs.unlinkSync(file);
+  } catch (err: unknown) {
+    if (!isErrnoException(err) || err.code !== "ENOENT") throw err;
+  }
+  return true;
+}
 
-  if (!fs.existsSync(pidPath)) {
-    // PID file is missing; check whether something is still listening.
-    // Use plain HTTP: the TLS proxy accepts it via byte-peeking, and this
-    // avoids false negatives from TLS handshake timeouts.
-    if (await isProxyRunning(proxyPort)) {
-      console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
-      const pid = findPidOnPort(proxyPort);
-      if (pid !== null) {
-        try {
-          process.kill(pid, "SIGTERM");
-          try {
-            fs.unlinkSync(store.portFilePath);
-          } catch {
-            // Port file may already be absent; non-fatal
-          }
-          writeTlsMarker(store.dir, false);
-          writeCustomCertMarker(store.dir, false);
-          writeTldFile(store.dir, DEFAULT_TLD);
-          writeLanMarker(store.dir, null);
-          console.log(colors.green(`Killed process ${pid}. Proxy stopped.`));
-        } catch (err: unknown) {
-          if (isErrnoException(err) && err.code === "EPERM") {
-            sudoStopOrHint(proxyPort);
-          } else {
-            const message = err instanceof Error ? err.message : String(err);
-            console.error(colors.red(`Failed to stop proxy: ${message}`));
-            console.error(colors.blue("Check if the process is still running:"));
-            console.error(
-              colors.cyan(
-                isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
-              )
-            );
-          }
-        }
-      } else if (!isWindows && process.getuid?.() !== 0) {
-        sudoStopOrHint(proxyPort);
-      } else {
-        console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
-        console.error(colors.blue("Try manually:"));
+/** The kernel's state letters for a live PID, or null when they cannot be read. */
+function readProcessState(pid: number): string | null {
+  try {
+    if (process.platform === "linux") {
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf-8");
+      return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] || null;
+    }
+    if (process.platform === "darwin") {
+      const state = execFileSync("ps", ["-o", "stat=", "-p", String(pid)], {
+        encoding: "utf-8",
+        timeout: 2000,
+      });
+      return state.trim() || null;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+/** Whether a live PID is still running rather than a zombie or dead entry. */
+function isProcessRunning(pid: number): boolean {
+  if (!isPidAlive(pid)) return false;
+  const state = readProcessState(pid);
+  return state === null ? isPidAlive(pid) : !/^[ZX]/.test(state);
+}
+
+/**
+ * Whether a live PID is suspended by SIGSTOP or a debugger. Returns null when
+ * the platform or a failed lookup cannot report the state.
+ */
+function isProcessSuspended(pid: number): boolean | null {
+  const state = readProcessState(pid);
+  return state === null ? null : /^[Tt]/.test(state);
+}
+
+/** Record the listening proxy's start time, so a later stop can tell it from a recycled PID. */
+function writeProxyStartTime(store: RouteStore): void {
+  const startTime = getProcessStartTime(process.pid);
+  const tempPath = `${store.startTimePath}.tmp`;
+  const discardTemp = () => {
+    try {
+      fs.rmSync(tempPath, { force: true });
+    } catch {
+      return;
+    }
+  };
+  try {
+    discardTemp();
+    if (startTime === null) {
+      fs.rmSync(store.startTimePath, { force: true });
+      return;
+    }
+    fs.writeFileSync(tempPath, startTime, { encoding: "utf-8", mode: FILE_MODE, flag: "wx" });
+    fixOwnership(tempPath);
+    fs.renameSync(tempPath, store.startTimePath);
+  } catch {
+    discardTemp();
+  }
+}
+
+/** Forget the recorded proxy identity and runtime settings once its process is gone. */
+function resetProxyMarkers(store: RouteStore): void {
+  for (const file of [store.startTimePath, `${store.startTimePath}.tmp`]) {
+    try {
+      fs.rmSync(file, { force: true });
+    } catch {
+      continue;
+    }
+  }
+  writeTlsMarker(store.dir, false);
+  writeCustomCertMarker(store.dir, false);
+  writeTldFile(store.dir, DEFAULT_TLD);
+  writeLanMarker(store.dir, null);
+}
+
+type ProxyIdentity = "proxy" | "recycled" | "unknown";
+
+/**
+ * Decide whether a live PID is the recorded proxy, from its recorded start time
+ * or, when none can be compared, from who holds the proxy port. Returns
+ * "unknown" when neither proves it, and callers must then keep the state.
+ */
+async function identifyRecordedProxy(
+  store: RouteStore,
+  pid: number,
+  proxyPort: number
+): Promise<ProxyIdentity> {
+  const recorded = readStateFile(store.startTimePath);
+  const live = getProcessStartTime(pid);
+  if (recorded !== null && live !== null) return recorded === live ? "proxy" : "recycled";
+  const holders = findPidsOnPort(proxyPort);
+  if (holders.includes(pid)) return "proxy";
+  if (holders.length > 0) return "recycled";
+  if (!(await isPortListening(proxyPort)) && isProcessSuspended(pid) !== true) return "recycled";
+  return "unknown";
+}
+
+/** Clear the port file and runtime markers once the proxy process is gone. */
+async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): Promise<boolean> {
+  if (!removeStateFileIfMatches(store.portFilePath, String(proxyPort))) {
+    console.error(
+      colors.red(`Port file changed to ${readStateFile(store.portFilePath)}; leaving it in place.`)
+    );
+    return false;
+  }
+  if (await isProxyRunning(proxyPort)) {
+    console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
+    return false;
+  }
+  resetProxyMarkers(store);
+  return true;
+}
+
+/** Wait until the recorded PID exits and its listener closes. */
+async function waitForProxyToClose(
+  proxyPort: number,
+  pid: number,
+  timeoutMs: number
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (!isProcessRunning(pid) && !(await isProxyRunning(proxyPort))) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, PROXY_STOP_POLL_MS));
+  }
+}
+
+/** What the PID file and the proxy port say about the proxy to stop. */
+type RecordedProxy =
+  | { state: "stopped" | "corrupt" | "dead" | "forbidden" }
+  | { state: "untrusted"; reason: string }
+  | { state: "unrecorded"; pid: number | null }
+  | { state: "running" | "recycled" | "mismatched"; pid: number }
+  | { state: "unverified"; pid: number; identity: Exclude<ProxyIdentity, "recycled"> };
+
+/**
+ * Decide what to do about the recorded proxy. A PID is signaled only when the
+ * state directory is under the user's control and nothing shows the PID is a
+ * different process from the one holding the proxy port.
+ */
+async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<RecordedProxy> {
+  const unsafe = store.untrustedReason();
+  if (unsafe) return { state: "untrusted", reason: unsafe };
+  if (!fs.existsSync(store.pidPath)) {
+    if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
+    return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
+  }
+  const pid = parseInt(fs.readFileSync(store.pidPath, "utf-8"), 10);
+  if (isNaN(pid)) return { state: "corrupt" };
+  try {
+    process.kill(pid, 0);
+  } catch (err: unknown) {
+    return { state: isErrnoException(err) && err.code === "EPERM" ? "forbidden" : "dead" };
+  }
+  const answering = await isProxyRunning(proxyPort);
+  const identity = await identifyRecordedProxy(store, pid, proxyPort);
+  if (identity === "recycled") return { state: answering ? "mismatched" : "recycled", pid };
+  if (answering) return { state: "running", pid };
+  return { state: "unverified", pid, identity };
+}
+
+/** Signal a proxy process and wait for it and its listener to go away. */
+async function terminateProxy(proxyPort: number, pid: number): Promise<boolean> {
+  process.kill(pid, "SIGTERM");
+  if (await waitForProxyToClose(proxyPort, pid, PROXY_STOP_TIMEOUT_MS)) return true;
+  console.error(colors.red(`Proxy did not stop within ${PROXY_STOP_TIMEOUT_MS / 1000}s.`));
+  return false;
+}
+
+/**
+ * Remove the PID file and clear the proxy state, unless another proxy has taken
+ * them over. `pid` is the recorded PID, or null when no PID file was recorded.
+ */
+async function forgetProxy(
+  store: RouteStore,
+  proxyPort: number,
+  pid: number | null
+): Promise<boolean> {
+  const unchanged =
+    pid === null
+      ? !fs.existsSync(store.pidPath)
+      : removeStateFileIfMatches(store.pidPath, String(pid));
+  if (unchanged) return clearProxyStateAfterStop(store, proxyPort);
+  console.error(
+    colors.red(`Proxy PID file changed to ${readStateFile(store.pidPath)}; leaving it in place.`)
+  );
+  return false;
+}
+
+async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): Promise<boolean> {
+  try {
+    const proxy = await readRecordedProxy(store, proxyPort);
+    switch (proxy.state) {
+      case "stopped":
+        console.log(colors.yellow("Proxy is not running."));
+        return true;
+      case "forbidden":
+        return sudoStopOrHint(proxyPort);
+      case "untrusted":
         console.error(
-          colors.cyan(
-            isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
+          colors.red(`Cannot stop the proxy recorded in ${store.dir}: ${proxy.reason}`)
+        );
+        console.error(colors.blue("Nothing was signaled."));
+        return false;
+      case "mismatched":
+        console.error(
+          colors.red(
+            `PID ${proxy.pid} in ${store.pidPath} is not the proxy answering on port ${proxyPort}.`
           )
         );
+        console.error(colors.blue("It was not signaled, and the proxy state is kept."));
+        console.error(
+          colors.cyan(
+            isWindows
+              ? `Find the proxy with: netstat -ano | findstr :${proxyPort}`
+              : `Find the proxy with: lsof -ti tcp:${proxyPort} -sTCP:LISTEN`
+          )
+        );
+        return false;
+      case "corrupt":
+        console.error(colors.red("Corrupted PID file. Removing it."));
+        fs.unlinkSync(store.pidPath);
+        resetProxyMarkers(store);
+        return true;
+      case "dead":
+        console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
+        fs.unlinkSync(store.pidPath);
+        fs.rmSync(store.portFilePath, { force: true });
+        resetProxyMarkers(store);
+        return true;
+      case "unrecorded": {
+        console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
+        if (proxy.pid === null) {
+          if (!isWindows && process.getuid?.() !== 0) return sudoStopOrHint(proxyPort);
+          console.error(colors.red(`Could not identify the process on port ${proxyPort}.`));
+          console.error(colors.blue("Try manually:"));
+          console.error(
+            colors.cyan(
+              isWindows ? "  taskkill /F /PID <pid>" : `  sudo kill "$(lsof -ti tcp:${proxyPort})"`
+            )
+          );
+          return false;
+        }
+        const stopped =
+          (await terminateProxy(proxyPort, proxy.pid)) &&
+          (await forgetProxy(store, proxyPort, null));
+        if (stopped) console.log(colors.green(`Killed process ${proxy.pid}. Proxy stopped.`));
+        return stopped;
       }
-    } else {
-      console.log(colors.yellow("Proxy is not running."));
-    }
-    return;
-  }
-
-  try {
-    const pid = parseInt(fs.readFileSync(pidPath, "utf-8"), 10);
-    if (isNaN(pid)) {
-      console.error(colors.red("Corrupted PID file. Removing it."));
-      fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return;
-    }
-
-    // Check if the process is still alive before trying to kill it
-    try {
-      process.kill(pid, 0);
-    } catch (err: unknown) {
-      if (isErrnoException(err) && err.code === "EPERM") {
-        sudoStopOrHint(proxyPort);
-        return;
+      case "recycled":
+        if (!(await forgetProxy(store, proxyPort, proxy.pid))) return false;
+        console.log(
+          colors.yellow(
+            `PID ${proxy.pid} is not a proxy listening on port ${proxyPort}. Removed stale proxy state.`
+          )
+        );
+        return true;
+      case "unverified": {
+        const { pid, identity } = proxy;
+        console.error(
+          colors.red(
+            identity === "proxy"
+              ? `Proxy PID ${pid} is not responding on port ${proxyPort}.`
+              : `Could not verify that PID ${pid} is the proxy on port ${proxyPort}.`
+          )
+        );
+        console.error(colors.blue("It was not signaled, and its state and CA files are kept."));
+        if (!isWindows && isProcessSuspended(pid) === true) {
+          console.error(colors.cyan(`The process is suspended. Resume it with: kill -CONT ${pid}`));
+        } else if (identity === "proxy") {
+          console.error(
+            colors.cyan(
+              `If it stays unresponsive, stop it with: ${
+                isWindows ? `taskkill /F /PID ${pid}` : `sudo kill ${pid}`
+              }`
+            )
+          );
+        }
+        return false;
       }
-      console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
-      fs.unlinkSync(pidPath);
-      try {
-        fs.unlinkSync(store.portFilePath);
-      } catch {
-        // Port file may already be absent; non-fatal
+      case "running": {
+        const stopped =
+          (await terminateProxy(proxyPort, proxy.pid)) &&
+          (await forgetProxy(store, proxyPort, proxy.pid));
+        if (stopped) console.log(colors.green("Proxy stopped."));
+        return stopped;
       }
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return;
     }
-
-    // Verify the process is actually running a proxy on the expected port.
-    // If the PID was recycled by an unrelated process, the port won't be listening.
-    // Plain HTTP works for both TLS and non-TLS proxies (byte-peeking).
-    if (!(await isProxyRunning(proxyPort))) {
-      console.log(
-        colors.yellow(
-          `PID file exists but port ${proxyPort} is not listening. The PID may have been recycled.`
-        )
-      );
-      console.log(colors.yellow("Removing stale PID file."));
-      fs.unlinkSync(pidPath);
-      writeTlsMarker(store.dir, false);
-      writeCustomCertMarker(store.dir, false);
-      writeTldFile(store.dir, DEFAULT_TLD);
-      writeLanMarker(store.dir, null);
-      return;
-    }
-
-    process.kill(pid, "SIGTERM");
-    fs.unlinkSync(pidPath);
-    try {
-      fs.unlinkSync(store.portFilePath);
-    } catch {
-      // Port file may already be removed; non-fatal
-    }
-    writeTlsMarker(store.dir, false);
-    writeCustomCertMarker(store.dir, false);
-    writeTldFile(store.dir, DEFAULT_TLD);
-    writeLanMarker(store.dir, null);
-    console.log(colors.green("Proxy stopped."));
   } catch (err: unknown) {
     if (isErrnoException(err) && err.code === "EPERM") {
-      sudoStopOrHint(proxyPort);
-    } else {
-      const message = err instanceof Error ? err.message : String(err);
-      console.error(colors.red(`Failed to stop proxy: ${message}`));
-      console.error(colors.blue("Check if the process is still running:"));
-      console.error(
-        colors.cyan(
-          isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
-        )
-      );
+      return sudoStopOrHint(proxyPort);
     }
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(colors.red(`Failed to stop proxy: ${message}`));
+    console.error(colors.blue("Check if the process is still running:"));
+    console.error(
+      colors.cyan(
+        isWindows ? `  netstat -ano | findstr :${proxyPort}` : `  lsof -ti tcp:${proxyPort}`
+      )
+    );
+    return false;
   }
 }
 
-function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
+function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: boolean): void {
   const routes = store.loadRoutes();
+
+  if (json) {
+    const output = routes.map((route) => ({
+      hostname: route.hostname,
+      url: formatUrl(route.hostname, proxyPort, tls),
+      port: route.port,
+      pid: route.pid,
+      registeredAt: route.registeredAt,
+      ...(route.upstream ? { upstream: route.upstream } : {}),
+      ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
+      ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
+      ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
+      ...(route.cloudflareUrl ? { cloudflareUrl: route.cloudflareUrl } : {}),
+    }));
+    console.log(JSON.stringify({ routes: output }));
+    return;
+  }
 
   if (routes.length === 0) {
     console.log(colors.yellow("No active routes."));
@@ -1208,11 +1648,18 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean): void {
   console.log(colors.blue.bold("\nActive routes:\n"));
   for (const route of routes) {
     const url = formatUrl(route.hostname, proxyPort, tls);
+    const upstream = route.upstream;
+    const endpoint = upstream
+      ? `${upstream.tls ? "https" : "http"}://localhost:${route.port}`
+      : `localhost:${route.port}`;
     const label = route.pid === 0 ? "(alias)" : `(pid ${route.pid})`;
     const uptime = route.pid === 0 ? null : formatUptime(route.registeredAt, Date.now());
     console.log(
-      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(`localhost:${route.port}`)}  ${colors.gray(label)}${uptime ? ` ${colors.gray(`up ${uptime}`)}` : ""}`
+      `  ${colors.cyan(url)}  ${colors.gray("->")}  ${colors.white(endpoint)}  ${colors.gray(label)}${uptime ? ` ${colors.gray(`up ${uptime}`)}` : ""}`
     );
+    if (upstream?.host) {
+      console.log(`    ${colors.gray("Host:")} ${colors.white(upstream.host)}`);
+    }
     if (route.tailscaleUrl) {
       const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
@@ -1270,26 +1717,17 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
 }
 
 /**
- * Check if the proxy is running and auto-start it if needed.
- * Returns the discovered state after start, or `{ started: false }` when
- * the proxy was already up.
+ * Resolve the config and port a stopped proxy starts with, applying persisted
+ * overrides unless the environment is explicit. Shared by the starter and the
+ * multi-app collision preflight so both read the same effective TLDs.
  */
-async function ensureProxyRunning(
-  proxyPort: number,
-  tls: boolean,
-  desired: ProxyDesiredState
-): Promise<EnsureProxyResult> {
+function resolveProxyStart(desired: ProxyDesiredState): {
+  startConfig: ReturnType<typeof resolveProxyConfig>;
+  startPort: number | undefined;
+} {
   const { explicit, desiredConfig } = desired;
-
-  const proxyResponsive = await isProxyRunning(proxyPort, tls);
-  const proxyListeningFromStateDir =
-    !!process.env.PORTLESS_STATE_DIR && (await isPortListening(proxyPort));
-
-  if (proxyResponsive || proxyListeningFromStateDir) {
-    return { started: false };
-  }
-
   const persisted = readPersistedProxyState();
+  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
   const startConfig = { ...desiredConfig };
   let startPort: number | undefined;
 
@@ -1315,10 +1753,29 @@ async function ensureProxyRunning(
       startConfig.bindAll = persisted.bindAll;
     }
     const envPort = getDefaultPort(startConfig.useHttps);
-    if (persisted.port !== envPort) {
+    if (!configuredEnvPort && persisted.port !== envPort) {
       startPort = persisted.port;
     }
   }
+
+  return { startConfig, startPort };
+}
+
+/**
+ * Check if the proxy is running and auto-start it if needed.
+ * Returns the discovered state after start, or `{ started: false }` when
+ * the proxy was already up.
+ */
+async function ensureProxyRunning(
+  proxyPort: number,
+  tls: boolean,
+  desired: ProxyDesiredState
+): Promise<EnsureProxyResult> {
+  if (await isProxyUp(proxyPort, tls)) {
+    return { started: false };
+  }
+
+  const { startConfig, startPort } = resolveProxyStart(desired);
 
   const effectivePort = startPort ?? getDefaultPort(startConfig.useHttps);
   const needsSudo =
@@ -1342,7 +1799,7 @@ async function ensureProxyRunning(
     process.exit(1);
   }
 
-  console.log(colors.gray("Starting proxy..."));
+  console.error(colors.gray("Starting proxy..."));
   const proxyStartConfig = buildProxyStartConfig({
     useHttps: startConfig.useHttps,
     customCertPath: startConfig.customCertPath,
@@ -1361,7 +1818,7 @@ async function ensureProxyRunning(
   const startArgs = [getEntryScript(), "proxy", "start", ...proxyStartConfig.args];
 
   const result = spawnSync(process.execPath, startArgs, {
-    stdio: "inherit",
+    stdio: ["inherit", 2, "inherit"],
     timeout: SUDO_SPAWN_TIMEOUT_MS,
   });
 
@@ -1402,13 +1859,14 @@ async function runApp(
   tls: boolean,
   tlds: string[],
   force: boolean,
-  autoInfo?: { nameSource: string; prefix?: string; prefixSource?: string },
+  autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
 ) {
   let store = initialStore;
-  console.log(chalk.blue.bold(`\nportless\n`));
+  initialStore.recoverCorruptRoutesFile();
+  console.error(chalk.blue.bold(`\nportless\n`));
 
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
@@ -1471,6 +1929,7 @@ async function runApp(
     store = new RouteStore(stateDir, {
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
+    store.recoverCorruptRoutesFile();
     if (tls && !isCATrusted(stateDir)) {
       await handleTrust();
     }
@@ -1488,7 +1947,7 @@ async function runApp(
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
     tlds = runningConfig.tlds;
-    console.log(chalk.gray("-- Proxy is running"));
+    console.error(chalk.gray("  Proxy is running"));
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
@@ -1508,26 +1967,25 @@ async function runApp(
   }
 
   if (lanIp) {
-    console.log(chalk.gray(`-- ${hostnames.join(", ")} (LAN: ${lanIp})`));
+    console.error(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
   } else {
-    console.log(chalk.gray(`-- ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
+    console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (autoInfo) {
-    const baseName = autoInfo.prefix ? name.slice(autoInfo.prefix.length + 1) : name;
-    console.log(chalk.gray(`-- Name "${baseName}" (from ${autoInfo.nameSource})`));
+    console.error(chalk.gray(`  Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
     if (autoInfo.prefix) {
-      console.log(chalk.gray(`-- Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+      console.error(chalk.gray(`  Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
     }
   }
 
   const port = desiredPort ?? (await findFreePort());
   if (desiredPort) {
-    console.log(colors.green(`-- Using port ${port} (fixed)`));
+    console.error(colors.green(`  Using port ${port} (fixed)`));
   } else {
-    console.log(colors.green(`-- Using port ${port}`));
+    console.error(colors.green(`  Using port ${port}`));
   }
 
-  stopOrphanedProcessGroups(store);
+  await stopOrphanedProcessGroups(store);
 
   // Register route (--force kills the existing owner if any)
   let killedPids: number[] = [];
@@ -1542,21 +2000,21 @@ async function runApp(
     throw err;
   }
   if (killedPids.length > 0) {
-    console.log(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
+    console.error(colors.yellow(`Killed existing process(es): ${killedPids.join(", ")}`));
   }
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   const allUrls = formatUrls(hostnames, proxyPort, tls);
-  console.log(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
+  console.error(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
   for (const extraUrl of allUrls.slice(1)) {
-    console.log(chalk.cyan(`  also -> ${extraUrl}`));
+    console.error(chalk.cyan(`  also -> ${extraUrl}`));
   }
   if (allUrls.length > 1) {
-    console.log("");
+    console.error("");
   }
   if (lanIp) {
-    console.log(chalk.green(`  LAN -> ${finalUrl}`));
-    console.log(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+    console.error(chalk.green(`  LAN -> ${finalUrl}`));
+    console.error(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
   // Tailscale sharing: register with tailscale serve (or funnel).
@@ -1623,11 +2081,11 @@ async function runApp(
     // a successful register or exits the process on final failure.
     tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
     const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
-    console.log(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+    console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
     if (wantsFunnel) {
-      console.log(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+      console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
     } else {
-      console.log(chalk.gray("  (accessible from your tailnet)\n"));
+      console.error(chalk.gray("  (accessible from your tailnet)\n"));
     }
 
     try {
@@ -1651,8 +2109,8 @@ async function runApp(
         onExit: (code, signal) => handleTunnelExit(run, code, signal),
         configPath: path.join(store.dir, "cloudflared.yml"),
       });
-      console.log(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
-      console.log(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
+      console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
+      console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
 
       try {
         store.updateRoute(hostname, {
@@ -1729,11 +2187,13 @@ async function runApp(
   const caFragment = caEnv.NODE_EXTRA_CA_CERTS
     ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
     : "";
-  console.log(
+  console.error(
     chalk.gray(
       `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
     )
   );
+
+  const preexistingListener = await findPreexistingListener(port);
 
   for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
     process.once(signal, () => (stoppingTunnels = true));
@@ -1756,6 +2216,8 @@ async function runApp(
       ),
       ...caEnv,
     },
+    onExit: (childPid, code) =>
+      transferRoutesToDaemon(store, hostnames, port, childPid, preexistingListener, code === 0),
     onSpawn: (pid) => {
       const childStartTime = getProcessStartTime(pid) ?? undefined;
       for (const host of hostnames) {
@@ -1796,6 +2258,8 @@ interface ParsedRunArgs {
   appPort?: number;
   /** Override the inferred base name (from --name flag). */
   name?: string;
+  /** Override the worktree label (from --prefix flag). Empty disables it. */
+  prefix?: string;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -1807,13 +2271,11 @@ interface ParsedAppArgs extends ParsedRunArgs {
 
 function parseAppPort(value: string | undefined): number {
   if (!value || value.startsWith("--")) {
-    console.error(colors.red("Error: --app-port requires a port number."));
-    process.exit(1);
+    throw new UsageError("--app-port requires a port number.");
   }
   const port = parsePort(value);
   if (port === null) {
-    console.error(colors.red(`Error: Invalid app port "${value}". Must be 1-65535.`));
-    process.exit(1);
+    throw new UsageError(`Invalid app port "${value}". Must be 1-65535.`);
   }
   return port;
 }
@@ -1829,59 +2291,89 @@ function appPortFromEnv(): number | undefined {
   return port;
 }
 
-function applySharingFlag(flag: string): boolean {
-  if (flag === "--tailscale") {
-    process.env.PORTLESS_TAILSCALE = "1";
-    return true;
-  }
-  if (flag === "--funnel") {
+const LAN_FLAG_SPEC = { "--lan": "boolean", "--ip": "value" } as const;
+
+const SHARE_FLAG_SPEC = {
+  "--tailscale": "boolean",
+  "--funnel": "boolean",
+  "--ngrok": "boolean",
+  "--cloudflare": "boolean",
+} as const;
+
+const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--force": "boolean",
+  "--app-port": "value",
+  ...LAN_FLAG_SPEC,
+  ...SHARE_FLAG_SPEC,
+  "--help": "boolean",
+  "-h": "boolean",
+};
+
+const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--name": "value",
+  "--prefix": "text",
+  "--force": "boolean",
+  "--app-port": "value",
+  "--script": "value",
+  ...LAN_FLAG_SPEC,
+  ...SHARE_FLAG_SPEC,
+  "--help": "boolean",
+  "-h": "boolean",
+};
+
+const LEADING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...APP_FLAG_SPEC,
+  "--script": "value",
+};
+
+/** Sets the environment a LAN or sharing flag stands for. Rejects an --ip value that is not an IP address. */
+function applyGlobalFlag(flag: string, value?: string): void {
+  if (flag === "--tailscale") process.env.PORTLESS_TAILSCALE = "1";
+  else if (flag === "--funnel") {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
-    return true;
+  } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
+  else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
+  else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
+  else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
+    if (isIP(value ?? "") === 0) {
+      throw new UsageError(`${flag} requires an IP address, but got "${value}".`, [
+        "  portless --lan --ip 192.168.1.42 run <command>",
+      ]);
+    }
+    process.env[flag === "--ip" ? "PORTLESS_LAN_IP" : INTERNAL_LAN_IP_ENV] = value;
+    process.env.PORTLESS_LAN = "1";
   }
-  if (flag === "--ngrok") {
-    process.env.PORTLESS_NGROK = "1";
-    return true;
-  }
-  if (flag === "--cloudflare") {
-    process.env.PORTLESS_CLOUDFLARE = "1";
-    return true;
-  }
-  return false;
 }
 
-/**
- * Parse `run` subcommand arguments: `[--name <name>] [--force] [--] <command...>`
- *
- * `--name`, `--force`, and `--app-port` are recognized. `--` stops flag
- * parsing. Everything after the flag region is the child command, passed
- * through untouched.
- */
-function parseRunArgs(args: string[]): ParsedRunArgs {
-  let force = false;
-  let appPort: number | undefined;
-  let name: string | undefined;
-  let i = 0;
+/** Applies the --lan and --ip flags a command parsed. Rejects a repeated --ip. */
+function applyLanFlags(parsed: ParsedArgs): void {
+  for (const flag of Object.keys(LAN_FLAG_SPEC)) {
+    const values = parsed.values(flag);
+    if (values.length > 1) throw new UsageError(`${flag} can only be given once.`);
+    if (parsed.has(flag)) applyGlobalFlag(flag, values[0]);
+  }
+}
 
-  while (i < args.length && args[i].startsWith("-")) {
-    if (args[i] === "--") {
-      i++;
-      break;
-    } else if (args[i] === "--help" || args[i] === "-h") {
-      console.log(`
+function printRunHelp(): void {
+  console.log(`
 ${colors.bold("portless run")} - Infer project name and run through the proxy.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless run [options] [command...]")}
 
   When no command is given, runs the configured script (default: "dev")
-  from package.json.
+  from package.json. Value flags accept both --flag <value> and --flag=<value>.
 
   Ctrl+C is forwarded to the command. Portless waits for its process tree to
   exit and terminates remaining descendants after a short grace period.
 
+  On macOS and Linux, portless exits with the reason when another user owns
+  or can write to the state directory.
+
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
+  --prefix <label>       Override the worktree label (an empty value disables it)
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -1896,48 +2388,67 @@ ${colors.bold("Name inference (in order):")}
   3. Git repo root directory name
   4. Current directory basename
 
-  Use --name to override the inferred name while keeping worktree prefixes.
-  In git worktrees, the branch name is prepended as a subdomain prefix
-  (e.g. feature-auth.myapp.localhost).
+  In git worktrees the branch becomes a subdomain prefix (e.g.
+  feature-auth.myapp.localhost); the default label is its last segment. Set
+  "worktree.prefix" to "branch" for the whole branch, or
+  "worktree.hostnameTemplate" with {worktree} and optional {name}. Templates
+  must render valid DNS labels. --prefix and PORTLESS_PREFIX override detection;
+  empty disables it. Template labels over 63 characters are hash-truncated.
+  Duplicate proxied hostnames fail before apps start.
 
 ${colors.bold("Examples:")}
   portless run                        # Run dev script through proxy
   portless run next dev               # -> https://<project>.localhost
   portless run --name myapp next dev  # -> https://myapp.localhost
+  portless run --prefix pr-42 next dev  # -> https://pr-42.<project>.localhost
   portless run vite dev               # -> https://<project>.localhost
   portless run --app-port 3000 pnpm start
 `);
+}
+
+/**
+ * Parse `run` subcommand arguments: `[--name <name>] [--prefix <label>] [--force] [--] <command...>`
+ *
+ * `--name`, `--prefix`, `--force`, and `--app-port` are recognized. `--`
+ * stops flag parsing. Everything after the flag region is the child command,
+ * passed through untouched.
+ */
+function parseRunArgs(args: string[]): ParsedRunArgs {
+  let force = false;
+  let appPort: number | undefined;
+  let name: string | undefined;
+  let prefix: string | undefined;
+
+  const commandArgs = visitLeadingFlags("run", args, RUN_FLAG_SPEC, (flag, value) => {
+    if (flag === "--help" || flag === "-h") {
+      printRunHelp();
       process.exit(0);
-    } else if (args[i] === "--force") {
-      force = true;
-    } else if (args[i] === "--app-port") {
-      i++;
-      appPort = parseAppPort(args[i]);
-    } else if (args[i] === "--name") {
-      i++;
-      if (!args[i] || args[i].startsWith("-")) {
-        console.error(colors.red("Error: --name requires a name value."));
-        console.error(colors.cyan("  portless run --name <name> <command...>"));
-        process.exit(1);
-      }
-      name = args[i];
-    } else if (applySharingFlag(args[i])) {
-      // handled
-    } else {
-      console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(
-        colors.blue(
-          "Known flags: --name, --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare, --help"
-        )
-      );
-      process.exit(1);
     }
-    i++;
-  }
+    switch (flag) {
+      case "--force":
+        force = true;
+        break;
+      case "--app-port":
+        appPort = parseAppPort(value);
+        break;
+      case "--name":
+        name = value;
+        break;
+      case "--prefix":
+        prefix = value;
+        break;
+      default:
+        applyGlobalFlag(flag, value);
+    }
+  });
 
-  if (!appPort) appPort = appPortFromEnv();
-
-  return { force, appPort, name, commandArgs: args.slice(i) };
+  return {
+    force,
+    appPort: appPort ?? appPortFromEnv(),
+    name,
+    prefix,
+    commandArgs,
+  };
 }
 
 /**
@@ -1950,63 +2461,47 @@ ${colors.bold("Examples:")}
 function parseAppArgs(args: string[]): ParsedAppArgs {
   let force = false;
   let appPort: number | undefined;
-  let i = 0;
 
-  // Consume leading flags before name
-  while (i < args.length && args[i].startsWith("-")) {
-    if (args[i] === "--") {
-      i++;
-      break;
-    } else if (args[i] === "--force") {
-      force = true;
-    } else if (args[i] === "--app-port") {
-      i++;
-      appPort = parseAppPort(args[i]);
-    } else if (applySharingFlag(args[i])) {
-      // handled
-    } else {
-      console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(
-        colors.blue(
-          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
-        )
-      );
-      process.exit(1);
+  const readFlag = (flag: string, value: string | undefined): void => {
+    if (flag === "--help" || flag === "-h") {
+      printRunHelp();
+      process.exit(0);
     }
-    i++;
-  }
+    if (flag === "--force") force = true;
+    else if (flag === "--app-port") appPort = parseAppPort(value);
+    else applyGlobalFlag(flag, value);
+  };
 
-  // Next token is the app name
-  const name = args[i];
-  i++;
+  const afterLeading = visitLeadingFlags("", args, APP_FLAG_SPEC, readFlag);
+  const name = afterLeading[0];
+  let commandArgs = afterLeading.slice(1);
 
   // Allow flags immediately after name (e.g. `portless myapp --force next dev`)
-  while (i < args.length && args[i].startsWith("--")) {
-    if (args[i] === "--") {
-      i++;
-      break;
-    } else if (args[i] === "--force") {
-      force = true;
-    } else if (args[i] === "--app-port") {
-      i++;
-      appPort = parseAppPort(args[i]);
-    } else if (applySharingFlag(args[i])) {
-      // handled
-    } else {
-      console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(
-        colors.blue(
-          "Known flags: --force, --app-port, --tailscale, --funnel, --ngrok, --cloudflare"
-        )
-      );
-      process.exit(1);
-    }
-    i++;
+  if (commandArgs.length > 0 && (commandArgs[0].startsWith("--") || commandArgs[0] === "-h")) {
+    commandArgs = visitLeadingFlags("", commandArgs, APP_FLAG_SPEC, readFlag);
   }
 
-  if (!appPort) appPort = appPortFromEnv();
+  return {
+    force,
+    appPort: appPort ?? appPortFromEnv(),
+    name,
+    commandArgs,
+  };
+}
 
-  return { force, appPort, name, commandArgs: args.slice(i) };
+/**
+ * The app name in named mode and whether a child command follows it. Reads the
+ * arguments before flags are validated, so a misspelled command is reported
+ * instead of its own flags.
+ */
+function readNamedArgs(args: readonly string[]): { name: string | undefined; hasCommand: boolean } {
+  const end = args.indexOf("--");
+  const flagRegion = end === -1 ? args : args.slice(0, end);
+  const words = flagRegion.filter(
+    (arg, i) => !arg.startsWith("-") && flagRegion[i - 1] !== "--app-port"
+  );
+  if (end !== -1) words.push(...args.slice(end + 1));
+  return { name: words[0], hasCommand: words.length > 1 };
 }
 
 // ---------------------------------------------------------------------------
@@ -2015,17 +2510,7 @@ function parseAppArgs(args: string[]): ParsedAppArgs {
 
 function printHelp(): void {
   console.log(`
-${colors.bold("portless")} - Replace port numbers with stable, named .localhost URLs. For humans and agents.
-
-Eliminates port conflicts, memorizing port numbers, and cookie/storage
-clashes by giving each dev server a stable .localhost URL.
-
-${colors.bold("Install:")}
-  ${colors.cyan("npm install -g portless")}          Global (recommended)
-  ${colors.cyan("npm install -D portless")}          Project dev dependency
-
-${colors.bold("Requirements:")}
-  Node.js 24+
+${colors.bold("portless")} - Run dev servers at stable .localhost URLs.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless")}                         Run dev script through proxy
@@ -2033,211 +2518,68 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless run")}                     Same as above
   ${colors.cyan("portless run <cmd>")}               Run a command through the proxy
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
-  ${colors.cyan("portless proxy start")}             Start the proxy (HTTPS on port 443, daemon); rarely needed since it auto-starts on first run
+  ${colors.cyan("portless proxy start")}             Start the proxy
   ${colors.cyan("portless proxy stop")}              Stop the proxy
   ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
-  ${colors.cyan("portless get <name>")}              Print URL for a service (for cross-service refs)
-  ${colors.cyan("portless alias <name> <port>")}     Register a static route (e.g. for Docker)
+  ${colors.cyan("portless get <name>")}              Print URL for a service
+  ${colors.cyan("portless alias <name> <port>")}     Register a static route
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
+  ${colors.cyan("portless compose up [args...]")}    Run a Docker Compose project
   ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
-  ${colors.cyan("portless clean")}                   Remove portless state, trust entry, and hosts block
-  ${colors.cyan("portless prune")}                   Kill orphaned dev servers from crashed sessions
-  ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY} (fixes Safari)
+  ${colors.cyan("portless clean")}                   Remove portless state and trust entry
+  ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
+  ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
 
+Every command accepts --help or -h, which only prints help. After run <cmd>,
+compose <subcommand>, or --, they belong to the wrapped command.
+Value flags for run and named apps accept both --flag <value> and --flag=<value>.
+Forwarding arguments into a script with shell operators or a comment exits 2;
+run the command directly or make the script a single command. In Turbo mode
+only the root script is checked.
+
 ${colors.bold("Examples:")}
-  portless                            # Run dev script through proxy
-  portless                            # From monorepo root: start all apps
-  portless --script start             # Run "start" script instead of "dev"
-  portless myapp next dev             # -> https://myapp.localhost
-  portless run next dev               # -> https://<project>.localhost
-  portless run next dev               # in worktree -> https://<worktree>.<project>.localhost
-  portless service install            # Start HTTPS proxy on OS startup
-  portless service install --lan      # Persist LAN mode in the startup service
-  portless service install --wildcard # Persist wildcard routing in the startup service
-  portless get backend                # -> https://backend.localhost
-  portless doctor                     # Check proxy, routes, DNS, and CA trust
-  portless myapp --tailscale next dev # -> also https://<node>.ts.net (tailnet)
-  portless myapp --funnel next dev    # -> also https://<node>.ts.net (public)
-  portless myapp --ngrok next dev     # -> also https://<random>.ngrok.app (public)
-
-${colors.bold("Configuration (portless.json):")}
-  Optional. Portless works out of the box by running the "dev" script
-  from package.json. Use portless.json to override defaults.
-
-  Override name:   { "name": "myapp" }
-  Override script: { "name": "myapp", "script": "start" }
-  Monorepo:        { "apps": { "apps/web": { "name": "myapp" } } }
-  Turborepo:       Workspace roots use Turbo when turbo.json or turbo.jsonc is readable
-                   Set { "turbo": false } to use direct spawning
-
-${colors.bold("In package.json:")}
-  {
-    "scripts": {
-      "dev": "next dev"
-    }
-  }
-  Then run: portless
-  Or:       portless run
-  Or:       portless run next dev
-
-${colors.bold("How it works:")}
-  1. Start the proxy once (HTTPS on port 443 by default, auto-elevates with sudo)
-  2. Run your apps - they auto-start the proxy and register automatically
-     (apps get a random port in the 4000-4999 range via PORT)
-  3. Access via https://<name>.localhost
-  4. .localhost domains auto-resolve to 127.0.0.1
-  5. Frameworks that ignore PORT (Vite, VitePlus, VitePress, Astro, React
-     Router, Angular, Expo, React Native, Wrangler) get --port and, when
-     needed, --host flags injected automatically (--ip for Wrangler),
-     including through a package script whose command starts with the
-     framework. Only server commands (dev, serve, preview, start, a bare
-     vite, or vite [root]) get them; build, optimize, test and the like
-     reject them, and an invocation portless cannot classify is left alone
-     too. Expo --localhost, --lan and --tunnel modes are preserved while
-     the assigned port is still injected.
-     Portless also leaves a script alone when it is
-     compound (&&, |, ;), ends in a # comment, ends its own option list with
-     --, is env-prefixed (NODE_ENV=production vite), delegates to another
-     script, or is invoked with runner flags before the script name
-     (bun run --bun dev); set the port in those yourself
-  6. The proxy listens only on 127.0.0.1 and ::1 unless LAN mode is enabled
-  7. Proxy errors (404, 421 misdirected, 502, 508) are an HTML page for browsers and JSON
-     ({"error","upstream","message"}) for clients that do not accept text/html
-  Elevated proxy processes keep the invoking user's ~/.portless state directory.
-
-${colors.bold("HTTP/2 + HTTPS (default):")}
-  HTTPS with HTTP/2 multiplexing is enabled by default (faster page loads).
-  WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441
-  extended CONNECT), so dev server HMR works through the proxy.
-  On first use, portless generates a local CA and adds it to your
-  system trust store. No browser warnings. Disable with --no-tls.
-  On WSL, portless also adds the CA to the Windows user certificate store.
-  Linux containers on a WSL2 host use only the Linux trust store.
-
-${colors.bold("LAN mode:")}
-  Use --lan to make services accessible from other devices (phones,
-  tablets) on the same WiFi network via mDNS (.local domains).
-  Normal mode binds only to 127.0.0.1 and ::1.
-  LAN mode binds to 0.0.0.0 and ::.
-  Useful for testing React Native / Expo apps on real devices.
-  Expo keeps Metro's default LAN host behavior in this mode.
-  Auto-detected LAN IPs follow network changes automatically.
-  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  All proxy settings are persisted and reused on auto-start unless
-  overridden by explicit flags or env vars.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
-  If a proxy is already running with different explicit LAN/TLS/TLD settings,
-  stop it first.
-  ${colors.cyan("portless proxy start --lan")}
-  ${colors.cyan("portless proxy start --lan --https")}
-  ${colors.cyan("portless proxy start --lan --ip 192.168.1.42")}
-
-${colors.bold("Tailscale sharing:")}
-  Use --tailscale to share your dev server with teammates on your tailnet.
-  Each app is root-mounted on its own Tailscale HTTPS port (443, then 8443,
-  8444, etc.) so no basePath configuration is needed.
-  Use --funnel to expose your dev server to the public internet via
-  Tailscale Funnel. Requires Tailscale CLI to be installed and connected,
-  with Tailscale HTTPS certificates enabled. Funnel must also be enabled
-  on your tailnet.
-  ${colors.cyan("portless myapp --tailscale next dev")}
-  ${colors.cyan("portless myapp --funnel next dev")}
-
-${colors.bold("ngrok sharing:")}
-  Use --ngrok to expose your dev server to the public internet with ngrok.
-  Requires the ngrok CLI to be installed and authenticated.
-  ${colors.cyan("portless myapp --ngrok next dev")}
+  portless
+  portless -- --inspect
+  portless run next dev
+  portless --script start
+  portless myapp next dev
+  portless run --prefix pr-42 next dev
+  portless myapp --tailscale next dev
 
 ${colors.bold("Options:")}
-  run [--name <name>] <cmd>      Infer project name (or override with --name)
-                                Adds worktree prefix in git worktrees
-  --script <name>               Run a specific package.json script (default: dev)
-  -p, --port <number>           Port for the proxy (default: 443, or 80 with --no-tls)
-                                Standard ports auto-elevate with sudo when the bind needs root
-                                Failed elevation exits nonzero without changing ports
-                                unless --unprivileged is set
-  --unprivileged                Take a port below 1024 without sudo: bind the wildcard
-                                address and accept loopback peers only. Serves plain
-                                HTTP on port 80 unless --https is also given, and
-                                never writes the hosts file. Remembered after
-                                stop; PORTLESS_UNPRIVILEGED=0 switches back
-  --bind-all                    Listen on every network interface and accept peers
-                                other than this machine, such as Docker containers.
-                                Keeps the TLD and skips mDNS. Routes become reachable
-                                by any machine that can reach this host. Remembered
-                                after stop; PORTLESS_BIND_ALL=0 switches back
-  --no-tls                      Disable HTTPS (use plain HTTP on port 80)
-  --https                       Enable HTTPS (default, accepted for compatibility)
-  --lan                         Enable LAN mode (mDNS .local, for real device testing)
-  --ip <address>                Pin a specific LAN IP (disables auto-follow; use with --lan)
-  --cert <path>                 Use a custom TLS certificate
-  --key <path>                  Use a custom TLS private key
-  --foreground                  Run proxy in foreground (for debugging)
-  --tld <tld>                   Use a custom TLD instead of .localhost (e.g. test, dev.example.com); repeat for more
-  --wildcard                    Allow unregistered subdomains to fall back to the most specific parent route
-  --state-dir <path>            Use a custom state directory with service install
-  --app-port <number>           Use a fixed port for the app (skip auto-assignment)
-  --tailscale                   Share the app on your Tailscale network (tailnet)
+  --script <name>               Select a package.json script in zero-argument mode
+  --lan                         Enable LAN access for app commands
+  --ip <address>                Pin the LAN IP (implies --lan)
+  --tailscale                   Share the app on your tailnet
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
-  --cloudflare                  Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
+  --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
+  --                            Stop flag parsing and pass remaining arguments to the app
+
+${colors.bold("Options for run and <name> <command>:")}
+  --name <name>                 Set the app name or bypass command dispatch
   --force                       Kill the existing process and take over its route
-  --name <name>                 Use <name> as the app name (bypasses subcommand dispatch)
-  --                            Stop flag parsing; everything after is passed to the child
+  --app-port <number>           Use a fixed port for the app
 
 ${colors.bold("Environment variables:")}
-  PORTLESS_PORT=<number>        Override the default proxy port (e.g. in .bashrc)
-  PORTLESS_APP_PORT=<number>    Use a fixed port for the app (same as --app-port)
-  PORTLESS_HTTPS=0              Disable HTTPS (same as --no-tls)
-  PORTLESS_LAN=1                Enable LAN mode when set to 1 (set in .bashrc / .zshrc)
-  PORTLESS_LAN_IP=<address>     Pin a specific LAN IP for LAN mode
-  PORTLESS_TLD=<tld>[,<tld>]    Use one or more TLDs (e.g. localhost,test,dev.example.com)
-  PORTLESS_WILDCARD=1           Allow unregistered subdomains to fall back to the most specific parent route
-  PORTLESS_UNPRIVILEGED=1       Take a port below 1024 without sudo (same as --unprivileged)
-  PORTLESS_BIND_ALL=1           Listen on all interfaces and accept any peer (same as --bind-all)
-  PORTLESS_SYNC_HOSTS=0         Disable auto-sync of ${HOSTS_DISPLAY} (on by default)
-  PORTLESS_TAILSCALE=1          Share apps on your Tailscale network (same as --tailscale)
-  PORTLESS_FUNNEL=1             Share apps publicly via Tailscale Funnel (same as --funnel)
-  PORTLESS_NGROK=1              Share apps publicly via ngrok (same as --ngrok)
-  PORTLESS_CLOUDFLARE=1         Share apps publicly via Cloudflare (same as --cloudflare)
-  PORTLESS_STATE_DIR=<path>     Override the state directory
-  PORTLESS=0                    Run command directly without proxy
+  PORTLESS=0                    Run app commands directly without the proxy
+  PORTLESS_PORT=<number>        Set the default proxy port
+  PORTLESS_APP_PORT=<number>    Set a fixed port for the app
+  PORTLESS_HTTPS=0              Disable HTTPS for the proxy
+  PORTLESS_LAN=1                Enable LAN mode
+  PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
+  PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
 
-${colors.bold("Child process environment:")}
-  PORT                          Ephemeral port the child should listen on
-  HOST                          Usually 127.0.0.1 (omitted for Expo in LAN mode)
-  PORTLESS_URL                  Primary public URL of the app
-  PORTLESS_LAN                  Set to 1 when proxy is in LAN mode
-  PORTLESS_TAILSCALE_URL        Tailscale URL of the app (when --tailscale is active)
-  PORTLESS_NGROK_URL            ngrok URL of the app (when --ngrok is active)
-  PORTLESS_CLOUDFLARE_URL       Cloudflare URL of the app (when --cloudflare is active)
-  NODE_EXTRA_CA_CERTS           Path to the portless CA (set when HTTPS is active)
-
-${colors.bold("Safari / DNS:")}
-  .localhost subdomains auto-resolve in Chrome, Firefox, and Edge.
-  Safari relies on the system DNS resolver, which may not handle them.
-  Auto-syncs ${HOSTS_DISPLAY} for route hostnames by default (including .localhost,
-  custom TLDs, and LAN .local). Set PORTLESS_SYNC_HOSTS=0 to disable. If a route
-  hostname will not resolve, the command that registered it warns instead of
-  failing silently. Manual sync reconciles the managed entries with current routes,
-  removes stale entries when there are no routes, and requires a successful read
-  before writing. Every write is verified; a failed verification uses the normal
-  hosts sync failure path. To sync manually:
-    ${colors.cyan("portless hosts sync")}
-  Clean up later with:
-    ${colors.cyan("portless hosts clean")}
-
-${colors.bold("Skip portless:")}
-  PORTLESS=0 pnpm dev           # Runs command directly without proxy
-
-${colors.bold("Reserved names:")}
-  run, get, alias, hosts, list, doctor, trust, clean, prune, proxy, service, mcp are subcommands and
-  cannot be used as app names directly. Use "portless run" to infer the name,
-  or "portless --name <name>" to force any name including reserved ones.
+Precedence: flags override PORTLESS_* variables, which override portless.json.
+Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
+unexpected proxy exit. A normal portless proxy stop clears them.
+Proxy options: portless proxy --help
+Run options: portless run --help
+Run portless <command> --help or visit https://portless.sh for details.
 `);
   process.exit(0);
 }
@@ -2247,30 +2589,54 @@ function printVersion(): void {
   process.exit(0);
 }
 
-async function handleTrust(): Promise<void> {
+function printTrustHelp(): void {
+  console.log(`
+${colors.bold("portless trust")} - Add the local CA to the system trust store.
+
+Generates the local CA first if it does not exist yet. Browsers and other
+clients then accept portless HTTPS certificates. The OS may ask for
+authorization or sudo.
+
+On macOS and Linux, the state directory and each parent directory must be
+owned by you or root and not writable by group or others. A sticky parent
+such as /tmp is allowed. Otherwise trust exits with the reason.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless trust")}
+
+${colors.bold("Options:")}
+  --help, -h             Show this help
+`);
+}
+
+async function handleTrust(args: string[] = []): Promise<void> {
+  parseCommandArgs("trust", args.slice(1), {}, 0);
   const { dir, port, tls } = await discoverState();
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  if (!fs.existsSync(dir)) ensureStateDir(dir);
+  const unsafe = explainUnsafeStateDir(dir);
+  if (unsafe) {
+    console.error(colors.red(`Cannot trust the CA in ${dir}: ${unsafe}`));
+    process.exit(1);
   }
   const { caGenerated } = ensureCerts(dir);
   if (caGenerated) {
-    console.log(colors.gray("Generated local CA certificate."));
+    console.error(colors.gray("Generated local CA certificate."));
     // A running proxy keeps the previous CA and the TLS contexts it already
     // built in memory, so it presents the old chain until it restarts.
     if (await isProxyRunning(port, tls)) {
       const portFlag = port !== getDefaultPort(tls) ? ` -p ${port}` : "";
-      console.log(
+      console.error(
         colors.yellow("The running proxy still serves certificates from the previous CA.")
       );
-      console.log(
+      console.error(
         colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
       );
     }
   }
   const result = trustCA(dir);
   if (result.trusted) {
-    console.log(colors.green("Local CA added to system trust store."));
-    console.log(colors.gray("Browsers will now trust portless HTTPS certificates."));
+    console.error(colors.green("Local CA added to system trust store."));
+    console.error(colors.gray("Browsers will now trust portless HTTPS certificates."));
     return;
   }
 
@@ -2279,7 +2645,9 @@ async function handleTrust(): Promise<void> {
   const isPermissionError =
     result.error?.includes("Permission denied") || result.error?.includes("EACCES");
   if (isPermissionError && !isWindows && process.getuid?.() !== 0) {
-    console.log(colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo..."));
+    console.error(
+      colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo...")
+    );
     const sudoResult = spawnSync(
       "sudo",
       [
@@ -2303,9 +2671,130 @@ async function handleTrust(): Promise<void> {
   process.exit(1);
 }
 
-async function handleClean(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+/** Parse the internal allowlist of cleanup steps requested by a sudo retry. */
+function parseCleanupSteps(value: string | undefined): CleanupStep[] | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const requested = new Set(trimmed.split(",").map((step) => step.trim()));
+  for (const step of requested) {
+    if (!CLEANUP_STEP_ORDER.includes(step as CleanupStep)) {
+      throw new Error(`Unknown cleanup step: ${step}`);
+    }
+  }
+  return CLEANUP_STEP_ORDER.filter((step) => requested.has(step));
+}
+
+/** Parse the exact state directories approved by the parent clean invocation. */
+function parseCleanupDirs(value: string | undefined): string[] {
+  if (!value) return [];
+  const parsed: unknown = JSON.parse(value);
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some((entry) => typeof entry !== "string" || !path.isAbsolute(entry))
+  ) {
+    throw new Error("Invalid cleanup directories");
+  }
+  return [...new Set(parsed)];
+}
+
+function cleanupStepLabel(step: CleanupStep): string {
+  if (step === "ca") return "CA trust removal";
+  if (step === "files") return "state files";
+  return "hosts file";
+}
+
+/** Whether CA identity must survive because removal or trust refresh is unfinished. */
+function shouldPreserveCAIdentity(stateDir: string, failedCAStateDirs: Set<string>): boolean {
+  return (
+    failedCAStateDirs.has(stateDir) || isCATrustRefreshPending(stateDir) || isCATrusted(stateDir)
+  );
+}
+
+/** Whether the unprivileged process can inspect a state directory. */
+function canInspectStateDir(stateDir: string): boolean {
+  try {
+    fs.accessSync(stateDir, fs.constants.R_OK | fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Remove allowlisted state files and return every path that remains. */
+function removeStateFilesForCleanup(
+  stateDirs: string[],
+  failedCAStateDirs: Set<string>,
+  preserveProxyRuntime: boolean
+): string[] {
+  const failures = new Set<string>();
+  for (const stateDir of stateDirs) {
+    const removed = removePortlessStateFiles(stateDir, {
+      preserveCAIdentity:
+        preserveProxyRuntime || shouldPreserveCAIdentity(stateDir, failedCAStateDirs),
+      preserveProxyRuntime,
+    });
+    for (const file of removed) failures.add(file);
+  }
+  return [...failures];
+}
+
+/** Run the given cleanup steps against the state directories and report what is left. */
+function runCleanupSteps(
+  steps: readonly CleanupStep[],
+  stateDirs: string[],
+  preserveProxyRuntime: boolean
+) {
+  const caResults = steps.includes("ca")
+    ? attemptCATrustRemovalForCleanup(stateDirs, untrustCA)
+    : new Map<string, CATrustRemovalResult>();
+  const failedCAStateDirs = new Set(
+    [...caResults].filter(([, result]) => !result.removed).map(([stateDir]) => stateDir)
+  );
+  const stateFailures = steps.includes("files")
+    ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime)
+    : [];
+  const hostsCleaned = !steps.includes("hosts") || cleanHostsFile();
+  return { caResults, failedCAStateDirs, stateFailures, hostsCleaned };
+}
+
+/**
+ * Retry only the failed privileged cleanup steps under sudo. The elevated
+ * process receives the exact approved state directories and runs the internal
+ * allowlist instead of the full clean command.
+ */
+function runElevatedCleanup(
+  steps: CleanupStep[],
+  stateDirs: string[],
+  preserveProxyRuntime: boolean
+): number | null {
+  if (steps.length === 0) return 0;
+  const labels = steps.map(cleanupStepLabel).join(", ");
+  console.log(colors.yellow(`Cleanup needs elevated privileges. Requesting sudo for ${labels}...`));
+  const home = process.env.HOME;
+  const result = spawnSync(
+    "sudo",
+    [
+      "env",
+      ...(home ? [`HOME=${home}`] : []),
+      `${CLEAN_ELEVATED_STEPS_ENV}=${steps.join(",")}`,
+      `${CLEAN_ELEVATED_DIRS_ENV}=${JSON.stringify(stateDirs)}`,
+      ...(preserveProxyRuntime ? [`${CLEAN_ELEVATED_PRESERVE_PROXY_ENV}=1`] : []),
+      process.execPath,
+      getEntryScript(),
+      "clean",
+      "--yes",
+    ],
+    { stdio: "inherit", timeout: SUDO_SPAWN_TIMEOUT_MS }
+  );
+  if (result.error) {
+    console.error(colors.red(`Could not run sudo: ${result.error.message}`));
+    return null;
+  }
+  return result.status;
+}
+
+function printCleanHelp(): void {
+  console.log(`
 ${colors.bold("portless clean")} - Remove portless artifacts from this machine.
 
 Stops the proxy if it is running, uninstalls the startup service if installed,
@@ -2318,24 +2807,78 @@ Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
 fails, the CA certificate and key are retained so clean can safely retry.
 
-macOS/Linux may prompt for sudo when the proxy, trust store, or ${HOSTS_DISPLAY}
-require elevated privileges. On Windows, run as Administrator if needed.
+On macOS and Linux, a state directory that another user owns or can write to
+is left alone. Clean prints the reason and exits nonzero. A /tmp/portless
+directory that fails the check is skipped without an error.
+
+On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
+or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
+steps against the same allowlisted state directories. If the proxy cannot be
+confirmed stopped, its PID, port, runtime marker files, and CA files are kept
+and the CA stays trusted. On Windows, run as Administrator if needed.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless clean")}
 
 ${colors.bold("Options:")}
+  --yes, -y              Confirm cleanup without prompting
   --help, -h             Show this help
 `);
-    process.exit(0);
+}
+
+async function handleClean(args: string[]): Promise<void> {
+  const parsed = parseCommandArgs(
+    "clean",
+    args.slice(1),
+    { "--yes": "boolean", "-y": "boolean" },
+    0
+  );
+
+  const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
+  if (requestedCleanupSteps) {
+    if (!parsed.has("--yes") && !parsed.has("-y")) {
+      throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
+    }
+    const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
+    const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
+    const cleanableDirs = approvedDirs.filter(isCleanableStateDir);
+    const left = runCleanupSteps(requestedCleanupSteps, cleanableDirs, preserveProxyRuntime);
+    const clean =
+      cleanableDirs.length === approvedDirs.length &&
+      left.failedCAStateDirs.size === 0 &&
+      left.stateFailures.length === 0 &&
+      left.hostsCleaned;
+    process.exitCode = clean ? 0 : 1;
+    return;
   }
 
-  if (args.length > 1) {
-    console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
-    console.error(colors.cyan("  portless clean --help"));
-    process.exit(1);
+  const collectedStateDirs = collectStateDirsForCleanupWithFailures();
+  const stateDirs = collectedStateDirs.dirs;
+  console.error("Clean will:");
+  console.error("  Stop the proxy");
+  console.error("  Remove the startup service if installed");
+  console.error("  Remove the CA from the trust store");
+  console.error(
+    `  Delete known state files in: ${stateDirs.join(", ") || "no existing state directories"}`
+  );
+  console.error(`  Remove the portless block from ${HOSTS_DISPLAY}`);
+  for (const failed of collectedStateDirs.failures) {
+    const reason = explainUnsafeStateDir(failed) ?? "it cannot be resolved";
+    console.error(colors.yellow(`  Leave ${failed} alone: ${reason}`));
   }
 
+  if (!parsed.has("--yes") && !parsed.has("-y")) {
+    if (!process.stdin.isTTY || !process.stderr.isTTY || process.env.CI) {
+      throw new UsageError("Confirmation required.", ["Re-run: portless clean --yes"]);
+    }
+    const answer = await prompt("Continue? [y/N] ");
+    if (answer !== "y" && answer !== "yes") {
+      console.error("Clean canceled.");
+      process.exit(1);
+    }
+  }
+
+  let problems = collectedStateDirs.failures.length;
   const serviceResult = tryUninstallService(getEntryScript());
   if (serviceResult.removed) {
     console.log(colors.green("Removed startup service."));
@@ -2354,6 +2897,7 @@ ${colors.bold("Options:")}
       process.exit(1);
     }
     console.warn(colors.yellow(message));
+    problems++;
   }
 
   console.log(colors.cyan("Stopping proxy if it is running..."));
@@ -2361,80 +2905,147 @@ ${colors.bold("Options:")}
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  await stopProxy(store, port, tls);
+  let proxyStopped = await stopProxy(store, port, tls);
+  if (!proxyStopped) {
+    problems++;
+  } else if (await isProxyRunning(port, tls)) {
+    console.error(colors.red(`Proxy is still running on port ${port}. Stop it and retry clean.`));
+    proxyStopped = false;
+    problems++;
+  }
+  const preserveProxyRuntime = !proxyStopped;
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  const routesForClean = store.loadRoutesRaw();
+  let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  try {
+    routesForClean = store.untrustedReason() ? [] : store.loadRoutesRaw();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
+    problems++;
+  }
   for (const route of routesForClean) {
     if (route.tailscaleHttpsPort) {
       try {
         unregisterTailscale(route);
         console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
-      } catch {
-        // Tailscale may not be installed; non-fatal
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn(colors.yellow(message));
+        problems++;
       }
     }
-    for (const t of stopRecordedTunnels(route)) {
+    for (const t of stopRecordedTunnels(route, true)) {
       console.log(colors.green(`Stopped ${t.label} tunnel for ${route.hostname}.`));
     }
   }
 
-  const stateDirs = collectStateDirsForCleanup();
-  const failedCAStateDirs = new Set<string>();
-  const caRemovalResults = attemptCATrustRemovalForCleanup(stateDirs, untrustCA);
+  if (!proxyStopped) {
+    console.warn(colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed."));
+  }
+  const outcome = runCleanupSteps(
+    proxyStopped ? CLEANUP_STEP_ORDER : ["files", "hosts"],
+    stateDirs,
+    preserveProxyRuntime
+  );
+  const { caResults: caRemovalResults, failedCAStateDirs } = outcome;
+  let { stateFailures, hostsCleaned } = outcome;
+
+  const retrySteps: CleanupStep[] = [];
+  if (failedCAStateDirs.size > 0) retrySteps.push("ca");
+  if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
+  if (!hostsCleaned) retrySteps.push("hosts");
+  if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
+    const elevatedStatus = runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
+    if (elevatedStatus === 0) {
+      failedCAStateDirs.clear();
+      if (retrySteps.includes("files")) stateFailures = [];
+      if (retrySteps.includes("hosts")) hostsCleaned = true;
+    } else {
+      for (const stateDir of [...failedCAStateDirs]) {
+        if (
+          canInspectStateDir(stateDir) &&
+          !isCATrustRefreshPending(stateDir) &&
+          !isCATrusted(stateDir)
+        ) {
+          failedCAStateDirs.delete(stateDir);
+        }
+      }
+      if (retrySteps.includes("ca") || retrySteps.includes("files")) {
+        stateFailures = removeStateFilesForCleanup(
+          stateDirs,
+          failedCAStateDirs,
+          preserveProxyRuntime
+        );
+      }
+      if (!hostsCleaned) hostsCleaned = cleanHostsFile();
+    }
+  }
+
   for (const [stateDir, untrustResult] of caRemovalResults) {
-    if (untrustResult.removed) {
+    if (!failedCAStateDirs.has(stateDir)) {
       console.log(colors.green("Removed local CA from the system trust store."));
     } else {
-      failedCAStateDirs.add(stateDir);
+      problems++;
       console.warn(
         colors.yellow(
           `Could not remove CA from trust store: ${untrustResult.error ?? "unknown error"}\n` +
-            `Try: sudo portless clean (Linux), or delete the certificate manually.`
+            `Delete the certificate manually, then rerun clean.`
         )
       );
     }
   }
 
-  for (const stateDir of stateDirs) {
-    removePortlessStateFiles(stateDir, {
-      preserveCAIdentity: failedCAStateDirs.has(stateDir),
-    });
+  for (const file of stateFailures) {
+    console.warn(colors.yellow(`Could not remove state file: ${file}`));
   }
-  console.log(colors.green("Removed portless state files from known state directories."));
+  problems += stateFailures.length;
+  if (stateFailures.length === 0) {
+    console.log(colors.green("Removed portless state files from known state directories."));
+  }
   if (failedCAStateDirs.size > 0) {
     console.warn(
       colors.yellow("Retained CA identity files so trust removal can be retried safely.")
     );
   }
 
-  if (cleanHostsFile()) {
+  if (hostsCleaned) {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
-  } else if (!isWindows && process.getuid?.() !== 0) {
-    if (!runCleanWithSudo(`Updating ${HOSTS_DISPLAY} requires elevated privileges.`)) {
-      console.error(colors.red(`Failed to update ${HOSTS_DISPLAY}. Run: sudo portless clean`));
-      process.exit(1);
-    }
   } else {
     console.warn(
       colors.yellow(
         `Could not remove portless entries from ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`
       )
     );
+    problems++;
   }
 
-  console.log(colors.green("Clean finished."));
+  if (problems > 0) {
+    console.error(`Clean finished with ${problems} problem(s).`);
+    process.exitCode = 1;
+  } else {
+    console.log(colors.green("Clean finished."));
+  }
 }
 
-async function handlePrune(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
-${colors.bold("portless prune")} - Kill orphaned dev servers left behind by crashed portless sessions.
+function printPruneHelp(): void {
+  console.log(`
+${colors.bold("portless prune")} - Clean up routes left by crashed portless sessions.
 
-When portless is killed with SIGKILL (kill -9) or crashes, child dev servers
-may survive and continue holding their ports. This command finds those orphans
-by checking routes whose owning CLI process is dead but whose port is still in
-use, then terminates them and cleans up the stale route entries.
+Finds routes whose owning portless process is gone, including groups kept from
+an earlier run. On macOS and Linux, it signals the recorded dev server process
+group only if its leader matches, or a previously recorded surviving member
+matches on retry, and reports the group stopped only after every member has
+exited. A group that outlives the signal keeps its route and shares even after
+it closes its port, and the member that survived is recorded so a retry with
+--force can stop it. A group that cannot be verified is reported and kept,
+never signaled, except that a member holding its port while the recorded
+leader is gone is recorded so --force can retry it. Stale routes and their
+Tailscale and tunnel shares are removed only once the recorded group is gone. A
+port holder that cannot be proven part of the recorded group is reported and
+kept, never killed. On Windows, process groups cannot be verified or signaled.
+Recorded ngrok and cloudflared tunnels are stopped only when their executable
+names match, including on Windows.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
@@ -2444,105 +3055,160 @@ ${colors.bold("Options:")}
   --force                Send SIGKILL instead of SIGTERM
   --help, -h             Show this help
 `);
-    process.exit(0);
-  }
+}
 
-  const forceKill = args.includes("--force");
+async function handlePrune(args: string[]): Promise<void> {
+  const forceKill = parseCommandArgs("prune", args.slice(1), { "--force": "boolean" }, 0).has(
+    "--force"
+  );
 
   const { dir } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
 
-  const stale = store.pruneStaleRoutes();
+  const unsafe = store.untrustedReason();
+  if (unsafe) {
+    console.error(colors.red(`Cannot prune routes recorded in ${dir}: ${unsafe}`));
+    console.error(colors.blue("Nothing was signaled."));
+    process.exit(1);
+  }
+
+  const stale = store.findStaleRoutes();
   if (stale.length === 0) {
     console.log("No orphaned routes found.");
     return;
   }
+  const liveTailscalePorts = new Set(
+    store
+      .loadRoutes()
+      .flatMap((route) =>
+        route.tailscaleHttpsPort === undefined ? [] : [route.tailscaleHttpsPort]
+      )
+  );
 
+  let pruned = 0;
+  let skipped = 0;
+  const signal = forceKill ? "SIGKILL" : "SIGTERM";
+  const stops = await stopRecordedGroups(stale, signal);
   for (const route of stale) {
-    if (route.tailscaleHttpsPort) {
+    const pgid = route.childPgid;
+    const stop = pgid === undefined ? undefined : stops.get(pgid);
+    if (stop?.state === "survived") {
+      if (stop.survivor) store.recordStaleOrphan(route, stop.survivor.pid, stop.survivor.startTime);
+      skipped++;
+      console.log(
+        `  ${route.hostname} :${route.port} - process group ${pgid} did not exit${
+          forceKill
+            ? " after SIGKILL; route kept"
+            : "; route kept. Retry with portless prune --force"
+        }`
+      );
+      continue;
+    }
+    if (stop?.state === "unverified") {
+      const leaderGone = pgid !== undefined && !isPidAlive(pgid);
+      const holder = leaderGone
+        ? findPidsOnPort(route.port).find((pid) => getProcessGroupId(pid) === pgid)
+        : undefined;
+      const holderStartTime = holder === undefined ? null : getProcessStartTime(holder);
+      const recorded =
+        holder !== undefined &&
+        holderStartTime !== null &&
+        store.recordStaleOrphan(route, holder, holderStartTime);
+      skipped++;
+      console.log(
+        recorded
+          ? `  ${route.hostname} :${route.port} - process group ${pgid} outlived its leader; route kept and process ${holder} recorded. Retry with portless prune --force`
+          : `  ${route.hostname} :${route.port} - process group ${pgid} could not be verified; route kept and nothing was killed`
+      );
+      continue;
+    }
+    const holders = findPidsOnPort(route.port);
+    const held = holders.length > 0 || (await isPortListening(route.port));
+    if (!store.removeStaleRoute(route.hostname, route.pid)) {
+      console.log(
+        `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
+      );
+      skipped++;
+      continue;
+    }
+    pruned++;
+    const holder = holders.length > 0 ? `PID ${holders.join(", ")}` : "another process";
+    console.log(
+      `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
+    );
+    if (route.tailscaleHttpsPort && !liveTailscalePorts.has(route.tailscaleHttpsPort)) {
       try {
         unregisterTailscale(route);
         console.log(
           `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
         );
       } catch {
-        // Tailscale CLI may not be installed; non-fatal during prune
+        console.warn(colors.yellow(`  ${route.hostname} - could not remove tailscale serve`));
       }
     }
-    for (const t of stopRecordedTunnels(route)) {
+    for (const t of stopRecordedTunnels(route, true)) {
       console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
   }
 
   let killed = 0;
-  const signal = forceKill ? "SIGKILL" : "SIGTERM";
-  const killedGroups = new Set<number>();
-  for (const route of stale) {
-    const pgid = route.childPgid;
-    if (
-      pgid &&
-      !killedGroups.has(pgid) &&
-      killOrphanedProcessGroup(pgid, route.childStartTime, signal)
-    ) {
-      killedGroups.add(pgid);
-      killed++;
-      console.log(`  ${route.hostname} - killed process group ${pgid} (${signal})`);
-    }
+  for (const [pgid, stop] of stops) {
+    if (stop.state !== "stopped" || !stop.signaled) continue;
+    killed++;
+    console.log(`  killed process group ${pgid} (${signal})`);
   }
-
-  for (const route of stale) {
-    if (route.childPgid && killedGroups.has(route.childPgid)) continue;
-    const pids = findPidsOnPort(route.port);
-    if (pids.length === 0) {
-      console.log(`  ${route.hostname} :${route.port} - route removed (port already free)`);
-      continue;
-    }
-    for (const pid of pids) {
-      try {
-        process.kill(pid, signal);
-        killed++;
-        console.log(`  ${route.hostname} :${route.port} - killed PID ${pid} (${signal})`);
-      } catch {
-        console.log(`  ${route.hostname} :${route.port} - PID ${pid} already exited`);
-      }
-    }
-  }
-
-  const routeWord = stale.length === 1 ? "route" : "routes";
+  const routeWord = pruned === 1 ? "route" : "routes";
   const procWord = killed === 1 ? "process" : "processes";
+  const skippedSummary =
+    skipped === 0 ? "" : `, skipped ${skipped} ${skipped === 1 ? "route" : "routes"}`;
   console.log(
     colors.green(
-      `\nPruned ${stale.length} stale ${routeWord}, killed ${killed} orphaned ${procWord}.`
+      `\nPruned ${pruned} stale ${routeWord}, killed ${killed} orphaned ${procWord}${skippedSummary}.`
     )
   );
 }
 
-async function handleList(): Promise<void> {
+async function handleList(args: string[]): Promise<void> {
+  const json = parseCommandArgs("list", args.slice(1), { "--json": "boolean" }, 0).has("--json");
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
-  listRoutes(store, port, tls);
+  listRoutes(store, port, tls, json);
 }
 
-async function handleGet(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printListHelp(): void {
+  console.log(`
+${colors.bold("portless list")} - Show active routes and their uptime.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless list [--json]")}
+
+${colors.bold("Options:")}
+  --json                 Print routes as JSON, including upstream settings when set
+  --help, -h             Show this help
+`);
+}
+
+function printGetHelp(): void {
+  console.log(`
 ${colors.bold("portless get")} - Print the URL for a service.
 
 ${colors.bold("Usage:")}
   ${colors.cyan("portless get <name>")}
 
-Constructs the URL using the same hostname and worktree logic as
-"portless run", then prints it to stdout. Useful for wiring services
-together:
+Uses the worktree config in the current directory, including workspace defaults,
+not the named app's package. Run from the target package for its per-app options.
+Invalid config fails instead of printing a guessed URL.
+PORTLESS_PREFIX="" skips worktree naming.
 
   BACKEND_URL=$(portless get backend)
 
 ${colors.bold("Options:")}
-  --no-worktree          Skip worktree prefix detection
+  --no-worktree          Skip config loading and worktree naming
+  --json                 Print name, hostname, and URL as JSON
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -2550,115 +3216,217 @@ ${colors.bold("Examples:")}
   portless get backend                  # in worktree -> https://auth.backend.localhost
   portless get backend --no-worktree    # -> https://backend.localhost (skip worktree)
 `);
-    process.exit(0);
+}
+
+async function handleGet(args: string[]): Promise<void> {
+  const parsed = parseCommandArgs(
+    "get",
+    args.slice(1),
+    { "--no-worktree": "boolean", "--json": "boolean" },
+    1
+  );
+  const name = parsed.positionals[0];
+  if (!name) {
+    throw new UsageError("Missing service name.", [
+      "Usage:",
+      "  portless get <name>",
+      "Example:",
+      "  portless get backend",
+    ]);
   }
 
-  let skipWorktree = false;
-  const positional: string[] = [];
-
-  for (let i = 1; i < args.length; i++) {
-    if (args[i] === "--no-worktree") {
-      skipWorktree = true;
-    } else if (args[i].startsWith("-")) {
-      console.error(colors.red(`Error: Unknown flag "${args[i]}".`));
-      console.error(colors.blue("Known flags: --no-worktree, --help"));
-      process.exit(1);
-    } else {
-      positional.push(args[i]);
-    }
-  }
-
-  if (positional.length === 0) {
-    console.error(colors.red("Error: Missing service name."));
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless get <name>"));
-    console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless get backend"));
-    process.exit(1);
-  }
-
-  const name = positional[0];
-  const worktree = skipWorktree ? null : detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${name}` : name;
+  const skipWorktree = parsed.has("--no-worktree");
+  const json = parsed.has("--json");
+  const appConfig = skipWorktree ? null : loadAppConfig();
+  const worktree = skipWorktree
+    ? null
+    : detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
+  const effectiveName = applyWorktreePrefix(name, worktree, appConfig?.worktree?.hostnameTemplate);
 
   const { port, tls, tlds } = await discoverState();
   const hostname = buildHostnames(effectiveName, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
   // Print bare URL to stdout so it works in $(portless get <name>)
-  process.stdout.write(url + "\n");
+  process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
 }
 
-async function handleAlias(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printAliasHelp(): void {
+  console.log(`
 ${colors.bold("portless alias")} - Register a static route for services not managed by portless.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless alias <name> <port>")}        Register a route
-  ${colors.cyan("portless alias --remove <name>")}      Remove a route
-  ${colors.cyan("portless alias <name> <port> --force")} Override existing route
+  ${colors.cyan("portless alias <name> <port>")}                 Register a route
+  ${colors.cyan("portless alias <name> <port> --upstream https")}  Use HTTPS to the local backend
+  ${colors.cyan("portless alias --remove <name>")}               Remove static routes, preserve process-owned routes
+  ${colors.cyan("portless alias <name> <port> --force")}          Take over a running app's route
+
+${colors.bold("Options:")}
+  --force                   Take over a running app's route and stop the app
+  --tld <tld>               Only these TLDs (repeatable, comma-separated); adding needs configured ones
+  --upstream <value>        https, https://<host>[:<port>], or http://<host>[:<port>]
+  --help, -h                Show this help
+
+--remove also removes the name on TLDs the proxy no longer serves, taking the
+last label of such a hostname as its TLD. For a former multi-segment TLD, pass
+--tld or the full hostname.
+
+Registering a name that already has an alias replaces that alias, including
+its upstream, without --force.
+
+On macOS and Linux, portless exits with the reason when another user owns or
+can write to the state directory.
+
+The positional port always dials loopback. The value "https" enables TLS and
+preserves Host. An "https://" authority enables TLS and overrides Host with the full
+authority, including its optional port. SNI uses a DNS hostname without the port;
+IP addresses are not sent as SNI. An "http://" authority overrides Host without TLS.
+Upstream TLS connects only to an
+HTTP/1.1 backend on loopback. Certificate verification is disabled, so backend
+identity is not authenticated, including through an SSH tunnel. This does not change
+client-facing proxy TLS. Authorities accept only a hostname or IP with an optional
+port, without credentials, paths, queries, fragments, or whitespace. Restart the
+proxy daemon after upgrading.
 
 ${colors.bold("Examples:")}
-  portless alias my-postgres 5432     # -> https://my-postgres.localhost
-  portless alias redis 6379           # -> https://redis.localhost
-  portless alias --remove my-postgres # Remove the alias
+  portless alias my-postgres 5432      # -> https://my-postgres.localhost
+  portless alias redis 6379            # -> https://redis.localhost
+  portless alias redis 6379 --tld test # -> https://redis.test only
+  portless alias api 8080 --upstream https://api.internal
+  portless alias --remove my-postgres  # Remove the alias
 `);
-    process.exit(0);
+}
+
+async function handleAlias(args: string[]): Promise<void> {
+  const helpIsUpstreamValue = args.some(
+    (arg, index) => arg === "--upstream" && ["--help", "-h"].includes(args[index + 1] ?? "")
+  );
+  if (hasHelpFlag(args) && !helpIsUpstreamValue) {
+    printAliasHelp();
+    return;
+  }
+  const parsed = parseCommandArgs(
+    "alias",
+    args.slice(1),
+    {
+      "--remove": "value",
+      "--force": "boolean",
+      "--tld": "value",
+      "--upstream": "value",
+    },
+    2
+  );
+  const isRemove = parsed.has("--remove");
+  const removeName = parsed.value("--remove");
+  const [aliasName, aliasPortValue] = parsed.positionals;
+  const usageHints = [
+    "Usage:",
+    "  portless alias <name> <port>",
+    "  portless alias --remove <name>",
+    "Example:",
+    "  portless alias my-postgres 5432",
+  ];
+  if (isRemove && parsed.has("--force")) {
+    throw new UsageError("--force cannot be used with --remove.", usageHints);
+  }
+  if (isRemove && parsed.positionals.length > 0) {
+    throw new UsageError(`Unexpected argument "${parsed.positionals[0]}" for portless alias.`, [
+      "See: portless alias --help",
+    ]);
+  }
+  if (!isRemove && !aliasName) throw new UsageError("Missing alias name.", usageHints);
+  if (!isRemove && !aliasPortValue) throw new UsageError("Missing port.", usageHints);
+  const removeValues = parsed.values("--remove");
+  if (removeValues.length > 1) {
+    throw new UsageError("--remove may be specified only once.", ["See: portless alias --help"]);
+  }
+  const upstreamValues = parsed.values("--upstream");
+  if (upstreamValues.length > 1) {
+    throw new UsageError("--upstream may be specified only once.", ["See: portless alias --help"]);
+  }
+  if (isRemove && upstreamValues.length > 0) {
+    throw new UsageError("--upstream can only be used when adding an alias.", [
+      "See: portless alias --help",
+    ]);
+  }
+  let upstream: AliasUpstream | undefined;
+  if (upstreamValues.length === 1) {
+    try {
+      upstream = parseAliasUpstream(upstreamValues[0]!);
+    } catch (err) {
+      throw new UsageError(`Invalid --upstream value. ${(err as Error).message}`, [
+        "See: portless alias --help",
+      ]);
+    }
+  }
+
+  const tldFlagValues = parsed.values("--tld");
+  if (tldFlagValues.some((value) => !value.trim())) {
+    throw new UsageError("--tld requires a TLD value.", ["See: portless alias --help"]);
+  }
+  let targetTlds: string[] | undefined;
+  if (tldFlagValues.length > 0) {
+    try {
+      targetTlds = [...new Set(tldFlagValues.flatMap((value) => parseTldList(value)))];
+    } catch (err) {
+      throw new UsageError((err as Error).message, ["See: portless alias --help"]);
+    }
+  }
+  const port = aliasPortValue ? parsePort(aliasPortValue) : null;
+  if (!isRemove && port === null) {
+    throw new UsageError(`Invalid port "${aliasPortValue}". Must be 1-65535.`, usageHints);
   }
 
   const { dir, tlds, port: proxyPort, tls, lanMode } = await discoverState();
+  if (targetTlds && !isRemove) {
+    const unconfigured = targetTlds.find((tld) => !tlds.includes(tld));
+    if (unconfigured) {
+      console.error(
+        colors.red(`Error: TLD "${unconfigured}" is not configured (${tlds.join(", ")}).`)
+      );
+      process.exit(1);
+    }
+  }
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+  store.recoverCorruptRoutesFile();
 
-  if (args[1] === "--remove") {
-    const aliasName = args[2];
-    if (!aliasName) {
-      console.error(colors.red("Error: No alias name provided."));
-      console.error(colors.cyan("  portless alias --remove <name>"));
+  if (isRemove) {
+    const hostnames =
+      targetTlds && !targetTlds.some((tld) => tlds.includes(tld))
+        ? []
+        : buildHostnames(removeName!, tlds, targetTlds);
+    const aliases = store
+      .loadRoutes()
+      .filter((route) => {
+        if (route.pid !== 0) return false;
+        const tld = aliasRouteTld(route.hostname, [...tlds, ...(targetTlds ?? [])]);
+        if (tlds.includes(tld)) return hostnames.includes(route.hostname);
+        return (
+          (!targetTlds || targetTlds.includes(tld)) &&
+          route.hostname === `${stripTld(removeName!, [...tlds, tld])}.${tld}`
+        );
+      })
+      .map((route) => route.hostname);
+    if (aliases.length === 0) {
+      console.error(colors.red(`Error: No alias found for "${removeName}".`));
       process.exit(1);
     }
-    const hostnames = buildHostnames(aliasName, tlds);
-    const routes = store.loadRoutes();
-    const existing = routes.find((r) => hostnames.includes(r.hostname) && r.pid === 0);
-    if (!existing) {
-      console.error(colors.red(`Error: No alias found for "${hostnames.join(", ")}".`));
-      process.exit(1);
-    }
-    removeRoutes(store, hostnames);
-    console.log(colors.green(`Removed alias: ${hostnames.join(", ")}`));
+    // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
+    removeRoutes(store, aliases, 0);
+    console.log(colors.green(`Removed alias: ${aliases.join(", ")}`));
     return;
   }
 
-  const aliasName = args[1];
-  const aliasPort = args[2];
-  if (!aliasName || !aliasPort) {
-    console.error(colors.red("Error: Missing arguments."));
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless alias <name> <port>"));
-    console.error(colors.cyan("  portless alias --remove <name>"));
-    console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless alias my-postgres 5432"));
-    process.exit(1);
-  }
-
-  const hostnames = buildHostnames(aliasName, tlds);
-  const port = parsePort(aliasPort);
-  if (port === null) {
-    console.error(colors.red(`Error: Invalid port "${aliasPort}". Must be 1-65535.`));
-    process.exit(1);
-  }
-
-  const force = args.includes("--force");
-  addRoutes(store, hostnames, port, 0, force);
+  const hostnames = buildHostnames(aliasName!, tlds, targetTlds);
+  addRoutes(store, hostnames, port!, 0, parsed.has("--force"), upstream);
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
   // Awaited: this command exits, and a warning printed after exit reaches nobody.
   await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
 }
 
-async function handleHosts(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printHostsHelp(): void {
+  console.log(`
 ${colors.bold("portless hosts")} - Manage ${HOSTS_DISPLAY} entries for .localhost subdomains.
 
 Safari relies on the system DNS resolver, which may not handle .localhost
@@ -2669,17 +3437,27 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
 
 ${colors.bold("Auto-sync:")}
-  The proxy updates ${HOSTS_DISPLAY} for route hostnames by default. Disable with
-  PORTLESS_SYNC_HOSTS=0. If a route hostname will not resolve, the command that
-  registered it warns instead of failing silently.
+  The proxy updates ${HOSTS_DISPLAY} for route hostnames by default.
+  Disable hosts sync with PORTLESS_SYNC_HOSTS=0. If a route hostname
+  will not resolve, the command that registered it warns instead of failing.
 
 ${colors.bold("Safety:")}
   Sync removes stale entries when there are no routes. It requires a successful
   hosts-file read before writing and verifies every write. Read or verification
   failures use the normal elevated privileges or error path.
 `);
-    process.exit(0);
+}
+
+async function handleHosts(args: string[]): Promise<void> {
+  if (!args[1]) {
+    printHostsHelp();
+    return;
   }
+
+  if (args[1] !== "sync" && args[1] !== "clean") {
+    throw new UsageError(`Unknown hosts subcommand "${args[1]}".`, ["See: portless hosts --help"]);
+  }
+  parseCommandArgs(`hosts ${args[1]}`, args.slice(2), {}, 0);
 
   if (args[1] === "clean") {
     if (cleanHostsFile()) {
@@ -2687,22 +3465,7 @@ ${colors.bold("Safety:")}
       return;
     }
 
-    if (!isWindows && process.getuid?.() !== 0) {
-      console.log(
-        colors.yellow(
-          `Writing to ${HOSTS_DISPLAY} requires elevated privileges. Requesting sudo...`
-        )
-      );
-      const result = spawnSync(
-        "sudo",
-        ["env", ...collectPortlessEnvArgs(), process.execPath, getEntryScript(), "hosts", "clean"],
-        {
-          stdio: "inherit",
-          timeout: SUDO_SPAWN_TIMEOUT_MS,
-        }
-      );
-      if (result.status === 0) return;
-    }
+    if (!isWindows && process.getuid?.() !== 0 && runHostsCleanWithSudo()) return;
 
     console.error(
       colors.red(`Failed to update ${HOSTS_DISPLAY}${isWindows ? " (run as Administrator)." : "."}`)
@@ -2711,28 +3474,16 @@ ${colors.bold("Safety:")}
     return;
   }
 
-  if (!args[1]) {
-    console.log(`
-${colors.bold("Usage: portless hosts <command>")}
-
-  ${colors.cyan("portless hosts sync")}    Reconcile current routes with ${HOSTS_DISPLAY}
-  ${colors.cyan("portless hosts clean")}   Remove portless entries from ${HOSTS_DISPLAY}
-`);
-    process.exit(0);
-  }
-
-  if (args[1] !== "sync") {
-    console.error(colors.red(`Error: Unknown hosts subcommand "${args[1]}".`));
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan(`  portless hosts sync    # Reconcile routes with ${HOSTS_DISPLAY}`));
-    console.error(colors.cyan("  portless hosts clean   # Remove portless entries"));
-    process.exit(1);
-  }
-
   const { dir } = await discoverState();
   const store = new RouteStore(dir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+
+  const unsafe = store.untrustedReason();
+  if (unsafe) {
+    console.error(colors.red(`Cannot sync hosts from routes recorded in ${dir}: ${unsafe}`));
+    process.exit(1);
+  }
 
   const routes = store.loadRoutes();
   const hostnames = routes.map((r) => r.hostname);
@@ -2840,29 +3591,39 @@ function doctorProxyStartHint(proxyPort: number, tls: boolean): string {
   return `Run: portless proxy start${portArgs}${tlsArgs}`;
 }
 
-async function handleDoctor(args: string[]): Promise<void> {
-  if (args[1] === "--help" || args[1] === "-h") {
-    console.log(`
+function printDoctorHelp(): void {
+  console.log(`
 ${colors.bold("portless doctor")} - Check local portless health and print suggested fixes.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless doctor")}
+  ${colors.cyan("portless doctor [--json] [--lan] [--ip <address>]")}
 
 Checks Node.js, the state directory, proxy liveness, route entries, HTTPS CA
 trust, hostname resolution, and LAN mode prerequisites. It does not start,
 stop, clean, prune, trust, or modify portless state.
 
 ${colors.bold("Options:")}
+  --json                 Print the report as JSON
+  --lan                  Check LAN mode prerequisites even if the proxy is not in LAN mode
+  --ip <address>         Same as --lan; the address must be a valid IP
   --help, -h             Show this help
-`);
-    process.exit(0);
-  }
 
-  if (args.length > 1) {
-    console.error(colors.red(`Error: Unknown argument "${args[1]}".`));
-    console.error(colors.cyan("  portless doctor --help"));
-    process.exit(1);
-  }
+${colors.bold("Exit codes:")}
+  0                      No failures; warnings do not affect the exit code
+  1                      One or more failures
+  2                      Invalid arguments
+`);
+}
+
+async function handleDoctor(args: string[]): Promise<void> {
+  const parsed = parseCommandArgs(
+    "doctor",
+    args.slice(1),
+    { "--json": "boolean", ...LAN_FLAG_SPEC },
+    0
+  );
+  applyLanFlags(parsed);
+  const json = parsed.has("--json");
 
   const findings: DoctorFinding[] = [];
   const add = (status: DoctorStatus, message: string, hint?: string) => {
@@ -2906,16 +3667,23 @@ ${colors.bold("Options:")}
   const proxyUsesCustomCert = proxyTls && readCustomCertMarker(state.dir);
   const stateExists = fs.existsSync(state.dir);
 
-  console.log(colors.blue.bold("\nportless doctor\n"));
-  console.log(`Version: ${__VERSION__}`);
-  console.log(`Node.js: ${process.versions.node}`);
-  console.log(`Platform: ${process.platform} ${process.arch}`);
-  console.log(`State dir: ${state.dir}`);
-  console.log(`Proxy target: ${formatUrl("127.0.0.1", proxyPort, proxyTls)}`);
-  console.log(
-    `Mode: ${proxyTls ? "HTTPS" : "HTTP"}, ${formatTldList(state.tlds)}${state.lanMode ? ", LAN" : ""}`
-  );
-  console.log("");
+  const version = __VERSION__;
+  const nodeVersion = process.versions.node;
+  const platform = `${process.platform} ${process.arch}`;
+  const stateDir = state.dir;
+  const proxyTarget = formatUrl("127.0.0.1", proxyPort, proxyTls);
+  const mode = `${proxyTls ? "HTTPS" : "HTTP"}, ${formatTldList(state.tlds)}${state.lanMode ? ", LAN" : ""}`;
+
+  if (!json) {
+    console.log(colors.blue.bold("\nportless doctor\n"));
+    console.log(`Version: ${version}`);
+    console.log(`Node.js: ${nodeVersion}`);
+    console.log(`Platform: ${platform}`);
+    console.log(`State dir: ${stateDir}`);
+    console.log(`Proxy target: ${proxyTarget}`);
+    console.log(`Mode: ${mode}`);
+    console.log("");
+  }
 
   const nodeMajor = parseInt(process.versions.node.split(".")[0], 10);
   if (nodeMajor >= 24) {
@@ -3111,7 +3879,14 @@ ${colors.bold("Options:")}
 
   if (state.lanMode || isLanEnvEnabled()) {
     const mdns = isMdnsSupported();
-    if (mdns.supported) {
+    const mdnsDaemonProblem = mdns.supported && getMdnsDaemonProblem();
+    if (mdnsDaemonProblem) {
+      add(
+        "warn",
+        `LAN mode is enabled but the mDNS daemon is unavailable, so .local names are not published: ${mdnsDaemonProblem}`,
+        "Run: sudo systemctl enable --now avahi-daemon"
+      );
+    } else if (mdns.supported) {
       add("ok", "mDNS publishing support is available for LAN mode.");
     } else {
       add("fail", `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`);
@@ -3146,58 +3921,42 @@ ${colors.bold("Options:")}
     }
   }
 
+  const failures = findings.filter((finding) => finding.status === "fail").length;
+  const warnings = findings.filter((finding) => finding.status === "warn").length;
+
+  if (json) {
+    console.log(
+      JSON.stringify({
+        version,
+        nodeVersion,
+        platform,
+        stateDir,
+        proxyTarget,
+        mode,
+        findings,
+        summary: { failures, warnings },
+      })
+    );
+    if (failures > 0) process.exitCode = 1;
+    return;
+  }
+
   for (const finding of findings) {
     printDoctorFinding(finding);
   }
-
-  const failures = findings.filter((finding) => finding.status === "fail").length;
-  const warnings = findings.filter((finding) => finding.status === "warn").length;
   console.log("");
   if (failures > 0) {
     console.log(
       colors.red(`Summary: ${pluralize(failures, "failure")}, ${pluralize(warnings, "warning")}.`)
     );
-    process.exit(1);
+    process.exitCode = 1;
+    return;
   }
   console.log(colors.green(`Summary: 0 failures, ${pluralize(warnings, "warning")}.`));
 }
 
-async function handleProxy(args: string[]): Promise<void> {
-  if (args[1] === "stop") {
-    let explicitPort: number | undefined;
-    const portIdx = args.indexOf("--port") !== -1 ? args.indexOf("--port") : args.indexOf("-p");
-    if (portIdx !== -1) {
-      const portValue = args[portIdx + 1];
-      if (portValue && !portValue.startsWith("-")) {
-        const parsed = parsePort(portValue);
-        if (parsed === null) {
-          console.error(colors.red(`Error: Invalid port number: ${portValue}`));
-          console.error(colors.blue("Port must be between 1 and 65535."));
-          process.exit(1);
-        }
-        explicitPort = parsed;
-      }
-    }
-
-    if (explicitPort !== undefined) {
-      const dir = resolveStateDir(explicitPort);
-      const store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(msg)),
-      });
-      await stopProxy(store, explicitPort, false);
-    } else {
-      const { dir, port, tls } = await discoverState();
-      const store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(msg)),
-      });
-      await stopProxy(store, port, tls);
-    }
-    return;
-  }
-
-  const isProxyHelp = args[1] === "--help" || args[1] === "-h";
-  if (isProxyHelp || args[1] !== "start") {
-    console.log(`
+function printProxyHelp(): void {
+  console.log(`
 ${colors.bold("portless proxy")} - Manage the portless proxy server.
 
 ${colors.bold("Usage:")}
@@ -3205,14 +3964,27 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --no-tls")}       Start without HTTPS (port 80)
   ${colors.cyan("portless proxy start --lan")}          Enable LAN mode (mDNS, .local TLD)
   ${colors.cyan("portless proxy start --foreground")}   Start in foreground (for debugging)
-  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (no sudo)
-  ${colors.cyan("portless proxy start --unprivileged")}  Plain HTTP on port 80, no sudo, nothing installed
-  ${colors.cyan("portless proxy start --bind-all")}     Listen on all interfaces (containers, other hosts), keep .localhost
+  ${colors.cyan("portless proxy start -p 1355")}        Start on a custom port (also --port)
+  ${colors.cyan("portless proxy start --bind-all")}     Listen on all interfaces (containers, other hosts), keep the TLD
+  ${colors.cyan("portless proxy start --unprivileged")}  Port 80 without sudo (443 with --https); plain HTTP unless --https
+  ${colors.cyan("portless proxy start --https")}        Serve HTTPS, even with --unprivileged or PORTLESS_HTTPS=0 (not with --no-tls)
+  ${colors.cyan("portless proxy start --cert <path> --key <path>")}  Use a custom certificate and key
+  ${colors.cyan("portless proxy start --lan --ip <address>")}  Pin the LAN IP
+  ${colors.cyan("portless proxy start --skip-trust")}   Do not add the CA to the system trust store
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
   ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
+
+${colors.bold("Stop:")}
+  Signals the recorded proxy only when nothing shows it is a different
+  process from the one answering on the proxy port, and never from a state
+  directory another user owns or can write to.
+
+${colors.bold("State directory:")}
+  The proxy exits instead of running on a state directory another user owns,
+  can write to, or can redirect.
 
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
@@ -3221,8 +3993,10 @@ ${colors.bold("LAN mode (--lan):")}
   via mDNS (.local domains). Useful for testing on real mobile devices.
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
-  Stopped LAN proxies keep LAN mode for the next start via proxy.lan.
-  Use PORTLESS_LAN=0 for one start to switch back to .localhost mode.
+
+${colors.bold("Unprivileged mode (--unprivileged):")}
+  Binds without sudo, installs nothing, and never writes the hosts file.
+  Stopped proxies keep the mode; use PORTLESS_UNPRIVILEGED=0 to switch back.
 
 ${colors.bold("Bind-all mode (--bind-all):")}
   Listens on 0.0.0.0 and :: and accepts peers that are not this machine,
@@ -3230,44 +4004,97 @@ ${colors.bold("Bind-all mode (--bind-all):")}
   Keeps the configured TLD and does not publish mDNS records.
   Every route becomes reachable by any machine that can reach this host,
   so use it on trusted networks only.
-  Stopped bind-all proxies keep the mode for the next start via proxy.bind-all.
-  Use PORTLESS_BIND_ALL=0 for one start to switch back to loopback only.
+  Stopped proxies keep the mode; use PORTLESS_BIND_ALL=0 to switch back.
 `);
-    process.exit(isProxyHelp || !args[1] ? 0 : 1);
+}
+
+async function handleProxy(args: string[]): Promise<void> {
+  if (args[1] && args[1] !== "start" && args[1] !== "stop") {
+    throw new UsageError(`Unknown proxy subcommand "${args[1]}".`, ["See: portless proxy --help"]);
+  }
+  if (!args[1]) {
+    printProxyHelp();
+    return;
   }
 
-  const isForeground = args.includes("--foreground");
-  const skipTrust = args.includes("--skip-trust");
-  const hasUnprivilegedFlag = args.includes("--unprivileged");
-  const hasBindAllFlag = args.includes("--bind-all");
+  if (args[1] === "stop") {
+    const parsed = parseCommandArgs(
+      "proxy stop",
+      args.slice(2),
+      { "--port": "value", "-p": "value" },
+      0
+    );
+    for (const value of [...parsed.values("--port"), ...parsed.values("-p")]) {
+      if (parsePort(value) === null) {
+        throw new UsageError(`Invalid port number: ${value}`, [
+          "Port must be between 1 and 65535.",
+        ]);
+      }
+    }
+    const portValue = parsed.value("--port") ?? parsed.value("-p");
+    const explicitPort = portValue === undefined ? undefined : parsePort(portValue)!;
+
+    if (explicitPort !== undefined) {
+      const dir = resolveStateDir(explicitPort);
+      const store = new RouteStore(dir, {
+        onWarning: (msg) => console.warn(colors.yellow(msg)),
+      });
+      if (!(await stopProxy(store, explicitPort, false))) process.exitCode = 1;
+    } else {
+      const { dir, port, tls } = await discoverState();
+      const store = new RouteStore(dir, {
+        onWarning: (msg) => console.warn(colors.yellow(msg)),
+      });
+      if (!(await stopProxy(store, port, tls))) process.exitCode = 1;
+    }
+    return;
+  }
+
+  const startArgs = args.slice(2);
+  const autoIpIndex = startArgs.indexOf(INTERNAL_LAN_IP_FLAG);
+  if (autoIpIndex !== -1) {
+    applyGlobalFlag(INTERNAL_LAN_IP_FLAG, startArgs.splice(autoIpIndex, 2)[1]);
+  }
+  const startFlags = parseCommandArgs(
+    "proxy start",
+    startArgs,
+    {
+      "--foreground": "boolean",
+      "--skip-trust": "boolean",
+      "--unprivileged": "boolean",
+      "--bind-all": "boolean",
+      "--https": "boolean",
+      "--no-tls": "boolean",
+      "--wildcard": "boolean",
+      "--cert": "value",
+      "--key": "value",
+      "--port": "value",
+      "-p": "value",
+      "--tld": "value",
+      ...LAN_FLAG_SPEC,
+    },
+    0
+  );
+  applyLanFlags(startFlags);
+  const isForeground = startFlags.has("--foreground");
+  const skipTrust = startFlags.has("--skip-trust");
+  const hasUnprivilegedFlag = startFlags.has("--unprivileged");
+  const hasBindAllFlag = startFlags.has("--bind-all");
 
   // HTTPS is on by default. Disable with --no-tls or PORTLESS_HTTPS=0.
-  const hasHttpsFlag = args.includes("--https");
-  const hasNoTls = args.includes("--no-tls") || isHttpsEnvDisabled();
+  const hasHttpsFlag = startFlags.has("--https");
+  if (hasHttpsFlag && startFlags.has("--no-tls")) {
+    throw new UsageError("--https and --no-tls cannot be used together.", [
+      "See: portless proxy start --help",
+    ]);
+  }
+  const hasNoTls = startFlags.has("--no-tls") || (!hasHttpsFlag && isHttpsEnvDisabled());
   const wantHttps = !hasNoTls;
 
-  // Parse optional --cert / --key for custom certificates
-  let customCertPath: string | null = null;
-  let customKeyPath: string | null = null;
-  const certIdx = args.indexOf("--cert");
-  if (certIdx !== -1) {
-    customCertPath = args[certIdx + 1] || null;
-    if (!customCertPath || customCertPath.startsWith("-")) {
-      console.error(colors.red("Error: --cert requires a file path."));
-      process.exit(1);
-    }
-  }
-  const keyIdx = args.indexOf("--key");
-  if (keyIdx !== -1) {
-    customKeyPath = args[keyIdx + 1] || null;
-    if (!customKeyPath || customKeyPath.startsWith("-")) {
-      console.error(colors.red("Error: --key requires a file path."));
-      process.exit(1);
-    }
-  }
-  if ((customCertPath && !customKeyPath) || (!customCertPath && customKeyPath)) {
-    console.error(colors.red("Error: --cert and --key must be used together."));
-    process.exit(1);
+  let customCertPath = startFlags.value("--cert") ?? null;
+  let customKeyPath = startFlags.value("--key") ?? null;
+  if (!customCertPath !== !customKeyPath) {
+    throw new UsageError("--cert and --key must be used together.");
   }
 
   // Custom cert/key implies HTTPS
@@ -3277,21 +4104,13 @@ ${colors.bold("Bind-all mode (--bind-all):")}
   // port (443 for HTTPS, 80 for HTTP) so URLs are clean.
   let hasExplicitPort = false;
   let proxyPort = getDefaultPort(useHttps);
-  let portFlagIndex = args.indexOf("--port");
-  if (portFlagIndex === -1) portFlagIndex = args.indexOf("-p");
-  if (portFlagIndex !== -1) {
-    const portValue = args[portFlagIndex + 1];
-    if (!portValue || portValue.startsWith("-")) {
-      console.error(colors.red("Error: --port / -p requires a port number."));
-      console.error(colors.blue("Usage:"));
-      console.error(colors.cyan("  portless proxy start -p 8080"));
-      process.exit(1);
-    }
+  const portValue = startFlags.value("--port") ?? startFlags.value("-p");
+  if (portValue !== undefined) {
     const parsed = parsePort(portValue);
     if (parsed === null) {
-      console.error(colors.red(`Error: Invalid port number: ${portValue}`));
-      console.error(colors.blue("Port must be between 1 and 65535."));
-      process.exit(1);
+      throw new UsageError(`Invalid port number: ${portValue}`, [
+        "Port must be between 1 and 65535.",
+      ]);
     }
     proxyPort = parsed;
     hasExplicitPort = true;
@@ -3305,31 +4124,17 @@ ${colors.bold("Bind-all mode (--bind-all):")}
     console.error(colors.red(`Error: ${(err as Error).message}`));
     process.exit(1);
   }
-  const tldFlagValues: string[] = [];
-  for (let i = 0; i < args.length; i += 1) {
-    if (args[i] === "--tld") {
-      const tldValue = args[i + 1];
-      if (!tldValue || tldValue.startsWith("-")) {
-        console.error(
-          colors.red("Error: --tld requires a TLD value (e.g. test, dev.example.com).")
-        );
-        process.exit(1);
-      }
-      tldFlagValues.push(tldValue);
-      i += 1;
-    }
-  }
+  const tldFlagValues = startFlags.values("--tld");
   if (tldFlagValues.length > 0) {
     try {
       tlds = normalizeTlds(tldFlagValues.flatMap((value) => parseTldList(value)));
     } catch (err) {
-      console.error(colors.red(`Error: ${(err as Error).message}`));
-      process.exit(1);
+      throw new UsageError((err as Error).message, ["See: portless proxy start --help"]);
     }
   }
   let tld = primaryTld(tlds);
   // Parse --wildcard flag (disables the default strict subdomain matching)
-  const useWildcard = args.includes("--wildcard") || isWildcardEnvEnabled();
+  const useWildcard = startFlags.has("--wildcard") || isWildcardEnvEnabled();
 
   const explicit: ProxyConfigExplicitness = {
     useHttps:
@@ -3342,7 +4147,7 @@ ${colors.bold("Bind-all mode (--bind-all):")}
     lanMode: process.env.PORTLESS_LAN !== undefined,
     lanIp: process.env.PORTLESS_LAN_IP !== undefined,
     tlds: tldFlagValues.length > 0 || process.env.PORTLESS_TLD !== undefined,
-    useWildcard: args.includes("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
+    useWildcard: startFlags.has("--wildcard") || process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: hasUnprivilegedFlag || process.env.PORTLESS_UNPRIVILEGED !== undefined,
     bindAll: hasBindAllFlag || process.env.PORTLESS_BIND_ALL !== undefined,
   };
@@ -3449,6 +4254,7 @@ ${colors.bold("Bind-all mode (--bind-all):")}
   const store = new RouteStore(stateDir, {
     onWarning: (msg) => console.warn(colors.yellow(msg)),
   });
+  store.recoverCorruptRoutesFile();
 
   // Check if already running. Plain HTTP check detects both TLS and non-TLS
   // proxies because the TLS-enabled proxy accepts plain HTTP via byte-peeking.
@@ -3568,6 +4374,7 @@ ${colors.bold("Bind-all mode (--bind-all):")}
     console.log(
       colors.yellow(`Port ${proxyPort} requires elevated privileges. Requesting sudo...`)
     );
+    if (fs.existsSync(store.dir)) store.ensureDir();
     const result = spawnSync("sudo", ["env", ...collectPortlessEnvArgs(), ...startArgs], {
       stdio: "inherit",
       timeout: SUDO_SPAWN_TIMEOUT_MS,
@@ -3629,6 +4436,7 @@ ${colors.bold("Bind-all mode (--bind-all):")}
           process.exit(1);
         }
 
+        createSecureContext({ cert, key });
         tlsOptions = { cert, key };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
@@ -3636,10 +4444,10 @@ ${colors.bold("Bind-all mode (--bind-all):")}
         process.exit(1);
       }
     } else {
-      console.log(colors.gray("Ensuring TLS certificates..."));
+      console.error(colors.gray("Ensuring TLS certificates..."));
       const certs = ensureCerts(stateDir);
       if (certs.caGenerated) {
-        console.log(colors.green("Generated local CA certificate."));
+        console.error(colors.green("Generated local CA certificate."));
       }
 
       if (desiredUnprivileged && !isCATrusted(stateDir)) {
@@ -3652,10 +4460,10 @@ ${colors.bold("Bind-all mode (--bind-all):")}
         );
         console.warn(colors.cyan("  portless trust"));
       } else if (!skipTrust && !isCATrusted(stateDir)) {
-        console.log(colors.yellow("Adding CA to system trust store..."));
+        console.error(colors.yellow("Adding CA to system trust store..."));
         const trustResult = trustCA(stateDir);
         if (trustResult.trusted) {
-          console.log(
+          console.error(
             colors.green("CA added to system trust store. Browsers will trust portless certs.")
           );
         } else {
@@ -3765,7 +4573,7 @@ ${colors.bold("Bind-all mode (--bind-all):")}
   await reportHostsSyncHere(persistedHostnames, proxyPort, useHttps, lanMode);
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
-    console.log(chalk.gray("Services will be discoverable as <name>.local on your network."));
+    console.log(describeMdnsDiscovery());
   } else if (desiredBindAll) {
     console.log(
       chalk.yellow(
@@ -3785,8 +4593,23 @@ type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
 function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null {
   try {
     const loaded = loadConfig(cwd);
-    if (!loaded) return null;
-    return { ...resolveAppConfig(loaded.config, loaded.configDir, cwd), source: loaded.source };
+    const root = findWorkspaceRoot(cwd);
+    const rootConfig = root && root !== cwd ? loadConfig(root) : null;
+    const rootWorktree = mergeWorktreeConfig(
+      rootConfig
+        ? resolveAppConfig(rootConfig.config, rootConfig.configDir, cwd).worktree
+        : undefined
+    );
+    if (!loaded) {
+      return rootConfig && rootWorktree
+        ? { worktree: rootWorktree, source: rootConfig.source }
+        : null;
+    }
+    const local = resolveAppConfig(loaded.config, loaded.configDir, cwd);
+    const worktree = mergeWorktreeConfig(rootWorktree, local.worktree);
+    return worktree
+      ? { ...local, worktree, source: loaded.source }
+      : { ...local, source: loaded.source };
   } catch (err) {
     if (err instanceof ConfigValidationError) {
       console.error(colors.red(`Error: ${err.message}`));
@@ -3838,11 +4661,45 @@ async function handleDefaultMode(
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
   if (hasScript(scriptName, cwd)) {
-    await handleDefaultSingle(cwd, scriptName, appConfig);
+    await handleDefaultSingle(cwd, scriptName, appConfig, extraArgs);
     return true;
   }
 
   return false;
+}
+
+/**
+ * Forward arguments through a package script, adding the `--` separators that
+ * nested wrappers, delegated scripts, and Turbo consume, and rejecting
+ * compound scripts.
+ */
+function forwardScriptExtraArgs(
+  scriptName: string,
+  packageDir: string,
+  extraArgs: readonly string[]
+): string[] {
+  if (extraArgs.length === 0) return [];
+  const forwarding = resolveScriptArgForwarding(scriptName, packageDir);
+  if (forwarding.kind === "unsafe") {
+    const forwarded = extraArgs.join(" ");
+    throw new UsageError(
+      `Cannot forward arguments through the "${forwarding.scriptName}" script. It has shell operators or a comment.`,
+      [
+        `Run the command directly: portless run <command> ${forwarded}`,
+        `Or change the "${forwarding.scriptName}" script to a single command.`,
+      ]
+    );
+  }
+  if (forwarding.kind === "too-deep") {
+    throw new UsageError(
+      `Cannot forward arguments through the "${scriptName}" script. It runs through too many package scripts, or the scripts call each other in a loop.`,
+      [`Run the command directly: portless run <command> ${extraArgs.join(" ")}`]
+    );
+  }
+  const separators = forwarding.kind === "forward" ? forwarding.separators : 0;
+  return separators > 0
+    ? [...Array.from({ length: separators }, () => "--"), ...extraArgs]
+    : [...extraArgs];
 }
 
 /**
@@ -3851,9 +4708,11 @@ async function handleDefaultMode(
 async function handleDefaultSingle(
   cwd: string,
   scriptName: string,
-  appConfig: AppConfigWithSource | null
+  appConfig: AppConfigWithSource | null,
+  extraArgs: string[] = []
 ): Promise<void> {
-  const resolved = resolveScriptCommand(scriptName, cwd);
+  const forwardedArgs = forwardScriptExtraArgs(scriptName, cwd, extraArgs);
+  const resolved = resolveScriptCommand(scriptName, cwd, forwardedArgs);
   if (!resolved) {
     console.error(colors.red(`Error: No "${scriptName}" script found in package.json.`));
     process.exit(1);
@@ -3874,8 +4733,12 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = detectWorktreePrefix(cwd);
-  const effectiveName = applyWorktreePrefix(baseName, worktree);
+  const worktree = detectWorktreePrefix(cwd, appConfig?.worktree?.prefix);
+  const effectiveName = applyWorktreePrefix(
+    baseName,
+    worktree,
+    appConfig?.worktree?.hostnameTemplate
+  );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -3890,8 +4753,8 @@ async function handleDefaultSingle(
     tls,
     tlds,
     false,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
-    appConfig?.appPort,
+    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
     lanIp
   );
@@ -3949,8 +4812,8 @@ function prefixStream(
 }
 
 function pipeOutput(child: ReturnType<typeof spawn>, prefix: string): void {
-  prefixStream(child.stdout, process.stdout, prefix);
-  prefixStream(child.stderr, process.stderr, prefix);
+  prefixStream(child.stdout, process.stdout, colorFor("stdout", prefix));
+  prefixStream(child.stderr, process.stderr, colorFor("stderr", prefix));
 }
 
 async function spawnProxiedApp(
@@ -3960,13 +4823,18 @@ async function spawnProxiedApp(
   tls: boolean,
   tlds: string[],
   lanMode: boolean,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<MultiAppEntry, number | null>
 ): Promise<{
   child: ReturnType<typeof spawn>;
   displayUrl: string;
   route: { store: RouteStore; hostnames: string[] } | null;
+  settled: Promise<void>;
 }> {
   const usesPortless = app.commandArgs[0] === "portless";
+
+  if (lanMode && !process.env.PORTLESS_LAN) {
+    process.env.PORTLESS_LAN = "1";
+  }
 
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -3975,6 +4843,7 @@ async function spawnProxiedApp(
   let store: RouteStore | null = null;
   let hostnames: string[] = [];
   let displayUrl: string;
+  let appPort: number | undefined;
 
   if (usesPortless) {
     env = pkgEnv;
@@ -3984,7 +4853,7 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
     });
 
-    const appPort = app.appPort ?? (await findFreePort());
+    appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app.name, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
@@ -3992,6 +4861,7 @@ async function spawnProxiedApp(
 
     addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
+    injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
     env = {
       ...pkgEnv,
@@ -4009,30 +4879,53 @@ async function spawnProxiedApp(
     }
   }
 
+  const preexistingListener = appPort === undefined ? null : await findPreexistingListener(appPort);
   const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
   pipeOutput(child, chalk.cyan(`[${app.name}]`));
 
   const capturedStore = store;
   const capturedHostnames = hostnames;
-  child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
-    if (code !== 0 && code !== null) {
-      console.error(colors.red(`[${app.name}] exited with code ${code}`));
-    } else if (signal) {
-      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
-    }
-    if (capturedStore && capturedHostnames.length > 0) {
-      removeRoutes(capturedStore, capturedHostnames, process.pid);
-    }
+  const capturedPort = appPort;
+  const settled = new Promise<void>((resolve) => {
+    child.on("exit", (code, signal) => {
+      exitCodes.set(app, code);
+      if (code !== 0 && code !== null) {
+        console.error(colors.red(`[${app.name}] exited with code ${code}`));
+      } else if (signal) {
+        console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+      }
+      if (!capturedStore || capturedHostnames.length === 0 || capturedPort === undefined) {
+        resolve();
+        return;
+      }
+      const transfer = signal
+        ? Promise.resolve()
+        : transferRoutesToDaemon(
+            capturedStore,
+            capturedHostnames,
+            capturedPort,
+            child.pid,
+            preexistingListener,
+            code === 0
+          );
+      transfer
+        .catch(() => {
+          // Best-effort; the routes are removed below.
+        })
+        .finally(() => {
+          removeRoutes(capturedStore, capturedHostnames, process.pid);
+          resolve();
+        });
+    });
   });
 
   const route = store && hostnames.length > 0 ? { store, hostnames } : null;
-  return { child, displayUrl, route };
+  return { child, displayUrl, route, settled };
 }
 
 function spawnTaskApp(
   app: MultiAppEntry,
-  exitCodes: Map<string, number | null>
+  exitCodes: Map<MultiAppEntry, number | null>
 ): ReturnType<typeof spawn> {
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -4041,7 +4934,7 @@ function spawnTaskApp(
   pipeOutput(child, chalk.gray(`[${app.name}]`));
 
   child.on("exit", (code, signal) => {
-    exitCodes.set(app.name, code);
+    exitCodes.set(app, code);
     if (code !== 0 && code !== null) {
       console.error(colors.red(`[${app.name}] exited with code ${code}`));
     } else if (signal) {
@@ -4074,7 +4967,34 @@ async function handleDefaultMulti(
     process.exit(1);
   }
 
-  const scriptName = globalScript ?? loaded?.config.script ?? "dev";
+  const configScript = loaded?.config.script ?? "dev";
+  const scriptName = globalScript ?? configScript;
+  const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
+
+  if (useTurbo && extraArgs.length > 0 && hasScript(scriptName, wsRoot)) {
+    const forwarding = resolveTurboRootForwarding(scriptName, wsRoot);
+    if (forwarding.kind === "unsafe") {
+      const forwarded = extraArgs.join(" ");
+      const hints = forwarding.turbo
+        ? [
+            `  Change the root "${scriptName}" script to a single command, such as "turbo ${scriptName}".`,
+          ]
+        : [
+            `  Run the command directly: portless run <command> ${forwarded}`,
+            `  Or change the root "${scriptName}" script to a single command.`,
+          ];
+      throw new UsageError(
+        `Cannot forward arguments through the "${scriptName}" root script. It has shell operators or a comment.`,
+        hints
+      );
+    }
+    if (forwarding.kind === "too-deep") {
+      throw new UsageError(
+        `Cannot forward arguments through the "${scriptName}" script. It runs through too many package scripts, or the scripts call each other in a loop.`,
+        [`Run the command directly: portless run <command> ${extraArgs.join(" ")}`]
+      );
+    }
+  }
 
   // Infer the monorepo project name for use as the base domain.
   // Config name > common npm scope > workspace root inference.
@@ -4105,18 +5025,26 @@ async function handleDefaultMulti(
   }
 
   const apps: MultiAppEntry[] = [];
+  const envAppPort = appPortFromEnv();
 
-  // In a git worktree, prefix every app's hostname with the branch name so
-  // parallel worktrees of the same monorepo don't collide on <name>.localhost.
-  // Mirrors handleDefaultSingle; single-app mode already does this.
-  const worktree = detectWorktreePrefix(wsRoot);
+  const detectedWorktrees = new Map<WorktreePrefixStyle, WorktreePrefix | null>();
+  const worktreeFor = (worktreeConfig: WorktreeConfig | undefined): WorktreePrefix | null => {
+    const style = worktreeConfig?.prefix ?? "last-segment";
+    if (!detectedWorktrees.has(style)) {
+      detectedWorktrees.set(style, detectWorktreePrefix(wsRoot, style));
+    }
+    return detectedWorktrees.get(style)!;
+  };
 
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
-    let pkgConfig: AppConfig | null;
+    let leafConfig: AppConfig | null;
+    // Worktree config matches default mode: the leaf portless.json (or its
+    // package.json "portless" fallback) wins over the workspace root config.
     try {
-      pkgConfig = loadPackagePortlessConfig(pkg.dir);
+      const leaf = loadConfig(pkg.dir);
+      leafConfig = leaf ? resolveAppConfig(leaf.config, leaf.configDir, pkg.dir) : null;
     } catch (err) {
       if (err instanceof ConfigValidationError) {
         console.error(colors.red(`Error: ${err.message}`));
@@ -4125,13 +5053,13 @@ async function handleDefaultMulti(
       throw err;
     }
 
-    // Merge (closest wins): package.json "portless" > portless.json app entry > defaults
     const appOverride: AppConfig = {
       ...Object.fromEntries(Object.entries(rootOverride ?? {}).filter(([, v]) => v !== undefined)),
-      ...Object.fromEntries(Object.entries(pkgConfig ?? {}).filter(([, v]) => v !== undefined)),
+      ...Object.fromEntries(Object.entries(leafConfig ?? {}).filter(([, v]) => v !== undefined)),
+      worktree: mergeWorktreeConfig(rootOverride?.worktree, leafConfig?.worktree),
     };
 
-    const effectiveScript = appOverride.script ?? scriptName;
+    const effectiveScript = globalScript ?? appOverride.script ?? configScript;
     const scriptValue = pkg.scripts[effectiveScript];
     if (!scriptValue) continue;
 
@@ -4139,7 +5067,10 @@ async function handleDefaultMulti(
     if (rawScript.length === 0) continue;
 
     const pm = detectPackageManager(pkg.dir);
-    const commandArgs = [pm, "run", effectiveScript];
+    const forwardedArgs = useTurbo
+      ? []
+      : forwardScriptExtraArgs(effectiveScript, pkg.dir, extraArgs);
+    const commandArgs = scriptRunCommand(pm, effectiveScript, pkg.dir, forwardedArgs);
 
     const proxied = appOverride.proxy ?? isServerCommand(rawScript);
 
@@ -4163,9 +5094,20 @@ async function handleDefaultMulti(
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
-    name = applyWorktreePrefix(name, worktree);
+    name = applyWorktreePrefix(
+      name,
+      worktreeFor(appOverride.worktree),
+      appOverride.worktree?.hostnameTemplate
+    );
 
-    apps.push({ pkg, name, label, commandArgs, appPort: appOverride.appPort, proxied });
+    apps.push({
+      pkg,
+      name,
+      label,
+      commandArgs,
+      appPort: envAppPort ?? appOverride.appPort,
+      proxied,
+    });
   }
 
   if (apps.length === 0) {
@@ -4177,7 +5119,17 @@ async function handleDefaultMulti(
   const proxiedApps = apps.filter((a) => a.proxied);
   const taskApps = apps.filter((a) => !a.proxied);
 
-  console.log(chalk.blue.bold(`\nportless\n`));
+  if (envAppPort !== undefined && proxiedApps.length > 1) {
+    throw new UsageError(
+      `PORTLESS_APP_PORT sets one port, but this run starts ${proxiedApps.length} apps.`,
+      [
+        "Set appPort for each app in portless.json, or unset PORTLESS_APP_PORT.",
+        'Example: { "apps": { "packages/web": { "appPort": 4100 }, "packages/api": { "appPort": 4200 } } }',
+      ]
+    );
+  }
+
+  console.error(chalk.blue.bold(`\nportless\n`));
 
   let { dir, port, tls, tlds, lanMode } = await discoverState();
 
@@ -4189,6 +5141,35 @@ async function handleDefaultMulti(
       console.error(colors.red(`Error: ${(err as Error).message}`));
       process.exit(1);
     }
+
+    // Check hostname collisions before starting the proxy so a config mistake
+    // cannot leave a proxy or app children behind. A running proxy keeps its
+    // own TLDs; otherwise an explicit env override decides a fresh start.
+    const where = (app: MultiAppEntry) =>
+      `"${app.label}" (${path.relative(wsRoot, app.pkg.dir).replace(/\\/g, "/") || "."})`;
+    const checkHostnameCollisions = (tldsForCheck: readonly string[]) => {
+      const seen = new Map<string, MultiAppEntry>();
+      for (const app of proxiedApps) {
+        for (const hostname of buildHostnames(app.name, tldsForCheck)) {
+          const existing = seen.get(hostname);
+          if (existing) {
+            throw new Error(
+              `Duplicate hostname "${hostname}" for ${where(existing)} and ${where(app)}. Set unique "name" overrides; if using worktree.hostnameTemplate, include {name}.`
+            );
+          }
+          seen.set(hostname, app);
+        }
+      }
+    };
+    // A running proxy keeps its own TLDs; a stopped one starts with the same
+    // persisted/env merge ensureProxyRunning uses, with LAN normalized to .local.
+    let preflightTlds = tlds;
+    if (!(await isProxyUp(port, tls))) {
+      const { startConfig } = resolveProxyStart(multiDesired);
+      preflightTlds = startConfig.lanMode ? ["local"] : startConfig.tlds;
+    }
+    checkHostnameCollisions(preflightTlds);
+
     const ensureResult = await ensureProxyRunning(port, tls, multiDesired);
     if (ensureResult.started) {
       dir = ensureResult.state.dir;
@@ -4201,12 +5182,15 @@ async function handleDefaultMulti(
       ({ dir, port, tls, tlds, lanMode } = await discoverState());
     }
 
+    // Recheck if the proxy settled on different TLDs than the preflight read.
+    if (tlds.join("\u0000") !== preflightTlds.join("\u0000")) {
+      checkHostnameCollisions(tlds);
+    }
+
     if (tls && !isCATrusted(dir)) {
       await handleTrust();
     }
   }
-
-  const useTurbo = loaded?.config.turbo !== false && hasTurboConfig(wsRoot);
 
   if (useTurbo) {
     await runWithTurbo(
@@ -4278,27 +5262,34 @@ async function runWithTurbo(
     manifest[app.pkg.dir] = entry;
   }
 
-  ensureEnvLoader();
-  writeManifest(manifest);
+  const envPublication = new EnvPublication(stateDir);
+  envPublication.publish(manifest);
+  process.once("exit", () => envPublication.retire());
 
   if (appUrls.length > 0) {
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
     for (const { label, url } of appUrls) {
       const pad = " ".repeat(maxLabel - label.length);
-      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+      console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.log("");
+  console.error("");
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
+  const forwarding = useRootScript ? resolveTurboRootForwarding(scriptName, wsRoot) : null;
+  const turboSeparators = useRootScript
+    ? forwarding?.kind === "forward"
+      ? forwarding.separators
+      : 0
+    : 1;
+  const turboPassThrough =
+    extraArgs.length > 0 && turboSeparators > 0
+      ? [...Array.from({ length: turboSeparators }, () => "--"), ...extraArgs]
+      : extraArgs;
   const turboArgs = useRootScript
-    ? [pm, "run", scriptName, ...extraArgs]
-    : pm === "npm"
-      ? ["npx", "turbo", "run", scriptName, ...extraArgs]
-      : pm === "bun"
-        ? ["bunx", "turbo", "run", scriptName, ...extraArgs]
-        : [pm, "exec", "turbo", "run", scriptName, ...extraArgs];
+    ? scriptRunCommand(pm, scriptName, wsRoot, turboPassThrough)
+    : packageManagerExec(pm, ["turbo", "run", scriptName, ...turboPassThrough]);
 
   const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
@@ -4306,7 +5297,7 @@ async function runWithTurbo(
     cwd: wsRoot,
     env: {
       ...process.env,
-      NODE_OPTIONS: buildNodeOptions(),
+      NODE_OPTIONS: buildNodeOptions(stateDir),
     },
     ...(isWindows ? {} : { detached: true }),
   });
@@ -4329,7 +5320,6 @@ async function runWithTurbo(
     for (const { hostnames } of routes) {
       removeRoutes(store, hostnames, process.pid);
     }
-    removeManifest();
   };
 
   process.on("SIGINT", cleanup);
@@ -4341,6 +5331,7 @@ async function runWithTurbo(
   });
 
   cleanup();
+  envPublication.retire();
 
   if (exitCode !== 0 && exitCode !== null) {
     process.exit(exitCode);
@@ -4357,14 +5348,15 @@ async function runWithDirectSpawn(
   taskApps: MultiAppEntry[]
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
-  const exitCodes = new Map<string, number | null>();
+  const exitCodes = new Map<MultiAppEntry, number | null>();
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
+  const routeSettlements: Promise<void>[] = [];
 
   // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
   // a port, so parallel spawning could cause port collisions.
   for (const app of proxiedApps) {
-    const { child, displayUrl, route } = await spawnProxiedApp(
+    const { child, displayUrl, route, settled } = await spawnProxiedApp(
       app,
       stateDir,
       proxyPort,
@@ -4374,6 +5366,7 @@ async function runWithDirectSpawn(
       exitCodes
     );
     children.push(child);
+    routeSettlements.push(settled);
     if (route) routeEntries.push(route);
     appUrls.push({ label: app.label, url: displayUrl });
   }
@@ -4389,10 +5382,10 @@ async function runWithDirectSpawn(
     const maxLabel = Math.max(...appUrls.map((a) => a.label.length));
     for (const { label, url } of appUrls) {
       const pad = " ".repeat(maxLabel - label.length);
-      console.log(`  ${label}${pad}  ${chalk.dim(url)}`);
+      console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.log("");
+  console.error("");
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
@@ -4429,12 +5422,13 @@ async function runWithDirectSpawn(
         })
     )
   );
+  await Promise.all(routeSettlements);
 
   const failed = [...exitCodes.entries()].filter(([, code]) => code !== 0 && code !== null);
   if (failed.length > 0) {
     console.error(
       colors.red(
-        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([name, code]) => `${name} (${code})`).join(", ")}`
+        `\n${failed.length} app${failed.length === 1 ? "" : "s"} exited with errors: ${failed.map(([app, code]) => `${app.label} (${code})`).join(", ")}`
       )
     );
     process.exit(1);
@@ -4443,6 +5437,8 @@ async function runWithDirectSpawn(
 
 async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
   const parsed = parseRunArgs(args);
+
+  if (parsed.prefix !== undefined) process.env.PORTLESS_PREFIX = parsed.prefix;
 
   const appConfig = loadAppConfig();
 
@@ -4455,12 +5451,12 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   }
 
   if (parsed.commandArgs.length === 0) {
-    console.error(colors.red("Error: No command provided."));
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless run <command...>"));
-    console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless run next dev"));
-    process.exit(1);
+    throw new UsageError("No command provided.", [
+      "Usage:",
+      "  portless run <command...>",
+      "Example:",
+      "  portless run next dev",
+    ]);
   }
 
   let baseName: string;
@@ -4490,8 +5486,12 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = detectWorktreePrefix();
-  const effectiveName = worktree ? `${worktree.prefix}.${baseName}` : baseName;
+  const worktree = detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
+  const effectiveName = applyWorktreePrefix(
+    baseName,
+    worktree,
+    appConfig?.worktree?.hostnameTemplate
+  );
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -4506,23 +5506,35 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     tls,
     tlds,
     parsed.force,
-    { nameSource, prefix: worktree?.prefix, prefixSource: worktree?.source },
+    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
     lanIp
   );
 }
 
-async function handleNamedMode(args: string[]): Promise<void> {
+const NAMED_USAGE = [
+  "Usage:",
+  "  portless <name> <command...>",
+  "Example:",
+  "  portless myapp next dev",
+];
+
+async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
+  const { name, hasCommand } = readNamedArgs(args);
+  const suggestion = explicitName || hasCommand ? undefined : suggestCommand(name);
+  if (name && suggestion) {
+    throw new UsageError("No command provided.", [
+      `"${name}" is not a portless command. Did you mean:`,
+      `  portless ${suggestion}`,
+      ...NAMED_USAGE,
+    ]);
+  }
+
   const parsed = parseAppArgs(args);
 
   if (parsed.commandArgs.length === 0) {
-    console.error(colors.red("Error: No command provided."));
-    console.error(colors.blue("Usage:"));
-    console.error(colors.cyan("  portless <name> <command...>"));
-    console.error(colors.blue("Example:"));
-    console.error(colors.cyan("  portless myapp next dev"));
-    process.exit(1);
+    throw new UsageError("No command provided.", NAMED_USAGE);
   }
 
   if (!parsed.appPort) {
@@ -4560,8 +5572,457 @@ async function handleNamedMode(args: string[]): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Docker Compose
+// ---------------------------------------------------------------------------
+
+function printComposeHelp(): void {
+  console.log(`
+${colors.bold("portless compose")} - Run a Docker Compose project behind portless.
+
+Each service that publishes an HTTP port gets ${colors.cyan("<service>.<project>.localhost")}.
+Database and cache ports such as 5432, 3306, 6379, and 27017 keep their
+published port.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless compose up [args...]")}       Start the project and register routes
+  ${colors.cyan("portless compose up -d [args...]")}    Start detached; routes stay until down
+  ${colors.cyan("portless compose down [args...]")}     Stop the project and remove its routes
+  ${colors.cyan("portless compose <command> [args]")}   Any other compose command, unchanged
+
+Global compose flags (-f, -p, --profile, --env-file, --project-directory) go
+before the command, as with docker compose.
+
+${colors.bold("Examples:")}
+  portless compose up                  # -> https://web.myapp.localhost
+  portless compose -f compose.dev.yml up -d
+  portless compose down
+
+${colors.bold("Service labels:")}
+  portless.enable: "false"     Leave the service and its ports unchanged
+  portless.name: <name>        Use <name> instead of the service name
+  portless.ports: 3000,9229    Route only these container ports
+
+${colors.bold("Notes:")}
+  portless picks a free port on 127.0.0.1 for each HTTP port and reuses it,
+  so routes keep working after restart, after stop and start, and when Docker
+  restarts the container. A routed service can't scale past one container.
+  A service with several HTTP ports also gets <port>.<service>.<project>.
+  Each routed service gets __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS, so a Vite
+  dev server in a container accepts its portless hostname.
+  Start the project with portless compose up, because a plain docker compose
+  up recreates the containers with their original ports.
+`);
+}
+
+/** Host ports for compose routes. Separate from the 4000-4999 range of portless run. */
+const COMPOSE_MIN_PORT = 14000;
+const COMPOSE_MAX_PORT = 14999;
+
+/** Run docker compose and capture its output. */
+function dockerCompose(
+  args: string[],
+  input?: string
+): { status: number | null; stdout: string; stderr: string } {
+  const result = spawnSync("docker", ["compose", ...args], {
+    encoding: "utf8",
+    maxBuffer: 64 * 1024 * 1024,
+    ...(input === undefined ? {} : { input }),
+  });
+  if (result.error) throw new Error(`could not run docker compose: ${result.error.message}`);
+  return { status: result.status, stdout: result.stdout, stderr: result.stderr };
+}
+
+/** Run docker compose attached to this terminal. */
+function spawnDockerCompose(
+  args: string[],
+  input?: string
+): {
+  child: ReturnType<typeof spawn>;
+  exited: Promise<number>;
+} {
+  const child = spawn("docker", ["compose", ...args], {
+    stdio: [input === undefined ? "inherit" : "pipe", "inherit", "inherit"],
+  });
+  if (input !== undefined) child.stdin?.end(input);
+  const exited = new Promise<number>((resolve) => {
+    child.on("error", (err) => {
+      console.error(colors.red(`Error: could not run docker compose: ${err.message}`));
+      resolve(1);
+    });
+    child.on("exit", (code, signal) => resolve(code ?? (signal ? 1 : 0)));
+  });
+  return { child, exited };
+}
+
+/** Running containers of a compose invocation, or null when `ps` fails. */
+function readComposeContainers(
+  globals: string[],
+  opts: { all?: boolean; input?: string } = {}
+): ComposeContainers | null {
+  const result = dockerCompose(
+    [...globals, "ps", "--format", "json", ...(opts.all ? ["--all"] : [])],
+    opts.input
+  );
+  if (result.status !== 0) return null;
+  try {
+    return parseContainers(result.stdout);
+  } catch {
+    return null;
+  }
+}
+
+/** Project name from the compose file, or undefined when there is none to read. */
+function readComposeProjectName(globals: string[], input?: string): string | undefined {
+  const config = dockerCompose([...globals, "config", "--format", "json"], input);
+  if (config.status !== 0) return undefined;
+  try {
+    return (JSON.parse(config.stdout) as ComposeModel).name;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Files portless keeps per compose project: the resolved model and its fixed ports. */
+function composeStatePaths(stateDir: string, project: string): { model: string; ports: string } {
+  const dir = path.join(stateDir, "compose");
+  return {
+    model: path.join(dir, `${project}.json`),
+    ports: path.join(dir, `${project}.ports.json`),
+  };
+}
+
+async function composeDown(args: string[], globals: string[], input?: string): Promise<never> {
+  // An explicit name wins. Otherwise read it from the containers, so down
+  // works without the compose file and after services were renamed, and
+  // fall back to the file when no container is left.
+  const project =
+    explicitProject(globals) ??
+    process.env.COMPOSE_PROJECT_NAME ??
+    readComposeContainers(globals, { all: true, input })?.projects[0] ??
+    readComposeProjectName(globals, input);
+  const code = await spawnDockerCompose(args, input).exited;
+  // A failed down leaves the containers running, so their routes stay.
+  if (code !== 0 || !project) process.exit(code);
+  const after = readComposeContainers(["-p", project]);
+  if (!after) {
+    console.warn(
+      colors.yellow("Could not read the project's containers. Routes were left in place.")
+    );
+    process.exit(code);
+  }
+  const { dir, tlds } = await discoverState();
+  const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+  store.recoverCorruptRoutesFile();
+  const aliases = store.loadRoutes().filter((r) => r.pid === 0);
+  removeRoutes(store, staleAliases(aliases, project, tlds, after));
+  if (after.ports.size === 0) {
+    // The resolved model can hold env_file values; drop it with the project.
+    const files = composeStatePaths(dir, project);
+    fs.rmSync(files.model, { force: true });
+    fs.rmSync(files.ports, { force: true });
+  }
+  process.exit(code);
+}
+
+/** Reject a compose invocation whose own global flags do not parse. */
+function assertComposeGlobals(globals: readonly string[]): void {
+  const error = composeGlobalError(globals);
+  if (error) throw new UsageError(error, ["See: portless compose --help"]);
+}
+
+async function handleCompose(args: string[]): Promise<void> {
+  const composeArgs = args.slice(1);
+  const { globals, subcommand, rest, dockerArgs } = splitComposeArgs(composeArgs);
+  const childHelp = rest.includes("--help") || rest.includes("-h");
+  const globalHelp = isGlobalFlagSet(globals, ["--help", "-h"]);
+
+  if (!subcommand) {
+    if (!globalHelp) assertComposeGlobals(globals);
+    printComposeHelp();
+    process.exit(0);
+  }
+
+  if (isPortlessSkipped()) process.exit(await spawnDockerCompose(dockerArgs).exited);
+
+  if (!globalHelp) assertComposeGlobals(globals);
+
+  if (globalHelp || childHelp || (subcommand !== "up" && subcommand !== "down")) {
+    process.exit(await spawnDockerCompose(dockerArgs).exited);
+  }
+
+  try {
+    // stdin can be read once; keep it for every compose call that needs the file.
+    const input = readsComposeFromStdin(globals) ? fs.readFileSync(0, "utf8") : undefined;
+    if (subcommand === "down") await composeDown(dockerArgs, globals, input);
+
+    // Include every profile so `up <service>` can start a service from an
+    // inactive profile; compose still applies the user's --profile flags at up.
+    const config = dockerCompose(
+      [...globals, "--profile", "*", "config", "--format", "json"],
+      input
+    );
+    if (config.status !== 0) {
+      process.stderr.write(config.stderr);
+      throw new Error("docker compose config failed.");
+    }
+    await composeUp(JSON.parse(config.stdout) as ComposeModel, globals, rest);
+  } catch (err) {
+    console.error(colors.red(`Error: ${(err as Error).message}`));
+    process.exit(1);
+  }
+}
+
+/** Refuse a project whose hostnames would collide with another project's, like fd_x and fd-x. */
+function assertUniqueProjectLabel(stateDir: string, project: string): void {
+  const dir = path.join(stateDir, "compose");
+  if (!fs.existsSync(dir)) return;
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith(".json") || file.endsWith(".ports.json")) continue;
+    // Compare the project name stored in the model, not the file name: older
+    // versions named the file after the hostname label (my-app.json for my_app).
+    let other: string;
+    try {
+      other = (JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")) as ComposeModel).name;
+    } catch {
+      continue;
+    }
+    if (other !== project && projectLabel(other) === projectLabel(project)) {
+      throw new Error(
+        `Projects "${other}" and "${project}" share the hostname suffix ${projectLabel(project)}. Run portless compose -p ${other} down, or rename one project.`
+      );
+    }
+  }
+}
+
+function isPortFree(port: number): Promise<boolean> {
+  return findFreePort(port, port).then(
+    () => true,
+    () => false
+  );
+}
+
+/** Ports saved by every other compose project in the state dir. */
+function reservedComposePorts(stateDir: string, project: string): Set<number> {
+  const dir = path.join(stateDir, "compose");
+  const reserved = new Set<number>();
+  if (!fs.existsSync(dir)) return reserved;
+  const own = path.basename(composeStatePaths(stateDir, project).ports);
+  for (const file of fs.readdirSync(dir)) {
+    if (!file.endsWith(".ports.json") || file === own) continue;
+    try {
+      const ports = JSON.parse(fs.readFileSync(path.join(dir, file), "utf8")) as Record<
+        string,
+        number
+      >;
+      for (const port of Object.values(ports)) if (typeof port === "number") reserved.add(port);
+    } catch {
+      // Unreadable file: nothing to reserve.
+    }
+  }
+  return reserved;
+}
+
+/** Fixed host ports for the project's routed container ports, saved for the next up. */
+async function allocateComposePorts(
+  stateDir: string,
+  project: string,
+  keys: string[]
+): Promise<Map<string, number>> {
+  const portsPath = composeStatePaths(stateDir, project).ports;
+  let stored: Record<string, number> = {};
+  try {
+    stored = JSON.parse(fs.readFileSync(portsPath, "utf8")) as Record<string, number>;
+  } catch {
+    // First run, or an unreadable file: allocate fresh ports.
+  }
+  const ports = await allocatePorts(keys, stored, {
+    min: COMPOSE_MIN_PORT,
+    max: COMPOSE_MAX_PORT,
+    ours: new Set(readComposeContainers(["-p", project])?.ports.values() ?? []),
+    reserved: reservedComposePorts(stateDir, project),
+    isFree: isPortFree,
+  });
+  fs.writeFileSync(portsPath, JSON.stringify(Object.fromEntries(ports), null, 2), { mode: 0o600 });
+  return ports;
+}
+
+async function composeUp(source: ComposeModel, globals: string[], rest: string[]): Promise<never> {
+  let state = await discoverState();
+  const ensured = await ensureProxyRunning(
+    state.port,
+    state.tls,
+    resolveProxyDesiredState(state.lanMode)
+  );
+  if (ensured.started) {
+    state = ensured.state;
+    if (state.tls && !isCATrusted(state.dir)) await handleTrust();
+  } else {
+    const running = readCurrentProxyConfig(state.dir);
+    state = { ...state, tlds: running.tlds, lanMode: running.lanMode, lanIp: running.lanIp };
+  }
+  const { dir, port: proxyPort, tls, tlds, lanMode } = state;
+  const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+
+  const project = source.name;
+  const files = composeStatePaths(dir, project);
+  store.ensureDir();
+  fs.mkdirSync(path.dirname(files.model), { recursive: true });
+  fixOwnership(path.dirname(files.model));
+  assertUniqueProjectLabel(dir, project);
+
+  const planOpts = {
+    hostnamesFor: (name: string) => buildHostnames(name, tlds),
+    urlFor: (hostname: string) => formatUrl(hostname, proxyPort, tls),
+    viteAllowedHosts: formatViteAllowedHosts(tlds),
+  };
+  // Plan once to learn the routed ports, then again with their fixed host ports.
+  const keyOf = (service: string, target: number): string => `${service}:${target}`;
+  const keys = [
+    ...new Set(planCompose(source, planOpts).routes.map((r) => keyOf(r.service, r.target))),
+  ];
+  const ports = await allocateComposePorts(dir, project, keys);
+  const plan = planCompose(source, {
+    ...planOpts,
+    portFor: (service, target) => ports.get(keyOf(service, target)),
+  });
+
+  fs.writeFileSync(files.model, JSON.stringify(plan.model, null, 2), { mode: 0o600 });
+  fixOwnership(files.model, files.ports);
+
+  console.error(colors.bold(`\nportless compose ${plan.project}\n`));
+  for (const k of plan.kept) {
+    const where = k.published ? `host port ${k.published}` : "an ephemeral port";
+    const verb = k.dropped ? "drops" : "keeps";
+    console.error(colors.gray(`  ${k.service}:${k.target} ${verb} ${where} (${k.reason})`));
+  }
+  if (plan.routes.length === 0) {
+    console.error(colors.yellow("No published HTTP ports found. Nothing to route."));
+  }
+
+  const upArgs = buildUpArgs({
+    globals,
+    rest,
+    project: plan.project,
+    modelPath: files.model,
+    cwd: process.cwd(),
+    composeFileEnv: process.env.COMPOSE_FILE,
+    pathSeparator: process.env.COMPOSE_PATH_SEPARATOR,
+  });
+  const detached = isDetachedUp(rest);
+  const ownerPid = detached ? 0 : process.pid;
+  const registered = new Map<string, number>();
+  // Conflicts are retried on every sync (the owner may exit) but reported once.
+  const conflicts = new Set<string>();
+
+  // Register the routes of running services. Ports are fixed, so this only
+  // picks up services as they start.
+  const sync = (): boolean => {
+    const containers = readComposeContainers(["-p", plan.project]);
+    if (!containers) return false;
+    for (const route of plan.routes) {
+      const port = routePort(route, containers);
+      const primary = route.hostnames[0]!;
+      if (port === undefined || registered.get(primary) === port) continue;
+      try {
+        // Aliases from an earlier up -d are ours to replace; a live process is not.
+        addRoutes(store, route.hostnames, port, ownerPid, isAliasConflict(store, primary));
+      } catch (err) {
+        if (!(err instanceof RouteConflictError)) throw err;
+        if (!conflicts.has(primary)) {
+          console.error(
+            colors.red(
+              `Error: ${primary} is already registered by another process (PID ${err.existingPid}). Stop it, or rename the service with portless.name.`
+            )
+          );
+        }
+        conflicts.add(primary);
+        continue;
+      }
+      conflicts.delete(primary);
+      registered.set(primary, port);
+      console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
+    }
+    return true;
+  };
+
+  if (detached) {
+    const code = await spawnDockerCompose(upArgs).exited;
+    if (code === 0) {
+      console.error("");
+      if (!sync()) {
+        console.warn(
+          colors.yellow(
+            "Could not read the project's containers, so no routes were registered. Run portless compose up -d again."
+          )
+        );
+      }
+      if (registered.size > 0)
+        await reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+    }
+    process.exit(code !== 0 ? code : conflicts.size > 0 ? 1 : 0);
+  }
+
+  // Foreground: compose owns the terminal. portless registers routes as
+  // services start and drops them when compose exits.
+  const { child, exited } = spawnDockerCompose(upArgs);
+  let reported = false;
+  const timer = setInterval(() => {
+    sync();
+    if (!reported && registered.size > 0) {
+      reported = true;
+      void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+    }
+  }, 1000);
+  // Ctrl+C reaches compose through the process group; wait for it to stop.
+  process.on("SIGINT", () => {});
+  process.on("SIGTERM", () => child.kill("SIGTERM"));
+  const code = await exited;
+  clearInterval(timer);
+  for (const route of plan.routes) removeRoutes(store, route.hostnames, process.pid);
+  fs.rmSync(files.model, { force: true });
+  process.exit(code);
+}
+
+function isAliasConflict(store: RouteStore, hostname: string): boolean {
+  store.recoverCorruptRoutesFile();
+  return store.loadRoutes().some((r) => r.hostname === hostname && r.pid === 0);
+}
+
+// ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
+
+/** True when PORTLESS=0 (or false/skip) asks portless to run commands directly. */
+function isPortlessSkipped(): boolean {
+  const value = process.env.PORTLESS;
+  return value === "0" || value === "false" || value === "skip";
+}
+
+interface CommandEntry {
+  run: (args: string[], context: { globalScript?: string }) => Promise<void>;
+  help?: () => void;
+}
+
+const COMMANDS: Record<CommandName, CommandEntry> = {
+  run: {
+    run: (args, { globalScript }) => handleRunMode(args.slice(1), globalScript),
+  },
+  get: { run: handleGet, help: printGetHelp },
+  list: { run: handleList, help: printListHelp },
+  alias: { run: handleAlias },
+  compose: { run: handleCompose },
+  proxy: { run: handleProxy, help: printProxyHelp },
+  service: {
+    run: (args) => handleService(args, { entryScript: getEntryScript() }),
+    help: printServiceHelp,
+  },
+  hosts: { run: handleHosts, help: printHostsHelp },
+  doctor: { run: handleDoctor, help: printDoctorHelp },
+  trust: { run: handleTrust, help: printTrustHelp },
+  clean: { run: handleClean, help: printCleanHelp },
+  prune: { run: handlePrune, help: printPruneHelp },
+  mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp },
+};
 
 async function main() {
   if (process.stdin.isTTY) {
@@ -4590,216 +6051,159 @@ async function main() {
     process.exit(1);
   }
 
-  if (args[0] === "mcp") {
-    await runMcp(args.slice(1));
-    return;
-  }
-
-  const globalBooleanFlags = new Set([
-    "--lan",
-    "--tailscale",
-    "--funnel",
-    "--ngrok",
-    "--cloudflare",
-  ]);
-  const globalValueFlags = new Set(["--ip", INTERNAL_LAN_IP_FLAG, "--script"]);
-  const childlessCommands = new Set([
-    "--help",
-    "-h",
-    "--version",
-    "-v",
-    "trust",
-    "clean",
-    "prune",
-    "list",
-    "doctor",
-    "get",
-    "alias",
-    "hosts",
-    "proxy",
-    "service",
-  ]);
-
-  const advancePortlessFlag = (index: number, localValueFlags: Set<string>): number | null => {
+  const advancePortlessFlag = (
+    index: number,
+    spec: Readonly<Record<string, FlagKind>>
+  ): number | null => {
     const arg = args[index];
-    if (globalBooleanFlags.has(arg) || arg === "--force" || arg === "--help" || arg === "-h") {
-      return index + 1;
-    }
-    if (globalValueFlags.has(arg) || localValueFlags.has(arg)) {
-      return index + 2;
-    }
-    return null;
+    const equalsIndex = arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const kind = spec[equalsIndex === -1 ? arg : arg.slice(0, equalsIndex)];
+    if (!kind) return null;
+    return index + (kind === "boolean" || equalsIndex !== -1 ? 1 : 2);
   };
 
-  const globalFlagEnd = (): number => {
+  const flagLimit = (): number => {
     const separator = args.indexOf("--");
-    const limit = separator === -1 ? args.length : separator;
-    const leadingValueFlags = new Set(["--app-port"]);
-    let index = 0;
+    return separator === -1 ? args.length : separator;
+  };
 
+  const skipFlags = (start: number, spec: Readonly<Record<string, FlagKind>>): number => {
+    const limit = flagLimit();
+    let index = start;
     while (index < limit) {
-      const next = advancePortlessFlag(index, leadingValueFlags);
-      if (next === null) break;
-      index = next;
-    }
-
-    if (index >= limit) return limit;
-    const mode = args[index];
-    if (childlessCommands.has(mode)) return limit;
-
-    if (mode === "run") {
-      index++;
-      const runValueFlags = new Set(["--name", "--app-port"]);
-      while (index < limit) {
-        const next = advancePortlessFlag(index, runValueFlags);
-        if (next === null) break;
-        index = next;
-      }
-      return index;
-    }
-
-    if (mode === "--name") {
-      index += 2;
-    } else {
-      index++;
-    }
-
-    const namedValueFlags = new Set(["--app-port"]);
-    while (index < limit) {
-      const next = advancePortlessFlag(index, namedValueFlags);
+      const next = advancePortlessFlag(index, spec);
       if (next === null) break;
       index = next;
     }
     return index;
   };
 
+  const globalFlagEnd = (flag: string): number => {
+    const limit = flagLimit();
+    const index = skipFlags(0, LEADING_FLAG_SPEC);
+    if (index >= limit) return limit;
+    const mode = args[index];
+    if (mode === "run") return skipFlags(index + 1, RUN_FLAG_SPEC);
+    if (!APP_FLAG_SPEC[flag]) return 0;
+    if (isCommandName(mode)) return index;
+    if (mode === "--version" || mode === "-v") return limit;
+    return skipFlags(index + (mode === "--name" ? 2 : 1), APP_FLAG_SPEC);
+  };
+
+  const commandIndex = skipFlags(0, LEADING_FLAG_SPEC);
+  const leadingCommand = args[commandIndex];
+  if (
+    commandIndex > 0 &&
+    isCommandName(leadingCommand) &&
+    !["run", "mcp", "compose"].includes(leadingCommand)
+  ) {
+    args.push(...args.splice(0, commandIndex));
+  }
+
   const stripGlobalFlag = (flag: string, hasValue: boolean): string | boolean | null => {
-    const end = globalFlagEnd();
-    const idx = args.indexOf(flag);
-    if (idx === -1 || idx >= end) return null;
+    const end = globalFlagEnd(flag);
+    const idx = args.findIndex(
+      (arg, index) => index < end && (arg === flag || (hasValue && arg.startsWith(`${flag}=`)))
+    );
+    if (idx === -1) return null;
     if (!hasValue) {
       args.splice(idx, 1);
+      stripGlobalFlag(flag, false);
       return true;
     }
-    const value = args[idx + 1];
-    if (!value || value.startsWith("-")) return false; // present but missing value
-    args.splice(idx, 2);
+    const equalsIndex = args[idx].indexOf("=");
+    const value = equalsIndex === -1 ? args[idx + 1] : args[idx].slice(equalsIndex + 1);
+    if (!value || value.startsWith("-")) return false;
+    args.splice(idx, equalsIndex === -1 ? 2 : 1);
+    if (stripGlobalFlag(flag, true) !== null) {
+      throw new UsageError(`${flag} can only be given once.`);
+    }
     return value;
   };
 
-  if (stripGlobalFlag("--lan", false)) {
-    process.env.PORTLESS_LAN = "1";
-  }
+  if (stripGlobalFlag("--lan", false)) applyGlobalFlag("--lan");
 
   const ipResult = stripGlobalFlag("--ip", true);
   if (ipResult === false) {
-    console.error(chalk.red("Error: --ip requires an IP address."));
-    console.error(chalk.cyan("  portless --lan --ip 192.168.1.42 run <command>"));
-    process.exit(1);
-  } else if (typeof ipResult === "string") {
-    process.env.PORTLESS_LAN_IP = ipResult;
-    process.env.PORTLESS_LAN = "1";
+    throw new UsageError("--ip requires an IP address.", [
+      "  portless --lan --ip 192.168.1.42 run <command>",
+    ]);
   }
+  if (typeof ipResult === "string") applyGlobalFlag("--ip", ipResult);
 
-  const autoIpResult = stripGlobalFlag(INTERNAL_LAN_IP_FLAG, true);
-  if (autoIpResult === false) {
-    console.error(chalk.red(`Error: ${INTERNAL_LAN_IP_FLAG} requires an IP address.`));
-    process.exit(1);
-  } else if (typeof autoIpResult === "string") {
-    process.env[INTERNAL_LAN_IP_ENV] = autoIpResult;
-    process.env.PORTLESS_LAN = "1";
-  }
-
-  if (stripGlobalFlag("--tailscale", false)) {
-    process.env.PORTLESS_TAILSCALE = "1";
-  }
-  if (stripGlobalFlag("--funnel", false)) {
-    process.env.PORTLESS_FUNNEL = "1";
-    process.env.PORTLESS_TAILSCALE = "1";
-  }
-  if (stripGlobalFlag("--ngrok", false)) {
-    process.env.PORTLESS_NGROK = "1";
-  }
-  if (stripGlobalFlag("--cloudflare", false)) {
-    process.env.PORTLESS_CLOUDFLARE = "1";
+  for (const flag of Object.keys(SHARE_FLAG_SPEC)) {
+    if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);
   if (scriptResult === false) {
-    console.error(colors.red("Error: --script requires a script name."));
-    console.error(colors.cyan("  portless --script start"));
-    process.exit(1);
+    throw new UsageError("--script requires a script name.", ["  portless --script start"]);
   }
   const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
 
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
-  // subcommand (run, alias, hosts, list, doctor, trust, clean, prune, proxy, service, mcp).
-  if (args[0] === "--name") {
+  // subcommand (see COMMAND_NAMES).
+  if (args[0]?.startsWith("--name=")) {
+    args.splice(0, 1, "--name", args[0].slice("--name=".length));
+  }
+  const explicitName = args[0] === "--name";
+  if (explicitName) {
     args.shift();
     if (!args[0]) {
-      console.error(colors.red("Error: --name requires an app name."));
-      console.error(colors.cyan("  portless --name <name> <command...>"));
-      process.exit(1);
+      throw new UsageError("--name requires an app name.", [
+        "  portless --name <name> <command...>",
+      ]);
     }
-    const skipPortless =
-      process.env.PORTLESS === "0" ||
-      process.env.PORTLESS === "false" ||
-      process.env.PORTLESS === "skip";
-    if (skipPortless) {
-      const { commandArgs } = parseAppArgs(args);
-      if (commandArgs.length === 0) {
-        console.error(colors.red("Error: No command provided."));
-        process.exit(1);
-      }
-      spawnCommand(commandArgs);
+  }
+  const command = explicitName || !isCommandName(args[0]) ? undefined : COMMANDS[args[0]];
+  const isRunCommand = command === COMMANDS.run;
+
+  if (
+    isPortlessSkipped() &&
+    !explicitName &&
+    !isRunCommand &&
+    (args.length === 0 || args[0] === "--")
+  ) {
+    const scriptArgs = args[0] === "--" ? args.slice(1) : [];
+    const appConfig = loadAppConfig();
+    const scriptName = globalScript ?? appConfig?.script ?? "dev";
+    const forwardedArgs = forwardScriptExtraArgs(scriptName, process.cwd(), scriptArgs);
+    const resolved = resolveScriptCommand(scriptName, process.cwd(), forwardedArgs);
+    if (resolved) {
+      spawnCommand(resolved);
       return;
     }
-    await handleNamedMode(args);
-    return;
+    throw new UsageError("No command provided.");
   }
 
-  // `run` subcommand: strip it, rest is parsed as run-mode args
-  const isRunCommand = args[0] === "run";
-  if (isRunCommand) {
-    args.shift();
-  }
-
-  const skipPortless =
-    process.env.PORTLESS === "0" ||
-    process.env.PORTLESS === "false" ||
-    process.env.PORTLESS === "skip";
   if (
-    skipPortless &&
-    (isRunCommand ||
-      args.length === 0 ||
-      (args.length >= 2 &&
-        args[0] !== "proxy" &&
-        args[0] !== "clean" &&
-        args[0] !== "doctor" &&
-        args[0] !== "service"))
+    isPortlessSkipped() &&
+    (isRunCommand || args.length === 0 || (args.length >= 2 && !command))
   ) {
-    const parsed = isRunCommand ? parseRunArgs(args) : parseAppArgs(args);
+    const parsed = isRunCommand ? parseRunArgs(args.slice(1)) : parseAppArgs(args);
     let commandArgs = parsed.commandArgs;
-    if (commandArgs.length === 0 && (isRunCommand || args.length === 0)) {
+    if (commandArgs.length === 0 && isRunCommand) {
       const appConfig = loadAppConfig();
       const scriptName = globalScript ?? appConfig?.script ?? "dev";
       const resolved = resolveScriptCommand(scriptName, process.cwd());
       if (resolved) commandArgs = resolved;
     }
-    if (commandArgs.length === 0) {
-      console.error(colors.red("Error: No command provided."));
-      process.exit(1);
-    }
+    if (commandArgs.length === 0) throw new UsageError("No command provided.");
     spawnCommand(commandArgs);
     return;
   }
 
-  // Global dispatch: help, version, trust, clean, prune, list, doctor, alias, hosts, proxy, service
-  // When `run` is used, skip these so args like "list" or "--help" are treated
-  // as child-command tokens, not portless subcommands.
-  if (!isRunCommand) {
+  if (command) {
+    if (command.help && hasHelpFlag(args)) {
+      command.help();
+      return;
+    }
+    await command.run(args, { globalScript });
+    return;
+  }
+  if (!explicitName) {
     if (args[0] === "--help" || args[0] === "-h") {
       printHelp();
       return;
@@ -4815,57 +6219,17 @@ async function main() {
       printVersion();
       return;
     }
-    if (args[0] === "trust") {
-      await handleTrust();
-      return;
-    }
-    if (args[0] === "clean") {
-      await handleClean(args);
-      return;
-    }
-    if (args[0] === "prune") {
-      await handlePrune(args);
-      return;
-    }
-    if (args[0] === "list") {
-      await handleList();
-      return;
-    }
-    if (args[0] === "doctor") {
-      await handleDoctor(args);
-      return;
-    }
-    if (args[0] === "get") {
-      await handleGet(args);
-      return;
-    }
-    if (args[0] === "alias") {
-      await handleAlias(args);
-      return;
-    }
-    if (args[0] === "hosts") {
-      await handleHosts(args);
-      return;
-    }
-    if (args[0] === "proxy") {
-      await handleProxy(args);
-      return;
-    }
-    if (args[0] === "service") {
-      await handleService(args, { entryScript: getEntryScript() });
-      return;
-    }
   }
 
-  // Run app (either `portless run <cmd>` or `portless <name> <cmd>`)
-  if (isRunCommand) {
-    await handleRunMode(args, globalScript);
-  } else {
-    await handleNamedMode(args);
-  }
+  await handleNamedMode(args, explicitName);
 }
 
 main().catch((err: unknown) => {
+  if (err instanceof UsageError) {
+    console.error(colors.red(`Error: ${err.message}`));
+    for (const hint of err.hints) console.error(colors.blue(hint));
+    process.exit(2);
+  }
   const message = err instanceof Error ? err.message : String(err);
   console.error(colors.red("Error:"), message);
   process.exit(1);

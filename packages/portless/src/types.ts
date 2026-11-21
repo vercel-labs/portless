@@ -2,6 +2,7 @@
 export interface RouteInfo {
   hostname: string;
   port: number;
+  upstream?: { tls?: boolean; host?: string };
   /**
    * Public Tailscale Serve/Funnel URL for this route, when one is active
    * (e.g. "https://my-device.tail1234.ts.net"). Requests whose Host header
