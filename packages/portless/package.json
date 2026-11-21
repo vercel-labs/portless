@@ -1,6 +1,6 @@
 {
   "name": "portless",
-  "version": "0.15.12",
+  "version": "0.18.1",
   "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
   "type": "module",
   "main": "./dist/index.js",
@@ -26,15 +26,16 @@
     "win32"
   ],
   "scripts": {
-    "build": "tsup",
+    "build": "tsup && tsc -p tsconfig.build.json",
     "dev": "tsup --watch",
-    "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix",
+    "lint": "oxlint src/",
+    "lint:fix": "oxlint src/ --fix",
     "prepublishOnly": "cp ../../README.md . && pnpm build",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc-ts --noEmit",
+    "type-check:tsc": "tsc --noEmit"
   },
   "keywords": [
     "local",
@@ -55,9 +56,10 @@
   "devDependencies": {
     "@types/node": "^24.12.4",
     "@vitest/coverage-v8": "^4.0.18",
-    "eslint": "^9.39.2",
+    "oxlint": "^1.91.0",
+    "tsc-ts": "0.1.2",
     "tsup": "^8.0.1",
-    "typescript": "^5.3.3",
+    "typescript": "^7.0.2",
     "vitest": "^4.0.18"
   }
 }

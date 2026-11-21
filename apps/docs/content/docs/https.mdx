@@ -4,7 +4,13 @@ title: "HTTPS"
 
 HTTP/2 + TLS is enabled by default for faster dev server page loads. Browsers limit HTTP/1.1 to 6 connections per host, which bottlenecks dev servers serving many unbundled files. HTTP/2 multiplexes all requests over a single connection.
 
+WebSockets work over both protocol versions, so dev server HMR (Next.js, Vite, and others) works through the proxy. HTTP/1.1 `Upgrade` requests are forwarded as-is, and WebSockets opened over an HTTP/2 connection use extended CONNECT (RFC 8441).
+
 First run generates a local CA and server certs, then adds the CA to your system trust store. After that, no prompts, no browser warnings.
+
+On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE through `update-ca-certificates` or `update-ca-trust`. On Windows, it uses `certutil` to add the CA to the system trust store. Linux containers on a WSL2 host use only the Linux trust store.
+
+Portless sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. For a Node.js process you start outside portless, point it at the CA yourself with `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`, or use `--no-tls`.
 
 On WSL, portless updates both the Linux trust store and the Windows current-user Root store. Windows browsers can then verify portless HTTPS certificates served from WSL.
 

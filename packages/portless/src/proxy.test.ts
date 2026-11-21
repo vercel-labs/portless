@@ -1,4 +1,4 @@
-import { describe, it, expect, afterAll, afterEach, beforeAll } from "vitest";
+import { describe, it, expect, afterAll, afterEach, beforeAll, vi } from "vitest";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
@@ -7,7 +7,12 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createProxyServer, HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import {
+  createHttpRedirectServer,
+  createProxyServer,
+  HOSTS_SYNC_PATH,
+  PORTLESS_HEADER,
+} from "./proxy.js";
 import { HOSTS_SYNC_AUTH_HEADER, HOSTS_SYNC_AUTH_PROOF_HEADER } from "./hosts-sync-auth.js";
 import type { ProxyServer } from "./proxy.js";
 import type { RouteInfo } from "./types.js";
@@ -408,14 +413,16 @@ describe("createProxyServer", () => {
       const res = await request(server, {
         host: "myapp.localhost",
         headers: {
-          connection: "keep-alive",
+          connection: "close",
           "keep-alive": "timeout=5",
           "proxy-connection": "keep-alive",
           upgrade: "h2c",
         },
       });
       expect(res.status).toBe(200);
-      expect(received.connection).toBe("close");
+      // the pooled upstream agent sets its own keep-alive, a forwarded client
+      // value would show up as close
+      expect(received.connection).toBe("keep-alive");
       expect(received["keep-alive"]).toBeUndefined();
       expect(received["proxy-connection"]).toBeUndefined();
       expect(received.upgrade).toBeUndefined();
@@ -956,6 +963,9 @@ describe("createProxyServer", () => {
       expect(res.body).toContain("Bad Gateway");
       expect(errors.length).toBeGreaterThan(0);
       expect(errors[0]).toContain("dead.localhost");
+      expect(errors[0]).toContain("ECONNREFUSED");
+      expect(errors[0]).toContain("127.0.0.1:59999");
+      expect(errors[0]).toContain("::1:59999");
     });
 
     const errorScenarios = [
@@ -1102,6 +1112,306 @@ describe("createProxyServer", () => {
       });
       client.destroy();
       expect(responses).toBe(2);
+    });
+  });
+
+  describe("upstream connections", () => {
+    it("serves an IPv6 backend while the IPv4 connection stays pending", async (ctx) => {
+      const backend = http.createServer((_req, res) => res.end("ipv6"));
+      const ipv6Available = await new Promise<boolean>((resolve) => {
+        backend.once("error", () => resolve(false));
+        backend.listen(0, "::1", () => resolve(true));
+      });
+      if (!ipv6Available) return ctx.skip();
+      trackServer(backend);
+      const backendPort = (backend.address() as net.AddressInfo).port;
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+      const connect = net.Socket.prototype.connect;
+      const pending: net.Socket[] = [];
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (
+          options &&
+          "port" in options &&
+          options.port === backendPort &&
+          (options.host === "127.0.0.1" || options.host === "localhost")
+        ) {
+          Reflect.set(this, "connecting", true);
+          pending.push(this);
+          return this;
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        const res = await Promise.race([
+          request(server, { host: "myapp.localhost" }),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => reject(new Error("IPv4 blocked the IPv6 backend")), 1000);
+          }),
+        ]);
+        expect(res.status).toBe(200);
+        expect(res.body).toBe("ipv6");
+        expect(pending).toHaveLength(1);
+        expect(pending[0].destroyed).toBe(true);
+      } finally {
+        clearTimeout(timeout);
+        for (const socket of pending) socket.destroy();
+        spy.mockRestore();
+      }
+    });
+
+    it("streams a POST after IPv6 refuses while IPv4 is still pending", async () => {
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          req.on("data", (chunk) => res.write(chunk));
+          req.on("end", () => res.end());
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address() as net.AddressInfo;
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendAddr.port }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      await listen(server);
+      const connect = net.Socket.prototype.connect;
+      let ipv4Pending = false;
+      let releaseIpv4: (() => void) | undefined;
+      let refusedWhilePending = false;
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (options && "port" in options && options.port === backendAddr.port) {
+          if (options.host === "127.0.0.1") {
+            ipv4Pending = true;
+            releaseIpv4 = () => {
+              ipv4Pending = false;
+              if (!this.destroyed) Reflect.apply(connect, this, args);
+            };
+            return this;
+          }
+          if (options.host === "::1") {
+            this.once("error", () => {
+              refusedWhilePending = ipv4Pending;
+              setImmediate(() => releaseIpv4?.());
+            });
+          }
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      let client: http.ClientRequest | undefined;
+      try {
+        const result = await new Promise<{ status: number; body: string }>((resolve, reject) => {
+          client = http.request(
+            {
+              host: "127.0.0.1",
+              port: (server.address() as net.AddressInfo).port,
+              method: "POST",
+              headers: { host: "myapp.localhost" },
+              agent: false,
+            },
+            (res) => {
+              let body = "";
+              res.on("error", reject);
+              res.once("data", () => client!.end("-last"));
+              res.on("data", (chunk) => (body += chunk));
+              res.on("end", () => resolve({ status: res.statusCode!, body }));
+            }
+          );
+          client.on("error", reject);
+          client.write("first");
+        });
+        expect(refusedWhilePending).toBe(true);
+        expect(result).toEqual({ status: 200, body: "first-last" });
+      } finally {
+        client?.destroy();
+        spy.mockRestore();
+      }
+    });
+
+    it("reuses one upstream connection across requests (issue #370)", async () => {
+      const connections = new Set<net.Socket>();
+      const backend = trackServer(http.createServer((_req, res) => res.end("ok")));
+      backend.on("connection", (socket) => connections.add(socket));
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      for (let i = 0; i < 5; i++) {
+        expect((await request(server, { host: "myapp.localhost" })).status).toBe(200);
+      }
+      expect(connections.size).toBe(1);
+    });
+
+    it("finishes an in-flight response when the proxy closes", async () => {
+      let finishResponse: (() => void) | undefined;
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          finishResponse = () => res.end("last");
+          res.write("first");
+        })
+      );
+      await listen(backend);
+      const backendPort = (backend.address() as net.AddressInfo).port;
+
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "myapp.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+        })
+      );
+      let client: http.ClientRequest | undefined;
+      let closePromise: Promise<void> | undefined;
+
+      try {
+        await listen(server);
+        const proxyPort = (server.address() as net.AddressInfo).port;
+
+        let body = "";
+        const response = new Promise<string>((resolve, reject) => {
+          client = http.get(
+            {
+              host: "127.0.0.1",
+              port: proxyPort,
+              headers: { host: "myapp.localhost" },
+              agent: false,
+            },
+            (res) => {
+              res.once("data", () => {
+                closePromise = new Promise<void>((resolve) => server.close(() => resolve()));
+                finishResponse?.();
+              });
+              res.on("data", (chunk) => {
+                body += chunk.toString();
+              });
+              res.on("end", () => resolve(body));
+              res.on("error", reject);
+            }
+          );
+          client.on("error", reject);
+        });
+
+        expect(await response).toBe("firstlast");
+        await closePromise;
+      } finally {
+        finishResponse?.();
+        client?.destroy();
+        backend.closeAllConnections();
+        (server as http.Server).closeAllConnections();
+        await closePromise;
+      }
+    });
+
+    it("keeps serving requests while many long-lived responses are open", async () => {
+      // SSE and streaming responses hold their upstream socket for good, so a
+      // cap on open sockets would leave every later request waiting forever
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          if (req.url === "/stream") {
+            res.writeHead(200, { "content-type": "text/event-stream" });
+            res.write("data: hi\n\n");
+            return;
+          }
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      const proxyAddr = server.address();
+      if (!proxyAddr || typeof proxyAddr === "string") throw new Error("no addr");
+
+      const streams = await Promise.all(
+        Array.from(
+          { length: 80 },
+          () =>
+            new Promise<http.ClientRequest>((resolve, reject) => {
+              const req = http.get(
+                {
+                  port: proxyAddr.port,
+                  path: "/stream",
+                  headers: { host: "myapp.localhost" },
+                  agent: false,
+                },
+                (res) => res.once("data", () => resolve(req))
+              );
+              req.on("error", reject);
+            })
+        )
+      );
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("ok");
+      for (const stream of streams) stream.destroy();
+    });
+
+    it("replays a request when the backend resets a pooled connection", async () => {
+      // answer the first request on a connection then reset the next one, which
+      // is what an idle close looks like when it crosses our write
+      const handled = new WeakMap<net.Socket, number>();
+      let resets = 0;
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          const count = (handled.get(req.socket) ?? 0) + 1;
+          handled.set(req.socket, count);
+          if (count === 1) return res.end("ok");
+          resets++;
+          req.socket.resetAndDestroy();
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const errors: string[] = [];
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: (msg) => errors.push(msg),
+        })
+      );
+      await listen(server);
+
+      for (let i = 0; i < 4; i++) {
+        const res = await request(server, { host: "myapp.localhost" });
+        expect(res.status).toBe(200);
+        expect(res.body).toBe("ok");
+      }
+      expect(resets).toBeGreaterThan(0);
+      expect(errors).toEqual([]);
     });
   });
 
@@ -1689,6 +1999,65 @@ describe("createProxyServer", () => {
       expect(result.status).toBe(502);
     });
 
+    it("does not report an error when shutdown aborts a pending WebSocket upgrade", async () => {
+      const backendPort = TEST_PROXY_PORT + 1;
+      const pending: net.Socket[] = [];
+      let resolvePending!: () => void;
+      const pendingStarted = new Promise<void>((resolve) => (resolvePending = resolve));
+      const connect = net.Socket.prototype.connect;
+      const spy = vi.spyOn(net.Socket.prototype, "connect").mockImplementation(function (
+        this: net.Socket,
+        ...args: unknown[]
+      ) {
+        const options = (Array.isArray(args[0]) ? args[0][0] : args[0]) as
+          | net.NetConnectOpts
+          | undefined;
+        if (options && "port" in options && options.port === backendPort) {
+          Reflect.set(this, "connecting", true);
+          pending.push(this);
+          if (pending.length === 2) resolvePending();
+          return this;
+        }
+        return Reflect.apply(connect, this, args);
+      });
+      const onError = vi.fn();
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [{ hostname: "ws.localhost", port: backendPort }],
+          proxyPort: TEST_PROXY_PORT,
+          onError,
+        })
+      );
+      await listen(server);
+      const resultPromise = new Promise<{ status?: number; closed: boolean }>((resolve, reject) => {
+        let status: number | undefined;
+        const req = http.request({
+          hostname: "127.0.0.1",
+          port: (server.address() as net.AddressInfo).port,
+          headers: { host: "ws.localhost", connection: "Upgrade", upgrade: "websocket" },
+        });
+        req.on("socket", (socket) => socket.once("close", () => resolve({ status, closed: true })));
+        req.on("response", (res) => {
+          status = res.statusCode;
+          res.resume();
+        });
+        req.on("error", reject);
+        req.end();
+      });
+
+      try {
+        await pendingStarted;
+        expect(pending.every((socket) => !socket.destroyed)).toBe(true);
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+        expect(await resultPromise).toEqual({ status: 502, closed: true });
+        expect(pending.every((socket) => socket.destroyed)).toBe(true);
+        expect(onError).not.toHaveBeenCalled();
+      } finally {
+        spy.mockRestore();
+        for (const socket of pending) socket.destroy();
+      }
+    });
+
     it("forwards backend Sec-WebSocket-Accept and custom headers", async () => {
       const testAcceptValue = "dGhlIHNhbXBsZSBub25jZQ==";
       const testProtocol = "graphql-ws";
@@ -1802,7 +2171,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     const certs = ensureCerts(certDir);
     tlsCert = fs.readFileSync(certs.certPath);
     tlsKey = fs.readFileSync(certs.keyPath);
-  }, 30_000);
+  }, 180_000);
 
   afterAll(() => {
     fs.rmSync(certDir, { recursive: true, force: true });
@@ -1852,6 +2221,383 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       req.end();
     });
   }
+
+  it("forwards HTTP/1 and HTTP/2 POST bodies to a TLS upstream using its authority", async () => {
+    const received: {
+      host: string | undefined;
+      forwardedHost: string | undefined;
+      sni: string | false | null;
+      body: string;
+    }[] = [];
+    const backend = trackServer(
+      https.createServer({ cert: tlsCert, key: tlsKey }, (req, res) => {
+        let body = "";
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          received.push({
+            host: req.headers.host,
+            forwardedHost: req.headers["x-forwarded-host"] as string | undefined,
+            sni: (req.socket as import("node:tls").TLSSocket).servername,
+            body,
+          });
+          res.end("received");
+        });
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address() as net.AddressInfo;
+    const routes: RouteInfo[] = [
+      {
+        hostname: "api.localhost",
+        port: backendAddr.port,
+        upstream: { tls: true, host: "api.internal:8443" },
+      },
+    ];
+    const plain = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    const secure = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(plain);
+    await listen(secure);
+
+    const http1Body = await new Promise<string>((resolve, reject) => {
+      const req = http.request(
+        {
+          host: "127.0.0.1",
+          port: (plain.address() as net.AddressInfo).port,
+          method: "POST",
+          headers: { host: "api.localhost:1444" },
+        },
+        (res) => {
+          let body = "";
+          res.on("data", (chunk) => (body += chunk));
+          res.on("end", () => resolve(body));
+        }
+      );
+      req.on("error", reject);
+      req.end("http1 body");
+    });
+    expect(http1Body).toBe("received");
+
+    const client = http2.connect(
+      `https://127.0.0.1:${(secure.address() as net.AddressInfo).port}`,
+      {
+        rejectUnauthorized: false,
+      }
+    );
+    try {
+      const http2Body = await new Promise<string>((resolve, reject) => {
+        const req = client.request({
+          ":method": "POST",
+          ":path": "/",
+          ":authority": "api.localhost:1444",
+        });
+        let body = "";
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => resolve(body));
+        req.on("error", reject);
+        req.end("http2 body");
+      });
+      expect(http2Body).toBe("received");
+    } finally {
+      client.destroy();
+    }
+    expect(received).toEqual([
+      {
+        host: "api.internal:8443",
+        forwardedHost: "api.localhost:1444",
+        sni: "api.internal",
+        body: "http1 body",
+      },
+      {
+        host: "api.internal:8443",
+        forwardedHost: "api.localhost:1444",
+        sni: "api.internal",
+        body: "http2 body",
+      },
+    ]);
+  });
+
+  it("rewrites only redirects to the configured upstream origin", async () => {
+    const backend = trackServer(
+      https.createServer({ cert: tlsCert, key: tlsKey }, (req, res) => {
+        const locations: Record<string, string> = {
+          "/matching": "https://api.internal:8443/login?next=1#section",
+          "/other": "https://elsewhere.internal/login",
+          "/relative": "/login",
+        };
+        res.writeHead(302, { location: locations[req.url ?? ""] });
+        res.end();
+      })
+    );
+    await listen(backend);
+    const routes: RouteInfo[] = [
+      {
+        hostname: "api.localhost",
+        port: (backend.address() as net.AddressInfo).port,
+        upstream: { tls: true, host: "api.internal:8443" },
+      },
+    ];
+    const plain = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    const secure = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(plain);
+    await listen(secure);
+
+    for (const [proxy, encrypted, host, location] of [
+      [plain, false, "api.localhost", "http://api.localhost/login?next=1#section"],
+      [plain, false, "api.localhost:80", "http://api.localhost/login?next=1#section"],
+      [plain, false, "api.localhost:1444", "http://api.localhost:1444/login?next=1#section"],
+      [secure, true, "api.localhost", "https://api.localhost/login?next=1#section"],
+      [secure, true, "api.localhost:443", "https://api.localhost/login?next=1#section"],
+      [secure, true, "api.localhost:1444", "https://api.localhost:1444/login?next=1#section"],
+    ] as const) {
+      const response = encrypted
+        ? await httpsRequest(proxy, { host, path: "/matching" })
+        : await request(proxy, { host, path: "/matching" });
+      expect(response.status).toBe(302);
+      expect(response.headers.location).toBe(location);
+    }
+
+    for (const [path, location] of [
+      ["/other", "https://elsewhere.internal/login"],
+      ["/relative", "/login"],
+    ]) {
+      const response = await request(plain, { host: "api.localhost:1444", path });
+      expect(response.status).toBe(302);
+      expect(response.headers.location).toBe(location);
+    }
+  });
+
+  it("reuses TLS sockets only for the same upstream authority and protocol", async () => {
+    let connections = 0;
+    const backend = trackServer(
+      https.createServer({ cert: tlsCert, key: tlsKey }, (req, res) => {
+        res.end(
+          JSON.stringify({
+            sni: (req.socket as import("node:tls").TLSSocket).servername,
+            host: req.headers.host,
+          })
+        );
+      })
+    );
+    backend.on("secureConnection", () => connections++);
+    await listen(backend);
+    const route: RouteInfo = {
+      hostname: "api.localhost",
+      port: (backend.address() as net.AddressInfo).port,
+      upstream: { tls: true, host: "a.internal" },
+    };
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => [route], proxyPort: TEST_PROXY_PORT, onError: () => {} })
+    );
+    await listen(server);
+    const get = () => request(server, { host: "api.localhost" });
+    expect(JSON.parse((await get()).body)).toEqual({ sni: "a.internal", host: "a.internal" });
+    expect(JSON.parse((await get()).body)).toEqual({ sni: "a.internal", host: "a.internal" });
+    expect(connections).toBe(1);
+    route.upstream = { tls: true, host: "b.internal" };
+    expect(JSON.parse((await get()).body)).toEqual({ sni: "b.internal", host: "b.internal" });
+    expect(connections).toBe(2);
+    route.upstream = { tls: false, host: "a.internal" };
+    expect((await get()).status).toBe(502);
+    route.upstream = { tls: true, host: "a.internal" };
+    expect(JSON.parse((await get()).body)).toEqual({ sni: "a.internal", host: "a.internal" });
+    expect(connections).toBe(2);
+  });
+
+  it("reports a TLS mismatch against a plaintext backend and recovers", async () => {
+    const backend = trackServer(http.createServer((_req, res) => res.end("ok")));
+    await listen(backend);
+    const route: RouteInfo = {
+      hostname: "api.localhost",
+      port: (backend.address() as net.AddressInfo).port,
+      upstream: { tls: true },
+    };
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => [route], proxyPort: TEST_PROXY_PORT, onError: () => {} })
+    );
+    await listen(server);
+    expect((await request(server, { host: "api.localhost" })).status).toBe(502);
+    route.upstream = { tls: false };
+    expect((await request(server, { host: "api.localhost" })).body).toBe("ok");
+  });
+
+  it("reaches an IPv6-only TLS backend", async (context) => {
+    const backend = trackServer(
+      https.createServer({ cert: tlsCert, key: tlsKey }, (_req, res) => res.end("ipv6"))
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        backend.once("error", reject);
+        backend.listen({ port: 0, host: "::1", ipv6Only: true }, () => resolve());
+      });
+    } catch (error) {
+      if (["EAFNOSUPPORT", "EADDRNOTAVAIL"].includes((error as NodeJS.ErrnoException).code ?? "")) {
+        context.skip();
+        return;
+      }
+      throw error;
+    }
+    const routes: RouteInfo[] = [
+      {
+        hostname: "api.localhost",
+        port: (backend.address() as net.AddressInfo).port,
+        upstream: { tls: true, host: "api.internal" },
+      },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+    expect((await request(server, { host: "api.localhost" })).body).toBe("ipv6");
+  });
+
+  it("times out, cancels and shuts down stalled TLS handshakes without losing dial slots", async () => {
+    const backend = trackServer(
+      https.createServer({ cert: tlsCert, key: tlsKey }, (_req, res) => res.end("ok"))
+    );
+    await listen(backend);
+    const sockets = new Set<net.Socket>();
+    const incomingSockets = new Set<net.Socket>();
+    let accepted = 0;
+    let forward = false;
+    const tunnel = trackServer(
+      net.createServer((socket) => {
+        accepted++;
+        sockets.add(socket);
+        incomingSockets.add(socket);
+        socket.on("close", () => {
+          sockets.delete(socket);
+          incomingSockets.delete(socket);
+        });
+        socket.on("error", () => {});
+        if (forward) {
+          const target = net.connect((backend.address() as net.AddressInfo).port, "127.0.0.1");
+          sockets.add(target);
+          target.on("close", () => sockets.delete(target));
+          target.on("error", () => socket.destroy());
+          socket.pipe(target).pipe(socket);
+        } else {
+          socket.resume();
+        }
+      })
+    );
+    await listen(tunnel);
+    const route: RouteInfo = {
+      hostname: "api.localhost",
+      port: (tunnel.address() as net.AddressInfo).port,
+      upstream: { tls: true, host: "timeout.internal" },
+    };
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => [route], proxyPort: TEST_PROXY_PORT, onError: () => {} })
+    );
+    await listen(server);
+    const port = (server.address() as net.AddressInfo).port;
+    const clients: http.ClientRequest[] = [];
+    const open = () => {
+      const client = http.get({
+        host: "127.0.0.1",
+        port,
+        headers: { host: "api.localhost" },
+        agent: false,
+      });
+      client.on("error", () => {});
+      client.on("response", (res) => res.resume());
+      clients.push(client);
+      return client;
+    };
+    try {
+      const timeout = await request(server, { host: "api.localhost", accept: "application/json" });
+      expect(timeout.status).toBe(502);
+      expect(JSON.parse(timeout.body).message).toBe("The target app may not be running.");
+      await vi.waitFor(() => expect(sockets.size).toBe(0));
+      route.upstream = { tls: true, host: "cancel.internal" };
+      const initial = accepted;
+      const stalled = Array.from({ length: 8 }, open);
+      await vi.waitFor(() => expect(accepted - initial).toBe(8));
+      const queued = request(server, { host: "api.localhost" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(accepted - initial).toBe(8);
+      forward = true;
+      stalled.forEach((client) => client.destroy());
+      expect((await queued).body).toBe("ok");
+      await vi.waitFor(() => expect(accepted - initial).toBe(9));
+      forward = false;
+      route.upstream = { tls: true, host: "shutdown.internal" };
+      const beforeShutdown = accepted;
+      Array.from({ length: 9 }, open);
+      await vi.waitFor(() => expect(accepted - beforeShutdown).toBe(8));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(accepted - beforeShutdown).toBe(8);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+      await vi.waitFor(() => expect(incomingSockets.size).toBe(0));
+    } finally {
+      clients.forEach((client) => client.destroy());
+      sockets.forEach((socket) => socket.destroy());
+    }
+  }, 20_000);
+
+  it("streams TLS upstream events without blocking another request", async () => {
+    let stream: http.ServerResponse | undefined;
+    const backend = trackServer(
+      https.createServer({ cert: tlsCert, key: tlsKey }, (req, res) => {
+        if (req.url === "/events") {
+          stream = res;
+          res.writeHead(200, { "content-type": "text/event-stream" });
+          res.write("data: first\n\n");
+        } else res.end("ok");
+      })
+    );
+    await listen(backend);
+    const routes: RouteInfo[] = [
+      {
+        hostname: "api.localhost",
+        port: (backend.address() as net.AddressInfo).port,
+        upstream: { tls: true },
+      },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+    );
+    await listen(server);
+    let incoming: http.IncomingMessage | undefined;
+    const req = http.get({
+      host: "127.0.0.1",
+      port: (server.address() as net.AddressInfo).port,
+      path: "/events",
+      headers: { host: "api.localhost" },
+    });
+    try {
+      const chunk = await new Promise<string>((resolve, reject) => {
+        req.on("error", reject);
+        req.on("response", (res) => {
+          incoming = res;
+          res.once("data", (data) => resolve(String(data)));
+          res.on("error", reject);
+        });
+      });
+      expect(chunk).toBe("data: first\n\n");
+      expect((await request(server, { host: "api.localhost" })).body).toBe("ok");
+    } finally {
+      incoming?.destroy();
+      req.destroy();
+      stream?.end();
+    }
+  });
 
   it("creates an HTTPS server that responds to requests", async () => {
     const routes: RouteInfo[] = [];
@@ -1949,6 +2695,156 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
     expect(result.status).toBe(404);
     expect(result.protocol).toBe("h2");
+  });
+
+  it("frames h2 request bodies sent without content-length (issue #414)", async () => {
+    const received: { method?: string; te?: string; body: string }[] = [];
+    const clientErrors: string[] = [];
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        let body = "";
+        req.on("data", (chunk) => (body += chunk));
+        req.on("end", () => {
+          received.push({ method: req.method, te: req.headers["transfer-encoding"], body });
+          res.end("ok");
+        });
+      })
+    );
+    backend.on("clientError", (err: NodeJS.ErrnoException, socket: net.Socket) => {
+      clientErrors.push(err.code ?? err.message);
+      socket.destroy();
+    });
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+    const send = (method: string, body?: string, headers: http2.OutgoingHttpHeaders = {}) =>
+      new Promise<number>((resolve, reject) => {
+        const req = client.request(
+          { ":method": method, ":path": "/", ":authority": "myapp.localhost", ...headers },
+          { endStream: body === undefined }
+        );
+        req.on("response", (headers) => resolve(headers[":status"] as number));
+        req.on("error", reject);
+        req.resume();
+        if (body !== undefined) req.end(body);
+      });
+
+    try {
+      expect(await send("DELETE", '{"id":1}')).toBe(200);
+      expect(await send("GET", "x")).toBe(200);
+      expect(await send("GET")).toBe(200);
+      expect(await send("DELETE", "{}", { "content-length": "2" })).toBe(200);
+    } finally {
+      client.close();
+    }
+
+    expect(clientErrors).toEqual([]);
+    expect(received).toEqual([
+      { method: "DELETE", te: "chunked", body: '{"id":1}' },
+      { method: "GET", te: "chunked", body: "x" },
+      { method: "GET", te: undefined, body: "" },
+      { method: "DELETE", te: undefined, body: "{}" },
+    ]);
+  });
+
+  it("resets the h2 stream with an error when the backend drops a response mid-body", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.write("partial", () => res.socket?.destroy());
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+    try {
+      const rstCode = await new Promise<number>((resolve) => {
+        const req = client.request({ ":path": "/", ":authority": "myapp.localhost" });
+        req.on("error", () => {});
+        req.on("close", () => resolve(req.rstCode));
+        req.resume();
+      });
+      expect(rstCode).toBe(http2.constants.NGHTTP2_INTERNAL_ERROR);
+    } finally {
+      client.close();
+    }
+  });
+
+  it("keeps an unframed h2 body from reaching another client's pooled request", async () => {
+    const received: { url?: string; auth?: string }[] = [];
+    const backend = trackServer(
+      http.createServer((req, res) => {
+        received.push({ url: req.url, auth: req.headers.authorization });
+        req.resume();
+        req.on("end", () => res.end("ok"));
+      })
+    );
+    backend.on("clientError", (_err: Error, socket: net.Socket) => socket.destroy());
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: backendAddr.port }],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const send = (path: string, headers: http2.OutgoingHttpHeaders, body?: string) => {
+      const client = http2.connect(`https://127.0.0.1:${addr.port}`, { rejectUnauthorized: false });
+      return new Promise<number>((resolve, reject) => {
+        const req = client.request(
+          { ":method": "GET", ":path": path, ":authority": "myapp.localhost", ...headers },
+          { endStream: body === undefined }
+        );
+        req.on("response", (h) => resolve(h[":status"] as number));
+        req.on("error", reject);
+        req.on("close", () => client.close());
+        req.resume();
+        if (body !== undefined) req.end(body);
+      });
+    };
+
+    // An incomplete request in a GET body must not prefix the next request
+    // that reuses the same upstream socket.
+    expect(await send("/", {}, "GET /admin HTTP/1.1\r\nX-Ignore: ")).toBe(200);
+    expect(await send("/profile", { authorization: "Bearer victim" })).toBe(200);
+
+    expect(received.some((r) => r.url === "/admin")).toBe(false);
+    expect(received).toContainEqual({ url: "/profile", auth: "Bearer victim" });
   });
 
   it("returns compact JSON errors over TLS to JSON clients", async () => {
@@ -2170,6 +3066,239 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     });
   }
 
+  it("distinguishes unavailable TLS upstreams from TLS protocol errors for HTTP and WebSockets", async () => {
+    let reset = false;
+    const backend = trackServer(http.createServer());
+    backend.on("clientError", (_err, socket) => {
+      if (reset) socket.destroy();
+      else socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
+    });
+    await listen(backend);
+    const port = (backend.address() as net.AddressInfo).port;
+    await new Promise<void>((resolve, reject) =>
+      backend.close((err) => (err ? reject(err) : resolve()))
+    );
+
+    const errors: string[] = [];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => [
+          { hostname: "ws.localhost", port, upstream: { tls: true, host: "ws.internal" } },
+        ],
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+        onError: (error) => errors.push(error),
+      })
+    );
+    await listen(server);
+    const { client } = await h2Session(server);
+    const wsHeaders = {
+      connection: "Upgrade",
+      upgrade: "websocket",
+      "sec-websocket-version": "13",
+      "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+    };
+    const h2WebSocket = () =>
+      new Promise<{ status: number; body: string }>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+          "sec-websocket-version": "13",
+        });
+        let status = 0;
+        let body = "";
+        req.on("response", (headers) => (status = headers[":status"] as number));
+        req.on("data", (chunk: Buffer) => (body += chunk));
+        req.on("end", () => resolve({ status, body }));
+        req.on("error", reject);
+        req.end();
+      });
+
+    try {
+      const json = await httpsRequest(server, { host: "ws.localhost", accept: "application/json" });
+      const html = await httpsRequest(server, { host: "ws.localhost" });
+      const ws = await request(server, { host: "ws.localhost", headers: wsHeaders });
+      const h2ws = await h2WebSocket();
+      const unavailable = "The target app is not responding. It may have crashed.";
+      expect.soft(json.status).toBe(502);
+      expect.soft(JSON.parse(json.body).message).toBe(unavailable);
+      expect.soft(html.status).toBe(502);
+      expect.soft(html.body.includes(unavailable)).toBe(true);
+      for (const response of [ws, h2ws]) {
+        expect.soft(response.status).toBe(502);
+        expect.soft(response.body).toContain("target app is not responding");
+        expect.soft(response.body).not.toContain("supports TLS");
+      }
+
+      await new Promise<void>((resolve) => backend.listen(port, "127.0.0.1", resolve));
+      const mismatchHttp = await httpsRequest(server, {
+        host: "ws.localhost",
+        accept: "application/json",
+      });
+      const mismatchWs = await request(server, { host: "ws.localhost", headers: wsHeaders });
+      const mismatchH2ws = await h2WebSocket();
+      for (const response of [mismatchHttp, mismatchWs, mismatchH2ws]) {
+        expect.soft(response.status).toBe(502);
+        expect.soft(response.body).toContain("supports TLS on the configured port");
+      }
+      expect.soft(errors.some((error) => /wrong version number/i.test(error))).toBe(true);
+      reset = true;
+      const resetResponse = await httpsRequest(server, {
+        host: "ws.localhost",
+        accept: "application/json",
+      });
+      expect.soft(resetResponse.status).toBe(502);
+      expect
+        .soft(JSON.parse(resetResponse.body).message)
+        .toBe("The target app may not be running.");
+
+      await new Promise<void>((resolve, reject) =>
+        backend.close((err) => (err ? reject(err) : resolve()))
+      );
+      const recovered = trackServer(
+        https.createServer({ cert: tlsCert, key: tlsKey }, (_req, res) => res.end("recovered"))
+      );
+      await new Promise<void>((resolve) => recovered.listen(port, "127.0.0.1", resolve));
+      const response = await httpsRequest(server, { host: "ws.localhost" });
+      expect(response.status).toBe(200);
+      expect(response.body).toBe("recovered");
+    } finally {
+      client.close();
+    }
+  });
+
+  it("reports a malformed WebSocket response after a successful upstream TLS handshake", async () => {
+    let handshakes = 0;
+    const backend = trackServer(https.createServer({ cert: tlsCert, key: tlsKey }));
+    backend.on("secureConnection", () => handshakes++);
+    backend.on("upgrade", (_req, socket) => socket.end("Unauthorized"));
+    await listen(backend);
+    const routes: RouteInfo[] = [
+      {
+        hostname: "ws.localhost",
+        port: (backend.address() as net.AddressInfo).port,
+        upstream: { tls: true, host: "ws.internal" },
+      },
+    ];
+    const server = trackServer(
+      createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, onError: () => {} })
+    );
+    await listen(server);
+    const response = await request(server, {
+      host: "ws.localhost",
+      headers: {
+        connection: "Upgrade",
+        upgrade: "websocket",
+        "sec-websocket-version": "13",
+        "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+      },
+    });
+    expect(handshakes).toBe(1);
+    expect(response.status).toBe(502);
+    expect(response.body).toContain("invalid response to the WebSocket handshake");
+    expect(response.body).not.toContain("supports TLS");
+  });
+
+  it("forwards HTTP/1 and RFC 8441 WebSockets through TLS with upstream headers", async () => {
+    const received: {
+      host: string | undefined;
+      forwarded: string | undefined;
+      sni: string | false | null;
+    }[] = [];
+    const backend = trackServer(https.createServer({ cert: tlsCert, key: tlsKey }));
+    backend.on("upgrade", (req, socket) => {
+      received.push({
+        host: req.headers.host,
+        forwarded: req.headers["x-forwarded-host"] as string | undefined,
+        sni: (req.socket as import("node:tls").TLSSocket).servername,
+      });
+      const accept = crypto
+        .createHash("sha1")
+        .update(`${req.headers["sec-websocket-key"]}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`)
+        .digest("base64");
+      socket.write(
+        `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`
+      );
+      socket.on("data", (data) => socket.write(`echo:${data}`));
+    });
+    await listen(backend);
+    const routes: RouteInfo[] = [
+      {
+        hostname: "ws.localhost",
+        port: (backend.address() as net.AddressInfo).port,
+        upstream: { tls: true, host: "ws.internal:8443" },
+      },
+    ];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const http1 = await new Promise<string>((resolve, reject) => {
+      const req = https.request({
+        host: "127.0.0.1",
+        port: (server.address() as net.AddressInfo).port,
+        rejectUnauthorized: false,
+        headers: {
+          host: "ws.localhost:1444",
+          connection: "Upgrade",
+          upgrade: "websocket",
+          "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==",
+          "sec-websocket-version": "13",
+        },
+      });
+      req.on("error", reject);
+      req.on("response", (res) => reject(new Error(`unexpected HTTP ${res.statusCode}`)));
+      req.on("upgrade", (_res, socket) => {
+        socket.on("error", reject);
+        socket.once("data", (data) => {
+          resolve(String(data));
+          socket.destroy();
+        });
+        socket.write("ping");
+      });
+      req.end();
+    });
+    expect(http1).toBe("echo:ping");
+    const { client } = await h2Session(server);
+    try {
+      const result = await new Promise<{ status: number; data: string }>((resolve, reject) => {
+        const stream = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/ws",
+          ":authority": "ws.localhost:1444",
+          ":scheme": "https",
+          "sec-websocket-version": "13",
+        });
+        stream.on("error", reject);
+        stream.on("response", (headers) => {
+          stream.write("ping");
+          stream.once("data", (data) => {
+            resolve({ status: Number(headers[":status"]), data: String(data) });
+            stream.close();
+          });
+        });
+      });
+      expect(result).toEqual({ status: 200, data: "echo:ping" });
+    } finally {
+      client.destroy();
+    }
+    expect(received).toEqual(
+      Array(2).fill({
+        host: "ws.internal:8443",
+        forwarded: "ws.localhost:1444",
+        sni: "ws.internal",
+      })
+    );
+  });
+
   it("proxies WebSocket over HTTP/2 extended CONNECT (RFC 8441)", async () => {
     const received: http.IncomingHttpHeaders = {};
     const backend = trackServer(http.createServer());
@@ -2247,6 +3376,47 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
       expect(received["x-forwarded-proto"]).toBe("https");
     } finally {
       client.close();
+    }
+  });
+
+  it("opens no upstream sockets when shutdown starts during extended CONNECT routing", async () => {
+    let closed: Promise<void> | undefined;
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => {
+          closed = new Promise<void>((resolve) => server.close(() => resolve()));
+          return [{ hostname: "ws.localhost", port: 12345 }];
+        },
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const { client } = await h2Session(server);
+    const connect = vi.spyOn(net.Socket.prototype, "connect");
+    try {
+      const status = await new Promise<number>((resolve, reject) => {
+        const req = client.request({
+          ":method": "CONNECT",
+          ":protocol": "websocket",
+          ":path": "/ws",
+          ":authority": "ws.localhost",
+          ":scheme": "https",
+        });
+        req.on("error", reject);
+        req.on("response", (headers) => {
+          req.resume();
+          req.on("end", () => resolve(headers[":status"] as number));
+        });
+        req.end();
+      });
+      expect(status).toBe(502);
+      expect(connect).not.toHaveBeenCalled();
+      client.destroy();
+      await closed;
+    } finally {
+      connect.mockRestore();
+      client.destroy();
     }
   });
 
@@ -2963,4 +4133,177 @@ describe("internal hosts-sync route", () => {
       expect(res.status).not.toBe(204);
     }
   );
+});
+
+describe("loopbackOnly", () => {
+  const servers: AnyServer[] = [];
+  let certDir: string;
+  let tlsCert: Buffer;
+  let tlsKey: Buffer;
+
+  /** A non-internal IPv4 address of this machine; connecting to it makes the peer non-loopback. */
+  const lanIp = Object.values(os.networkInterfaces())
+    .flat()
+    .find((entry) => entry && entry.family === "IPv4" && !entry.internal)?.address;
+
+  function track<T extends AnyServer>(server: T): T {
+    servers.push(server);
+    return server;
+  }
+
+  function listenAll(server: AnyServer): Promise<number> {
+    return new Promise((resolve) => {
+      server.listen(0, "0.0.0.0", () => {
+        const addr = server.address();
+        if (!addr || typeof addr === "string") throw new Error("no address");
+        resolve(addr.port);
+      });
+    });
+  }
+
+  async function backend(): Promise<{ port: number; hits: () => number }> {
+    let hits = 0;
+    const server = track(
+      http.createServer((_req, res) => {
+        hits++;
+        res.end("app");
+      })
+    );
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no address");
+    return { port: addr.port, hits: () => hits };
+  }
+
+  /** Plain request from `hostname` to the same host; resolves to the status or the socket error code. */
+  function plainRequest(
+    hostname: string,
+    port: number,
+    headers: http.OutgoingHttpHeaders = {}
+  ): Promise<{ status?: number; error?: string }> {
+    return new Promise((resolve) => {
+      const req = http.request(
+        { hostname, port, headers: { host: "myapp.localhost", ...headers } },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve({ status: res.statusCode }));
+        }
+      );
+      req.on("error", (err: NodeJS.ErrnoException) => resolve({ error: err.code ?? err.message }));
+      req.end();
+    });
+  }
+
+  function tlsRequest(
+    hostname: string,
+    port: number
+  ): Promise<{ status?: number; error?: string }> {
+    return new Promise((resolve) => {
+      const req = https.request(
+        {
+          hostname,
+          port,
+          servername: "myapp.localhost",
+          rejectUnauthorized: false,
+          headers: { host: "myapp.localhost" },
+          // No keep-alive, so closing the server never waits on this socket.
+          agent: false,
+        },
+        (res) => {
+          res.resume();
+          res.on("end", () => resolve({ status: res.statusCode }));
+        }
+      );
+      req.on("error", (err: NodeJS.ErrnoException) => resolve({ error: err.code ?? err.message }));
+      req.end();
+    });
+  }
+
+  beforeAll(() => {
+    certDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-loopback-only-"));
+    const certs = ensureCerts(certDir);
+    tlsCert = fs.readFileSync(certs.certPath);
+    tlsKey = fs.readFileSync(certs.keyPath);
+  }, 180_000);
+
+  afterAll(() => {
+    fs.rmSync(certDir, { recursive: true, force: true });
+  });
+
+  afterEach(async () => {
+    for (const s of servers) {
+      await new Promise<void>((resolve) => s.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  it("still serves loopback peers through the wildcard-bound plain server", async () => {
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+        loopbackOnly: true,
+      })
+    );
+    const port = await listenAll(server);
+    expect(await plainRequest("127.0.0.1", port)).toEqual({ status: 200 });
+    expect(app.hits()).toBe(1);
+  });
+
+  it("closes a non-loopback peer before the plain request reaches a backend", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+        loopbackOnly: true,
+      })
+    );
+    const port = await listenAll(server);
+    const result = await plainRequest(lanIp, port);
+    expect(result.status).toBeUndefined();
+    expect(result.error).toBeDefined();
+    expect(app.hits()).toBe(0);
+  });
+
+  it("accepts the same non-loopback peer when loopbackOnly is off", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+      })
+    );
+    const port = await listenAll(server);
+    expect(await plainRequest(lanIp, port)).toEqual({ status: 200 });
+    expect(app.hits()).toBe(1);
+  });
+
+  it("closes a non-loopback peer before the TLS handshake", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const app = await backend();
+    const server = track(
+      createProxyServer({
+        getRoutes: () => [{ hostname: "myapp.localhost", port: app.port }],
+        proxyPort: TEST_PROXY_PORT,
+        loopbackOnly: true,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    const port = await listenAll(server);
+    expect((await tlsRequest(lanIp, port)).status).toBeUndefined();
+    expect(await tlsRequest("127.0.0.1", port)).toEqual({ status: 200 });
+    expect(app.hits()).toBe(1);
+  });
+
+  it("guards the HTTP-to-HTTPS redirect listener the same way", async (ctx) => {
+    if (!lanIp) return ctx.skip();
+    const server = track(createHttpRedirectServer(443, true));
+    const port = await listenAll(server);
+    expect((await plainRequest(lanIp, port)).status).toBeUndefined();
+    expect(await plainRequest("127.0.0.1", port)).toEqual({ status: 302 });
+  });
 });

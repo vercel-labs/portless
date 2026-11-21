@@ -7,6 +7,9 @@ import {
   resolveAppConfig,
   resolveScript,
   resolveScriptCommand,
+  scriptRunCommand,
+  isYarnClassic,
+  packageManagerExec,
   detectPackageManager,
   hasScript,
   splitCommand,
@@ -264,6 +267,68 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("rejects invalid worktree options", () => {
+    const cases: [unknown, RegExp][] = [
+      ["branch", /must be an object/],
+      [{ prefix: "full" }, /last-segment/],
+      [{ hostnameTemplate: "tenant.{name}" }, /\{worktree\}/],
+      [{ hostnameTemplate: "" }, /hostnameTemplate/],
+    ];
+    for (const [worktree, message] of cases) {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ worktree }));
+      expect(() => loadConfig(tmpDir)).toThrow(message);
+    }
+  });
+
+  it("validates rendered hostnameTemplate labels in every config location", () => {
+    const valid = [
+      "tenant.{worktree}",
+      "{worktree}-{name}",
+      "a.b.{worktree}",
+      "UPPER-CASE.{worktree}",
+      `${"a".repeat(70)}.{worktree}`,
+    ];
+    const invalid = [
+      ".{worktree}",
+      "tenant_{worktree}",
+      "tenant.-{worktree}",
+      "{worktree}.{tenant}",
+      "a..{worktree}",
+      "{worktree}.",
+    ];
+    const places: [string, (t: string) => unknown, string][] = [
+      [
+        "portless.json",
+        (t) => ({ worktree: { hostnameTemplate: t } }),
+        '"worktree.hostnameTemplate"',
+      ],
+      [
+        "portless.json",
+        (t) => ({ apps: { "apps/web": { worktree: { hostnameTemplate: t } } } }),
+        '"apps.apps/web.worktree.hostnameTemplate"',
+      ],
+      [
+        "package.json",
+        (t) => ({ portless: { worktree: { hostnameTemplate: t } } }),
+        '"worktree.hostnameTemplate"',
+      ],
+    ];
+
+    for (const [file, wrap, key] of places) {
+      const write = (t: string) =>
+        fs.writeFileSync(path.join(tmpDir, file), JSON.stringify(wrap(t)));
+      for (const t of valid) {
+        write(t);
+        expect(() => loadConfig(tmpDir), t).not.toThrow();
+      }
+      for (const t of invalid) {
+        write(t);
+        expect(() => loadConfig(tmpDir), t).toThrow(`${key} in ${path.join(tmpDir, file)}`);
+      }
+      fs.rmSync(path.join(tmpDir, file), { force: true });
+    }
+  });
+
   it("throws when proxy is not a boolean", () => {
     fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ proxy: "false" }));
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
@@ -358,6 +423,19 @@ describe("resolveAppConfig", () => {
     };
     const result = resolveAppConfig(config, "/repo", "/repo/packages/shared");
     expect(result).toEqual({});
+  });
+
+  it("applies root worktree options and merges app overrides by key", () => {
+    const config = {
+      proxy: false,
+      worktree: { prefix: "branch", hostnameTemplate: "tenant.{worktree}-{name}" },
+      apps: { "apps/api": { worktree: { prefix: "last-segment" } } },
+    } as const;
+    const root = { prefix: "branch", hostnameTemplate: "tenant.{worktree}-{name}" };
+    expect(resolveAppConfig(config, "/repo", "/repo/apps/web")).toEqual({ worktree: root });
+    expect(resolveAppConfig(config, "/repo", "/repo/apps/api")).toEqual({
+      worktree: { ...root, prefix: "last-segment" },
+    });
   });
 
   it("ignores top-level fields when apps is present", () => {
@@ -644,5 +722,138 @@ describe("resolveScriptCommand", () => {
       JSON.stringify({ scripts: { dev: "next dev" } })
     );
     expect(resolveScriptCommand("dev", tmpDir)).toEqual(["yarn", "run", "dev"]);
+  });
+});
+
+describe("scriptRunCommand", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpDir);
+  });
+
+  it("keeps a leading literal -- for npm, pnpm, and bun", () => {
+    expect(scriptRunCommand("npm", "dev", tmpDir, ["--", "--inspect"])).toEqual([
+      "npm",
+      "run",
+      "dev",
+      "--",
+      "--",
+      "--inspect",
+    ]);
+    expect(scriptRunCommand("pnpm", "dev", tmpDir, ["--", "--inspect"])).toEqual([
+      "pnpm",
+      "run",
+      "dev",
+      "--",
+      "--inspect",
+    ]);
+    expect(scriptRunCommand("bun", "dev", tmpDir, ["--", "--inspect"])).toEqual([
+      "bun",
+      "run",
+      "dev",
+      "--",
+      "--",
+      "--inspect",
+    ]);
+  });
+
+  it("adds a separator for Yarn Classic but not Berry", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@1.22.22" })
+    );
+    expect(scriptRunCommand("yarn", "dev", tmpDir, ["--", "--inspect"])).toEqual([
+      "yarn",
+      "run",
+      "dev",
+      "--",
+      "--",
+      "--inspect",
+    ]);
+
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@4.18.1" })
+    );
+    expect(scriptRunCommand("yarn", "dev", tmpDir, ["--", "--inspect"])).toEqual([
+      "yarn",
+      "run",
+      "dev",
+      "--",
+      "--inspect",
+    ]);
+  });
+
+  it("keeps Yarn exec arguments after its own separator", () => {
+    expect(packageManagerExec("yarn", ["turbo", "run", "dev", "--", "--inspect"])).toEqual([
+      "yarn",
+      "exec",
+      "--",
+      "turbo",
+      "run",
+      "dev",
+      "--",
+      "--inspect",
+    ]);
+    expect(packageManagerExec("pnpm", ["turbo", "run", "dev", "--", "--inspect"])).toEqual([
+      "pnpm",
+      "exec",
+      "turbo",
+      "run",
+      "dev",
+      "--",
+      "--inspect",
+    ]);
+  });
+});
+
+describe("isYarnClassic", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTmpDir();
+  });
+
+  afterEach(() => {
+    cleanupDir(tmpDir);
+  });
+
+  it("reads the packageManager field and lockfile format", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@4.18.1" })
+    );
+    expect(isYarnClassic(tmpDir)).toBe(false);
+
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@1.22.22" })
+    );
+    expect(isYarnClassic(tmpDir)).toBe(true);
+
+    fs.writeFileSync(path.join(tmpDir, "package.json"), "{}");
+    fs.writeFileSync(
+      path.join(tmpDir, "yarn.lock"),
+      "# THIS IS AN AUTOGENERATED FILE. DO NOT EDIT THIS FILE DIRECTLY.\n# yarn lockfile v1\n"
+    );
+    expect(isYarnClassic(tmpDir)).toBe(true);
+
+    fs.writeFileSync(path.join(tmpDir, "yarn.lock"), "__metadata:\n  version: 8\n");
+    expect(isYarnClassic(tmpDir)).toBe(false);
+  });
+
+  it("walks up from a workspace package to the root metadata", () => {
+    const packageDir = path.join(tmpDir, "packages", "web");
+    fs.mkdirSync(packageDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ packageManager: "yarn@1.22.22" })
+    );
+    expect(isYarnClassic(packageDir)).toBe(true);
   });
 });

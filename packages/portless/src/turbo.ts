@@ -1,56 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { USER_STATE_DIR } from "./cli-utils.js";
-
-export const LOADER_FILENAME = "turbo-env-loader.cjs";
-export const MANIFEST_FILENAME = "dev-manifest.json";
-
-export function loaderPath(baseDir: string = USER_STATE_DIR): string {
-  return path.join(baseDir, LOADER_FILENAME);
-}
-
-export function manifestPath(baseDir: string = USER_STATE_DIR): string {
-  return path.join(baseDir, MANIFEST_FILENAME);
-}
-
-/**
- * Generate the CJS loader script source. The manifest path is resolved
- * relative to the given base directory at runtime.
- */
-export function loaderSource(baseDir: string = USER_STATE_DIR): string {
-  return `"use strict";
-var fs = require("fs");
-var path = require("path");
-var manifestPath = path.join(${JSON.stringify(baseDir)}, "dev-manifest.json");
-try {
-  var raw = fs.readFileSync(manifestPath, "utf-8");
-  var manifest = JSON.parse(raw);
-  var cwd = process.cwd();
-  var entry = manifest[cwd];
-  if (entry && typeof entry === "object") {
-    var keys = Object.keys(entry);
-    for (var i = 0; i < keys.length; i++) {
-      process.env[keys[i]] = entry[keys[i]];
-    }
-  }
-} catch (_) {}
-`;
-}
-
-/** Ensure the loader script exists. */
-export function ensureEnvLoader(baseDir: string = USER_STATE_DIR): void {
-  fs.mkdirSync(baseDir, { recursive: true, mode: 0o755 });
-  const target = loaderPath(baseDir);
-  const source = loaderSource(baseDir);
-
-  try {
-    const existing = fs.readFileSync(target, "utf-8");
-    if (existing === source) return;
-  } catch {
-    // doesn't exist yet
-  }
-  fs.writeFileSync(target, source, { mode: 0o644 });
-}
+import { isProcessAlive } from "./utils.js";
 
 export interface ManifestEntry {
   PORT: string;
@@ -60,24 +10,89 @@ export interface ManifestEntry {
   NODE_EXTRA_CA_CERTS?: string;
 }
 
-/**
- * Write the dev-manifest.json mapping package directories to env vars.
- * Keys are absolute paths to package directories.
- */
-export function writeManifest(
-  entries: Record<string, ManifestEntry>,
-  baseDir: string = USER_STATE_DIR
-): void {
-  fs.mkdirSync(baseDir, { recursive: true, mode: 0o755 });
-  fs.writeFileSync(manifestPath(baseDir), JSON.stringify(entries, null, 2) + "\n", { mode: 0o644 });
+const DATA_FILE_PATTERN = /^turbo-env-(\d+)\.json$/;
+
+const LOADER_SOURCE = `"use strict";
+var fs = require("fs");
+var path = require("path");
+var cwd = process.cwd();
+var names = fs.readdirSync(__dirname);
+for (var i = 0; i < names.length; i++) {
+  var match = ${DATA_FILE_PATTERN}.exec(names[i]);
+  if (!match || !isAlive(Number(match[1]))) continue;
+  var entry = readData(path.join(__dirname, names[i]))[cwd];
+  if (entry) {
+    Object.assign(process.env, entry);
+    break;
+  }
+}
+function isAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return err.code === "EPERM";
+  }
+}
+function readData(file) {
+  var raw;
+  try {
+    raw = fs.readFileSync(file, "utf-8");
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw err;
+  }
+  return JSON.parse(raw);
+}
+`;
+
+/** Path of the env loader shared by every portless run using a state directory. */
+export function loaderPath(baseDir: string): string {
+  return path.resolve(baseDir, "turbo-env-loader.cjs");
 }
 
-/** Remove the dev-manifest.json file. */
-export function removeManifest(baseDir: string = USER_STATE_DIR): void {
-  try {
-    fs.unlinkSync(manifestPath(baseDir));
-  } catch {
-    // already gone
+function dataPath(baseDir: string): string {
+  return path.resolve(baseDir, `turbo-env-${process.pid}.json`);
+}
+
+function writeFileAtomic(file: string, content: string): void {
+  const tempPath = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tempPath, content, { mode: 0o644 });
+  fs.renameSync(tempPath, file);
+}
+
+type EnvPublicationState = "unpublished" | "published" | "retired";
+
+/**
+ * Lifecycle of this run's env data file for the shared loader:
+ * unpublished, then published, then retired. Retire is idempotent and final.
+ */
+export class EnvPublication {
+  private state: EnvPublicationState = "unpublished";
+
+  constructor(private readonly baseDir: string) {}
+
+  /** Write the shared loader and this run's entries, removing data left by dead runs. */
+  publish(entries: Record<string, ManifestEntry>): void {
+    if (this.state !== "unpublished") {
+      throw new Error(`Cannot publish Turbo env entries in state ${this.state}`);
+    }
+    fs.mkdirSync(this.baseDir, { recursive: true, mode: 0o755 });
+    for (const name of fs.readdirSync(this.baseDir)) {
+      const pid = DATA_FILE_PATTERN.exec(name)?.[1];
+      if (pid && !isProcessAlive(Number(pid))) {
+        fs.rmSync(path.join(this.baseDir, name), { force: true });
+      }
+    }
+    writeFileAtomic(loaderPath(this.baseDir), LOADER_SOURCE);
+    writeFileAtomic(dataPath(this.baseDir), JSON.stringify(entries));
+    this.state = "published";
+  }
+
+  /** Remove this run's entries. The shared loader stays for processes that outlive the run. */
+  retire(): void {
+    if (this.state === "published") fs.rmSync(dataPath(this.baseDir), { force: true });
+    this.state = "retired";
   }
 }
 
@@ -85,7 +100,7 @@ export function removeManifest(baseDir: string = USER_STATE_DIR): void {
  * Build the NODE_OPTIONS value with the --require loader prepended.
  * Preserves any existing NODE_OPTIONS value.
  */
-export function buildNodeOptions(baseDir: string = USER_STATE_DIR): string {
+export function buildNodeOptions(baseDir: string): string {
   const existing = process.env.NODE_OPTIONS || "";
   const lp = loaderPath(baseDir);
   const requireFlag = lp.includes(" ") ? `--require "${lp}"` : `--require ${lp}`;

@@ -87,17 +87,13 @@ function formatSpawnError(provider: TunnelProvider, error: Error): Error {
 }
 
 function formatOutputError(output: string): Error {
-  const details = normalizeSpace(output);
-  const lower = details.toLowerCase();
-  if (
-    lower.includes("authtoken") ||
-    lower.includes("authentication") ||
-    lower.includes("not logged in")
-  ) {
+  if (output.includes("ERR_NGROK_4018")) {
     return new Error(
       "ngrok could not start because authentication is not configured. Run `ngrok config add-authtoken <token>`, then run portless again."
     );
   }
+  const errorLines = output.match(/^ERROR:.*/gm)?.map((line) => line.slice("ERROR:".length));
+  const details = normalizeSpace(errorLines?.join(" ") ?? output);
   return new Error(
     `Failed to start ngrok tunnel: ${details || "ngrok exited before printing a public URL"}`
   );

@@ -15,7 +15,6 @@ import {
   untrustCA,
   untrustCALinux,
 } from "./certs.js";
-import { isWSL } from "./windows-ca.js";
 
 /**
  * Return the signature algorithm string for a PEM cert file using openssl.
@@ -646,18 +645,30 @@ describe("isCATrusted", () => {
     expect(isCATrusted(path.join(tmpDir, "nonexistent"))).toBe(false);
   });
 
-  it("asks the OS instead of the trust marker when useMarker is false", () => {
-    ensureCerts(tmpDir);
-    const fingerprint = crypto
-      .createHash("sha256")
-      .update(fs.readFileSync(path.join(tmpDir, "ca.pem")))
-      .digest("hex");
-    fs.writeFileSync(path.join(tmpDir, "ca.trusted"), `${isWSL() ? "wsl:" : ""}${fingerprint}\n`);
+  it.skipIf(process.platform !== "darwin")(
+    "asks the OS instead of the trust marker when useMarker is false",
+    () => {
+      ensureCerts(tmpDir);
+      const pem = fs.readFileSync(path.join(tmpDir, "ca.pem"));
+      const fingerprint = crypto.createHash("sha256").update(pem).digest("hex");
+      fs.writeFileSync(path.join(tmpDir, "ca.trusted"), `${fingerprint}\n`);
 
-    // The marker matches, but the OS has never seen this freshly made CA.
-    expect(isCATrusted(tmpDir)).toBe(true);
-    expect(isCATrusted(tmpDir, { useMarker: false })).toBe(false);
-  });
+      // The marker matches, but the OS has never seen this freshly made CA.
+      expect(isCATrusted(tmpDir)).toBe(true);
+      expect(isCATrusted(tmpDir, { useMarker: false })).toBe(false);
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "checks the Linux trust store even when the trust marker matches",
+    () => {
+      ensureCerts(tmpDir);
+      const pem = fs.readFileSync(path.join(tmpDir, "ca.pem"));
+      const fingerprint = crypto.createHash("sha256").update(pem).digest("hex");
+      fs.writeFileSync(path.join(tmpDir, "ca.trusted"), `${fingerprint}\n`);
+      expect(isCATrusted(tmpDir)).toBe(false);
+    }
+  );
 });
 
 describe("trustCA", () => {
@@ -677,6 +688,18 @@ describe("trustCA", () => {
     expect(result.error).toContain("CA certificate not found");
     expect(result.error).toContain("portless trust");
   });
+
+  it.skipIf(process.platform === "win32")(
+    "refuses a state directory other users can write to",
+    () => {
+      ensureCerts(tmpDir);
+      fs.chmodSync(tmpDir, 0o777);
+      const result = trustCA(tmpDir);
+      expect(result.trusted).toBe(false);
+      expect(result.error).toContain("other users can write to it");
+      expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+    }
+  );
 
   it.skipIf(process.platform !== "darwin")(
     "returns actionable error when security command fails (#228)",
@@ -774,4 +797,35 @@ describe("untrustCA", () => {
     ).toEqual({ removed: true });
     expect(runUpdate).not.toHaveBeenCalled();
   });
+
+  it.skipIf(process.platform === "win32")(
+    "replaces a symlinked pending refresh marker without writing to its target",
+    () => {
+      const caPath = path.join(tmpDir, "ca.pem");
+      fs.writeFileSync(caPath, "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n");
+      const trustDir = path.join(tmpDir, "linux-trust");
+      const installedCA = path.join(trustDir, "portless-ca.crt");
+      const outsideTarget = path.join(tmpDir, "outside-target");
+      const pendingLink = path.join(tmpDir, "ca.trust-refresh-pending");
+      const config = { certDir: trustDir, updateCommand: "refresh-linux-trust" };
+      fs.mkdirSync(trustDir);
+      fs.copyFileSync(caPath, installedCA);
+      fs.symlinkSync(outsideTarget, pendingLink);
+
+      const runUpdate = vi.fn<(command: string) => void>(() => {
+        throw new Error("trust refresh failed");
+      });
+
+      const result = untrustCALinux(tmpDir, {
+        configs: [config],
+        activeConfig: config,
+        runUpdate,
+      });
+
+      expect(result).toEqual({ removed: false, error: "trust refresh failed" });
+      expect(fs.existsSync(outsideTarget)).toBe(false);
+      expect(fs.lstatSync(pendingLink).isSymbolicLink()).toBe(false);
+      expect(fs.readFileSync(pendingLink, "utf-8")).toBe("1\n");
+    }
+  );
 });

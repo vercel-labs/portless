@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import * as net from "node:net";
+import net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -50,37 +50,74 @@ export function resolveUserHome(options: UserHomeOptions = {}): string {
 }
 
 /**
- * Both loopback families, tried in order. Dev servers that bind `localhost`
- * on Node 17+ resolve it verbatim and may listen on IPv6 `::1` only (Vite's
- * default host does this), while most others bind IPv4 `127.0.0.1` only.
+ * Race both literal loopback addresses and hand off the first connected socket synchronously.
+ * Return a cancel function that aborts pending attempts with ABORT_ERR.
  */
-function loopbackLookup(
-  _hostname: string,
-  _options: unknown,
-  callback: (
-    err: NodeJS.ErrnoException | null,
-    addresses: { address: string; family: number }[]
-  ) => void
-): void {
-  callback(null, [
-    { address: "127.0.0.1", family: 4 },
-    { address: "::1", family: 6 },
-  ]);
-}
+export function createLoopbackConnection(
+  port: number,
+  callback: (error: NodeJS.ErrnoException | null, socket?: net.Socket) => void
+): () => void {
+  let settled = false;
+  const errors: NodeJS.ErrnoException[] = [];
+  const cleanup: ((winner?: net.Socket) => void)[] = [];
+  const finish = (error: NodeJS.ErrnoException | null, socket?: net.Socket) => {
+    if (settled) return;
+    settled = true;
+    for (const dispose of cleanup) dispose(socket);
+    callback(error, socket);
+  };
 
-/**
- * Open a TCP connection to a local app port, trying both loopback families
- * instead of hardcoding IPv4. Uses Node's Happy Eyeballs implementation
- * (`autoSelectFamily`) with a fixed address list, so no DNS lookup happens:
- * 127.0.0.1 is attempted first and `::1` is tried when it fails (issue #320).
- */
-export function createLoopbackConnection(port: number): net.Socket {
-  return net.connect({
-    host: "localhost",
-    port,
-    autoSelectFamily: true,
-    lookup: loopbackLookup as net.LookupFunction,
+  queueMicrotask(() => {
+    if (settled) return;
+    for (const [index, host] of ["127.0.0.1", "::1"].entries()) {
+      const onError = (error: NodeJS.ErrnoException) => {
+        if (settled || errors[index]) return;
+        errors[index] = error;
+        if (errors[0] && errors[1]) {
+          finish(
+            Object.assign(new AggregateError(errors, "Both loopback connections failed"), {
+              code: errors[0].code,
+            })
+          );
+        }
+      };
+      try {
+        const socket = net.connect({ host, port, family: index === 0 ? 4 : 6 });
+        const onConnect = () => finish(null, socket);
+        const onClose = () => {
+          socket.removeListener("connect", onConnect);
+          socket.removeListener("error", onError);
+          onError(
+            Object.assign(new Error("Connection closed before connecting"), {
+              code: "ECONNRESET",
+              address: host,
+              port,
+              syscall: "connect",
+            })
+          );
+        };
+        cleanup.push((winner) => {
+          socket.removeListener("connect", onConnect);
+          if (socket === winner) {
+            socket.removeListener("error", onError);
+            socket.removeListener("close", onClose);
+          } else {
+            socket.destroy();
+          }
+        });
+        socket.on("error", onError);
+        socket.once("connect", onConnect);
+        socket.once("close", onClose);
+      } catch (error) {
+        onError(error as NodeJS.ErrnoException);
+      }
+    }
   });
+
+  return () => {
+    if (settled) return;
+    finish(Object.assign(new Error("The operation was aborted"), { code: "ABORT_ERR" }));
+  };
 }
 
 /**
@@ -97,7 +134,7 @@ export function fixOwnership(...paths: string[]): void {
     try {
       const stat = fs.lstatSync(p);
       if (stat.isSymbolicLink()) continue;
-      fs.chownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
+      fs.lchownSync(p, parseInt(uid, 10), parseInt(gid || uid, 10));
     } catch {
       // Best-effort
     }
@@ -235,25 +272,38 @@ export function parseHostname(input: string, tld = "localhost"): string {
   return hostname;
 }
 
-/**
- * Parse a hostname input for every configured TLD. If the input already ends
- * with one of those TLDs, use the stripped base name for the full set.
- */
-export function parseHostnames(input: string, tlds: readonly string[] = ["localhost"]): string[] {
-  const uniqueTlds = [...new Set(tlds)];
+/** Normalize a hostname input and strip the longest of `tlds` it ends with. */
+export function stripTld(input: string, tlds: readonly string[]): string {
   let baseInput = input
     .trim()
     .replace(/^https?:\/\//i, "")
     .split("/")[0]
     .toLowerCase();
 
-  for (const tld of [...uniqueTlds].sort((a, b) => b.length - a.length)) {
+  for (const tld of [...tlds].sort((a, b) => b.length - a.length)) {
     const suffix = `.${tld}`;
     if (baseInput.endsWith(suffix)) {
       baseInput = baseInput.slice(0, -suffix.length);
       break;
     }
   }
+  return baseInput;
+}
+
+/**
+ * Parse a hostname input for every configured TLD, or only for the target
+ * TLDs. Strips any configured TLD suffix from the input before expanding.
+ */
+export function parseHostnames(
+  input: string,
+  tlds: readonly string[] = ["localhost"],
+  targetTlds?: readonly string[]
+): string[] {
+  const uniqueTlds = [...new Set(tlds)];
+  const expandTlds = targetTlds?.length
+    ? uniqueTlds.filter((tld) => targetTlds.includes(tld))
+    : uniqueTlds;
+  const baseInput = stripTld(input, uniqueTlds);
 
   // Skip a TLD that fails for TLD-specific reasons (e.g. app.TLD exceeds the
   // 253-char DNS limit) instead of losing the valid TLDs in the same list.
@@ -261,7 +311,7 @@ export function parseHostnames(input: string, tlds: readonly string[] = ["localh
   const hostnames: string[] = [];
   const skipped: string[] = [];
   let firstError: unknown;
-  for (const tld of uniqueTlds) {
+  for (const tld of expandTlds) {
     try {
       hostnames.push(parseHostname(baseInput, tld));
     } catch (err) {
@@ -269,9 +319,258 @@ export function parseHostnames(input: string, tlds: readonly string[] = ["localh
       skipped.push(`"${tld}": ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  if (hostnames.length === 0) throw firstError;
+  if (hostnames.length === 0) throw firstError ?? new Error("No usable TLD remains");
   for (const detail of skipped) {
     console.warn(`Warning: skipping TLD ${detail}`);
   }
   return hostnames;
+}
+
+/**
+ * UIDs allowed to own a state directory: root, the current user, and, when
+ * running as root under sudo, the invoking sudo user.
+ */
+function allowedStateDirOwners(): Set<number> | null {
+  if (process.platform === "win32") return null;
+  const uid = process.getuid?.();
+  if (uid === undefined) return null;
+  const owners = new Set<number>([0, uid]);
+  if (uid === 0) {
+    const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+    if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
+  }
+  return owners;
+}
+
+export type StateDirProblem =
+  | { reason: "unresolvable"; path: string }
+  | { reason: "not-directory"; path: string }
+  | { reason: "foreign-owner"; path: string }
+  | { reason: "writable-by-others"; path: string }
+  | { reason: "unsafe-parent"; path: string }
+  | { reason: "unsafe-link"; path: string };
+
+/**
+ * The first directory, from `start` up to the root, that another user could
+ * use to swap what lies below it: one owned by someone else, or writable by
+ * group or others without the sticky bit. Returns null when all are safe.
+ */
+function findUnsafeDirInChain(start: string, owners: Set<number>): string | null {
+  let current = start;
+  for (;;) {
+    try {
+      const stat = fs.lstatSync(current);
+      if (!stat.isDirectory()) return current;
+      if (!owners.has(stat.uid)) return current;
+      const writableByOthers = (stat.mode & 0o022) !== 0;
+      const sticky = (stat.mode & 0o1000) !== 0;
+      if (writableByOthers && !sticky) return current;
+    } catch {
+      return current;
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return null;
+    current = parent;
+  }
+}
+
+type TrustedPath = { path: string } | { unsafe: string } | { missing: string };
+
+const MAX_SYMLINK_HOPS = 40;
+
+function splitAbsolutePath(absolute: string): string[] {
+  return absolute.slice(path.parse(absolute).root.length).split(path.sep).filter(Boolean);
+}
+
+/**
+ * Resolve a path like realpath, but refuse to follow a symlink another user
+ * could create or retarget: one an allowed user does not own, or one held in
+ * a directory that fails findUnsafeDirInChain.
+ */
+function resolveTrustedPath(target: string, owners: Set<number>): TrustedPath {
+  const absolute = path.resolve(target);
+  const root = path.parse(absolute).root;
+  let pending = splitAbsolutePath(absolute);
+  let current = root;
+  let hops = 0;
+  while (pending.length > 0) {
+    const next = path.join(current, pending[0]!);
+    pending = pending.slice(1);
+    let stat: fs.Stats;
+    try {
+      stat = fs.lstatSync(next);
+    } catch {
+      return { missing: next };
+    }
+    if (!stat.isSymbolicLink()) {
+      current = next;
+      continue;
+    }
+    hops += 1;
+    if (hops > MAX_SYMLINK_HOPS || !owners.has(stat.uid)) return { unsafe: next };
+    const holder = findUnsafeDirInChain(current, owners);
+    if (holder) return { unsafe: holder };
+    let linked: string;
+    try {
+      linked = path.resolve(current, fs.readlinkSync(next));
+    } catch {
+      return { missing: next };
+    }
+    pending = [...splitAbsolutePath(linked), ...pending];
+    current = root;
+  }
+  return { path: current };
+}
+
+/**
+ * The first ancestor of a state directory that another user could use to swap
+ * or redirect the directory, or null when every ancestor is safe.
+ */
+function findUnsafeStateDirAncestor(dir: string, owners: Set<number>): string | null {
+  const resolved = resolveTrustedPath(dir, owners);
+  if ("unsafe" in resolved) return resolved.unsafe;
+  if ("missing" in resolved) return path.dirname(dir);
+  return findUnsafeDirInChain(path.dirname(resolved.path), owners);
+}
+
+/**
+ * Why a state directory cannot be trusted to name a CA, a process to signal,
+ * or elevated work, or null when only its owner can change it. The directory
+ * must be a real directory owned by the current user, the invoking sudo user,
+ * or root, reachable only through safe ancestors, and not writable by group or
+ * others. A "writable-by-others" result means the owner and ancestors passed.
+ */
+export function findStateDirProblem(dir: string): StateDirProblem | null {
+  let stat: fs.Stats;
+  try {
+    stat = fs.lstatSync(dir);
+  } catch {
+    return { reason: "not-directory", path: dir };
+  }
+  if (!stat.isDirectory()) return { reason: "not-directory", path: dir };
+  const owners = allowedStateDirOwners();
+  if (!owners) return null;
+  if (!owners.has(stat.uid)) return { reason: "foreign-owner", path: dir };
+  const ancestor = findUnsafeStateDirAncestor(dir, owners);
+  if (ancestor) return { reason: "unsafe-parent", path: ancestor };
+  if ((stat.mode & 0o022) !== 0) return { reason: "writable-by-others", path: dir };
+  return null;
+}
+
+/** Whether portless may act on a state directory. See findStateDirProblem. */
+export function isCleanableStateDir(dir: string): boolean {
+  return findStateDirProblem(dir) === null;
+}
+
+/**
+ * Resolve a state directory path through trusted symlinks only and check the
+ * directory it names. `canonical` is null when the path cannot be used at all.
+ */
+function locateStateDir(dir: string): {
+  canonical: string | null;
+  problem: StateDirProblem | null;
+} {
+  const owners = allowedStateDirOwners();
+  let canonical: string;
+  if (owners) {
+    const resolved = resolveTrustedPath(dir, owners);
+    if ("unsafe" in resolved) {
+      return { canonical: null, problem: { reason: "unsafe-link", path: resolved.unsafe } };
+    }
+    if ("missing" in resolved) {
+      return { canonical: null, problem: { reason: "unresolvable", path: resolved.missing } };
+    }
+    canonical = resolved.path;
+  } else {
+    try {
+      canonical = fs.realpathSync(dir);
+    } catch {
+      return { canonical: null, problem: { reason: "unresolvable", path: dir } };
+    }
+  }
+  return { canonical, problem: findStateDirProblem(canonical) };
+}
+
+function describeStateDirProblem(problem: StateDirProblem | null): string | null {
+  if (!problem) return null;
+  switch (problem.reason) {
+    case "unresolvable":
+      return "it cannot be resolved";
+    case "not-directory":
+      return "it is not a directory";
+    case "foreign-owner":
+      return "it is owned by another user";
+    case "writable-by-others":
+      return `other users can write to it. Run: chmod go-w ${problem.path}`;
+    case "unsafe-parent":
+      return `other users can replace it through ${problem.path}`;
+    case "unsafe-link":
+      return `other users can redirect it through ${problem.path}`;
+  }
+}
+
+/**
+ * A sentence fragment saying why a state directory path is refused, or null
+ * when it is safe. A symlink to a safe directory is accepted when no other
+ * user could have created or retargeted the link.
+ */
+export function explainUnsafeStateDir(dir: string): string | null {
+  return describeStateDirProblem(locateStateDir(dir).problem);
+}
+
+/** Permission mode for a state directory: writable only by its owner. */
+const STATE_DIR_MODE = 0o755;
+
+/**
+ * Set the mode of a checked state directory through a no-follow directory
+ * descriptor, so a path swapped for a symlink or a file is never changed.
+ */
+function setStateDirMode(canonical: string): boolean {
+  let fd: number | undefined;
+  try {
+    fd = fs.openSync(
+      canonical,
+      fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW
+    );
+    if (!fs.fstatSync(fd).isDirectory()) return false;
+    fs.fchmodSync(fd, STATE_DIR_MODE);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) fs.closeSync(fd);
+  }
+}
+
+/**
+ * Create a state directory if it is missing and make it writable only by its
+ * owner, whatever the umask. The mode and owner are changed only on a
+ * directory that passes findStateDirProblem. Returns why the directory is
+ * still unsafe, or null.
+ */
+export function ensureStateDir(dir: string): string | null {
+  let located = locateStateDir(dir);
+  if (located.problem?.reason === "unresolvable") {
+    fs.mkdirSync(dir, { recursive: true, mode: STATE_DIR_MODE });
+    located = locateStateDir(dir);
+  }
+  const { canonical, problem } = located;
+  if (canonical === null || process.platform === "win32") return describeStateDirProblem(problem);
+  if (problem === null) {
+    setStateDirMode(canonical);
+    fixOwnership(canonical);
+    return null;
+  }
+  return describeStateDirProblem(problem);
+}
+
+/**
+ * Prepare a state directory for use. Throws when the directory fails
+ * findStateDirProblem, so portless never runs on state another user controls.
+ */
+export function requireStateDir(dir: string): void {
+  const unsafe = ensureStateDir(dir);
+  if (unsafe && process.platform !== "win32") {
+    throw new Error(`Cannot use state directory ${dir}: ${unsafe}`);
+  }
 }
