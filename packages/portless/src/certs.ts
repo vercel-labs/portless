@@ -648,13 +648,21 @@ export function ensureCerts(stateDir: string): {
 
 /**
  * Check if the portless CA is already installed in the system trust store.
+ *
+ * On macOS a marker left by an earlier successful trust answers by default
+ * without asking the OS. Pass `useMarker: false` to always ask the OS: the
+ * marker still matches after the user removes the CA from the store. Linux
+ * and Windows always ask the OS.
  */
-export function isCATrusted(stateDir: string): boolean {
+export function isCATrusted(
+  stateDir: string,
+  { useMarker = true }: { useMarker?: boolean } = {}
+): boolean {
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) return false;
 
   if (process.platform === "darwin") {
-    const marker = readTrustMarker(stateDir);
+    const marker = useMarker ? readTrustMarker(stateDir) : null;
     if (marker && marker === caFingerprint(stateDir)) return true;
     return isCATrustedMacOS(caCertPath);
   } else if (process.platform === "linux") {
@@ -732,10 +740,17 @@ export interface LinuxCATrustConfig {
   updateCommand: string;
 }
 
-export interface LinuxCATrustRemovalOptions {
-  configs?: LinuxCATrustConfig[];
+export interface LinuxCATrustOptions {
   activeConfig?: LinuxCATrustConfig;
   runUpdate?: (command: string) => void;
+}
+
+export interface LinuxCATrustRemovalOptions extends LinuxCATrustOptions {
+  configs?: LinuxCATrustConfig[];
+}
+
+function runLinuxTrustUpdate(command: string): void {
+  execFileSync(command, [], { stdio: "pipe", timeout: 30_000 });
 }
 
 const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
@@ -799,11 +814,17 @@ function getLinuxCATrustConfig(): LinuxCATrustConfig {
 /**
  * Check if the CA is trusted on Linux.
  * Supports Debian/Ubuntu, Arch, Fedora/RHEL, and openSUSE.
+ *
+ * The CA in the distro's source directory counts only after the update
+ * command has rebuilt the trust store from it. While a refresh is pending
+ * (a trust or untrust whose update command failed or never ran), the store
+ * may not match the directory, so the CA is reported as untrusted.
  */
-function isCATrustedLinux(
+export function isCATrustedLinux(
   stateDir: string,
   config: LinuxCATrustConfig = getLinuxCATrustConfig()
 ): boolean {
+  if (isCATrustRefreshPending(stateDir)) return false;
   const systemCertPath = path.join(config.certDir, "portless-ca.crt");
   if (!fileExists(systemCertPath)) return false;
 
@@ -1142,13 +1163,7 @@ export function trustCA(configuredStateDir: string): { trusted: boolean; error?:
       writeTrustMarker(stateDir);
       return { trusted: true };
     } else if (process.platform === "linux") {
-      const config = getLinuxCATrustConfig();
-      if (!fs.existsSync(config.certDir)) {
-        fs.mkdirSync(config.certDir, { recursive: true });
-      }
-      const dest = path.join(config.certDir, "portless-ca.crt");
-      fs.copyFileSync(caCertPath, dest);
-      execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
+      trustCALinux(stateDir);
       if (isWSL()) {
         trustWindowsCA(caCertPath, wslWindowsCAStoreOptions());
       }
@@ -1186,7 +1201,38 @@ export function trustCA(configuredStateDir: string): { trusted: boolean; error?:
   }
 }
 
-/** Whether a previous CA removal still needs the distro trust cache refresh. */
+/**
+ * Add the CA to the Linux trust store: copy it into the distro's source
+ * directory, then rebuild the store with the distro's update command.
+ *
+ * A refresh is marked pending before the copy and cleared only after the
+ * update succeeds. A failed or interrupted update leaves the CA reported as
+ * untrusted, so the next `portless trust` copies and updates again.
+ */
+export function trustCALinux(stateDir: string, options: LinuxCATrustOptions = {}): void {
+  const config = options.activeConfig ?? getLinuxCATrustConfig();
+  const runUpdate = options.runUpdate ?? runLinuxTrustUpdate;
+  const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
+  const refreshWasPending = hasRegularTrustRefreshPending(pendingRefreshPath);
+  if (!refreshWasPending) writeStateMarkerFile(pendingRefreshPath, "1\n");
+  try {
+    if (!fs.existsSync(config.certDir)) {
+      fs.mkdirSync(config.certDir, { recursive: true });
+    }
+    fs.copyFileSync(
+      path.join(stateDir, CA_CERT_FILE),
+      path.join(config.certDir, "portless-ca.crt")
+    );
+  } catch (err: unknown) {
+    // The CA never reached the source directory, so this attempt owes no refresh.
+    if (!refreshWasPending) clearTrustRefreshPending(stateDir);
+    throw err;
+  }
+  runUpdate(config.updateCommand);
+  clearTrustRefreshPending(stateDir);
+}
+
+/** Whether a previous CA trust or removal still needs the distro trust cache refresh. */
 export function isCATrustRefreshPending(stateDir: string): boolean {
   return hasRegularTrustRefreshPending(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
 }
@@ -1291,11 +1337,7 @@ export function untrustCALinux(
   let refreshNeeded = hasRegularTrustRefreshPending(pendingRefreshPath);
   const configs = options.configs ?? Object.values(LINUX_CA_TRUST_CONFIGS);
   const activeConfig = options.activeConfig ?? getLinuxCATrustConfig();
-  const runUpdate =
-    options.runUpdate ??
-    ((command: string) => {
-      execFileSync(command, [], { stdio: "pipe", timeout: 30_000 });
-    });
+  const runUpdate = options.runUpdate ?? runLinuxTrustUpdate;
 
   for (const config of configs) {
     const dest = path.join(config.certDir, "portless-ca.crt");

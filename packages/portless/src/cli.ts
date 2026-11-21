@@ -2557,7 +2557,8 @@ ${colors.bold("portless trust")} - Add the local CA to the system trust store.
 
 Generates the local CA first if it does not exist yet. Browsers and other
 clients then accept portless HTTPS certificates. The OS may ask for
-authorization or sudo.
+authorization or sudo. When the system already trusts the CA, trust exits
+without asking.
 
 On macOS and Linux, the state directory and each parent directory must be
 owned by you or root and not writable by group or others. A sticky parent
@@ -2594,6 +2595,14 @@ async function handleTrust(args: string[] = []): Promise<void> {
         colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
       );
     }
+  }
+  // Adding a CA the system already trusts asks for authorization again (a
+  // Keychain dialog on macOS, sudo on Linux), so scripts that run `trust` to
+  // be sure would prompt on every run. Ask the OS, not the marker: `trust`
+  // also repairs trust after the CA was removed from the store.
+  if (isCATrusted(dir, { useMarker: false })) {
+    console.error(colors.green("Local CA is already in the system trust store."));
+    return;
   }
   const result = trustCA(dir);
   if (result.trusted) {
