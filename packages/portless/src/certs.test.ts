@@ -9,9 +9,12 @@ import {
   createSNICallback,
   ensureCerts,
   isCATrusted,
+  isCATrustedLinux,
+  isCATrustRefreshPending,
   opensslSupportsNotBefore,
   sanitizeHostForFilename,
   trustCA,
+  trustCALinux,
   untrustCA,
   untrustCALinux,
 } from "./certs.js";
@@ -727,6 +730,58 @@ describe("trustCA", () => {
       }
     }
   );
+});
+
+describe("trustCALinux", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-trust-linux-test-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reports the CA untrusted until a failed trust refresh is retried", () => {
+    const { caPath } = ensureCerts(tmpDir);
+    const trustDir = path.join(tmpDir, "linux-trust");
+    const installedCA = path.join(trustDir, "portless-ca.crt");
+    const config = { certDir: trustDir, updateCommand: "refresh-linux-trust" };
+    const runUpdate = vi
+      .fn<(command: string) => void>()
+      .mockImplementationOnce(() => {
+        throw new Error("trust refresh failed");
+      })
+      .mockImplementationOnce(() => undefined);
+
+    expect(() => trustCALinux(tmpDir, { activeConfig: config, runUpdate })).toThrow(
+      "trust refresh failed"
+    );
+    // The copy landed, but the store was never rebuilt from it.
+    expect(fs.readFileSync(installedCA, "utf-8")).toBe(fs.readFileSync(caPath, "utf-8"));
+    expect(isCATrustedLinux(tmpDir, config)).toBe(false);
+
+    trustCALinux(tmpDir, { activeConfig: config, runUpdate });
+
+    expect(isCATrustedLinux(tmpDir, config)).toBe(true);
+    expect(isCATrustRefreshPending(tmpDir)).toBe(false);
+    expect(runUpdate).toHaveBeenCalledTimes(2);
+  });
+
+  it("owes no trust refresh when the CA cannot be copied", () => {
+    ensureCerts(tmpDir);
+    // A regular file in the path makes creating the source directory fail.
+    const config = {
+      certDir: path.join(tmpDir, "ca.pem", "linux-trust"),
+      updateCommand: "refresh-linux-trust",
+    };
+    const runUpdate = vi.fn<(command: string) => void>();
+
+    expect(() => trustCALinux(tmpDir, { activeConfig: config, runUpdate })).toThrow();
+    expect(isCATrustRefreshPending(tmpDir)).toBe(false);
+    expect(runUpdate).not.toHaveBeenCalled();
+  });
 });
 
 describe("untrustCA", () => {
