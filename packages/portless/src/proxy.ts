@@ -363,6 +363,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
   const upstreamAgent = new http.Agent({ keepAlive: true });
+  // A replay follows a reset on a pooled socket, and the pool's other idle
+  // sockets can be just as stale, so replays dial new connections that this
+  // agent never keeps.
+  const replayAgent = new http.Agent();
   type UpstreamOptions = http.RequestOptions & {
     upstreamRoute: RouteInfo;
     upstreamConnection?: { cancel?: () => void };
@@ -453,7 +457,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
     return cancel;
   };
-  const upstream = new Map<string, { dialing: number; waiting: (() => void)[] }>();
+  const upstream = new Map<
+    string,
+    { dialing: number; waiting: { replay: boolean; send: () => void }[] }
+  >();
   const upstreamKey = (route: RouteInfo) => upstreamAgent.getName(agentOptions(route));
   const upstreamState = (route: RouteInfo) => {
     const key = upstreamKey(route);
@@ -466,32 +473,48 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   };
   const hasIdleSocket = (route: RouteInfo) =>
     (upstreamAgent.freeSockets[upstreamKey(route)]?.length ?? 0) > 0;
+  // A replay always dials, so only a free dial slot lets it start.
+  const canSend = (route: RouteInfo, replay: boolean) =>
+    (!replay && hasIdleSocket(route)) || upstreamState(route).dialing < MAX_PENDING_UPSTREAM_DIALS;
   // Start waiting requests once a dial settles and a slot or idle socket is free.
   const drainUpstream = (route: RouteInfo) => {
     if (closing) return;
     const key = upstreamKey(route);
     const state = upstream.get(key);
     if (!state) return;
-    while (
-      state.waiting.length > 0 &&
-      (hasIdleSocket(route) || state.dialing < MAX_PENDING_UPSTREAM_DIALS)
-    ) {
-      state.waiting.shift()?.();
+    // A replay waiting for a dial slot must not hold back requests behind it
+    // that an idle socket can serve.
+    for (let i = 0; i < state.waiting.length; ) {
+      const waiting = state.waiting[i];
+      if (canSend(route, waiting.replay)) {
+        state.waiting.splice(i, 1);
+        waiting.send();
+      } else {
+        i++;
+      }
     }
     if (state.dialing === 0 && state.waiting.length === 0) upstream.delete(key);
   };
-  const whenUpstreamReady = (route: RouteInfo, send: () => void, res: http.ServerResponse) => {
+  const whenUpstreamReady = (
+    route: RouteInfo,
+    send: () => void,
+    res: http.ServerResponse,
+    replay: boolean
+  ) => {
     const state = upstreamState(route);
-    if (hasIdleSocket(route) || state.dialing < MAX_PENDING_UPSTREAM_DIALS) {
+    if (canSend(route, replay)) {
       send();
     } else {
       const cancel = () => {
         const index = state.waiting.indexOf(waiting);
         if (index !== -1) state.waiting.splice(index, 1);
       };
-      const waiting = () => {
-        res.removeListener("close", cancel);
-        send();
+      const waiting = {
+        replay,
+        send: () => {
+          res.removeListener("close", cancel);
+          send();
+        },
       };
       state.waiting.push(waiting);
       res.once("close", cancel);
@@ -509,10 +532,11 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     });
     return undefined;
   };
+  replayAgent.createConnection = upstreamAgent.createConnection;
   const closeUpstream = () => {
     closing = true;
     for (const state of upstream.values()) {
-      for (const send of state.waiting.splice(0)) send();
+      for (const waiting of state.waiting.splice(0)) waiting.send();
     }
     for (const cancel of pendingConnections) cancel();
   };
@@ -668,7 +692,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       const connection: { cancel?: () => void } = {};
       const proxyReq = http.request(
         {
-          agent: upstreamAgent,
+          agent: isReplay ? replayAgent : upstreamAgent,
           ...agentOptions(route),
           ...{ upstreamConnection: connection },
           path: req.url,
@@ -760,7 +784,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         req.pipe(proxyReq);
       }
     };
-    whenUpstreamReady(route, send, res);
+    whenUpstreamReady(route, send, res, isReplay);
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
@@ -1171,6 +1195,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       h2Server.close();
       plainServer.close();
       upstreamAgent.destroy();
+      replayAgent.destroy();
       return origClose(cb);
     } as typeof wrapper.close;
 
@@ -1182,7 +1207,10 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
 
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
-  httpServer.on("close", () => upstreamAgent.destroy());
+  httpServer.on("close", () => {
+    upstreamAgent.destroy();
+    replayAgent.destroy();
+  });
   const origClose = httpServer.close.bind(httpServer);
   httpServer.close = function (cb?: (err?: Error) => void) {
     closeUpstream();
