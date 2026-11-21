@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "be2a9250db17fb53b3134ddc6a6fac7c7db4b1df46eb6abbf0dd4f5476bb5c68",
-      "markdownBodySha256": "be2a9250db17fb53b3134ddc6a6fac7c7db4b1df46eb6abbf0dd4f5476bb5c68",
+      "mdxSha256": "5223cb85e5d16353f713c5e4f60d46ba887faa2e9f72b0a2fc3c44b6077b7d45",
+      "markdownBodySha256": "5223cb85e5d16353f713c5e4f60d46ba887faa2e9f72b0a2fc3c44b6077b7d45",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",
@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "36a7b21a5ae370e403858af8c7a75c0a41c687c9c287af854a01692b6619b7df",
-      "markdownBodySha256": "36a7b21a5ae370e403858af8c7a75c0a41c687c9c287af854a01692b6619b7df",
+      "mdxSha256": "1abbc4fe9e96d798f9034b1a313af26e344d050631ee6f1799102dc2a2ebad20",
+      "markdownBodySha256": "1abbc4fe9e96d798f9034b1a313af26e344d050631ee6f1799102dc2a2ebad20",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -68,6 +68,7 @@
         [2, "Run an app", "run-an-app"],
         [2, "Get a service URL", "get-a-service-url"],
         [2, "Alias (static routes)", "alias-static-routes"],
+        [2, "Docker Compose", "docker-compose"],
         [2, "List routes", "list-routes"],
         [2, "Doctor", "doctor"],
         [2, "Trust the CA", "trust-the-ca"],
@@ -81,7 +82,8 @@
         [2, "Hosts", "hosts"],
         [2, "MCP server", "mcp-server"],
         [2, "Bypass portless", "bypass-portless"],
-        [2, "Info", "info"]
+        [2, "Info", "info"],
+        [2, "Exit codes", "exit-codes"]
       ]
     },
     {
@@ -90,8 +92,8 @@
       "title": "HTTPS | portless",
       "markdownTitle": "HTTPS",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "48fd5c2b5b74a059f6eacb615bae65ffb931d7727c130d5757af8b103c8f43e5",
-      "markdownBodySha256": "48fd5c2b5b74a059f6eacb615bae65ffb931d7727c130d5757af8b103c8f43e5",
+      "mdxSha256": "5542e6be303826ae93c323ffc0a8335edf494937015a8946faf4c351495587f0",
+      "markdownBodySha256": "5542e6be303826ae93c323ffc0a8335edf494937015a8946faf4c351495587f0",
       "ssr": [
         "HTTP/2 + TLS is enabled by default for faster dev server page loads.",
         "portless proxy start --cert ./cert.pem --key ./key.pem",
@@ -110,8 +112,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "9da1ac2a9a5757ed28daefb1bd2f7a4af62f54e00e0dfc845eb0c1e6062f1e70",
-      "markdownBodySha256": "9da1ac2a9a5757ed28daefb1bd2f7a4af62f54e00e0dfc845eb0c1e6062f1e70",
+      "mdxSha256": "afb71ee2f5917f9000f13c32bb06a2d1a75a6d369d12509912ff12dffe9d8021",
+      "markdownBodySha256": "afb71ee2f5917f9000f13c32bb06a2d1a75a6d369d12509912ff12dffe9d8021",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",
@@ -137,8 +139,8 @@
       "title": "Changelog | portless",
       "markdownTitle": "Changelog",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "033c60fa34a2ea8de652ada87544727339a8eb0fe84ec03a6d0f2b286ab9ce68",
-      "markdownBodySha256": "033c60fa34a2ea8de652ada87544727339a8eb0fe84ec03a6d0f2b286ab9ce68",
+      "mdxSha256": "8932948ce9c53c0addd8bb400a362dc3bd9b8b6a10464e4f13130bef15061fc5",
+      "markdownBodySha256": "8932948ce9c53c0addd8bb400a362dc3bd9b8b6a10464e4f13130bef15061fc5",
       "ssr": [
         "Agent-readable documentation",
         "Framework flags through package scripts",

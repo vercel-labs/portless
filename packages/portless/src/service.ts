@@ -2,6 +2,7 @@ import colors from "./colors.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isIP } from "node:net";
 import { spawnSync } from "node:child_process";
 import { ensureCerts, isCATrusted, trustCA } from "./certs.js";
 import {
@@ -13,7 +14,8 @@ import {
   parseTldList,
 } from "./cli-utils.js";
 import { isMdnsSupported } from "./mdns.js";
-import { fixOwnership, parsePort, resolveUserHome } from "./utils.js";
+import { UsageError, visitLeadingFlags, type FlagKind } from "./args.js";
+import { ensureStateDir, parsePort, resolveUserHome } from "./utils.js";
 
 const DEFAULT_SERVICE_PORT = getProtocolPort(true);
 const SERVICE_LABEL = "sh.portless.proxy";
@@ -202,14 +204,6 @@ function parsePortValue(value: string, source: string): number {
   return port;
 }
 
-function getFlagValue(args: string[], index: number, flag: string): string {
-  const value = args[index + 1];
-  if (!value || value.startsWith("-")) {
-    throw new Error(`${flag} requires a value.`);
-  }
-  return value;
-}
-
 function resolveServicePath(value: string): string {
   const expanded =
     value === "~"
@@ -238,6 +232,31 @@ function collectServiceExtraEnv(
     if (value) extraEnv[key] = value;
   }
   return extraEnv;
+}
+
+const SERVICE_INSTALL_FLAGS: Readonly<Record<string, FlagKind>> = {
+  "-p": "value",
+  "--port": "value",
+  "--https": "boolean",
+  "--no-tls": "boolean",
+  "--lan": "boolean",
+  "--ip": "value",
+  "--tld": "value",
+  "--wildcard": "boolean",
+  "--unprivileged": "boolean",
+  "--cert": "value",
+  "--key": "value",
+  "--state-dir": "value",
+};
+
+const SERVICE_RUNTIME_FLAGS: Readonly<Record<string, FlagKind>> = {
+  "--foreground": "boolean",
+  "--skip-trust": "boolean",
+};
+
+function serviceInstallSpec(allowRuntimeFlags: boolean | undefined): Record<string, FlagKind> {
+  if (!allowRuntimeFlags) return { ...SERVICE_INSTALL_FLAGS };
+  return { ...SERVICE_INSTALL_FLAGS, ...SERVICE_RUNTIME_FLAGS };
 }
 
 export function parseServiceInstallConfig(
@@ -293,78 +312,97 @@ export function parseServiceInstallConfig(
   }
 
   const tokens = args[0] === "service" ? args.slice(2) : args;
+  let portFlagSeen = false;
   let tldFlagSeen = false;
-  for (let i = 0; i < tokens.length; i += 1) {
-    const token = tokens[i];
-    switch (token) {
-      case "-p":
-      case "--port":
-        config.proxyPort = parsePortValue(getFlagValue(tokens, i, token), token);
-        i += 1;
-        break;
-      case "--https":
-        config.useHttps = true;
-        httpsExplicit = true;
-        break;
-      case "--no-tls":
-        config.useHttps = false;
-        httpsExplicit = true;
-        break;
-      case "--lan":
-        config.lanMode = true;
-        break;
-      case "--ip":
-        config.lanMode = true;
-        config.lanIp = getFlagValue(tokens, i, token);
-        config.lanIpExplicit = true;
-        i += 1;
-        break;
-      case "--tld": {
-        const tlds = parseTldList(getFlagValue(tokens, i, token));
-        config.tlds = normalizeTlds([...(tldFlagSeen ? config.tlds : []), ...tlds]);
-        config.tld = primaryTld(config.tlds);
-        tldFlagSeen = true;
-        i += 1;
-        break;
-      }
-      case "--wildcard":
-        config.useWildcard = true;
-        break;
-      case "--unprivileged":
-        config.unprivileged = true;
-        break;
-      case "--cert":
-        config.customCertPath = getFlagValue(tokens, i, token);
-        config.useHttps = true;
-        httpsExplicit = true;
-        i += 1;
-        break;
-      case "--key":
-        config.customKeyPath = getFlagValue(tokens, i, token);
-        config.useHttps = true;
-        httpsExplicit = true;
-        i += 1;
-        break;
-      case "--state-dir":
-        config.stateDir = getFlagValue(tokens, i, token);
-        i += 1;
-        break;
-      case "--foreground":
-      case "--skip-trust":
-        if (!options.allowRuntimeFlags) {
-          throw new Error(`Unknown service install option "${token}".`);
+  let tldFlagValues: string[] = [];
+
+  const rest = visitLeadingFlags(
+    "service install",
+    tokens,
+    serviceInstallSpec(options.allowRuntimeFlags),
+    (flag, value) => {
+      const flagValue = value ?? "";
+      switch (flag) {
+        case "-p":
+        case "--port": {
+          const port = parsePort(flagValue);
+          if (port === null) {
+            throw new UsageError(`Invalid port number: ${flagValue}`, [
+              "Port must be between 1 and 65535.",
+            ]);
+          }
+          config.proxyPort = port;
+          portFlagSeen = true;
+          break;
         }
-        break;
-      default:
-        throw new Error(`Unknown service install option "${token}".`);
+        case "--https":
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--no-tls":
+          config.useHttps = false;
+          httpsExplicit = true;
+          break;
+        case "--lan":
+          config.lanMode = true;
+          break;
+        case "--ip":
+          if (isIP(flagValue) === 0) {
+            throw new UsageError(`--ip requires an IP address, but got "${flagValue}".`, [
+              "See: portless service install --help",
+            ]);
+          }
+          config.lanMode = true;
+          config.lanIp = flagValue;
+          config.lanIpExplicit = true;
+          break;
+        case "--tld":
+          try {
+            tldFlagValues = [...tldFlagValues, ...parseTldList(flagValue)];
+          } catch (err) {
+            throw new UsageError((err as Error).message, ["See: portless service install --help"]);
+          }
+          tldFlagSeen = true;
+          break;
+        case "--wildcard":
+          config.useWildcard = true;
+          break;
+        case "--unprivileged":
+          config.unprivileged = true;
+          break;
+        case "--cert":
+          config.customCertPath = flagValue;
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--key":
+          config.customKeyPath = flagValue;
+          config.useHttps = true;
+          httpsExplicit = true;
+          break;
+        case "--state-dir":
+          config.stateDir = flagValue;
+          break;
+      }
     }
+  );
+
+  if (rest.length > 0) {
+    throw new UsageError(`Unexpected argument "${rest[0]}" for portless service install.`, [
+      "See: portless service install --help",
+    ]);
+  }
+
+  if (tldFlagSeen) {
+    config.tlds = normalizeTlds(tldFlagValues);
+    config.tld = primaryTld(config.tlds);
   }
 
   if (
     (config.customCertPath && !config.customKeyPath) ||
     (!config.customCertPath && config.customKeyPath)
   ) {
-    throw new Error("--cert and --key must be used together.");
+    throw new UsageError("--cert and --key must be used together.");
   }
 
   // Match proxy start: unprivileged mode serves plain HTTP on 80 unless
@@ -373,7 +411,7 @@ export function parseServiceInstallConfig(
     config.useHttps = false;
   }
 
-  if (!env.PORTLESS_PORT && !tokens.includes("--port") && !tokens.includes("-p")) {
+  if (!env.PORTLESS_PORT && !portFlagSeen) {
     config.proxyPort = getProtocolPort(config.useHttps);
   }
 
@@ -683,6 +721,21 @@ export function buildServiceSpec(options: {
   };
 }
 
+/**
+ * Whether the Windows scheduled task exists. The task store is checked because
+ * schtasks reports a missing task and a failed query with the same status; an
+ * unreadable store throws so callers keep the service files.
+ */
+function windowsTaskExists(taskName: string): boolean {
+  const taskPath = path.win32.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "Tasks",
+    taskName
+  );
+  return fs.statSync(taskPath, { throwIfNoEntry: false }) !== undefined;
+}
+
 function currentServiceSpec(
   entryScript: string,
   installConfig?: ServiceInstallConfig
@@ -937,11 +990,17 @@ function requireUnixElevation(args: string[], runner: CommandRunner): void {
   process.exit(result.status ?? 1);
 }
 
+type CommandResult = ReturnType<CommandRunner>;
+
+function commandFailure(result: CommandResult, command: string): string {
+  const detail = result.stderr || result.stdout || result.error?.message || `${command} failed`;
+  return detail.trim();
+}
+
 function runRequired(runner: CommandRunner, command: string, args: string[]): void {
   const result = runner(command, args);
   if (result.status !== 0) {
-    const detail = result.stderr || result.stdout || result.error?.message || `${command} failed`;
-    throw new Error(detail.trim());
+    throw new Error(commandFailure(result, command));
   }
 }
 
@@ -949,15 +1008,37 @@ function runOptional(runner: CommandRunner, command: string, args: string[]): vo
   runner(command, args);
 }
 
-function isPermissionError(err: unknown): boolean {
-  const code =
-    err && typeof err === "object" && "code" in err ? String((err as { code?: unknown }).code) : "";
-  const message = err instanceof Error ? err.message : String(err);
-  return (
-    code === "EACCES" ||
-    code === "EPERM" ||
-    /permission denied|operation not permitted|access is denied/i.test(message)
+function isTargetMissing(result: CommandResult): boolean {
+  const output = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+  return /(not|could not be) found|could not find|no such process|not exist|not loaded|not running/i.test(
+    output
   );
+}
+
+/** Runs a stop or delete step, ignoring a non-zero status only when the target is already gone. */
+function runRemovalStep(runner: CommandRunner, command: string, args: string[]): void {
+  const result = runner(command, args);
+  if (result.status !== 0 && !isTargetMissing(result)) {
+    if (result.error) throw result.error;
+    throw new Error(commandFailure(result, command));
+  }
+}
+
+/**
+ * Whether a failed service removal should be retried with sudo. Portless
+ * installs a system service on macOS and Linux, so a non-root process cannot
+ * remove it and the failure text is not a reliable signal. Windows has no
+ * sudo retry, and a missing command is a real failure.
+ */
+function removalNeedsElevation(err: unknown): boolean {
+  if (process.platform === "win32") return false;
+  if ((process.getuid?.() ?? -1) === 0) return false;
+  if (process.env[INTERNAL_ELEVATED_ENV] === "1") return false;
+  if (err && typeof err === "object" && "code" in err) {
+    const code = String((err as { code?: unknown }).code);
+    if (code === "ENOENT" || code === "EINVAL" || code === "ENOTDIR") return false;
+  }
+  return true;
 }
 
 function stopProxyOnPort(entryScript: string, runner: CommandRunner, proxyPort: number): void {
@@ -992,8 +1073,8 @@ async function stopExistingProxy(
 }
 
 function prepareServiceState(stateDir: string): void {
-  fs.mkdirSync(stateDir, { recursive: true });
-  fixOwnership(stateDir);
+  const unsafe = ensureStateDir(stateDir);
+  if (unsafe) throw new Error(`Cannot install the service with state in ${stateDir}: ${unsafe}`);
 }
 
 function prepareTrust(stateDir: string): void {
@@ -1084,15 +1165,17 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
   const spec = currentServiceSpec(entryScript);
 
   if (spec.platform === "darwin") {
-    runOptional(runner, "launchctl", ["bootout", "system", spec.plistPath]);
+    runRemovalStep(runner, "launchctl", ["bootout", `system/${spec.label}`]);
     fs.rmSync(spec.plistPath, { force: true });
   } else if (spec.platform === "linux") {
-    runOptional(runner, "systemctl", ["disable", "--now", spec.serviceName]);
+    runRemovalStep(runner, "systemctl", ["disable", "--now", spec.serviceName]);
     fs.rmSync(spec.unitPath, { force: true });
     runOptional(runner, "systemctl", ["daemon-reload"]);
   } else {
-    runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
-    runOptional(runner, "schtasks", spec.deleteArgs);
+    if (windowsTaskExists(spec.taskName)) {
+      runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
+      runRemovalStep(runner, "schtasks", spec.deleteArgs);
+    }
     fs.rmSync(spec.scriptDir, { recursive: true, force: true });
   }
 
@@ -1115,17 +1198,16 @@ export function tryUninstallService(
     if (spec.platform === "darwin") {
       installed = fs.existsSync(spec.plistPath);
       if (!installed) return { removed: false, installed: false };
-      runOptional(runner, "launchctl", ["bootout", "system", spec.plistPath]);
+      runRemovalStep(runner, "launchctl", ["bootout", `system/${spec.label}`]);
       fs.rmSync(spec.plistPath, { force: true });
     } else if (spec.platform === "linux") {
       installed = fs.existsSync(spec.unitPath);
       if (!installed) return { removed: false, installed: false };
-      runOptional(runner, "systemctl", ["disable", "--now", spec.serviceName]);
+      runRemovalStep(runner, "systemctl", ["disable", "--now", spec.serviceName]);
       fs.rmSync(spec.unitPath, { force: true });
       runOptional(runner, "systemctl", ["daemon-reload"]);
     } else {
-      const query = runner("schtasks", ["/Query", "/TN", spec.taskName, "/FO", "LIST"]);
-      installed = query.status === 0;
+      installed = windowsTaskExists(spec.taskName);
       if (!installed) return { removed: false, installed: false };
       runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
       runRequired(runner, "schtasks", spec.deleteArgs);
@@ -1138,7 +1220,7 @@ export function tryUninstallService(
       removed: false,
       installed,
       error: err instanceof Error ? err.message : String(err),
-      needsElevation: installed && isPermissionError(err),
+      needsElevation: installed && removalNeedsElevation(err),
     };
   }
 }
@@ -1246,9 +1328,12 @@ ${colors.bold("Install options:")}
   --state-dir <path>               Use a custom service state directory
 
 ${colors.bold("Notes:")}
+  Value flags accept both --flag <value> and --flag=<value>.
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
   macOS and Linux install a root-owned service so port 443 can bind at boot.
+  On macOS and Linux, install exits with the reason when another user owns,
+  can write to, or can redirect the state directory.
   Windows installs a Task Scheduler startup task that runs as SYSTEM.
 `);
 }
@@ -1260,31 +1345,24 @@ export async function handleService(
   const action = args[1];
   const runner = options.runner || defaultRunner;
 
-  if (!action || action === "--help" || action === "-h") {
+  if (!action) {
     printServiceHelp();
     process.exit(0);
   }
 
-  try {
-    if (action === "install") {
-      await installService(options.entryScript, runner, args);
-      return;
-    }
-    if (action === "uninstall") {
-      await uninstallService(options.entryScript, runner);
-      return;
-    }
-    if (action === "status") {
-      await printServiceStatus(options.entryScript, runner);
-      return;
-    }
-
-    console.error(colors.red(`Error: Unknown service command "${action}".`));
-    printServiceHelp();
-    process.exit(1);
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.error(colors.red("Error:"), message);
-    process.exit(1);
+  if (action === "install") {
+    await installService(options.entryScript, runner, args);
+    return;
   }
+  if (action !== "uninstall" && action !== "status") {
+    throw new UsageError(`Unknown service command "${action}".`, ["See: portless service --help"]);
+  }
+  if (args.length > 2) {
+    throw new UsageError(`Unexpected argument "${args[2]}" for portless service ${action}.`);
+  }
+  if (action === "uninstall") {
+    await uninstallService(options.entryScript, runner);
+    return;
+  }
+  await printServiceStatus(options.entryScript, runner);
 }

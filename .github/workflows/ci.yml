@@ -34,6 +34,9 @@ jobs:
 
       - run: pnpm type-check
 
+      # Also check with the official TypeScript compiler while tsc-ts is new.
+      - run: pnpm type-check:tsc
+
       - run: pnpm build
 
       - run: pnpm test

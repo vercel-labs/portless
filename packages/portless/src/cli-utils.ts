@@ -9,8 +9,15 @@ import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
-import { resolveScript, resolveScriptRaw } from "./config.js";
-import { createLoopbackConnection, isProcessAlive, parsePort, resolveUserHome } from "./utils.js";
+import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
+import {
+  createLoopbackConnection,
+  findStateDirProblem,
+  fixOwnership,
+  isProcessAlive,
+  parsePort,
+  resolveUserHome,
+} from "./utils.js";
 import {
   HOSTS_SYNC_AUTH_CHALLENGE_HEADER,
   HOSTS_SYNC_AUTH_HEADER,
@@ -124,6 +131,12 @@ export const SIGNAL_CODES: Record<string, number> = {
 const COMMAND_SHUTDOWN_GRACE_MS = 5000;
 const COMMAND_SHUTDOWN_FORCE_MS = 10_000;
 const COMMAND_SHUTDOWN_POLL_MS = 50;
+
+/** How long (ms) to wait for a signaled process group to exit before reporting it as surviving. */
+const PROCESS_GROUP_EXIT_TIMEOUT_MS = 2000;
+
+/** Interval (ms) between process group exit polls. */
+const PROCESS_GROUP_POLL_MS = 100;
 
 type TrackedProcess = {
   pid: number;
@@ -504,6 +517,7 @@ export function writeTlsMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, TLS_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
@@ -530,6 +544,7 @@ export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, UNPRIVILEGED_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
@@ -551,6 +566,7 @@ export function writeCustomCertMarker(dir: string, enabled: boolean): void {
   const markerPath = path.join(dir, CUSTOM_CERT_MARKER_FILE);
   if (enabled) {
     fs.writeFileSync(markerPath, "1", { mode: 0o644 });
+    fixOwnership(markerPath);
   } else {
     try {
       fs.unlinkSync(markerPath);
@@ -587,6 +603,7 @@ export function writeLanMarker(dir: string, ip: string | null): void {
     }
   } else {
     fs.writeFileSync(markerPath, ip, { mode: 0o644 });
+    fixOwnership(markerPath);
   }
 }
 
@@ -746,6 +763,7 @@ export function writeTldsFile(dir: string, tlds: readonly string[]): void {
   } else {
     fs.writeFileSync(tldsPath, uniqueTlds.join("\n") + "\n", { mode: 0o644 });
     fs.writeFileSync(tldPath, uniqueTlds[0] ?? DEFAULT_TLD, { mode: 0o644 });
+    fixOwnership(tldsPath, tldPath);
   }
 }
 
@@ -988,7 +1006,10 @@ export async function discoverState(): Promise<{
 
   // Check legacy system-level state (/tmp/portless) for proxies started with
   // older versions. Read-only: no root operations are performed on this path.
-  const legacyPort = readPortFromDir(LEGACY_SYSTEM_STATE_DIR);
+  const legacyPort =
+    findStateDirProblem(LEGACY_SYSTEM_STATE_DIR) === null
+      ? readPortFromDir(LEGACY_SYSTEM_STATE_DIR)
+      : null;
   if (legacyPort !== null) {
     if (await isProxyRunning(legacyPort)) {
       const tls = readTlsMarker(LEGACY_SYSTEM_STATE_DIR);
@@ -1320,7 +1341,6 @@ export async function reportHostsSync(
   const managed = lanMode
     ? hostnames.filter((hostname) => !hostname.endsWith(".local"))
     : hostnames;
-  if (managed.length === 0) return;
   const found = await trigger(port, tls);
 
   const unresolved = async () => {
@@ -1375,20 +1395,12 @@ export function syncHostsWithWarning(
 /** Check whether any process is listening on the given port on either loopback family. */
 export function isPortListening(port: number): Promise<boolean> {
   return new Promise((resolve) => {
-    const socket = createLoopbackConnection(port);
-    let settled = false;
-
-    const finish = (result: boolean) => {
-      if (settled) return;
-      settled = true;
-      socket.destroy();
-      resolve(result);
-    };
-
-    socket.setTimeout(SOCKET_TIMEOUT_MS);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("timeout", () => finish(false));
+    const cancel = createLoopbackConnection(port, (error, socket) => {
+      clearTimeout(timer);
+      socket?.destroy();
+      resolve(error === null);
+    });
+    const timer = setTimeout(cancel, SOCKET_TIMEOUT_MS);
   });
 }
 
@@ -1419,11 +1431,49 @@ export function parsePidFromNetstat(output: string, port: number): number | null
 }
 
 /**
+ * PIDs holding a listening TCP socket on `port`, read from /proc. Like lsof
+ * without root, it sees only processes whose file descriptors are readable.
+ */
+function findPidsOnPortFromProc(port: number): number[] {
+  const sockets = new Set<string>();
+  for (const table of ["/proc/net/tcp", "/proc/net/tcp6"]) {
+    if (!fs.existsSync(table)) continue;
+    for (const line of fs.readFileSync(table, "utf-8").split("\n").slice(1)) {
+      const fields = line.trim().split(/\s+/);
+      if (fields[3] === "0A" && parseInt(fields[1].split(":")[1], 16) === port) {
+        sockets.add(`socket:[${fields[9]}]`);
+      }
+    }
+  }
+  if (sockets.size === 0) return [];
+  return fs
+    .readdirSync("/proc")
+    .filter((entry) => /^\d+$/.test(entry))
+    .filter((pid) => {
+      let fds: string[];
+      try {
+        fds = fs.readdirSync(`/proc/${pid}/fd`);
+      } catch {
+        return false;
+      }
+      return fds.some((fd) => {
+        try {
+          return sockets.has(fs.readlinkSync(`/proc/${pid}/fd/${fd}`));
+        } catch {
+          return false;
+        }
+      });
+    })
+    .map(Number);
+}
+
+/**
  * Find all PIDs listening on the given TCP port.
- * Uses lsof on macOS/Linux and netstat on Windows.
+ * Reads /proc on Linux, uses lsof on macOS and netstat on Windows.
  */
 export function findPidsOnPort(port: number): number[] {
   try {
+    if (process.platform === "linux") return findPidsOnPortFromProc(port);
     if (isWindows) {
       const output = execSync("netstat -ano -p tcp", {
         encoding: "utf-8",
@@ -1445,6 +1495,85 @@ export function findPidsOnPort(port: number): number[] {
       .filter((n) => !isNaN(n) && n > 0);
   } catch {
     return [];
+  }
+}
+
+function isProcessGroupAlive(groupId: number): boolean {
+  if (isWindows || !Number.isInteger(groupId) || groupId <= 1) return false;
+  try {
+    process.kill(-groupId, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === "EPERM";
+  }
+}
+
+/**
+ * PIDs of a process group that have not exited, or null where groups cannot be
+ * listed. Unreaped zombies are left out: they keep the group number alive but
+ * are not running.
+ */
+export function listProcessGroupMembers(groupId: number): number[] | null {
+  if (isWindows || !Number.isInteger(groupId) || groupId <= 1) return null;
+  try {
+    const output = execFileSync("ps", ["-e", "-o", "pid=,pgid=,stat="], {
+      encoding: "utf-8",
+      timeout: PID_LOOKUP_TIMEOUT_MS,
+    });
+    const members: number[] = [];
+    for (const line of output.split("\n")) {
+      const [pid, group, stat] = line.trim().split(/\s+/);
+      if (Number(group) !== groupId || Number(pid) <= 1) continue;
+      if (stat?.startsWith("Z") === true) continue;
+      members.push(Number(pid));
+    }
+    return members;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether a process group still has a running member. */
+function groupHasLiveMember(groupId: number): boolean {
+  const members = listProcessGroupMembers(groupId);
+  return members === null ? isProcessGroupAlive(groupId) : members.length > 0;
+}
+
+/** Whether this exact process instance is still a member of the group. */
+function isGroupMember(pid: number, startTime: string | undefined, groupId: number): boolean {
+  return (
+    startTime !== undefined &&
+    pid > 1 &&
+    getProcessGroupId(pid) === groupId &&
+    getProcessStartTime(pid) === startTime
+  );
+}
+
+/**
+ * Find the listener a command left on `port` after its launcher exited, for
+ * commands that self-daemonize (print an address and exit while the server
+ * keeps running). The wait lasts up to `timeoutMs` while processes from the
+ * launcher's process group are alive, or after a clean exit, since a detached
+ * daemon leaves the group and may bind later. A failed foreground exit with an
+ * empty group returns at once. Windows has no process group to watch.
+ */
+export async function findSelfDaemonizedListener(
+  port: number,
+  processGroupId: number | undefined,
+  timeoutMs: number,
+  exitedCleanly = false
+): Promise<number | null> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await isPortListening(port)) {
+      const pid = findPidOnPort(port);
+      if (pid !== null) return pid;
+    }
+    const groupAlive =
+      !isWindows && processGroupId !== undefined && isProcessGroupAlive(processGroupId);
+    if (!groupAlive && !exitedCleanly) return null;
+    if (Date.now() >= deadline) return null;
+    await new Promise((resolve) => setTimeout(resolve, COMMAND_SHUTDOWN_POLL_MS));
   }
 }
 
@@ -1475,10 +1604,28 @@ export function getProcessStartTime(pid: number): string | null {
   }
 }
 
-/** Read the executable name of a process. Returns null on Windows or when it cannot be read. */
+/** Read the executable name of a process, without the Windows .exe suffix. Returns null if unreadable. */
 export function getProcessCommand(pid: number): string | null {
-  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
+  if (!Number.isInteger(pid) || pid <= 0) return null;
   try {
+    if (isWindows) {
+      const output = execFileSync(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `(Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}' -ErrorAction Stop).Name`,
+        ],
+        { encoding: "utf-8", windowsHide: true, timeout: PID_LOOKUP_TIMEOUT_MS }
+      );
+      return (
+        output
+          .trim()
+          .replace(/\.exe$/i, "")
+          .toLowerCase() || null
+      );
+    }
     const output = execFileSync("ps", ["-o", "comm=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
@@ -1490,34 +1637,102 @@ export function getProcessCommand(pid: number): string | null {
 }
 
 /**
- * Kill a process group left behind by a portless session that died without
- * cleaning up. The group is only signaled while its leader is alive, still
- * leads the group, and has the start time recorded at spawn, so a recycled PID
- * is not targeted. Returns true when the signal was sent.
+ * Read the process group a live pid belongs to. Groups outlive their leader, so
+ * a match here is evidence about a process, never proof it belongs to us.
+ * Returns null on Windows or when the process is gone.
  */
-export function killOrphanedProcessGroup(
-  pgid: number,
-  startTime: string | undefined,
-  signal: NodeJS.Signals = "SIGTERM"
-): boolean {
-  if (isWindows || !Number.isInteger(pgid) || pgid <= 1 || !startTime) return false;
+export function getProcessGroupId(pid: number): number | null {
+  if (isWindows || !Number.isInteger(pid) || pid <= 0) return null;
   try {
-    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pgid)], {
+    const output = execFileSync("ps", ["-o", "pgid=", "-p", String(pid)], {
       encoding: "utf-8",
       timeout: PID_LOOKUP_TIMEOUT_MS,
     });
-    if (Number(output.trim()) !== pgid) return false;
-    if (getProcessStartTime(pgid) !== startTime) return false;
-    process.kill(-pgid, signal);
-    return true;
+    const pgid = Number(output.trim());
+    return Number.isInteger(pgid) && pgid > 0 ? pgid : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
 /**
+ * How a recorded process group ended after a stop attempt. A group is only
+ * reported as stopped once it has no live member left, so a process that
+ * closes its port but keeps running is never reported as killed.
+ */
+export type ProcessGroupState = "gone" | "stopped" | "survived" | "unverified";
+
+export interface ProcessGroupStop {
+  state: ProcessGroupState;
+  /** Whether a signal reached the group. */
+  signaled: boolean;
+  /** A member that outlived the signal, recorded so a retry can verify it. */
+  survivor?: { pid: number; startTime: string };
+}
+
+/** The member to record for a retry: a live listener of the recorded port first, then any live member. */
+function pickGroupSurvivor(
+  groupId: number,
+  excluded: Set<number>,
+  port: number | undefined
+): { pid: number; startTime: string } | undefined {
+  const members = listProcessGroupMembers(groupId) ?? [];
+  const listeners =
+    port === undefined ? [] : findPidsOnPort(port).filter((pid) => members.includes(pid));
+  for (const pid of [...listeners, ...members]) {
+    if (excluded.has(pid)) continue;
+    const startTime = getProcessStartTime(pid);
+    if (startTime) return { pid, startTime };
+  }
+  return undefined;
+}
+
+/**
+ * Try to stop a recorded process group. Every identity recorded for the group is
+ * tried, so one stale record cannot hide a valid one, and the group is signaled
+ * only while the recorded leader or a recorded member still matches, so a
+ * recycled group number is never signaled. The wait ends on real member exit,
+ * not on the port closing, and a survivor is a member still running after the
+ * signal, so a retry anchor is never a process that already exited.
+ */
+export async function stopProcessGroup(
+  groupId: number,
+  leaderStartTimes: (string | undefined)[],
+  recordedMembers: { pid: number; startTime: string | undefined }[],
+  signal: NodeJS.Signals = "SIGTERM",
+  options: { port?: number; timeoutMs?: number } = {}
+): Promise<ProcessGroupStop> {
+  if (!groupHasLiveMember(groupId)) return { state: "gone", signaled: false };
+  const proven =
+    leaderStartTimes.some((startTime) => isGroupMember(groupId, startTime, groupId)) ||
+    recordedMembers.some((member) => isGroupMember(member.pid, member.startTime, groupId));
+  if (!proven) return { state: "unverified", signaled: false };
+  let signaled = false;
+  try {
+    process.kill(-groupId, signal);
+    signaled = true;
+  } catch {
+    signaled = false;
+  }
+  const deadline = Date.now() + (options.timeoutMs ?? PROCESS_GROUP_EXIT_TIMEOUT_MS);
+  while (groupHasLiveMember(groupId)) {
+    if (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, PROCESS_GROUP_POLL_MS));
+      continue;
+    }
+    const excluded = new Set([groupId, ...recordedMembers.map((member) => member.pid)]);
+    return {
+      state: "survived",
+      signaled,
+      survivor: pickGroupSurvivor(groupId, excluded, options.port),
+    };
+  }
+  return { state: "stopped", signaled };
+}
+
+/**
  * Try to find the PID of a process listening on the given TCP port.
- * Uses lsof on macOS/Linux and netstat on Windows.
+ * Reads /proc on Linux, uses lsof on macOS and netstat on Windows.
  * Returns null if the PID cannot be determined.
  */
 export function findPidOnPort(port: number): number | null {
@@ -1596,6 +1811,8 @@ export function spawnCommand(
   options?: {
     env?: NodeJS.ProcessEnv;
     onCleanup?: () => void;
+    /** Awaited after the command exits on its own, before cleanup runs. */
+    onExit?: (childPid: number | undefined, code: number | null) => Promise<void>;
     /** Called with the child's PID, which is also its process group on Unix. */
     onSpawn?: (pid: number) => void;
   }
@@ -1720,7 +1937,16 @@ export function spawnCommand(
       finish(128 + (SIGNAL_CODES[signal] || 15));
       return;
     }
-    finish(code ?? 1);
+    const onExit = options?.onExit;
+    if (!onExit) {
+      finish(code ?? 1);
+      return;
+    }
+    onExit(child.pid, code)
+      .catch(() => {
+        // Exit hooks are best-effort.
+      })
+      .finally(() => finish(code ?? 1));
   });
 }
 
@@ -1889,6 +2115,25 @@ type FrameworkInvocation = {
   separator?: string;
 };
 
+function skipRunnerPrefix(
+  commandArgs: string[],
+  start: number,
+  runner: { valueFlags?: string[] }
+): { index: number; separator: boolean } {
+  let index = start;
+  let separator = false;
+  while (index < commandArgs.length && commandArgs[index].startsWith("-")) {
+    const option = commandArgs[index];
+    index++;
+    if (option === "--") {
+      separator = true;
+      break;
+    }
+    if (!option.includes("=") && runner.valueFlags?.includes(option)) index++;
+  }
+  return { index, separator };
+}
+
 function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | null {
   if (commandArgs.length === 0) return null;
 
@@ -1901,32 +2146,26 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
     const runner = PACKAGE_RUNNERS[first];
     if (!runner) return null;
 
-    let i = 1;
-    const skipRunnerOptions = () => {
-      while (i < commandArgs.length && commandArgs[i].startsWith("-")) {
-        const option = commandArgs[i];
-        i++;
-        if (option === "--") {
-          runnerSeparator = true;
-          break;
-        }
-        if (!option.includes("=") && runner.valueFlags?.includes(option)) i++;
-      }
-    };
+    let skipped = skipRunnerPrefix(commandArgs, 1, runner);
+    runnerSeparator = skipped.separator;
+    let i = skipped.index;
 
     if (runner.subcommands.length > 0) {
-      skipRunnerOptions();
       if (i >= commandArgs.length) return null;
       if (!runner.subcommands.includes(commandArgs[i])) {
         const name = path.basename(commandArgs[i]);
         frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
       } else {
-        i++;
+        skipped = skipRunnerPrefix(commandArgs, i + 1, runner);
+        runnerSeparator ||= skipped.separator;
+        i = skipped.index;
       }
     }
 
     if (frameworkIndex === null) {
-      skipRunnerOptions();
+      skipped = skipRunnerPrefix(commandArgs, i, runner);
+      runnerSeparator ||= skipped.separator;
+      i = skipped.index;
       if (i >= commandArgs.length) return null;
       const name = path.basename(commandArgs[i]);
       frameworkIndex = FRAMEWORKS_NEEDING_PORT[name] ? i : null;
@@ -1980,6 +2219,131 @@ function parseFrameworkInvocation(commandArgs: string[]): FrameworkInvocation | 
  */
 function findFrameworkBasename(commandArgs: string[]): string | null {
   return parseFrameworkInvocation(commandArgs)?.basename ?? null;
+}
+
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+function commandBasename(token: string): string {
+  const name = path.basename(token);
+  return isWindows ? name.toLowerCase().replace(/\.(cmd|exe|bat|com)$/, "") : name;
+}
+
+function isTurboCommand(token: string, packageSpec: boolean): boolean {
+  const name = commandBasename(token);
+  return name === "turbo" || (packageSpec && !token.startsWith("@") && /^turbo@[^/]+$/.test(name));
+}
+
+function mentionsTurbo(commandArgs: string[]): boolean {
+  return commandArgs.some((arg) => {
+    const name = commandBasename(arg);
+    return name === "turbo" || /^turbo@[^/]+$/.test(name);
+  });
+}
+
+/** What a wrapper does to the command it runs and to the arguments forwarded through it. */
+type Wrapped = {
+  /** Whether it swallows one `--`: always, or only when its own options do not end with one. */
+  consumes?: "always" | "unless separated";
+  /** The `--` is swallowed by Yarn Classic only. */
+  classicOnly?: true;
+  /** What follows is a package spec such as `turbo@2`. */
+  packageSpec?: true;
+  /** What follows is a package script name: always after `run`, possibly after bare `yarn`. */
+  script?: "always" | "maybe";
+};
+
+type WrapperSpec = Wrapped & {
+  valueFlags?: string[];
+  subcommands?: Record<string, Wrapped>;
+  /** False when the command runs nothing without one of its subcommands. */
+  bare?: false;
+};
+
+const NPM_EXEC: Wrapped = { consumes: "unless separated", packageSpec: true };
+
+/** Every command that a root script may put in front of Turbo. */
+const COMMAND_WRAPPERS: Record<string, WrapperSpec> = {
+  env: { valueFlags: ["-u", "--unset"] },
+  "cross-env": {},
+  dotenv: { valueFlags: ["-e", "-v"], consumes: "unless separated" },
+  npx: { valueFlags: PACKAGE_RUNNERS.npx.valueFlags, packageSpec: true },
+  bunx: { packageSpec: true },
+  pnpx: { valueFlags: PACKAGE_RUNNERS.pnpx.valueFlags, packageSpec: true },
+  npm: {
+    valueFlags: PACKAGE_RUNNERS.npm.valueFlags,
+    subcommands: { exec: NPM_EXEC, x: NPM_EXEC, run: { consumes: "always", script: "always" } },
+  },
+  pnpm: { subcommands: { exec: {}, dlx: { packageSpec: true }, run: { script: "always" } } },
+  yarn: {
+    consumes: "always",
+    classicOnly: true,
+    script: "maybe",
+    subcommands: {
+      exec: { consumes: "unless separated", classicOnly: true },
+      dlx: { packageSpec: true },
+      run: { consumes: "always", classicOnly: true, script: "always" },
+    },
+  },
+  bun: {
+    bare: false,
+    subcommands: { x: { packageSpec: true }, run: { consumes: "always", script: "always" } },
+  },
+};
+
+type Unwrapped = {
+  /** The command left after every wrapper, starting at its executable or script name. */
+  command: string[];
+  /** `--` separators the wrappers swallow before the command sees forwarded arguments. */
+  consumed: number;
+  packageSpec: boolean;
+  script: Wrapped["script"];
+};
+
+/** Strip environment assignments and wrappers from the front of a script's tokens. */
+function unwrapCommand(tokens: string[], packageDir: string): Unwrapped | null {
+  const classic = isYarnClassic(packageDir);
+  let command = tokens;
+  let consumed = 0;
+  let packageSpec = false;
+  let script: Wrapped["script"];
+  for (;;) {
+    const first = command[0];
+    if (first === undefined) return null;
+    if (ENV_ASSIGNMENT.test(first)) {
+      command = command.slice(1);
+      continue;
+    }
+    const name = commandBasename(first);
+    const spec = COMMAND_WRAPPERS[name];
+    if (!spec) return { command, consumed, packageSpec, script };
+    let options = skipRunnerPrefix(command, 1, spec);
+    let wrapped: Wrapped = spec;
+    const subcommand = spec.subcommands?.[command[options.index] ?? ""];
+    if (subcommand) {
+      wrapped = subcommand;
+      options = subcommand.script
+        ? { index: options.index + 1, separator: false }
+        : skipRunnerPrefix(command, options.index + 1, spec);
+    } else if (spec.bare === false) {
+      return { command, consumed, packageSpec, script };
+    }
+    if (wrapped.script === "always") {
+      const target = command[options.index];
+      if (target === undefined || target.startsWith("-")) return null;
+      if (name === "bun" && !resolveScript(target, packageDir)) wrapped = {};
+    }
+    if (
+      wrapped.consumes &&
+      (!wrapped.classicOnly || classic) &&
+      (wrapped.consumes === "always" || !options.separator)
+    ) {
+      consumed++;
+    }
+    packageSpec = wrapped.packageSpec === true;
+    script = wrapped.script;
+    command = command.slice(options.index);
+    if (script === "always") return { command, consumed, packageSpec, script };
+  }
 }
 
 /**
@@ -2124,7 +2488,7 @@ const PACKAGE_SCRIPT_MANAGERS = new Set(["npm", "pnpm", "yarn", "bun"]);
  * their first token is not a name it recognizes, so a guard clause for them
  * would be unreachable. A regression test pins that outcome instead.
  */
-function isUnsafeToAppendArgs(command: string): boolean {
+export function isUnsafeToAppendArgs(command: string): boolean {
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -2269,6 +2633,93 @@ export function resolveFrameworkBasename(
   return scriptTokens ? findFrameworkBasename(scriptTokens) : null;
 }
 
+export type TurboRootForwarding =
+  | { kind: "none" }
+  | { kind: "forward"; separators: number }
+  | { kind: "unsafe"; turbo: boolean }
+  | { kind: "too-deep" };
+
+/** How many package scripts a root script may delegate through before portless stops following. */
+const MAX_SCRIPT_DELEGATION_DEPTH = 5;
+
+type ScriptWalkResult =
+  | { kind: "missing" }
+  | { kind: "unsafe"; scriptName: string; turbo: boolean }
+  | { kind: "too-deep" }
+  | { kind: "leaf"; separators: number; turbo: boolean };
+
+function walkScript(scriptName: string, packageDir: string, chain: string[]): ScriptWalkResult {
+  const raw = resolveScriptRaw(scriptName, packageDir);
+  const tokens = resolveScript(scriptName, packageDir);
+  if (!raw || !tokens) return { kind: "missing" };
+  if (isUnsafeToAppendArgs(raw)) {
+    return { kind: "unsafe", scriptName, turbo: mentionsTurbo(tokens) };
+  }
+  const unwrapped = unwrapCommand(tokens, packageDir);
+  if (!unwrapped) return { kind: "leaf", separators: 0, turbo: false };
+  const { command, packageSpec, script } = unwrapped;
+  const literalSeparators = command.slice(1).filter((arg) => arg === "--").length;
+  const turbo = script !== "always" && isTurboCommand(command[0], packageSpec);
+  if (turbo) {
+    return {
+      kind: "leaf",
+      separators: Math.max(0, unwrapped.consumed + 1 - literalSeparators),
+      turbo: true,
+    };
+  }
+  if (!script || chain.includes(command[0]) || !resolveScript(command[0], packageDir)) {
+    return {
+      kind: "leaf",
+      separators: Math.max(0, unwrapped.consumed - literalSeparators),
+      turbo: false,
+    };
+  }
+  if (chain.length - 1 >= MAX_SCRIPT_DELEGATION_DEPTH) return { kind: "too-deep" };
+  const child = walkScript(command[0], packageDir, [...chain, command[0]]);
+  if (child.kind === "too-deep" || child.kind === "unsafe") return child;
+  const childSeparators = child.kind === "leaf" ? child.separators : 0;
+  const childTurbo = child.kind === "leaf" && child.turbo;
+  return {
+    kind: "leaf",
+    separators: Math.max(0, unwrapped.consumed + childSeparators - literalSeparators),
+    turbo: childTurbo,
+  };
+}
+
+export function resolveTurboRootForwarding(
+  scriptName: string,
+  packageDir: string
+): TurboRootForwarding {
+  const result = walkScript(scriptName, packageDir, [scriptName]);
+  if (result.kind === "unsafe") return { kind: "unsafe", turbo: result.turbo };
+  if (result.kind === "too-deep") return result;
+  if (result.kind === "leaf" && result.turbo) {
+    return { kind: "forward", separators: result.separators };
+  }
+  return { kind: "none" };
+}
+
+export type ScriptArgForwarding =
+  | { kind: "missing" }
+  | { kind: "forward"; separators: number }
+  | { kind: "unsafe"; scriptName: string }
+  | { kind: "too-deep" };
+
+/**
+ * Resolve how forwarded arguments pass through a package script, following
+ * wrappers and nested scripts and counting the `--` separators they consume.
+ */
+export function resolveScriptArgForwarding(
+  scriptName: string,
+  packageDir: string
+): ScriptArgForwarding {
+  const result = walkScript(scriptName, packageDir, [scriptName]);
+  if (result.kind === "missing") return result;
+  if (result.kind === "unsafe") return { kind: "unsafe", scriptName: result.scriptName };
+  if (result.kind === "too-deep") return result;
+  return { kind: "forward", separators: result.separators };
+}
+
 /**
  * When the child command delegates to a package script (`<pm> run <script>`),
  * the framework command lives inside package.json where injectFrameworkFlags
@@ -2314,13 +2765,13 @@ export function injectPackageScriptFrameworkFlags(
 export function prompt(question: string): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
-    output: process.stdout,
+    output: process.stderr,
   });
   return new Promise((resolve) => {
     rl.on("close", () => resolve(""));
     rl.question(question, (answer) => {
-      rl.close();
       resolve(answer.trim().toLowerCase());
+      rl.close();
     });
   });
 }
