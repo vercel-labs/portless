@@ -139,3 +139,17 @@
 #nd-toc a[data-active="true"] {
   @apply text-gray-1000;
 }
+
+/* Header lockup slash: follow the shared OG card geometry, scaled to the 18px logo. */
+header a[aria-label="Vercel Labs"] + div {
+  width: 6.2px;
+  height: 14.8px;
+  margin-left: 1px;
+  margin-right: -2.3px;
+  background-color: currentColor;
+  clip-path: polygon(83.1% 0, 100% 0, 18.3% 100%, 0 100%);
+}
+
+header a[aria-label="Vercel Labs"] + div > svg {
+  display: none;
+}
