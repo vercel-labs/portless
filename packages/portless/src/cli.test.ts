@@ -48,7 +48,8 @@ VeuruL5f30jD8PbGa2A91T5e1oaoL5ap6bdl
 /** Run the CLI with the given args and optional env/cwd overrides. */
 function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
   const env: Record<string, string | undefined> = { ...process.env };
-  delete env.PORTLESS_PREFIX;
+  if (options?.cwd === undefined) env.PORTLESS_PREFIX = "";
+  else delete env.PORTLESS_PREFIX;
   Object.assign(env, options?.env);
   env.NO_COLOR = "1";
   // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
