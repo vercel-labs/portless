@@ -2001,7 +2001,7 @@ type PackageRunnerSpec = {
   separatorRequired?: boolean;
 };
 
-const NPM_SHARED_VALUE_FLAGS = [
+const NPM_VALUE_FLAGS = [
   "-C",
   "--prefix",
   "-w",
@@ -2026,46 +2026,13 @@ const NPM_SHARED_VALUE_FLAGS = [
   "--key",
   "--shell",
   "--umask",
+  "-c",
+  "--call",
+  "--package",
+  "--allow-scripts",
 ] as const;
 
-const NPM_EXEC_VALUE_FLAGS = ["-c", "--call", "--package", "--allow-scripts"] as const;
-
-const NPX_VALUE_FLAGS = [...NPM_SHARED_VALUE_FLAGS, ...NPM_EXEC_VALUE_FLAGS, "-p"] as const;
-
-const NPM_SHARED_BOOLEAN_FLAGS = [
-  "-s",
-  "--silent",
-  "-q",
-  "--quiet",
-  "-d",
-  "--dd",
-  "--ddd",
-  "--verbose",
-  "-y",
-  "--yes",
-  "-n",
-  "--no",
-  "-l",
-  "--long",
-  "-g",
-  "--global",
-  "--parseable",
-  "--ws",
-  "--workspaces",
-  "--include-workspace-root",
-  "--iwr",
-  "--if-present",
-  "--ignore-scripts",
-  "--foreground-scripts",
-  "--offline",
-  "--prefer-offline",
-  "--prefer-online",
-  "--json",
-  "--color",
-  "--progress",
-  "--strict-allow-scripts",
-  "--dangerously-allow-all-scripts",
-] as const;
+const NPX_VALUE_FLAGS = [...NPM_VALUE_FLAGS, "-p"] as const;
 
 const PNPM_VALUE_FLAGS = [
   "-F",
@@ -2317,7 +2284,7 @@ const PACKAGE_RUNNERS: Record<string, PackageRunnerSpec> = {
   },
   npm: {
     subcommands: ["exec", "x"],
-    valueFlags: [...NPM_SHARED_VALUE_FLAGS, ...NPM_EXEC_VALUE_FLAGS],
+    valueFlags: NPM_VALUE_FLAGS,
     separatorRequired: true,
   },
 };
@@ -2572,11 +2539,7 @@ type WrapperSpec = Wrapped & {
   parsesTrailingFlags?: true;
 };
 
-const NPM_EXEC: Wrapped = {
-  consumes: "unless separated",
-  packageSpec: true,
-  valueFlags: NPM_EXEC_VALUE_FLAGS,
-};
+const NPM_EXEC: Wrapped = { consumes: "unless separated", packageSpec: true };
 const NPM_RUN: Wrapped = { consumes: "unless separated", script: "always" };
 const PNPM_RUN: Wrapped = { script: "always" };
 
@@ -2598,7 +2561,6 @@ const COMMAND_WRAPPERS: Record<string, WrapperSpec> = {
   },
   npx: {
     valueFlags: NPX_VALUE_FLAGS,
-    booleanFlags: NPM_SHARED_BOOLEAN_FLAGS,
     packageSpec: true,
   },
   bunx: {
@@ -2614,8 +2576,7 @@ const COMMAND_WRAPPERS: Record<string, WrapperSpec> = {
     packageSpec: true,
   },
   npm: {
-    valueFlags: NPM_SHARED_VALUE_FLAGS,
-    booleanFlags: [...NPM_SHARED_BOOLEAN_FLAGS, "-p"],
+    valueFlags: NPM_VALUE_FLAGS,
     targetFlags: ["-w", "--workspace", "--workspaces", "--ws", "-C", "--prefix"],
     parsesTrailingFlags: true,
     subcommands: {
