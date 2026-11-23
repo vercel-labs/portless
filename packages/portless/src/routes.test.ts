@@ -1032,6 +1032,23 @@ describe("RouteStore", () => {
     }, 10_000);
   });
 
+  it("watches successive atomic route replacements", async () => {
+    let notify: (() => void) | undefined;
+    const stop = store.watch(() => notify?.());
+    try {
+      for (const port of [4001, 4002]) {
+        const changed = new Promise<void>((resolve) => {
+          notify = resolve;
+        });
+        await store.register({ hostnames: ["watch.localhost"], pid: process.pid, port });
+        await changed;
+        expect(store.loadRoutes()[0]?.port).toBe(port);
+      }
+    } finally {
+      stop();
+    }
+  });
+
   describe("route metadata", () => {
     it("persists and loads tailscale fields via updateRoute", async () => {
       await store.register({ hostnames: ["myapp.localhost"], pid: process.pid, port: 4123 });
