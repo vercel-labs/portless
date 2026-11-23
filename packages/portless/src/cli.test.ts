@@ -5547,6 +5547,55 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(fs.readFileSync(path.join(tmpDir, "proxy.port"), "utf-8")).toBe(String(testPort));
     });
 
+    it.runIf(process.platform === "darwin")(
+      "auto-starts an unprivileged HTTPS proxy without trusting its CA",
+      async () => {
+        const bin = path.join(tmpDir, "bin");
+        const log = path.join(tmpDir, "trust-commands.log");
+        fs.mkdirSync(bin);
+        for (const command of ["security", "sudo"]) {
+          fs.writeFileSync(
+            path.join(bin, command),
+            `#!/bin/sh\nprintf '${command} %s\\n' "$*" >> "$PORTLESS_TEST_TRUST_LOG"\nexit 1\n`,
+            { mode: 0o755 }
+          );
+        }
+        const env = {
+          ...proxyEnv(),
+          PORTLESS_HTTPS: undefined,
+          PORTLESS_UNPRIVILEGED: undefined,
+          PORTLESS_SYNC_HOSTS: "0",
+          PORTLESS_TEST_TRUST_LOG: log,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        };
+        const start = run(["proxy", "start", "--unprivileged", "--https"], { cwd: tmpDir, env });
+        expect(start.status, start.stdout + start.stderr).toBe(0);
+        expect(run(["proxy", "stop"], { cwd: tmpDir, env }).status).toBe(0);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+        expect(fs.readFileSync(log, "utf-8")).toContain("security verify-cert");
+        expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+        fs.writeFileSync(log, "");
+
+        const app = run(
+          ["run", "--name", "myapp", process.execPath, "-e", "console.log('APP_STARTED')"],
+          {
+            cwd: tmpDir,
+            env,
+          }
+        );
+        expect(app.status, app.stdout + app.stderr).toBe(0);
+        expect(app.stderr).toContain("Starting proxy");
+        expect(app.stdout).toContain("APP_STARTED");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+        const commands = fs.readFileSync(log, "utf-8");
+        expect(commands).not.toContain("security add-trusted-cert");
+        expect(commands).not.toContain("sudo ");
+        expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+      },
+      30_000
+    );
+
     it("reads unprivileged mode from PORTLESS_UNPRIVILEGED", async () => {
       const start = run(["proxy", "start"], {
         env: { ...proxyEnv(), PORTLESS_UNPRIVILEGED: "1" },

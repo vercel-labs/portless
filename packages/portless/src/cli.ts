@@ -1766,9 +1766,7 @@ async function runApp(
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
     store.recoverCorruptRoutesFile();
-    if (tls && !isCATrusted(stateDir)) {
-      await handleTrust();
-    }
+    await trustProxyCaIfAllowed(stateDir, tls);
   } else {
     const runningConfig = readCurrentProxyConfig(stateDir);
 
@@ -2463,6 +2461,12 @@ ${colors.bold("Usage:")}
 ${colors.bold("Options:")}
   --help, -h             Show this help
 `);
+}
+
+/** Trust the generated CA after auto-start unless the proxy runs in unprivileged mode. */
+async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
+  if (!tls || new ProxyState(dir).read().unprivileged || isCATrusted(dir)) return;
+  await handleTrust();
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
@@ -5006,9 +5010,7 @@ async function handleDefaultMulti(
       checkHostnameCollisions(tlds);
     }
 
-    if (tls && !isCATrusted(dir)) {
-      await handleTrust();
-    }
+    await trustProxyCaIfAllowed(dir, tls);
   }
 
   if (useTurbo) {
@@ -5655,7 +5657,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   );
   if (ensured.started) {
     state = ensured.state;
-    if (state.tls && !isCATrusted(state.dir)) await handleTrust();
+    await trustProxyCaIfAllowed(state.dir, state.tls);
   } else {
     const running = readCurrentProxyConfig(state.dir);
     state = { ...state, tlds: running.tlds, lanMode: running.lanMode, lanIp: running.lanIp };
