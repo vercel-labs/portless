@@ -7,9 +7,13 @@ import { cookies } from "next/headers";
 import { DocsChat } from "@/components/docs-chat";
 import { DocsProvider } from "@/components/geistdocs-provider";
 import { config } from "@/lib/geistdocs/config";
+import { versionedOgImage } from "@/lib/og-version";
+import { HOME_OG_TITLE } from "@/lib/page-titles";
 import "./globals.css";
 
 export const viewport: Viewport = { viewportFit: "cover" };
+
+const ogImage = versionedOgImage("/og", HOME_OG_TITLE);
 
 export const metadata: Metadata = {
   metadataBase: new URL("https://portless.sh"),
@@ -29,13 +33,13 @@ export const metadata: Metadata = {
     siteName: "portless",
     title: "portless | Named .localhost URLs for Development",
     description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-    images: [{ url: "/og", width: 1200, height: 630, alt: "portless" }],
+    images: [{ url: ogImage, width: 1200, height: 630, alt: "portless" }],
   },
   twitter: {
     card: "summary_large_image",
     title: "portless | Named .localhost URLs for Development",
     description: "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-    images: ["/og"],
+    images: [{ url: ogImage, width: 1200, height: 630, alt: "portless" }],
   },
 };
 

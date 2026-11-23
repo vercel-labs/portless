@@ -1,3 +1,6 @@
+// Sentence case headline drawn on the home OG card.
+export const HOME_OG_TITLE = "Replace port numbers with named URLs";
+
 export const PAGE_TITLES: Record<string, string> = {
   "": "Replace Port Numbers\nwith Named URLs",
   why: "Why Portless",
