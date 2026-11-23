@@ -9,6 +9,8 @@ const nextConfig = {
   serverExternalPackages: ["just-bash", "bash-tool"],
   outputFileTracingIncludes: {
     "/*": ["./content/docs/**/*.mdx"],
+    "/og": ["./src/app/og/*.ttf", "./src/app/og/labs-logo.svg"],
+    "/og/*": ["./src/app/og/*.ttf", "./src/app/og/labs-logo.svg"],
   },
   async headers() {
     return process.env.VERCEL_ENV && process.env.VERCEL_ENV !== "production"

@@ -9,6 +9,7 @@ coverage/
 .nuxt/
 .next/
 apps/docs/.source/
+apps/docs/src/app/og/labs-og.tsx
 .react-router/
 .svelte-kit/
 .angular/
