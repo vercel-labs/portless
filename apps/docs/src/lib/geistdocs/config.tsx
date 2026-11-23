@@ -6,7 +6,10 @@ export const config = defineConfig({
   siteUrl,
   defaultLanguage: "en",
   logo: (
-    <span className="font-sans text-[24.4px] font-semibold leading-none tracking-[-0.05em] text-black dark:text-white">
+    <span
+      className="font-sans text-[24.4px] font-semibold leading-none tracking-[-0.05em] text-black dark:text-white"
+      style={{ transform: "translateY(-0.5px)" }}
+    >
       portless
     </span>
   ),
