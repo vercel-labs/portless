@@ -5059,6 +5059,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         );
 
         const { status } = run(["run", "--name", "myapp", "node", scriptPath], {
+          cwd: tmpDir,
           env: {
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_HTTPS: "0",
