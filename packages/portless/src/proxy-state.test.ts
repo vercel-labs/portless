@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_TLD, PORT_FILE, ProxyState } from "./proxy-state.js";
+import { DEFAULT_TLD, PORT_FILE, ProxyState, readProxyStateFile } from "./proxy-state.js";
 import { fixOwnership } from "./utils.js";
 
 vi.mock("./utils.js", async (importOriginal) => {
@@ -37,7 +37,6 @@ describe("ProxyState", () => {
     for (const name of [
       "proxy.pid",
       "proxy.port",
-      "proxy.start.tmp",
       "proxy.tls",
       "proxy.custom-cert",
       "proxy.unprivileged",
@@ -45,8 +44,11 @@ describe("ProxyState", () => {
       "proxy.tld",
       "proxy.tlds",
     ]) {
-      expect(paths).toContain(path.join(dir, name));
+      expect(
+        paths.some((file) => file.startsWith(path.join(dir, `${name}.`)) && file.endsWith(".tmp"))
+      ).toBe(true);
     }
+    expect(paths).toContain(path.join(dir, "proxy.start.tmp"));
     expect(fs.readFileSync(path.join(dir, "proxy.start"), "utf-8")).toBe("start-time");
     state.reset();
     expect(fs.existsSync(path.join(dir, "proxy.start"))).toBe(false);
@@ -129,17 +131,113 @@ describe("ProxyState", () => {
   });
 
   it("skips invalid persisted tld entries instead of dropping the list", () => {
-    fs.writeFileSync(
-      path.join(dir, "proxy.tlds"),
-      JSON.stringify(["test", "a".repeat(70), "internal"])
-    );
+    const sensitive = `private-${"a".repeat(70)}`;
+    fs.writeFileSync(path.join(dir, "proxy.tlds"), JSON.stringify(["test", sensitive, "internal"]));
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       expect(state.read().tlds).toEqual(["test", "internal"]);
-      expect(warn).toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledWith("Warning: ignoring invalid TLD entry in proxy.tlds");
+      expect(JSON.stringify(warn.mock.calls)).not.toContain(sensitive);
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it("reads individual settings without parsing persisted TLDs", () => {
+    fs.writeFileSync(path.join(dir, "proxy.tlds"), JSON.stringify(["invalid name"]));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      expect(state.readPort()).toBeNull();
+      expect(state.readTls()).toBe(false);
+      expect(state.readCustomCert()).toBe(false);
+      expect(state.readUnprivileged()).toBe(false);
+      expect(state.readLanIp()).toBeNull();
+      expect(warn).not.toHaveBeenCalled();
+      expect(state.readTlds()).toEqual([DEFAULT_TLD]);
+      expect(warn).toHaveBeenCalledOnce();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("ignores symlinked proxy state files", () => {
+    const target = path.join(dir, "private-data");
+    fs.writeFileSync(target, "sensitive.example");
+    for (const name of [
+      "proxy.tlds",
+      "proxy.tld",
+      "proxy.lan",
+      "proxy.tls",
+      "proxy.custom-cert",
+      "proxy.port",
+      "proxy.unprivileged",
+    ]) {
+      fs.symlinkSync(target, path.join(dir, name));
+    }
+    expect(state.read()).toEqual({
+      port: null,
+      tls: false,
+      customCert: false,
+      unprivileged: false,
+      lanIp: null,
+      tlds: [DEFAULT_TLD],
+    });
+    expect(() => readProxyStateFile(path.join(dir, "proxy.port"))).toThrow(
+      "Unsafe proxy state file"
+    );
+    expect(fs.readFileSync(target, "utf-8")).toBe("sensitive.example");
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "replaces planted state symlinks without modifying their target",
+    () => {
+      const target = path.join(dir, "private-data");
+      fs.writeFileSync(target, "sensitive data");
+      const files = [
+        "proxy.pid",
+        "proxy.port",
+        "proxy.tls",
+        "proxy.custom-cert",
+        "proxy.unprivileged",
+        "proxy.lan",
+        "proxy.tld",
+        "proxy.tlds",
+      ];
+      for (const name of files) fs.symlinkSync(target, path.join(dir, name));
+      state.publishListener(1234, 443, "start-time");
+      state.publish({
+        tls: true,
+        customCert: true,
+        unprivileged: true,
+        lanIp: "192.168.1.42",
+        tlds: ["localhost", "test"],
+      });
+      expect(fs.readFileSync(target, "utf-8")).toBe("sensitive data");
+      for (const name of files) expect(fs.lstatSync(path.join(dir, name)).isFile()).toBe(true);
+      expect(state.read()).toEqual({
+        port: 443,
+        tls: true,
+        customCert: true,
+        unprivileged: true,
+        lanIp: "192.168.1.42",
+        tlds: ["localhost", "test"],
+      });
+    }
+  );
+
+  it("ignores oversized and non-regular state files", () => {
+    fs.writeFileSync(path.join(dir, "proxy.tlds"), Buffer.alloc(64 * 1024 + 1, "a"));
+    fs.mkdirSync(path.join(dir, "proxy.port"));
+    fs.mkdirSync(path.join(dir, "proxy.tls"));
+    expect(state.readTlds()).toEqual([DEFAULT_TLD]);
+    expect(state.readPort()).toBeNull();
+    expect(state.readTls()).toBe(false);
+  });
+
+  it("removes temporary state files after a failed replacement", () => {
+    fs.mkdirSync(path.join(dir, "proxy.lan"));
+    expect(() => state.setLanIp("10.0.0.5")).toThrow();
+    expect(fs.readdirSync(dir)).toEqual(["proxy.lan"]);
   });
 
   it("writes and clears the LAN marker", () => {

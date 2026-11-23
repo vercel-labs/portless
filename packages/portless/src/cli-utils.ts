@@ -666,21 +666,22 @@ export async function discoverState(): Promise<{
   }
 
   // Check user-level state first (~/.portless)
-  const userState = new ProxyState(USER_STATE_DIR).read();
-  const userPort = userState.port;
+  const userState = new ProxyState(USER_STATE_DIR);
+  const userPort = userState.readPort();
   if (userPort !== null) {
     // Always use plain HTTP for the liveness check. The TLS-enabled proxy
     // accepts plain HTTP via byte-peeking, so this works for both modes and
     // avoids TLS handshake timeouts that can cause false negatives.
     if (await isProxyRunning(userPort)) {
+      const settings = userState.read();
       return {
         dir: USER_STATE_DIR,
         port: userPort,
-        tls: userState.tls,
-        tld: userState.tlds[0] ?? DEFAULT_TLD,
-        tlds: userState.tlds,
-        lanMode: userState.lanIp !== null,
-        lanIp: userState.lanIp,
+        tls: settings.tls,
+        tld: settings.tlds[0] ?? DEFAULT_TLD,
+        tlds: settings.tlds,
+        lanMode: settings.lanIp !== null,
+        lanIp: settings.lanIp,
       };
     }
   }
@@ -689,19 +690,20 @@ export async function discoverState(): Promise<{
   // older versions. Read-only: no root operations are performed on this path.
   const legacyState =
     findStateDirProblem(LEGACY_SYSTEM_STATE_DIR) === null
-      ? new ProxyState(LEGACY_SYSTEM_STATE_DIR).read()
+      ? new ProxyState(LEGACY_SYSTEM_STATE_DIR)
       : null;
-  const legacyPort = legacyState?.port ?? null;
+  const legacyPort = legacyState?.readPort() ?? null;
   if (legacyState && legacyPort !== null) {
     if (await isProxyRunning(legacyPort)) {
+      const settings = legacyState.read();
       return {
         dir: LEGACY_SYSTEM_STATE_DIR,
         port: legacyPort,
-        tls: legacyState.tls,
-        tld: legacyState.tlds[0] ?? DEFAULT_TLD,
-        tlds: legacyState.tlds,
-        lanMode: legacyState.lanIp !== null,
-        lanIp: legacyState.lanIp,
+        tls: settings.tls,
+        tld: settings.tlds[0] ?? DEFAULT_TLD,
+        tlds: settings.tlds,
+        lanMode: settings.lanIp !== null,
+        lanIp: settings.lanIp,
       };
     }
   }

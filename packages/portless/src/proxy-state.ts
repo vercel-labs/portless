@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { randomUUID } from "node:crypto";
 import { HOSTS_SYNC_AUTH_FILE, HOSTS_SYNC_AUTH_TEMP_FILE } from "./hosts-sync-auth.js";
-import { fixOwnership } from "./utils.js";
+import { fixOwnership, isErrnoException } from "./utils.js";
 
 /** Default TLD when PORTLESS_TLD is not set. */
 export const DEFAULT_TLD = "localhost";
@@ -22,6 +23,7 @@ const UNPRIVILEGED_FILE = "proxy.unprivileged";
 const LAN_FILE = "proxy.lan";
 const TLD_FILE = "proxy.tld";
 const TLDS_FILE = "proxy.tlds";
+const MAX_STATE_FILE_BYTES = 64 * 1024;
 
 /** Every file name the proxy owns inside a state directory. */
 export const PROXY_FILES: readonly string[] = [
@@ -52,16 +54,39 @@ export type ProxySettings = {
 
 function hasEntry(dir: string, name: string): boolean {
   try {
-    return fs.existsSync(path.join(dir, name));
+    return fs.lstatSync(path.join(dir, name)).isFile();
   } catch {
     return false;
   }
 }
 
+export function readProxyStateFile(file: string): string | null {
+  try {
+    const entry = fs.lstatSync(file);
+    if (entry.isSymbolicLink() || !entry.isFile()) {
+      throw new Error(`Unsafe proxy state file: ${file}`);
+    }
+    const flags =
+      fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0);
+    const fd = fs.openSync(file, flags);
+    try {
+      const stat = fs.fstatSync(fd);
+      if (!stat.isFile() || stat.size > MAX_STATE_FILE_BYTES) {
+        throw new Error(`Unsafe proxy state file: ${file}`);
+      }
+      return fs.readFileSync(fd, "utf-8").trim();
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch (error) {
+    if (isErrnoException(error) && error.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 function readEntry(dir: string, name: string): string | null {
   try {
-    const raw = fs.readFileSync(path.join(dir, name), "utf-8").trim();
-    return raw || null;
+    return readProxyStateFile(path.join(dir, name)) || null;
   } catch {
     return null;
   }
@@ -69,8 +94,27 @@ function readEntry(dir: string, name: string): string | null {
 
 function writeEntry(dir: string, name: string, contents: string): void {
   const file = path.join(dir, name);
-  fs.writeFileSync(file, contents, { mode: 0o644 });
-  fixOwnership(file);
+  const tempPath = `${file}.${randomUUID()}.tmp`;
+  let created = false;
+  try {
+    const flags =
+      fs.constants.O_WRONLY |
+      fs.constants.O_CREAT |
+      fs.constants.O_EXCL |
+      (fs.constants.O_NOFOLLOW ?? 0);
+    const fd = fs.openSync(tempPath, flags, 0o644);
+    created = true;
+    try {
+      fs.writeFileSync(fd, contents);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fixOwnership(tempPath);
+    fs.renameSync(tempPath, file);
+  } catch (error) {
+    if (created) fs.rmSync(tempPath, { force: true });
+    throw error;
+  }
 }
 
 function removeEntry(dir: string, name: string): void {
@@ -101,10 +145,10 @@ export class ProxyState {
   read(): ProxySettings {
     return {
       port: this.readPort(),
-      tls: hasEntry(this.dir, TLS_FILE),
-      customCert: hasEntry(this.dir, CUSTOM_CERT_FILE),
-      unprivileged: hasEntry(this.dir, UNPRIVILEGED_FILE),
-      lanIp: readEntry(this.dir, LAN_FILE),
+      tls: this.readTls(),
+      customCert: this.readCustomCert(),
+      unprivileged: this.readUnprivileged(),
+      lanIp: this.readLanIp(),
       tlds: this.readTlds(),
     };
   }
@@ -177,20 +221,37 @@ export class ProxyState {
     this.setLanIp(null);
   }
 
-  private readPort(): number | null {
+  readPort(): number | null {
     const raw = readEntry(this.dir, PORT_FILE);
     if (raw === null) return null;
     const port = parseInt(raw, 10);
     return isNaN(port) ? null : port;
   }
 
+  readTls(): boolean {
+    return hasEntry(this.dir, TLS_FILE);
+  }
+
+  readCustomCert(): boolean {
+    return hasEntry(this.dir, CUSTOM_CERT_FILE);
+  }
+
+  readUnprivileged(): boolean {
+    return hasEntry(this.dir, UNPRIVILEGED_FILE);
+  }
+
+  readLanIp(): string | null {
+    return readEntry(this.dir, LAN_FILE);
+  }
+
   private readLegacyTld(): string {
     return readEntry(this.dir, TLD_FILE) ?? DEFAULT_TLD;
   }
 
-  private readTlds(): string[] {
+  readTlds(): string[] {
+    const raw = readEntry(this.dir, TLDS_FILE);
+    if (raw === null) return [this.readLegacyTld()];
     try {
-      const raw = fs.readFileSync(path.join(this.dir, TLDS_FILE), "utf-8").trim();
       const parsed: unknown = raw.startsWith("[")
         ? JSON.parse(raw)
         : raw
@@ -203,10 +264,8 @@ export class ProxyState {
         if (typeof value !== "string") return [];
         try {
           return parseTldList(value);
-        } catch (err) {
-          console.warn(
-            `Warning: ignoring invalid TLD entry in ${TLDS_FILE}: ${err instanceof Error ? err.message : String(err)}`
-          );
+        } catch {
+          console.warn(`Warning: ignoring invalid TLD entry in ${TLDS_FILE}`);
           return [];
         }
       });

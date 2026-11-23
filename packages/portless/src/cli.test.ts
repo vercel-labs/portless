@@ -5475,6 +5475,20 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
+    it.skipIf(process.platform === "win32")(
+      "refuses to read a symlinked proxy PID when stopping",
+      () => {
+        const target = path.join(tmpDir, "private-data");
+        fs.writeFileSync(target, "sensitive value");
+        fs.symlinkSync(target, path.join(tmpDir, "proxy.pid"));
+        const stop = run(["proxy", "stop"], { cwd: tmpDir, env: proxyEnv() });
+        expect(stop.status).toBe(1);
+        expect(stop.stderr).toContain("Unsafe proxy state file");
+        expect(stop.stderr).not.toContain("sensitive value");
+        expect(fs.readFileSync(target, "utf-8")).toBe("sensitive value");
+      }
+    );
+
     it("starts the proxy and stops it cleanly", () => {
       const start = run(["proxy", "start"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -5545,6 +5559,60 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(second.stderr).toContain(`A proxy is already running on port ${testPort}`);
       expect(fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8")).toBe(pid);
       expect(fs.readFileSync(path.join(tmpDir, "proxy.port"), "utf-8")).toBe(String(testPort));
+    });
+
+    it("uses HTTP for an explicit unprivileged restart after remembered HTTPS", async () => {
+      const env = {
+        ...proxyEnv(),
+        PORTLESS_HTTPS: undefined,
+        PORTLESS_UNPRIVILEGED: undefined,
+      };
+      const start = run(["proxy", "start", "--unprivileged", "--https"], { cwd: tmpDir, env });
+      expect(start.status, start.stdout + start.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(run(["proxy", "stop"], { cwd: tmpDir, env }).status).toBe(0);
+
+      const bare = run(["proxy", "start"], { cwd: tmpDir, env });
+      expect(bare.status, bare.stdout + bare.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+      expect(run(["proxy", "stop"], { cwd: tmpDir, env }).status).toBe(0);
+
+      const explicit = run(["proxy", "start", "--unprivileged"], { cwd: tmpDir, env });
+      expect(explicit.status, explicit.stdout + explicit.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+      const acceptsHttps = await new Promise<boolean>((resolve) => {
+        const req = https.get(
+          { hostname: "127.0.0.1", port: testPort, rejectUnauthorized: false },
+          (res) => {
+            res.resume();
+            resolve(true);
+          }
+        );
+        req.on("error", () => resolve(false));
+        req.setTimeout(2000, () => req.destroy());
+      });
+      expect(acceptsHttps).toBe(false);
+    }, 30_000);
+
+    it("uses HTTP for an explicit unprivileged auto-start with stale HTTPS state", () => {
+      fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+      fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(testPort));
+      const env = {
+        ...proxyEnv(),
+        PORTLESS_HTTPS: undefined,
+        PORTLESS_UNPRIVILEGED: "1",
+        PORTLESS_SYNC_HOSTS: "0",
+      };
+      const app = run(
+        ["run", "--name", "myapp", process.execPath, "-e", "console.log('APP_STARTED')"],
+        { cwd: tmpDir, env }
+      );
+      expect(app.status, app.stdout + app.stderr).toBe(0);
+      expect(app.stdout).toContain("APP_STARTED");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
     });
 
     it.runIf(process.platform === "darwin")(

@@ -133,7 +133,7 @@ import {
   augmentedPath,
   waitForProxy,
 } from "./cli-utils.js";
-import { ProxyState, DEFAULT_TLD, parseTldList } from "./proxy-state.js";
+import { ProxyState, DEFAULT_TLD, parseTldList, readProxyStateFile } from "./proxy-state.js";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
@@ -337,7 +337,8 @@ function resolveProxyConfig(options: {
   // generated CA is one. So it serves plain HTTP unless HTTPS was asked for,
   // or a stopped unprivileged proxy already remembered serving it.
   if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
-    config.useHttps = options.persistedUnprivileged && options.persistedHttps;
+    config.useHttps =
+      !options.explicit.unprivileged && options.persistedUnprivileged && options.persistedHttps;
   }
 
   if (!config.lanMode) {
@@ -1173,12 +1174,7 @@ function sudoStopOrHint(port: number): boolean {
 
 /** Read a state file, returning null only when it does not exist. */
 function readStateFile(file: string): string | null {
-  try {
-    return fs.readFileSync(file, "utf-8").trim();
-  } catch (err: unknown) {
-    if (isErrnoException(err) && err.code === "ENOENT") return null;
-    throw err;
-  }
+  return readProxyStateFile(file);
 }
 
 /** Remove a state file only while its contents still match the expected value. */
@@ -1302,7 +1298,7 @@ async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<
     if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
     return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
   }
-  const pid = parseInt(fs.readFileSync(store.pidPath, "utf-8"), 10);
+  const pid = parseInt(readStateFile(store.pidPath) ?? "", 10);
   if (isNaN(pid)) return { state: "corrupt" };
   try {
     process.kill(pid, 0);
@@ -1536,11 +1532,11 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
     unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
   };
-  const persisted = new ProxyState(resolveStateDir()).read();
+  const persistedState = new ProxyState(resolveStateDir());
   const desiredConfig = resolveProxyConfig({
     persistedLanMode: lanMode,
-    persistedUnprivileged: persisted.unprivileged,
-    persistedHttps: persisted.tls,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
     explicit,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
@@ -1565,30 +1561,34 @@ function resolveProxyStart(desired: ProxyDesiredState): {
   startPort: number | undefined;
 } {
   const { explicit, desiredConfig } = desired;
-  const settings = new ProxyState(resolveStateDir()).read();
-  const persistedPort = settings.port;
+  const persistedState = new ProxyState(resolveStateDir());
+  const persistedPort = persistedState.readPort();
   const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
   const startConfig = { ...desiredConfig };
   let startPort: number | undefined;
 
   if (persistedPort !== null) {
-    if (!explicit.useHttps && settings.tls !== desiredConfig.useHttps) {
-      startConfig.useHttps = settings.tls;
+    const persistedTls = persistedState.readTls();
+    if (!explicit.useHttps && !explicit.unprivileged && persistedTls !== desiredConfig.useHttps) {
+      startConfig.useHttps = persistedTls;
     }
-    if (
-      !explicit.tlds &&
-      (settings.tlds.length !== desiredConfig.tlds.length ||
-        settings.tlds.some((tld, index) => tld !== desiredConfig.tlds[index]))
-    ) {
-      startConfig.tlds = settings.tlds;
-      startConfig.tld = primaryTld(settings.tlds);
+    if (!explicit.tlds) {
+      const persistedTlds = persistedState.readTlds();
+      if (
+        persistedTlds.length !== desiredConfig.tlds.length ||
+        persistedTlds.some((tld, index) => tld !== desiredConfig.tlds[index])
+      ) {
+        startConfig.tlds = persistedTlds;
+        startConfig.tld = primaryTld(persistedTlds);
+      }
     }
-    const persistedLanMode = settings.lanIp !== null;
+    const persistedLanMode = persistedState.readLanIp() !== null;
     if (!explicit.lanMode && persistedLanMode !== desiredConfig.lanMode) {
       startConfig.lanMode = persistedLanMode;
     }
-    if (!explicit.unprivileged && settings.unprivileged !== desiredConfig.unprivileged) {
-      startConfig.unprivileged = settings.unprivileged;
+    const persistedUnprivileged = persistedState.readUnprivileged();
+    if (!explicit.unprivileged && persistedUnprivileged !== desiredConfig.unprivileged) {
+      startConfig.unprivileged = persistedUnprivileged;
     }
     const envPort = getDefaultPort(startConfig.useHttps);
     if (!configuredEnvPort && persistedPort !== envPort) {
@@ -2465,7 +2465,7 @@ ${colors.bold("Options:")}
 
 /** Trust the generated CA after auto-start unless the proxy runs in unprivileged mode. */
 async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
-  if (!tls || new ProxyState(dir).read().unprivileged || isCATrusted(dir)) return;
+  if (!tls || new ProxyState(dir).readUnprivileged() || isCATrusted(dir)) return;
   await handleTrust();
 }
 
@@ -3523,7 +3523,7 @@ async function handleDoctor(args: string[]): Promise<void> {
   const proxyPort = proxyRunning || portListening || hasPortFile ? probePort : configuredPort;
   const proxyTls = proxyRunning || portListening || hasPortFile ? probeTls : configuredTls;
   const currentProxyStateIsHttp = (proxyRunning || portListening || hasPortFile) && !proxyTls;
-  const proxyUsesCustomCert = proxyTls && new ProxyState(state.dir).read().customCert;
+  const proxyUsesCustomCert = proxyTls && new ProxyState(state.dir).readCustomCert();
   const stateExists = fs.existsSync(state.dir);
 
   const version = __VERSION__;
@@ -3603,7 +3603,7 @@ async function handleDoctor(args: string[]): Promise<void> {
 
   if (fs.existsSync(store.pidPath)) {
     try {
-      const rawPid = fs.readFileSync(store.pidPath, "utf-8").trim();
+      const rawPid = readStateFile(store.pidPath) ?? "";
       const pid = parseInt(rawPid, 10);
       if (isNaN(pid) || pid <= 0) {
         add("fail", `Proxy PID file is invalid: ${store.pidPath}`);
@@ -3997,7 +3997,7 @@ async function handleProxy(args: string[]): Promise<void> {
 
   // Resolve state directory based on the port
   let stateDir = resolveStateDir();
-  let persistedLanMode = new ProxyState(stateDir).read().lanIp !== null;
+  let persistedLanMode = new ProxyState(stateDir).readLanIp() !== null;
   let runningPort: number | null = null;
   if (!hasExplicitPort) {
     const currentState = await discoverState();
@@ -4011,11 +4011,11 @@ async function handleProxy(args: string[]): Promise<void> {
       stateDir = currentState.dir;
     }
   }
-  const persisted = new ProxyState(stateDir).read();
+  const persistedState = new ProxyState(stateDir);
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
-    persistedUnprivileged: persisted.unprivileged,
-    persistedHttps: persisted.tls,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
@@ -4042,7 +4042,7 @@ async function handleProxy(args: string[]): Promise<void> {
     stateDir = resolveStateDir();
   }
 
-  const savedPort = new ProxyState(stateDir).read().port;
+  const savedPort = new ProxyState(stateDir).readPort();
   if (savedPort !== null && savedPort !== proxyPort && (await isProxyRunning(savedPort))) {
     console.error(
       colors.red(`Error: A proxy is already running on port ${savedPort} for this state directory.`)
