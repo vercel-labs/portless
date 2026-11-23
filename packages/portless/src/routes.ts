@@ -275,9 +275,20 @@ export class RouteStore {
 
     while (Date.now() < deadline) {
       try {
-        fs.mkdirSync(this.lockPath);
+        fs.mkdirSync(this.lockPath, { mode: 0o700 });
         try {
-          fs.writeFileSync(path.join(this.lockPath, "owner"), JSON.stringify({ pid: process.pid }));
+          const ownerPath = path.join(this.lockPath, "owner");
+          const ownerFlags =
+            fs.constants.O_WRONLY |
+            fs.constants.O_CREAT |
+            fs.constants.O_EXCL |
+            (fs.constants.O_NOFOLLOW ?? 0);
+          const fd = fs.openSync(ownerPath, ownerFlags, 0o600);
+          try {
+            fs.writeFileSync(fd, JSON.stringify({ pid: process.pid }));
+          } finally {
+            fs.closeSync(fd);
+          }
         } catch (writeError) {
           fs.rmSync(this.lockPath, { recursive: true, force: true });
           throw writeError;
@@ -291,10 +302,15 @@ export class RouteStore {
             if (Date.now() - stat.mtimeMs > STALE_LOCK_THRESHOLD_MS) {
               let pid: unknown;
               try {
-                const owner: unknown = JSON.parse(
-                  fs.readFileSync(path.join(this.lockPath, "owner"), "utf-8")
-                );
-                if (typeof owner === "object" && owner !== null && "pid" in owner) pid = owner.pid;
+                const ownerFlags = fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0);
+                const fd = fs.openSync(path.join(this.lockPath, "owner"), ownerFlags);
+                try {
+                  const owner: unknown = JSON.parse(fs.readFileSync(fd, "utf-8"));
+                  if (typeof owner === "object" && owner !== null && "pid" in owner)
+                    pid = owner.pid;
+                } finally {
+                  fs.closeSync(fd);
+                }
               } catch {
                 void 0;
               }

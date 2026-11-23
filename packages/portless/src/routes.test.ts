@@ -791,6 +791,67 @@ describe("RouteStore", () => {
       return child.pid!;
     }
 
+    it.skipIf(process.platform === "win32")(
+      "creates private lock and owner files under a group-writable umask",
+      async () => {
+        const prevUmask = process.umask(0o002);
+        const write = vi.mocked(fs.writeFileSync);
+        const originalWrite = write.getMockImplementation()!;
+        let lockMode: number | undefined;
+        let ownerMode: number | undefined;
+        write.mockImplementation((target, data, options) => {
+          if (typeof target === "number") {
+            lockMode = fs.statSync(lockPath()).mode & 0o777;
+            ownerMode = fs.statSync(ownerPath()).mode & 0o777;
+          }
+          return originalWrite(target, data, options);
+        });
+        try {
+          await store.register({ hostnames: ["private.localhost"], pid: process.pid, port: 4001 });
+          expect(lockMode).toBe(0o700);
+          expect(ownerMode).toBe(0o600);
+        } finally {
+          write.mockImplementation(originalWrite);
+          process.umask(prevUmask);
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "does not truncate a symlink planted as the lock owner",
+      async () => {
+        const target = path.join(tmpDir, "target");
+        fs.writeFileSync(target, "keep");
+        store.ensureDir();
+        const mkdir = vi.mocked(fs.mkdirSync);
+        const originalMkdir = mkdir.getMockImplementation()!;
+        mkdir.mockImplementationOnce((directory, options) => {
+          const result = originalMkdir(directory, options);
+          fs.symlinkSync(target, ownerPath());
+          return result;
+        });
+        try {
+          await store.register({ hostnames: ["safe.localhost"], pid: process.pid, port: 4001 });
+          expect(fs.readFileSync(target, "utf-8")).toBe("keep");
+          expect(store.loadRoutes()[0]?.hostname).toBe("safe.localhost");
+        } finally {
+          mkdir.mockImplementation(originalMkdir);
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")("does not follow a stale owner symlink", async () => {
+      const target = path.join(tmpDir, "target");
+      fs.writeFileSync(target, JSON.stringify({ pid: process.pid }));
+      writeLock(undefined);
+      fs.symlinkSync(target, ownerPath());
+      const when = new Date(Date.now() - 20_000);
+      fs.utimesSync(lockPath(), when, when);
+      await store.register({ hostnames: ["safe.localhost"], pid: process.pid, port: 4001 });
+      expect(fs.readFileSync(target, "utf-8")).toBe(JSON.stringify({ pid: process.pid }));
+      expect(store.loadRoutes()[0]?.hostname).toBe("safe.localhost");
+    });
+
     it("gives each of 20 concurrent processes its own port", async () => {
       const count = 20;
       const scriptPath = path.join(tmpDir, "worker.mjs");
