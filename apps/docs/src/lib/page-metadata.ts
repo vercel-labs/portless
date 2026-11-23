@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
-import { PAGE_TITLES } from "./page-titles";
+import { versionedOgImage } from "./og-version";
+import { HOME_OG_TITLE, PAGE_TITLES } from "./page-titles";
 import { siteDescription, siteUrl } from "./site";
 
 export function pageMetadata(slug: string): Metadata {
@@ -10,7 +11,7 @@ export function pageMetadata(slug: string): Metadata {
   const fullTitle = slug
     ? `${displayTitle} | portless`
     : "portless | Named .localhost URLs for Development";
-  const ogImageUrl = slug ? `/og/${slug}` : "/og";
+  const ogImageUrl = versionedOgImage(slug ? `/og/${slug}` : "/og", slug ? title : HOME_OG_TITLE);
 
   return {
     title: slug ? displayTitle : { absolute: fullTitle },

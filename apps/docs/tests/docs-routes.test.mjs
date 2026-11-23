@@ -139,16 +139,27 @@ for (const page of pages) {
       "og:type": "website",
       "og:site_name": "portless",
       "og:locale": "en_US",
-      "og:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
       "og:image:width": "1200",
       "og:image:height": "630",
       "og:image:alt": page.path === "/" ? "portless" : `${page.markdownTitle} - portless`,
       "twitter:card": "summary_large_image",
       "twitter:title": page.title,
       "twitter:description": page.description,
-      "twitter:image": `${origin}/og${page.path === "/" ? "" : page.path}`,
     }))
       assert.deepEqual(meta(html, key), [expected], `${page.path}: ${key}`);
+    const ogImage = new URL(meta(html, "og:image")[0], origin);
+    assert.equal(ogImage.origin, origin, `${page.path}: og:image origin`);
+    assert.equal(
+      ogImage.pathname,
+      `/og${page.path === "/" ? "" : page.path}`,
+      `${page.path}: og:image path`
+    );
+    assert.match(
+      ogImage.searchParams.get("v") ?? "",
+      /^[0-9a-f]{8}$/,
+      `${page.path}: og:image version`
+    );
+    assert.deepEqual(meta(html, "twitter:image"), [ogImage.href], `${page.path}: twitter:image`);
     const structured = [...html.matchAll(/<script\b([^>]*)>([\s\S]*?)<\/script>/gi)]
       .filter((match) => attributes(match[1]).type === "application/ld+json")
       .map((match) => JSON.parse(match[2]));
