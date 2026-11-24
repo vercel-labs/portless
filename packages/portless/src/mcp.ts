@@ -228,6 +228,11 @@ export const TOOLS: ToolDef[] = [
         description:
           "Take a port below 1024 without sudo: bind the wildcard address and accept loopback peers only. Serves plain HTTP on port 80 unless HTTPS is requested, and turns off hosts sync.",
       },
+      bindAll: {
+        type: "boolean",
+        description:
+          "Listen on every network interface and accept peers other than this machine, such as Docker containers, keeping the TLD and skipping mDNS. Every route becomes reachable by any machine that can reach this host.",
+      },
       https: {
         type: "boolean",
         description:
@@ -487,6 +492,7 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       for (const tld of readStringArray(args, "tld")) argv.push("--tld", tld);
       if (readBoolean(args, "wildcard") === true) argv.push("--wildcard");
       if (readBoolean(args, "unprivileged") === true) argv.push("--unprivileged");
+      if (readBoolean(args, "bindAll") === true) argv.push("--bind-all");
       if (readBoolean(args, "https") === true) argv.push("--https");
       if (readBoolean(args, "skipTrust") === true) argv.push("--skip-trust");
       for (const flag of ["cert", "key", "ip"] as const) {

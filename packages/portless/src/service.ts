@@ -80,6 +80,7 @@ export type ServiceInstallConfig = {
   tlds: string[];
   useWildcard: boolean;
   unprivileged: boolean;
+  bindAll: boolean;
   extraEnv: Record<string, string>;
 };
 
@@ -99,6 +100,7 @@ const DEFAULT_SERVICE_CONFIG: ServiceInstallConfig = {
   tlds: [DEFAULT_TLD],
   useWildcard: false,
   unprivileged: false,
+  bindAll: false,
   extraEnv: {},
 };
 
@@ -244,6 +246,7 @@ const SERVICE_INSTALL_FLAGS: Readonly<Record<string, FlagKind>> = {
   "--tld": "value",
   "--wildcard": "boolean",
   "--unprivileged": "boolean",
+  "--bind-all": "boolean",
   "--cert": "value",
   "--key": "value",
   "--state-dir": "value",
@@ -303,6 +306,11 @@ export function parseServiceInstallConfig(
   const envUnprivileged = parseBooleanEnv(env.PORTLESS_UNPRIVILEGED);
   if (envUnprivileged !== null) {
     config.unprivileged = envUnprivileged;
+  }
+
+  const envBindAll = parseBooleanEnv(env.PORTLESS_BIND_ALL);
+  if (envBindAll !== null) {
+    config.bindAll = envBindAll;
   }
 
   if (env.PORTLESS_PORT) {
@@ -369,6 +377,9 @@ export function parseServiceInstallConfig(
           break;
         case "--unprivileged":
           config.unprivileged = true;
+          break;
+        case "--bind-all":
+          config.bindAll = true;
           break;
         case "--cert":
           config.customCertPath = flagValue;
@@ -461,6 +472,7 @@ function buildProxyCommand(entryScript: string, serviceConfig: ServiceInstallCon
     tlds: serviceConfig.tlds,
     useWildcard: serviceConfig.useWildcard,
     unprivileged: serviceConfig.unprivileged,
+    bindAll: serviceConfig.bindAll,
     foreground: true,
     includePort: true,
     proxyPort: serviceConfig.proxyPort,
@@ -477,6 +489,7 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
     PORTLESS_LAN: ctx.config.lanMode ? "1" : "0",
     PORTLESS_WILDCARD: ctx.config.useWildcard ? "1" : "0",
     PORTLESS_UNPRIVILEGED: ctx.config.unprivileged ? "1" : "0",
+    PORTLESS_BIND_ALL: ctx.config.bindAll ? "1" : "0",
     ...ctx.config.extraEnv,
   };
 
@@ -1297,6 +1310,7 @@ async function printServiceStatus(entryScript: string, runner: CommandRunner): P
   }
   console.log(`  Wildcard: ${config.useWildcard ? "yes" : "no"}`);
   console.log(`  Unprivileged: ${config.unprivileged ? "yes" : "no"}`);
+  console.log(`  Bind all interfaces: ${config.bindAll ? "yes" : "no"}`);
   console.log(`  State directory: ${config.stateDir}`);
   if (status.details) {
     console.log(`  Service entry: ${status.details}`);
@@ -1323,6 +1337,7 @@ ${colors.bold("Install options:")}
   --tld <tld>                      Use a custom TLD outside LAN mode, repeatable
   --wildcard                       Allow subdomain fallback
   --unprivileged                   Bind the wildcard address, loopback peers only, no elevation
+  --bind-all                       Listen on all interfaces and accept any peer, keeping the TLD
   --cert <path>                    Use a custom TLS certificate
   --key <path>                     Use a custom TLS private key
   --state-dir <path>               Use a custom service state directory
