@@ -2,10 +2,9 @@ import * as crypto from "node:crypto";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
-import * as nodeTls from "node:tls";
 import type { ProxyServerOptions, RouteInfo } from "./types.js";
+import { UpstreamPool } from "./upstream-pool.js";
 import {
-  createLoopbackConnection,
   escapeHtml,
   formatUptime,
   formatUrl,
@@ -48,12 +47,6 @@ const HOP_BY_HOP_HEADERS = new Set([
   "transfer-encoding",
   "upgrade",
 ]);
-
-// HTTP/2 multiplexes a whole cold page load onto one client connection, so
-// without a limit the proxy dials the backend once per request at the same
-// instant and overflows its accept backlog. Only dials in progress are
-// limited, so long-lived responses such as SSE never starve other requests.
-const MAX_PENDING_UPSTREAM_DIALS = 8;
 
 function formatProxyError(error: Error): string {
   return error instanceof AggregateError
@@ -362,160 +355,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const tldSuffixes = [...new Set(tlds.length > 0 ? tlds : [tld])].map((value) => `.${value}`);
   const primaryTldSuffix = tldSuffixes[0] ?? ".localhost";
 
-  const upstreamAgent = new http.Agent({ keepAlive: true });
-  type UpstreamOptions = http.RequestOptions & {
-    upstreamRoute: RouteInfo;
-    upstreamConnection?: { cancel?: () => void };
-  };
-  const originalAgentName = upstreamAgent.getName.bind(upstreamAgent);
-  upstreamAgent.getName = (options) => {
-    const route = (options as UpstreamOptions).upstreamRoute;
-    return `${originalAgentName(options)}:${JSON.stringify([!!route?.upstream?.tls, route?.upstream?.host ?? ""])}`;
-  };
-  const agentOptions = (route: RouteInfo): UpstreamOptions => ({
-    port: route.port,
-    upstreamRoute: route,
-  });
-  const pendingConnections = new Set<() => void>();
-  let closing = false;
-  const connectUpstream = (
-    route: RouteInfo,
-    callback: (error: NodeJS.ErrnoException | null, socket: net.Socket) => void
-  ) => {
-    if (closing) {
-      queueMicrotask(() => {
-        callback(
-          Object.assign(new Error("The operation was aborted"), { code: "ABORT_ERR" }),
-          undefined!
-        );
-      });
-      return () => undefined;
-    }
-    let settled = false;
-    let tlsSocket: nodeTls.TLSSocket | undefined;
-    let cancelDial = () => {};
-    const timer = setTimeout(() => {
-      finish(Object.assign(new Error("Upstream connection timed out"), { code: "ETIMEDOUT" }));
-    }, 10_000);
-    const finish = (error: NodeJS.ErrnoException | null, socket?: net.Socket) => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      pendingConnections.delete(cancel);
-      if (error) {
-        cancelDial();
-        if (tlsSocket) {
-          tlsSocket.on("error", () => {});
-          tlsSocket.destroy();
-        }
-      }
-      callback(error, socket!);
-    };
-    const cancel = () => {
-      finish(Object.assign(new Error("The operation was aborted"), { code: "ABORT_ERR" }));
-    };
-    pendingConnections.add(cancel);
-    cancelDial = createLoopbackConnection(route.port, (error, socket) => {
-      if (settled) {
-        socket?.destroy();
-        return;
-      }
-      if (error || !socket) {
-        finish(
-          error ?? Object.assign(new Error("Upstream connection failed"), { code: "ECONNRESET" })
-        );
-        return;
-      }
-      if (!route.upstream?.tls) {
-        finish(null, socket);
-        return;
-      }
-      const authority = route.upstream.host;
-      const hostname = authority?.startsWith("[")
-        ? authority.slice(1, authority.indexOf("]"))
-        : authority?.split(":")[0];
-      try {
-        tlsSocket = nodeTls.connect({
-          socket,
-          ...(hostname && !net.isIP(hostname) ? { servername: hostname } : {}),
-          ALPNProtocols: ["http/1.1"],
-          rejectUnauthorized: false,
-        });
-        tlsSocket.once("secureConnect", () => finish(null, tlsSocket));
-        tlsSocket.once("error", (err) => finish(err));
-        tlsSocket.once("close", () =>
-          finish(Object.assign(new Error("Upstream TLS handshake closed"), { code: "ECONNRESET" }))
-        );
-      } catch (err) {
-        socket.destroy();
-        finish(err as NodeJS.ErrnoException);
-      }
-    });
-    return cancel;
-  };
-  const upstream = new Map<string, { dialing: number; waiting: (() => void)[] }>();
-  const upstreamKey = (route: RouteInfo) => upstreamAgent.getName(agentOptions(route));
-  const upstreamState = (route: RouteInfo) => {
-    const key = upstreamKey(route);
-    let state = upstream.get(key);
-    if (!state) {
-      state = { dialing: 0, waiting: [] };
-      upstream.set(key, state);
-    }
-    return state;
-  };
-  const hasIdleSocket = (route: RouteInfo) =>
-    (upstreamAgent.freeSockets[upstreamKey(route)]?.length ?? 0) > 0;
-  // Start waiting requests once a dial settles and a slot or idle socket is free.
-  const drainUpstream = (route: RouteInfo) => {
-    if (closing) return;
-    const key = upstreamKey(route);
-    const state = upstream.get(key);
-    if (!state) return;
-    while (
-      state.waiting.length > 0 &&
-      (hasIdleSocket(route) || state.dialing < MAX_PENDING_UPSTREAM_DIALS)
-    ) {
-      state.waiting.shift()?.();
-    }
-    if (state.dialing === 0 && state.waiting.length === 0) upstream.delete(key);
-  };
-  const whenUpstreamReady = (route: RouteInfo, send: () => void, res: http.ServerResponse) => {
-    const state = upstreamState(route);
-    if (hasIdleSocket(route) || state.dialing < MAX_PENDING_UPSTREAM_DIALS) {
-      send();
-    } else {
-      const cancel = () => {
-        const index = state.waiting.indexOf(waiting);
-        if (index !== -1) state.waiting.splice(index, 1);
-      };
-      const waiting = () => {
-        res.removeListener("close", cancel);
-        send();
-      };
-      state.waiting.push(waiting);
-      res.once("close", cancel);
-    }
-  };
-  // Dial via createLoopbackConnection so ::1-only backends work too.
-  upstreamAgent.createConnection = (options, callback) => {
-    const { upstreamRoute: route, upstreamConnection: connection } = options as UpstreamOptions;
-    const state = upstreamState(route);
-    state.dialing++;
-    connection!.cancel = connectUpstream(route, (error, socket) => {
-      state.dialing--;
-      callback?.(error, socket);
-      drainUpstream(route);
-    });
-    return undefined;
-  };
-  const closeUpstream = () => {
-    closing = true;
-    for (const state of upstream.values()) {
-      for (const send of state.waiting.splice(0)) send();
-    }
-    for (const cancel of pendingConnections) cancel();
-  };
+  const pool = new UpstreamPool();
 
   const refusesPeer = (address: string | undefined) => loopbackOnly && !isLoopbackPeer(address);
 
@@ -658,24 +498,24 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders["transfer-encoding"] = "chunked";
     }
 
-    const send = () => {
-      // The client may have gone away while the request waited for a socket.
-      if (res.destroyed) return;
-      if (closing) {
-        res.destroy();
-        return;
-      }
-      const connection: { cancel?: () => void } = {};
-      const proxyReq = http.request(
-        {
-          agent: upstreamAgent,
-          ...agentOptions(route),
-          ...{ upstreamConnection: connection },
-          path: req.url,
-          method: req.method,
-          headers: proxyReqHeaders,
-        },
-        (proxyRes) => {
+    pool.dispatch(
+      route,
+      {
+        method: req.method,
+        path: req.url,
+        headers: proxyReqHeaders,
+        freshConnection: isReplay || undefined,
+      },
+      res,
+      (proxyReq) => {
+        const onRequestError = () => {
+          if (!proxyReq.destroyed) proxyReq.destroy();
+        };
+        const detachRequestError = () => req.removeListener("error", onRequestError);
+        req.on("error", onRequestError);
+        proxyReq.once("error", detachRequestError);
+        proxyReq.once("close", detachRequestError);
+        proxyReq.on("response", (proxyRes) => {
           const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
           rewriteUpstreamLocation(responseHeaders, route, req);
           if (reqTls) {
@@ -696,71 +536,55 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             }
           });
           proxyRes.pipe(res);
-        }
-      );
+        });
 
-      proxyReq.on("error", (err) => {
-        if (res.destroyed || h2Stream?.destroyed || h2Stream?.closed) return;
-        const errWithCode = err as NodeJS.ErrnoException;
-        // The backend closed a pooled socket as it was reused: replay once
-        // instead of returning a 502.
-        if (
-          !isReplay &&
-          proxyReq.reusedSocket &&
-          errWithCode.code === "ECONNRESET" &&
-          !res.headersSent &&
-          REPLAYABLE_METHODS.has(req.method || "") &&
-          // The first attempt consumed the body, so only bodiless requests replay.
-          !proxyReqHeaders["transfer-encoding"] &&
-          !Number(req.headers["content-length"])
-        ) {
+        proxyReq.on("error", (err) => {
+          if (res.destroyed || h2Stream?.destroyed || h2Stream?.closed) return;
+          const errWithCode = err as NodeJS.ErrnoException;
+          // The backend closed a pooled socket as it was reused: replay once
+          // instead of returning a 502.
+          if (
+            !isReplay &&
+            proxyReq.reusedSocket &&
+            errWithCode.code === "ECONNRESET" &&
+            !res.headersSent &&
+            REPLAYABLE_METHODS.has(req.method || "") &&
+            // The first attempt consumed the body, so only bodiless requests replay.
+            !proxyReqHeaders["transfer-encoding"] &&
+            !Number(req.headers["content-length"])
+          ) {
+            req.unpipe(proxyReq);
+            handleRequest(req, res, true);
+            return;
+          }
           req.unpipe(proxyReq);
-          handleRequest(req, res, true);
-          return;
-        }
-        req.unpipe(proxyReq);
-        req.resume();
-        if (errWithCode.code !== "ABORT_ERR") {
-          onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
-        }
-        if (!res.headersSent) {
-          const detail = isTlsError(errWithCode)
-            ? "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
-            : errWithCode.code === "ECONNREFUSED"
-              ? "The target app is not responding. It may have crashed."
-              : "The target app may not be running.";
-          sendProxyError(req, res, 502, "bad_gateway", detail, getRequestHost(req), () =>
-            renderPage(
-              502,
-              "Bad Gateway",
-              `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
-            )
-          );
-        }
-      });
+          req.resume();
+          if (errWithCode.code !== "ABORT_ERR") {
+            onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
+          }
+          if (!res.headersSent) {
+            const detail = isTlsError(errWithCode)
+              ? "Could not connect to the target app over HTTPS. Check that it supports TLS on the configured port."
+              : errWithCode.code === "ECONNREFUSED"
+                ? "The target app is not responding. It may have crashed."
+                : "The target app may not be running.";
+            sendProxyError(req, res, 502, "bad_gateway", detail, getRequestHost(req), () =>
+              renderPage(
+                502,
+                "Bad Gateway",
+                `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
+              )
+            );
+          }
+        });
 
-      // Abort the outgoing request if the client disconnects
-      res.on("close", () => {
-        connection.cancel?.();
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
+        if (isReplay) {
+          proxyReq.end();
+        } else {
+          req.pipe(proxyReq);
         }
-      });
-
-      req.on("error", () => {
-        connection.cancel?.();
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
-        }
-      });
-
-      if (isReplay) {
-        proxyReq.end();
-      } else {
-        req.pipe(proxyReq);
       }
-    };
-    whenUpstreamReady(route, send, res);
+    );
   };
 
   const handleUpgrade = (req: http.IncomingMessage, socket: net.Socket, head: Buffer) => {
@@ -801,7 +625,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const proxyReq = http.request({
       // Dial via createLoopbackConnection so ::1-only backends work too.
       createConnection: (_options, callback) => {
-        connection.cancel = connectUpstream(route, callback);
+        connection.cancel = pool.connect(route, callback);
         return undefined;
       },
       path: req.url,
@@ -968,7 +792,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     const proxyReq = http.request({
       // Dial via createLoopbackConnection so ::1-only backends work too.
       createConnection: (_options, callback) => {
-        connection.cancel = connectUpstream(route, callback);
+        connection.cancel = pool.connect(route, callback);
         return undefined;
       },
       path: req.url,
@@ -1167,31 +991,30 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
     // Proxy close() through to inner servers so tests and cleanup work.
     const origClose = wrapper.close.bind(wrapper);
     wrapper.close = function (cb?: (err?: Error) => void) {
-      closeUpstream();
+      pool.destroy();
       h2Server.close();
       plainServer.close();
-      upstreamAgent.destroy();
       return origClose(cb);
     } as typeof wrapper.close;
 
     wrapper.on("listening", () => {
-      closing = false;
+      pool.reopen();
     });
     return wrapper;
   }
 
   const httpServer = http.createServer(handleRequest);
   httpServer.on("upgrade", handleUpgrade);
-  httpServer.on("close", () => upstreamAgent.destroy());
+  httpServer.on("close", () => pool.destroy());
   const origClose = httpServer.close.bind(httpServer);
   httpServer.close = function (cb?: (err?: Error) => void) {
-    closeUpstream();
+    pool.close();
     return origClose(cb);
   };
 
   const server = loopbackOnly ? guardLoopbackOnly(httpServer) : httpServer;
   server.on("listening", () => {
-    closing = false;
+    pool.reopen();
   });
   return server;
 }
