@@ -364,6 +364,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless proxy start --tld dev.example.com`      | Use a multi-segment TLD for production-parity URLs             |
 | `portless proxy start --foreground`               | Start the proxy in foreground (for debugging)                  |
 | `portless proxy start --wildcard`                 | Allow unregistered subdomains to fall back to parent route     |
+| `portless proxy status [--json]`                  | Show whether the proxy is running and its settings             |
 | `portless proxy stop`                             | Stop the proxy                                                 |
 | `portless service install`                        | Start the HTTPS proxy when the OS starts                       |
 | `portless service install --lan`                  | Start the service in LAN mode                                  |
@@ -457,6 +458,8 @@ The proxy auto-starts when you run an app with `portless <name> <cmd>`. If it do
 ```bash
 portless proxy start
 ```
+
+To check whether it is running and how it is configured, use `portless proxy status`. With `--json` it prints one line, `{"running":true,"pid":1841,"port":443,"tls":true,"tlds":["localhost"],"lan":false,"unprivileged":false,"stateDir":"/Users/me/.portless"}`, with every field always present. Everything except `running` and `stateDir` is `null` while the proxy is not running. It exits 0 either way, so read `running` instead of the exit code.
 
 ### Port already in use
 
