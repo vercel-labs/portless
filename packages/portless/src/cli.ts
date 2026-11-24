@@ -2430,7 +2430,8 @@ ${colors.bold("Environment variables:")}
 Precedence: flags override PORTLESS_* variables, which override project config.
 Project config lookup: portless.json, .config/portless.json, then package.json portless.
 Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
-unexpected proxy exit. A normal portless proxy stop clears them.
+unexpected proxy exit. A normal portless proxy stop clears them, except an
+unprivileged proxy keeps unprivileged mode and its HTTPS choice.
 Proxy options: portless proxy --help
 Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
@@ -3854,7 +3855,9 @@ ${colors.bold("LAN mode (--lan):")}
 
 ${colors.bold("Unprivileged mode (--unprivileged):")}
   Binds without sudo, installs nothing, and never writes the hosts file.
-  Stopped proxies keep the mode; use PORTLESS_UNPRIVILEGED=0 to switch back.
+  Stopped proxies keep unprivileged mode and its HTTPS choice for auto-start
+  and bare proxy start. Pass --unprivileged without --https, or pass --no-tls,
+  to return to plain HTTP; use PORTLESS_UNPRIVILEGED=0 to switch back.
 `);
 }
 
