@@ -85,6 +85,7 @@ import {
   resolveWorktreeNaming,
   composeHostname,
   sanitizeForHostname,
+  type WorktreeNaming,
 } from "./auto.js";
 import {
   buildProxyStartConfig,
@@ -598,12 +599,22 @@ function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | n
   return "";
 }
 
+interface WorktreeHostnameInput {
+  baseName: string;
+  naming: WorktreeNaming | null;
+}
+
 function buildHostnames(
-  name: string,
+  input: string | WorktreeHostnameInput,
   tlds: readonly string[],
   targetTlds?: readonly string[]
 ): string[] {
-  return parseHostnames(name, normalizeTlds(tlds), targetTlds);
+  const normalizedTlds = normalizeTlds(tlds);
+  const name =
+    typeof input === "string"
+      ? input
+      : composeHostname(stripTld(input.baseName, [...normalizedTlds, DEFAULT_TLD]), input.naming);
+  return parseHostnames(name, normalizedTlds, targetTlds);
 }
 
 /**
@@ -1814,12 +1825,11 @@ async function runApp(
   initialStore: RouteStore,
   proxyPort: number,
   stateDir: string,
-  name: string,
+  name: string | (WorktreeHostnameInput & { nameSource: string; childPrefix?: string }),
   commandArgs: string[],
   tls: boolean,
   tlds: string[],
   force: boolean,
-  autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
@@ -1931,10 +1941,10 @@ async function runApp(
   } else {
     console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
-  if (autoInfo) {
-    console.error(chalk.gray(`  Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
-    if (autoInfo.prefix) {
-      console.error(chalk.gray(`  Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+  if (typeof name !== "string") {
+    console.error(chalk.gray(`  Name "${name.baseName}" (from ${name.nameSource})`));
+    if (name.naming) {
+      console.error(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
     }
   }
 
@@ -2162,6 +2172,9 @@ async function runApp(
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
+      ...(typeof name !== "string" && name.childPrefix !== undefined
+        ? { PORTLESS_PREFIX: name.childPrefix }
+        : {}),
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
       PORTLESS_URL: finalUrl,
@@ -3216,10 +3229,8 @@ async function handleGet(args: string[]): Promise<void> {
     config: appConfig?.worktree,
     override: skipWorktree ? null : undefined,
   });
-  const effectiveName = composeHostname(name, worktree);
-
   const { port, tls, tlds } = await discoverState();
-  const hostname = buildHostnames(effectiveName, tlds)[0]!;
+  const hostname = buildHostnames({ baseName: name, naming: worktree }, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
@@ -4685,7 +4696,6 @@ async function handleDefaultSingle(
     config: appConfig?.worktree,
     override: worktreeOverride,
   });
-  const effectiveName = composeHostname(baseName, worktree);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -4695,12 +4705,11 @@ async function handleDefaultSingle(
     store,
     port,
     dir,
-    effectiveName,
+    { baseName, naming: worktree, nameSource },
     resolved,
     tls,
     tlds,
     false,
-    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
     lanIp
@@ -4711,10 +4720,8 @@ async function handleDefaultSingle(
  * Multi-app mode: discover workspace packages and run all that have
  * the target script through the proxy concurrently.
  */
-interface MultiAppEntry {
+interface MultiAppEntry extends WorktreeHostnameInput {
   pkg: WorkspacePackage;
-  /** Portless hostname (e.g. "web.json-render") */
-  name: string;
   /** Human-readable package label for display (e.g. "web") */
   label: string;
   commandArgs: string[];
@@ -4777,6 +4784,7 @@ async function spawnProxiedApp(
   route: { store: RouteStore; hostnames: string[] } | null;
   settled: Promise<void>;
 }> {
+  const name = composeHostname(app.baseName, app.naming);
   const usesPortless = app.commandArgs[0] === "portless";
 
   if (lanMode && !process.env.PORTLESS_LAN) {
@@ -4797,11 +4805,11 @@ async function spawnProxiedApp(
     displayUrl = "(managed by portless)";
   } else {
     store = new RouteStore(stateDir, {
-      onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
+      onWarning: (msg) => console.warn(colors.yellow(`[${name}] ${msg}`)),
     });
 
     appPort = app.appPort ?? (await findFreePort());
-    hostnames = buildHostnames(app.name, tlds);
+    hostnames = buildHostnames(app, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
@@ -4828,7 +4836,7 @@ async function spawnProxiedApp(
 
   const preexistingListener = appPort === undefined ? null : await findPreexistingListener(appPort);
   const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
-  pipeOutput(child, chalk.cyan(`[${app.name}]`));
+  pipeOutput(child, chalk.cyan(`[${name}]`));
 
   const capturedStore = store;
   const capturedHostnames = hostnames;
@@ -4837,9 +4845,9 @@ async function spawnProxiedApp(
     child.on("exit", (code, signal) => {
       exitCodes.set(app, code);
       if (code !== 0 && code !== null) {
-        console.error(colors.red(`[${app.name}] exited with code ${code}`));
+        console.error(colors.red(`[${name}] exited with code ${code}`));
       } else if (signal) {
-        console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+        console.error(colors.yellow(`[${name}] killed by ${signal}`));
       }
       if (!capturedStore || capturedHostnames.length === 0 || capturedPort === undefined) {
         resolve();
@@ -4874,18 +4882,19 @@ function spawnTaskApp(
   app: MultiAppEntry,
   exitCodes: Map<MultiAppEntry, number | null>
 ): ReturnType<typeof spawn> {
+  const name = composeHostname(app.baseName, app.naming);
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
 
   const child = spawnChildProcess(app.commandArgs, pkgEnv, app.pkg.dir);
-  pipeOutput(child, chalk.gray(`[${app.name}]`));
+  pipeOutput(child, chalk.gray(`[${name}]`));
 
   child.on("exit", (code, signal) => {
     exitCodes.set(app, code);
     if (code !== 0 && code !== null) {
-      console.error(colors.red(`[${app.name}] exited with code ${code}`));
+      console.error(colors.red(`[${name}] exited with code ${code}`));
     } else if (signal) {
-      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+      console.error(colors.yellow(`[${name}] killed by ${signal}`));
     }
   });
 
@@ -5030,11 +5039,10 @@ async function handleDefaultMulti(
       config: appOverride.worktree,
       override: worktreeOverride,
     });
-    name = composeHostname(name, worktree);
-
     apps.push({
       pkg,
-      name,
+      baseName: name,
+      naming: worktree,
       label,
       commandArgs,
       appPort: envAppPort ?? appOverride.appPort,
@@ -5082,7 +5090,7 @@ async function handleDefaultMulti(
     const checkHostnameCollisions = (tldsForCheck: readonly string[]) => {
       const seen = new Map<string, MultiAppEntry>();
       for (const app of proxiedApps) {
-        for (const hostname of buildHostnames(app.name, tldsForCheck)) {
+        for (const hostname of buildHostnames(app, tldsForCheck)) {
           const existing = seen.get(hostname);
           if (existing) {
             throw new Error(
@@ -5170,7 +5178,7 @@ async function runWithTurbo(
     }
 
     const appPort = app.appPort ?? (await findFreePort());
-    const hostnames = buildHostnames(app.name, tlds);
+    const hostnames = buildHostnames(app, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
@@ -5412,11 +5420,8 @@ async function handleRunMode(
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = resolveWorktreeNaming({
-    config: appConfig?.worktree,
-    override: parsed.noWorktree || worktreeOverride === null ? null : parsed.prefix,
-  });
-  const effectiveName = composeHostname(baseName, worktree);
+  const override = parsed.noWorktree || worktreeOverride === null ? null : parsed.prefix;
+  const worktree = resolveWorktreeNaming({ config: appConfig?.worktree, override });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -5426,12 +5431,11 @@ async function handleRunMode(
     store,
     port,
     dir,
-    effectiveName,
+    { baseName, naming: worktree, nameSource, childPrefix: override ?? undefined },
     parsed.commandArgs,
     tls,
     tlds,
     parsed.force,
-    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
     lanIp
@@ -5485,7 +5489,6 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     tls,
     tlds,
     parsed.force,
-    undefined,
     parsed.appPort,
     lanMode,
     lanIp

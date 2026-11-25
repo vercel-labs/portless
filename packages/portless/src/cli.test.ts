@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import * as https from "node:https";
@@ -5834,6 +5835,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       script: string;
       cliArgs: string[];
       lan?: boolean;
+      packageName?: string;
       prefixEnv?: string;
       worktree?: Record<string, unknown>;
     }): Promise<{
@@ -5855,7 +5857,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.writeFileSync(
           path.join(tmpDir, "package.json"),
           JSON.stringify({
-            name: "test-app",
+            name: options.packageName ?? "test-app",
             packageManager: `${options.pm}@1.0.0`,
             portless: {
               appPort: 4567,
@@ -6053,18 +6055,48 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       const launched = capture.env.PORTLESS_URL!;
       expect(launched).toContain("tenant.flag-test-app.localhost");
-      expect(capture.env.PORTLESS_PREFIX).toBe("shell");
+      expect(capture.env.PORTLESS_PREFIX).toBe("flag");
 
       const got = run(["get", "test-app"], {
         cwd: tmpDir,
         env: {
           PORTLESS_STATE_DIR: tmpDir,
           PORTLESS_HTTPS: "0",
-          PORTLESS_PREFIX: "flag",
+          PORTLESS_PREFIX: capture.env.PORTLESS_PREFIX,
         },
       });
       expect(got.status).toBe(0);
       expect(got.stdout.trim()).toBe(launched);
+    });
+
+    it("flattens a long inferred package name once and matches get with a TLD", async () => {
+      const packageName = "a".repeat(80);
+      const label = `flag-${packageName}`;
+      const hash = createHash("sha256").update(label).digest("hex").slice(0, 6);
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        packageName,
+        script: "node server.js",
+        cliArgs: ["run", "--prefix", "flag", "--script", "dev"],
+        worktree: { flat: true },
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_URL).toBe(
+        `http://flag-${"a".repeat(51)}-${hash}.localhost:${proxyPort}`
+      );
+      for (const name of [packageName, `${packageName}.localhost`]) {
+        const got = run(["get", name], {
+          cwd: tmpDir,
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_HTTPS: "0",
+            PORTLESS_PREFIX: capture.env.PORTLESS_PREFIX,
+          },
+        });
+        expect(got.status).toBe(0);
+        expect(got.stdout.trim()).toBe(capture.env.PORTLESS_URL);
+      }
     });
 
     it("run --no-worktree opts out of both prefix overrides", async () => {
@@ -6096,7 +6128,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(capture.env.PORT).toBe("4567");
     });
 
-    it("keeps child --no-worktree and does not export the run prefix", async () => {
+    it("keeps child --no-worktree and exports the run prefix", async () => {
       const { status, proxyPort, capture } = await captureScriptDelegation({
         pm: "bun",
         script: "node server.js",
@@ -6105,7 +6137,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
       expect(status).toBe(0);
       expect(capture.env.PORTLESS_URL).toBe(`http://flag.test-app.localhost:${proxyPort}`);
-      expect(capture.env.PORTLESS_PREFIX).toBeUndefined();
+      expect(capture.env.PORTLESS_PREFIX).toBe("flag");
       expect(capture.args).toEqual(["run", "dev", "--no-worktree"]);
     });
 

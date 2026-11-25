@@ -28,17 +28,13 @@ export function truncateLabel(label: string): string {
   return `${prefix}-${hash}`;
 }
 
-function sanitizeLabel(name: string): string {
+/** Sanitize a name without shortening it before composition. */
+export function sanitizeForHostname(name: string): string {
   return name
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "");
-}
-
-/** Sanitize and truncate a hostname label. */
-export function sanitizeForHostname(name: string): string {
-  return truncateLabel(sanitizeLabel(name));
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +210,7 @@ const DEFAULT_BRANCHES = new Set(["main", "master"]);
 function branchToPrefix(branch: string, style: WorktreePrefixStyle): string | null {
   if (!branch || branch === "HEAD" || DEFAULT_BRANCHES.has(branch)) return null;
   const label = style === "branch" ? branch : branch.split("/").pop()!;
-  return sanitizeLabel(label) || null;
+  return sanitizeForHostname(label) || null;
 }
 
 /** Resolve the worktree prefix and hostname layout for a directory. */
@@ -231,9 +227,12 @@ export function resolveWorktreeNaming({
 
   let detected: WorktreePrefix | null | undefined;
   if (override !== undefined) {
-    detected = { prefix: sanitizeLabel(override), source: "--prefix flag" };
+    detected = { prefix: sanitizeForHostname(override), source: "--prefix flag" };
   } else if (process.env.PORTLESS_PREFIX !== undefined) {
-    detected = { prefix: sanitizeLabel(process.env.PORTLESS_PREFIX), source: "PORTLESS_PREFIX" };
+    detected = {
+      prefix: sanitizeForHostname(process.env.PORTLESS_PREFIX),
+      source: "PORTLESS_PREFIX",
+    };
   } else {
     const style = config?.prefix ?? "last-segment";
     detected = detectWorktreeViaCli(cwd, style);

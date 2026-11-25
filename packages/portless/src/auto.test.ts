@@ -49,22 +49,6 @@ describe("sanitizeForHostname", () => {
   it("handles mixed case and underscores", () => {
     expect(sanitizeForHostname("My_Feature_Branch")).toBe("my-feature-branch");
   });
-
-  it("truncates labels exceeding 63 characters", () => {
-    const longName = "a".repeat(80);
-    const result = sanitizeForHostname(longName);
-    expect(result.length).toBeLessThanOrEqual(63);
-  });
-
-  it("returns deterministic result for truncated labels", () => {
-    const longName = "a".repeat(80);
-    expect(sanitizeForHostname(longName)).toBe(sanitizeForHostname(longName));
-  });
-
-  it("preserves labels at exactly 63 characters", () => {
-    const name63 = "a".repeat(63);
-    expect(sanitizeForHostname(name63)).toBe(name63);
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -178,6 +162,16 @@ describe("inferProjectName", () => {
     fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "My_App" }));
     const result = inferProjectName(tmpDir);
     expect(result.name).toBe("my-app");
+  });
+
+  it("keeps the full inferred name until flat hostname composition", () => {
+    const name = `My_${"A".repeat(80)}`;
+    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name }));
+    const inferred = inferProjectName(tmpDir);
+    const sanitized = `my-${"a".repeat(80)}`;
+    const naming = resolveWorktreeNaming({ override: "feature", config: { flat: true } });
+    expect(inferred.name).toBe(sanitized);
+    expect(composeHostname(inferred.name, naming)).toBe(truncateLabel(`feature-${sanitized}`));
   });
 
   it("skips package.json whose name sanitizes to empty", () => {
