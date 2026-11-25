@@ -2,6 +2,7 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { isIP } from "node:net";
 import path from "node:path";
 
+import { getPlatformCapabilities } from "./capabilities.js";
 import { getLocalNetworkIp } from "./lan-ip.js";
 
 type MdnsPublisher = {
@@ -106,10 +107,15 @@ export function startLanIpMonitor(options: LanIpMonitorOptions): { stop: () => v
 /**
  * Check if mDNS publishing is supported on the current platform.
  */
-export function isMdnsSupported(): { supported: boolean; reason?: string } {
+export function isMdnsSupported(): { supported: boolean; reason?: string; hint?: string } {
+  const caps = getPlatformCapabilities();
   const publisher = getMdnsPublisher();
-  if (!publisher) {
-    return { supported: false, reason: "mDNS publishing is not supported on this platform" };
+  if (!caps.lanMdns.supported || !publisher) {
+    const reason = caps.lanMdns.supported
+      ? "mDNS publishing is not supported on this platform"
+      : caps.lanMdns.reason;
+    const hint = caps.lanMdns.supported ? undefined : caps.lanMdns.hint;
+    return { supported: false, reason, ...(hint ? { hint } : {}) };
   }
 
   if (!hasCommand(publisher.command, publisher.probeArgs)) {

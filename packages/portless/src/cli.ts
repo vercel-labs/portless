@@ -4,6 +4,7 @@ declare const __VERSION__: string;
 
 import colors, { colorFor } from "./colors.js";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isIP } from "node:net";
 import { createSecureContext } from "node:tls";
@@ -29,11 +30,12 @@ import {
 import {
   createSNICallback,
   ensureCerts,
-  isCATrusted,
+  ensureTrust,
+  inspectTrust,
   isCATrustRefreshPending,
-  trustCA,
   untrustCA,
 } from "./certs.js";
+import { getPlatformCapabilities, SUPPORTED_PLATFORMS } from "./capabilities.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   describeMdnsDiscovery,
@@ -882,6 +884,9 @@ function startProxyServer(
   if (lanIp && !mdnsSupport.supported) {
     const reason = mdnsSupport.reason ?? "mDNS publishing is not supported on this platform.";
     console.warn(chalk.yellow(`LAN mode disabled: ${reason}`));
+    if (mdnsSupport.hint) {
+      console.warn(chalk.yellow(mdnsSupport.hint));
+    }
   }
 
   let cachedRoutes: RouteMapping[] = [];
@@ -2429,6 +2434,14 @@ Generates the local CA first if it does not exist yet. Browsers and other
 clients then accept portless HTTPS certificates. The OS may ask for
 authorization or sudo.
 
+When the CA is already trusted, the command exits without prompting, so setup
+scripts can run it safely on every start.
+
+On Linux, Chrome and Chromium also read a per-user NSS database at
+~/.pki/nssdb or ~/.local/share/pki/nssdb, which needs certutil to update. On
+NixOS and other declarative systems, run portless with --no-tls or add the CA
+to your system configuration instead.
+
 On macOS and Linux, the state directory and each parent directory must be
 owned by you or root and not writable by group or others. A sticky parent
 such as /tmp is allowed. Otherwise trust exits with the reason.
@@ -2451,8 +2464,11 @@ platform.
 
 /** Trust the generated CA after auto-start unless the proxy runs in unprivileged mode. */
 async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
-  if (!tls || new ProxyState(dir).readUnprivileged() || isCATrusted(dir)) return;
-  await handleTrust();
+  if (!tls || new ProxyState(dir).readUnprivileged()) return;
+  const trust = inspectTrust(dir);
+  if (trust.stores.system === "untrusted" || trust.stores.browser === "untrusted") {
+    await handleTrust();
+  }
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
@@ -2483,41 +2499,84 @@ async function handleTrust(args: string[] = []): Promise<void> {
     if (!(await serveDeviceTrust(dir))) process.exit(1);
     return;
   }
-  const result = trustCA(dir);
-  if (result.trusted) {
-    console.error(colors.green("Local CA added to system trust store."));
-    console.error(colors.gray("Browsers will now trust portless HTTPS certificates."));
+  const result = ensureTrust(dir);
+  if (result.state === "trusted") {
+    console.error(colors.green("Local CA is already in the system trust store."));
+    if (
+      (result.stores.browser === "unavailable" || result.stores.browser === "untrusted") &&
+      result.hint
+    ) {
+      console.error(colors.yellow(result.hint));
+    }
     return;
   }
 
-  // Auto-elevate with sudo on macOS/Linux, but only for permission errors.
-  // Non-permission failures (missing cert, unsupported platform, timeout) skip sudo.
-  const isPermissionError =
-    result.error?.includes("Permission denied") || result.error?.includes("EACCES");
-  if (isPermissionError && !isWindows && process.getuid?.() !== 0) {
-    console.error(
-      colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo...")
-    );
-    const sudoResult = spawnSync(
-      "sudo",
-      [
-        "env",
-        ...collectPortlessEnvArgs(),
-        `PORTLESS_STATE_DIR=${dir}`,
-        process.execPath,
-        getEntryScript(),
-        "trust",
-      ],
-      {
-        stdio: "inherit",
-        timeout: SUDO_SPAWN_TIMEOUT_MS,
-      }
-    );
-    if (sudoResult.status === 0) return;
-    console.error(colors.red("sudo elevation also failed."));
+  if (result.state === "installed") {
+    console.error(colors.green("Local CA added to system trust store."));
+    if (result.stores.browser === "unavailable" || result.stores.browser === "untrusted") {
+      console.error(
+        colors.yellow(
+          result.hint ??
+            "Chrome/Chromium browser trust is incomplete. Install NSS certutil and rerun portless trust."
+        )
+      );
+    } else {
+      console.error(colors.gray("Browsers will now trust portless HTTPS certificates."));
+    }
+    return;
   }
 
-  console.error(colors.red(`Failed to trust CA: ${result.error}`));
+  if (result.state === "needs-elevation") {
+    if (!isWindows && process.getuid?.() !== 0) {
+      console.error(
+        colors.yellow("Trusting the CA requires elevated privileges. Requesting sudo...")
+      );
+      const sudoResult = spawnSync(
+        "sudo",
+        [
+          "env",
+          ...collectPortlessEnvArgs(),
+          `PORTLESS_STATE_DIR=${dir}`,
+          process.execPath,
+          getEntryScript(),
+          "trust",
+        ],
+        {
+          stdio: "inherit",
+          timeout: SUDO_SPAWN_TIMEOUT_MS,
+        }
+      );
+      if (sudoResult.status === 0) {
+        const post = inspectTrust(dir);
+        if (post.stores.browser === "untrusted") {
+          const nssResult = ensureTrust(dir);
+          if (nssResult.stores.browser === "trusted") {
+            console.error(colors.gray("Local CA added to browser NSS trust store."));
+          } else if (nssResult.hint) {
+            console.error(colors.yellow(nssResult.hint));
+          }
+        } else if (
+          post.stores.browser === "unavailable" &&
+          process.env.HOME &&
+          process.env.HOME !== os.userInfo().homedir &&
+          post.hint
+        ) {
+          console.error(colors.yellow(post.hint));
+        }
+        return;
+      }
+      console.error(colors.red("sudo elevation also failed."));
+    }
+    console.error(
+      colors.red(`Failed to trust CA: ${result.error ?? result.hint ?? "elevation required"}`)
+    );
+    process.exit(1);
+  }
+
+  console.error(colors.red(`Failed to trust CA: ${result.error ?? "trust store is unavailable"}`));
+  if (result.hint && result.hint !== result.error) {
+    console.error(colors.yellow(result.hint));
+  }
   process.exit(1);
 }
 
@@ -2553,10 +2612,23 @@ function cleanupStepLabel(step: CleanupStep): string {
   return "hosts file";
 }
 
+/** Whether CA trust remains installed or cannot be verified removed in any store. */
+function hasRemainingCATrust(stateDir: string): boolean {
+  const { stores } = inspectTrust(stateDir);
+  return (
+    stores.system === "trusted" ||
+    stores.system === "unavailable" ||
+    stores.browser === "trusted" ||
+    stores.browser === "unavailable"
+  );
+}
+
 /** Whether CA identity must survive because removal or trust refresh is unfinished. */
 function shouldPreserveCAIdentity(stateDir: string, failedCAStateDirs: Set<string>): boolean {
   return (
-    failedCAStateDirs.has(stateDir) || isCATrustRefreshPending(stateDir) || isCATrusted(stateDir)
+    failedCAStateDirs.has(stateDir) ||
+    isCATrustRefreshPending(stateDir) ||
+    hasRemainingCATrust(stateDir)
   );
 }
 
@@ -2814,7 +2886,7 @@ async function handleClean(args: string[]): Promise<void> {
         if (
           canInspectStateDir(stateDir) &&
           !isCATrustRefreshPending(stateDir) &&
-          !isCATrusted(stateDir)
+          !hasRemainingCATrust(stateDir)
         ) {
           failedCAStateDirs.delete(stateDir);
         }
@@ -3541,6 +3613,15 @@ async function handleDoctor(args: string[]): Promise<void> {
     add("fail", `Node.js ${process.versions.node} is unsupported.`, "Install Node.js 24 or newer.");
   }
 
+  const caps = getPlatformCapabilities();
+  if (!caps.supported) {
+    add(
+      "warn",
+      `Platform ${process.platform} is outside the supported OS list (${SUPPORTED_PLATFORMS.join(", ")}).`,
+      "Use --no-tls or configure CA trust manually."
+    );
+  }
+
   if (stateExists) {
     try {
       const stat = fs.statSync(state.dir);
@@ -3648,13 +3729,26 @@ async function handleDoctor(args: string[]): Promise<void> {
   } else if (proxyTls) {
     const caPath = path.join(state.dir, "ca.pem");
     if (fs.existsSync(caPath)) {
-      if (isCATrusted(state.dir)) {
+      const trust = inspectTrust(state.dir);
+      if (trust.state === "trusted") {
         add("ok", "Local CA is trusted by the OS trust store.");
+      } else if (trust.stores.system === "trusted") {
+        add(
+          "warn",
+          "Local CA is trusted by the OS store, but browser NSS trust is incomplete.",
+          trust.hint ?? "Run: portless trust"
+        );
+      } else if (trust.stores.system === "unavailable") {
+        add(
+          "warn",
+          trust.error ?? "Local CA exists, but automatic OS trust installation is unavailable.",
+          trust.hint
+        );
       } else {
         add(
           "warn",
           "Local CA exists but is not trusted by the OS trust store.",
-          "Run: portless trust"
+          trust.hint ?? "Run: portless trust"
         );
       }
     } else if (proxyRunning) {
@@ -3738,7 +3832,11 @@ async function handleDoctor(args: string[]): Promise<void> {
     } else if (mdns.supported) {
       add("ok", "mDNS publishing support is available for LAN mode.");
     } else {
-      add("fail", `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`);
+      add(
+        "fail",
+        `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`,
+        mdns.hint
+      );
     }
     if (state.lanIp) {
       add("ok", `LAN IP is recorded: ${state.lanIp}`);
@@ -4298,31 +4396,63 @@ async function handleProxy(args: string[]): Promise<void> {
         console.error(colors.green("Generated local CA certificate."));
       }
 
-      if (desiredUnprivileged && !isCATrusted(stateDir)) {
-        // Installing the CA elevates, which this mode never does.
-        console.warn(colors.yellow("The portless CA is not in the system trust store."));
-        console.warn(
-          colors.yellow(
-            "Browsers will show certificate warnings. Trust it once (asks for admin rights):"
-          )
-        );
-        console.warn(colors.cyan("  portless trust"));
-      } else if (!skipTrust && !isCATrusted(stateDir)) {
-        console.error(colors.yellow("Adding CA to system trust store..."));
-        const trustResult = trustCA(stateDir);
-        if (trustResult.trusted) {
-          console.error(
-            colors.green("CA added to system trust store. Browsers will trust portless certs.")
-          );
-        } else {
-          console.warn(colors.yellow("Could not add CA to system trust store."));
-          if (trustResult.error) {
-            console.warn(colors.gray(trustResult.error));
+      if (!skipTrust) {
+        if (desiredUnprivileged) {
+          const trust = inspectTrust(stateDir);
+          if (trust.state !== "trusted") {
+            if (trust.stores.system !== "trusted") {
+              console.warn(colors.yellow("The portless CA is not in the system trust store."));
+              console.warn(
+                colors.yellow(
+                  "Browsers will show certificate warnings. Trust it once (asks for admin rights):"
+                )
+              );
+              console.warn(colors.cyan("  portless trust"));
+              if (trust.hint) {
+                console.warn(colors.yellow(trust.hint));
+              }
+            } else {
+              console.warn(
+                colors.yellow(
+                  trust.hint ??
+                    "Browser trust for the portless CA is incomplete. Run: portless trust"
+                )
+              );
+            }
           }
-          console.warn(
-            colors.yellow("Browsers will show certificate warnings. To fix this later, run:")
-          );
-          console.warn(colors.cyan("  portless trust"));
+        } else {
+          const trustResult = ensureTrust(stateDir);
+          if (trustResult.state === "installed") {
+            if (
+              trustResult.stores.browser === "unavailable" ||
+              trustResult.stores.browser === "untrusted"
+            ) {
+              console.error(colors.green("CA added to system trust store."));
+              if (trustResult.hint) {
+                console.warn(colors.yellow(trustResult.hint));
+              }
+            } else {
+              console.error(
+                colors.green("CA added to system trust store. Browsers will trust portless certs.")
+              );
+            }
+          } else if (
+            trustResult.state === "needs-elevation" ||
+            trustResult.state === "unavailable"
+          ) {
+            console.warn(colors.yellow("Could not add CA to system trust store."));
+            if (trustResult.error) {
+              console.warn(colors.gray(trustResult.error));
+            }
+            if (trustResult.hint) {
+              console.warn(colors.yellow(trustResult.hint));
+            } else {
+              console.warn(
+                colors.yellow("Browsers will show certificate warnings. To fix this later, run:")
+              );
+              console.warn(colors.cyan("  portless trust"));
+            }
+          }
         }
       }
 

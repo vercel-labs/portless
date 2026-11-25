@@ -96,18 +96,37 @@ function storeContainsFingerprint(
   return listing.replace(/\s/g, "").toLowerCase().includes(fingerprint);
 }
 
+export type WindowsCATrustState = "trusted" | "untrusted" | "unavailable";
+
+/**
+ * Inspect whether the certificate is present in the Windows user Root store.
+ * Reports `unavailable` when certutil itself cannot be run.
+ */
+export function inspectWindowsCATrust(
+  caCertPath: string,
+  options: WindowsCAStoreOptions = {}
+): { state: WindowsCATrustState; error?: string } {
+  try {
+    const resolved = storeOptions(options);
+    const fingerprint = certificateFingerprint(caCertPath);
+    return storeContainsFingerprint(fingerprint, resolved)
+      ? { state: "trusted" }
+      : { state: "untrusted" };
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : String(error);
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      return { state: "unavailable", error: message };
+    }
+    return { state: "untrusted", error: message };
+  }
+}
+
 /** Return whether the certificate is present in the Windows user Root store. */
 export function isWindowsCATrusted(
   caCertPath: string,
   options: WindowsCAStoreOptions = {}
 ): boolean {
-  try {
-    const resolved = storeOptions(options);
-    const fingerprint = certificateFingerprint(caCertPath);
-    return storeContainsFingerprint(fingerprint, resolved);
-  } catch {
-    return false;
-  }
+  return inspectWindowsCATrust(caCertPath, options).state === "trusted";
 }
 
 /** Add the certificate to the Windows user Root store. */

@@ -8,7 +8,11 @@ WebSockets work over both protocol versions, so dev server HMR (Next.js, Vite, a
 
 First run generates a local CA and server certs, then adds the CA to your system trust store. After that, no prompts, no browser warnings.
 
-On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE through `update-ca-certificates` or `update-ca-trust`. On Windows, it uses `certutil` to add the CA to the system trust store. Linux containers on a WSL2 host use only the Linux trust store.
+On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE through `update-ca-certificates` or `update-ca-trust`, then verifies the compiled OS trust bundle. It fails when the distro update command fails. On Windows, it uses `certutil` to add the CA to the system trust store. Linux containers on a WSL2 host use only the Linux trust store.
+
+On Linux, `portless trust` also updates the invoking user's existing Chrome/Chromium NSS database (`~/.pki/nssdb`, or `~/.local/share/pki/nssdb` on Chromium M146 and later when `~/.pki/nssdb` does not exist). Install NSS `certutil` (`libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora/RHEL, `nss` on Arch, or `mozilla-nss-tools` on openSUSE), rerun `portless trust`, and restart the browser. Without `certutil`, system trust still succeeds with a warning, and `portless doctor` flags the incomplete browser trust. `portless clean` removes the CA from the NSS database as well.
+
+On declarative systems such as NixOS that do not provide `update-ca-certificates`, `portless trust` prints instructions to add `ca.pem` through `security.pki.certificateFiles`, or to use `--no-tls`.
 
 Portless sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. For a Node.js process you start outside portless, point it at the CA yourself with `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`, or use `--no-tls`.
 
@@ -57,6 +61,8 @@ If you skipped the trust prompt on first run:
 portless trust
 ```
 
+`portless trust` checks the active OS trust store first and exits without prompting when the CA is already trusted, so setup scripts can run it every time.
+
 ## Disable HTTPS
 
 Use `--no-tls` to run with plain HTTP on port 80:
@@ -64,3 +70,9 @@ Use `--no-tls` to run with plain HTTP on port 80:
 ```bash
 portless proxy start --no-tls
 ```
+
+## Platform and browser notes
+
+Embedded macOS WebViews (`WKWebView`, such as cmux) may ignore root certificates added by the user. Use `--no-tls` when an embedded WebView rejects the local CA.
+
+Remote SSH sessions run the proxy on the remote host. Use `--no-tls`, or import the remote `ca.pem` locally when you forward HTTPS from that host.

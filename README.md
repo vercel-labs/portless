@@ -43,7 +43,7 @@ portless myapp next dev
 # -> https://myapp.localhost
 ```
 
-- The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)).
+- The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)). `portless trust` is safe to run again: it exits without prompting when the CA is already trusted, and on Linux it also updates existing Chrome/Chromium NSS databases when `certutil` is installed.
 - `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, `--no-worktree` to skip worktree naming, or [configure the hostname layout](https://portless.sh/configuration#worktree-hostnames). Named launches keep their supplied hostname.
 - A name with dots is a subdomain: `portless api.myapp pnpm start` serves `https://api.myapp.localhost`.
 - `PORTLESS=0 pnpm dev` runs the command directly, without the proxy. Commands such as `portless get` and `portless list` still run normally.
@@ -141,7 +141,7 @@ On macOS and Linux, `portless trust`, `portless proxy stop`, `portless prune`, `
 
 ## Platforms
 
-portless runs on macOS, Linux, and Windows with Node.js 24 or later. `--tailscale` and `--funnel` need the Tailscale CLI, `--ngrok` needs the ngrok CLI, and `--cloudflare` needs `cloudflared`.
+portless runs on macOS, Linux, and Windows with Node.js 24 or later. On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE; on declarative distros such as NixOS, add `ca.pem` through `security.pki.certificateFiles` or use `--no-tls`. LAN mode mDNS publishing is macOS and Linux only, so use `--tailscale`, `--ngrok`, or `--cloudflare` on Windows. `--tailscale` and `--funnel` need the Tailscale CLI, `--ngrok` needs the ngrok CLI, and `--cloudflare` needs `cloudflared`. Other UNIX platforms, such as BSD and Solaris, are unsupported for automatic CA trust and startup services.
 
 ## Development
 
