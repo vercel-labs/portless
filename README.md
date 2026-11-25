@@ -23,7 +23,7 @@ portless runs a local reverse proxy and gives each dev server a name. Your app l
 npm install -g portless
 ```
 
-To pin the version per project, install it with `npm install -D portless`, or see [Install](https://portless.sh#install) for pre-1.0 version-pinning notes.
+To pin the version per project, install it with `npm install -D portless`, or see [Install on portless.sh](https://portless.sh#install) for the pre-1.0 note.
 
 ## Quick start
 
@@ -158,11 +158,11 @@ pnpm format
 
 ## Community tools
 
-These companion tools are maintained independently by community members, not by Vercel.
+These companion tools are maintained independently by their authors, not by Vercel.
 
 - [portless-manager](https://github.com/SiyeolBaek/portless-manager): SwiftBar menu bar companion for macOS
 - [portless-studio](https://github.com/keven-bardales/portless-studio): standalone local dashboard for active routes
-- [PortlessBar](https://github.com/akshitkrnagpal/portlessbar): native macOS menu bar app for active routes, proxy controls, and nearby app discovery
+- [PortlessBar](https://github.com/akshitkrnagpal/portlessbar): native macOS menu bar companion for active routes
 
 ## Documentation
 

@@ -211,7 +211,7 @@ portless alias --remove my-postgres                    # remove the alias
 
 ### Windows troubleshooting
 
-On Windows, portless runs wrapped commands through `cmd.exe`. If your dev server ignores `PORT` or a wrapper script has shell-escaping issues, run `portless proxy start`, start the server on a fixed port, and map it with `portless alias <name> <port>`. The alias points to `127.0.0.1:<port>` and does not start the proxy.
+On Windows, portless runs wrapped commands through `cmd.exe`. If a server ignores `PORT` and portless cannot inject a port flag for it, or a wrapper script has shell-escaping issues, run `portless proxy start`, start the server on a fixed port, and map it with `portless alias <name> <port>`. `portless alias` does not start the proxy.
 
 From PowerShell, you can also forward `PORT` explicitly with single quotes so the outer shell does not expand `$env:PORT` before portless sets it:
 
