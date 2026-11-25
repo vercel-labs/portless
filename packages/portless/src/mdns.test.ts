@@ -311,4 +311,45 @@ describe("createMdnsController", () => {
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith("mDNS publishing for one failed: failure");
   });
+
+  it("drops privileges to SUDO_UID/SUDO_GID under root and scopes orphan matching to that UID", async () => {
+    const origGetuid = process.getuid;
+    const origSudoUid = process.env.SUDO_UID;
+    const origSudoGid = process.env.SUDO_GID;
+    const { spawnProcess } = publishers();
+    const killPid = vi.fn((_pid: number, signal: NodeJS.Signals | 0) => {
+      if (signal === 0) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+    });
+    try {
+      Object.defineProperty(process, "getuid", { value: () => 0, configurable: true });
+      process.env.SUDO_UID = "501";
+      process.env.SUDO_GID = "20";
+      const controller = createMdnsController({
+        platform: "linux",
+        spawn: spawnProcess,
+        killPid,
+        listProcesses: () =>
+          [
+            "20001 1 501 avahi-publish-address -f -R one.local 192.168.1.1",
+            "20002 1 0 avahi-publish-address -f -R one.local 192.168.1.1",
+            "20003 1 502 avahi-publish-address -f -R one.local 192.168.1.1",
+          ].join("\n"),
+      });
+      await controller.reconcile("192.168.1.1", ["one"]);
+      expect(killPid).toHaveBeenCalledWith(20001, "SIGTERM");
+      expect(killPid).not.toHaveBeenCalledWith(20002, expect.anything());
+      expect(killPid).not.toHaveBeenCalledWith(20003, expect.anything());
+      expect(spawnProcess).toHaveBeenCalledWith(
+        "avahi-publish-address",
+        ["-f", "-R", "one.local", "192.168.1.1"],
+        expect.objectContaining({ uid: 501, gid: 20 })
+      );
+    } finally {
+      Object.defineProperty(process, "getuid", { value: origGetuid, configurable: true });
+      if (origSudoUid === undefined) delete process.env.SUDO_UID;
+      else process.env.SUDO_UID = origSudoUid;
+      if (origSudoGid === undefined) delete process.env.SUDO_GID;
+      else process.env.SUDO_GID = origSudoGid;
+    }
+  });
 });

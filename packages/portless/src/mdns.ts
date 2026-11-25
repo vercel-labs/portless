@@ -169,9 +169,36 @@ type Publication =
     }
   | { state: "failed"; ip: string; port: number; error: string };
 
+function parseNonNegativeInt(value: string | undefined): number | undefined {
+  if (!value || !/^\d+$/.test(value)) return undefined;
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) ? parsed : undefined;
+}
+
+function resolvePublisherIdentity(options: MdnsControllerOptions): {
+  uid?: number;
+  gid?: number;
+  dropPrivileges: boolean;
+} {
+  if (options.uid !== undefined) {
+    return { uid: options.uid, gid: options.gid, dropPrivileges: false };
+  }
+  const processUid = process.getuid?.();
+  if (processUid === undefined) return { dropPrivileges: false };
+  if (processUid === 0) {
+    const sudoUid = parseNonNegativeInt(process.env.SUDO_UID);
+    const sudoGid = parseNonNegativeInt(process.env.SUDO_GID);
+    if (sudoUid !== undefined && sudoUid > 0) {
+      return { uid: sudoUid, gid: sudoGid, dropPrivileges: true };
+    }
+  }
+  return { uid: processUid, dropPrivileges: false };
+}
+
 export interface MdnsControllerOptions {
   platform?: NodeJS.Platform;
   uid?: number;
+  gid?: number;
   spawn?: typeof spawn;
   listProcesses?: () => string;
   killPid?: (pid: number, signal: NodeJS.Signals | 0) => unknown;
@@ -282,7 +309,8 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
     (() =>
       spawnSync("ps", ["-eo", "pid=,ppid=,uid=,args="], { encoding: "utf8", timeout: 1000 })
         .stdout ?? "");
-  const currentUid = options.uid ?? process.getuid?.();
+  const identity = resolvePublisherIdentity(options);
+  const currentUid = identity.uid;
   const killPid = options.killPid ?? ((pid, signal) => process.kill(pid, signal));
   const stopGraceMs = options.stopGraceMs ?? MDNS_STOP_GRACE_MS;
   const stopKillWaitMs = options.stopKillWaitMs ?? MDNS_KILL_WAIT_MS;
@@ -394,10 +422,13 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
     const publisher = getMdnsPublisher(platform);
     if (!publisher) return;
     const args = publisher.buildArgs(fqdn, serviceName(fqdn), port, ip);
-    const child = spawnProcess(publisher.command, args, {
+    const spawnOpts: Parameters<typeof spawn>[2] = {
       stdio: ["ignore", "pipe", "pipe"],
       detached: false,
-    });
+      ...(identity.dropPrivileges && identity.uid !== undefined ? { uid: identity.uid } : {}),
+      ...(identity.dropPrivileges && identity.gid !== undefined ? { gid: identity.gid } : {}),
+    };
+    const child = spawnProcess(publisher.command, args, spawnOpts);
     let lastLine = "";
     const keepLastLine = (chunk: string) => {
       const output = lastLine + chunk;
