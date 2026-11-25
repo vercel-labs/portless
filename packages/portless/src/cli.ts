@@ -66,6 +66,7 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
+  isPortFree,
   isValidUpstream,
   type RouteMapping,
 } from "./routes.js";
@@ -91,7 +92,6 @@ import {
 import {
   buildProxyStartConfig,
   canBindProxyPort,
-  DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_ENV,
   INTERNAL_LAN_IP_FLAG,
@@ -99,7 +99,6 @@ import {
   WAIT_FOR_PROXY_INTERVAL_MS,
   WAIT_FOR_PROXY_MAX_ATTEMPTS,
   discoverState,
-  findFreePort,
   findPidOnPort,
   guardWindowsOrphans,
   findPidsOnPort,
@@ -114,8 +113,6 @@ import {
   getProxyBindTargets,
   canBindWithoutRoot,
   isUnprivilegedEnvEnabled,
-  readUnprivilegedMarker,
-  writeUnprivilegedMarker,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -130,25 +127,15 @@ import {
   isWindows,
   killTree,
   listenOnProxyInterface,
-  parseTldList,
   prompt,
-  readLanMarker,
-  readCustomCertMarker,
-  readPersistedProxyState,
-  readTldsFromDir,
-  readTlsMarker,
   resolveStateDir,
   spawnCommand,
   reportHostsSync,
   syncHostsWithWarning,
   augmentedPath,
   waitForProxy,
-  writeCustomCertMarker,
-  writeLanMarker,
-  writeTldFile,
-  writeTldsFile,
-  writeTlsMarker,
 } from "./cli-utils.js";
+import { ProxyState, DEFAULT_TLD, parseTldList, readProxyStateFile } from "./proxy-state.js";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
@@ -206,12 +193,6 @@ const chalk = colors;
 
 /** Display-friendly hosts file path. */
 const HOSTS_DISPLAY = isWindows ? "hosts file" : "/etc/hosts";
-
-/** Debounce delay (ms) for reloading routes after a file change. */
-const DEBOUNCE_MS = 100;
-
-/** Polling interval (ms) when fs.watch is unavailable. */
-const POLL_INTERVAL_MS = 3000;
 
 /** Grace period (ms) for connections to drain before force-exiting the proxy. */
 const EXIT_TIMEOUT_MS = 2000;
@@ -286,9 +267,31 @@ function defaultProxyConfig(
   };
 }
 
+/**
+ * Decide whether the proxy serves HTTPS from explicit overrides, unprivileged
+ * mode rules, and any persisted TLS marker.
+ */
+function resolveProxyUseHttps(options: {
+  explicit: ProxyConfigExplicitness;
+  useHttps: boolean;
+  unprivileged: boolean;
+  persistedHttps: boolean;
+  recoverCrashedState: boolean;
+}): boolean {
+  if (options.explicit.customCert) return true;
+  if (options.explicit.useHttps) return options.useHttps;
+  if (options.unprivileged) {
+    return options.explicit.unprivileged ? false : options.persistedHttps;
+  }
+  return options.recoverCrashedState ? options.persistedHttps : options.useHttps;
+}
+
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
   persistedUnprivileged: boolean;
+  persistedHttps: boolean;
+  persistedTlds?: string[];
+  recoverCrashedState?: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -300,22 +303,20 @@ function resolveProxyConfig(options: {
   useWildcard: boolean;
   unprivileged: boolean;
 }): ProxyConfig {
+  const recoverCrashedState = options.recoverCrashedState ?? false;
+  const usePersistedTlds =
+    recoverCrashedState &&
+    options.persistedTlds !== undefined &&
+    !(options.explicit.lanMode && !options.lanMode && options.persistedLanMode);
+  const baseTlds = usePersistedTlds ? options.persistedTlds! : options.defaultTlds;
+
   const config = defaultProxyConfig(
-    options.defaultTlds,
+    baseTlds,
     options.useHttps,
     options.explicit.lanMode ? options.lanMode : options.persistedLanMode
   );
 
-  if (options.explicit.useHttps) {
-    config.useHttps = options.useHttps;
-    if (!options.useHttps) {
-      config.customCertPath = null;
-      config.customKeyPath = null;
-    }
-  }
-
   if (options.explicit.customCert) {
-    config.useHttps = true;
     config.customCertPath = options.customCertPath;
     config.customKeyPath = options.customKeyPath;
   }
@@ -326,7 +327,7 @@ function resolveProxyConfig(options: {
       config.lanIp = null;
       config.lanIpExplicit = false;
       if (!options.explicit.tlds) {
-        config.tlds = normalizeTlds(options.defaultTlds);
+        config.tlds = normalizeTlds(baseTlds);
         config.tld = primaryTld(config.tlds);
       }
     }
@@ -347,17 +348,17 @@ function resolveProxyConfig(options: {
     config.useWildcard = options.useWildcard;
   }
 
-  // Like LAN mode, a stopped unprivileged proxy keeps its mode for the next
-  // start through proxy.unprivileged unless PORTLESS_UNPRIVILEGED overrides it.
   config.unprivileged = options.explicit.unprivileged
     ? options.unprivileged
     : options.persistedUnprivileged;
 
-  // Unprivileged mode promises no prompt of any kind, and trusting a
-  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
-  if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
-    config.useHttps = false;
-  }
+  config.useHttps = resolveProxyUseHttps({
+    explicit: options.explicit,
+    useHttps: options.useHttps,
+    unprivileged: config.unprivileged,
+    persistedHttps: options.persistedHttps,
+    recoverCrashedState,
+  });
 
   if (!config.lanMode) {
     config.lanIp = null;
@@ -381,21 +382,19 @@ function resolveProxyConfig(options: {
 }
 
 function readCurrentProxyConfig(dir: string): ProxyConfig {
-  const lanIp = readLanMarker(dir);
-  const tlds = readTldsFromDir(dir);
-  const tld = primaryTld(tlds);
+  const settings = new ProxyState(dir).read();
 
   return {
-    useHttps: readTlsMarker(dir),
+    useHttps: settings.tls,
     customCertPath: null,
     customKeyPath: null,
-    lanMode: lanIp !== null,
-    lanIp,
+    lanMode: settings.lanIp !== null,
+    lanIp: settings.lanIp,
     lanIpExplicit: false,
-    tld,
-    tlds,
+    tld: primaryTld(settings.tlds),
+    tlds: settings.tlds,
     useWildcard: false,
-    unprivileged: readUnprivilegedMarker(dir),
+    unprivileged: settings.unprivileged,
   };
 }
 
@@ -664,38 +663,6 @@ function isUnavailableIpv6Bind(err: NodeJS.ErrnoException, host: string): boolea
   return host.includes(":") && (err.code === "EAFNOSUPPORT" || err.code === "EADDRNOTAVAIL");
 }
 
-function addRoutes(
-  store: RouteStore,
-  hostnames: readonly string[],
-  port: number,
-  pid: number,
-  force = false,
-  upstream?: AliasUpstream
-): number[] {
-  store.recoverCorruptRoutesFile();
-  const registered: string[] = [];
-  const killedPids: number[] = [];
-  try {
-    for (const hostname of hostnames) {
-      const killedPid = store.addRoute(hostname, port, pid, force, upstream);
-      registered.push(hostname);
-      if (killedPid !== undefined) {
-        killedPids.push(killedPid);
-      }
-    }
-  } catch (err) {
-    for (const hostname of registered) {
-      try {
-        store.removeRoute(hostname, pid);
-      } catch {
-        // Non-fatal rollback cleanup.
-      }
-    }
-    throw err;
-  }
-  return [...new Set(killedPids)];
-}
-
 /**
  * Try to stop every recorded process group once, keyed by group id. Routes that
  * share a group share one outcome and contribute all of their recorded
@@ -829,16 +796,6 @@ function printTunnelHint(t: ProcessTunnel, message: string): void {
   }
 }
 
-function removeRoutes(store: RouteStore, hostnames: readonly string[], ownerPid?: number): void {
-  for (const hostname of hostnames) {
-    try {
-      store.removeRoute(hostname, ownerPid);
-    } catch {
-      // Non-fatal cleanup.
-    }
-  }
-}
-
 /**
  * Keep routes served when the command self-daemonized: its launcher exited
  * but a listener is still on the assigned port. The routes move to that
@@ -921,6 +878,7 @@ function startProxyServer(
   unprivileged = false
 ): void {
   store.ensureDir();
+  const state = new ProxyState(store.dir);
 
   const isTls = !!tlsOptions;
   const mdnsSupport = isMdnsSupported();
@@ -941,30 +899,8 @@ function startProxyServer(
     }
   }
 
-  // Create empty routes file if it doesn't exist
-  const routesPath = store.getRoutesPath();
-  if (!fs.existsSync(routesPath)) {
-    fs.writeFileSync(routesPath, "[]", { mode: FILE_MODE });
-  }
-  try {
-    fs.chmodSync(routesPath, FILE_MODE);
-  } catch {
-    // May fail if file is owned by another user; non-fatal
-  }
-  fixOwnership(routesPath);
-
-  // Cache routes in memory and reload on file change (debounced)
-  let cachedRoutes: ReturnType<RouteStore["loadRoutes"]> = [];
-  try {
-    cachedRoutes = store.loadTrustedRoutes();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(colors.yellow(`Could not read routes: ${message}`));
-  }
+  let cachedRoutes: RouteMapping[] = [];
   let routesReloadWarningShown = false;
-  let debounceTimer: ReturnType<typeof setTimeout> | null = null;
-  let watcher: fs.FSWatcher | null = null;
-  let pollingInterval: ReturnType<typeof setInterval> | null = null;
 
   // Writing the hosts file needs root, which unprivileged mode never has, so
   // it does not try; `proxy start` refuses an explicit PORTLESS_SYNC_HOSTS=1.
@@ -988,7 +924,7 @@ function startProxyServer(
     }
 
     activeLanIp = nextIp;
-    writeLanMarker(store.dir, activeLanIp);
+    state.setLanIp(activeLanIp);
 
     if (previousIp && nextIp) {
       console.log(chalk.green(`LAN IP changed: ${previousIp} -> ${nextIp}`));
@@ -1057,16 +993,12 @@ function startProxyServer(
     }
   };
 
+  const stopWatchingRoutes = store.watch(reloadRoutes);
   try {
-    watcher = fs.watch(store.dir, (_event, filename) => {
-      if (filename && filename !== path.basename(routesPath)) return;
-      if (debounceTimer) clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(reloadRoutes, DEBOUNCE_MS);
-    });
-  } catch {
-    // fs.watch may not be supported; fall back to periodic polling
-    console.warn(colors.yellow("fs.watch unavailable; falling back to polling for route changes"));
-    pollingInterval = setInterval(reloadRoutes, POLL_INTERVAL_MS);
+    cachedRoutes = store.loadTrustedRoutes();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.warn(colors.yellow(`Could not read routes: ${message}`));
   }
 
   if (autoSyncHosts) {
@@ -1181,15 +1113,8 @@ function startProxyServer(
       console.warn(colors.yellow("Could not publish hosts sync authorization."));
     }
     // Save PID and port once the server is actually listening
-    writeProxyStartTime(store);
-    fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
-    fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
-    writeTlsMarker(store.dir, isTls);
-    writeCustomCertMarker(store.dir, isTls && customCert);
-    writeTldsFile(store.dir, tlds);
-    writeLanMarker(store.dir, activeLanIp);
-    writeUnprivilegedMarker(store.dir, unprivileged);
-    fixOwnership(store.dir, store.pidPath, store.portFilePath, store.startTimePath);
+    state.publishListener(process.pid, proxyPort, getProcessStartTime(process.pid));
+    state.publish({ tls: isTls, customCert, unprivileged, lanIp: activeLanIp, tlds });
     console.log(
       colors.green(
         `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
@@ -1220,12 +1145,8 @@ function startProxyServer(
   const cleanup = () => {
     if (exiting) return;
     exiting = true;
-    if (debounceTimer) clearTimeout(debounceTimer);
-    if (pollingInterval) clearInterval(pollingInterval);
+    stopWatchingRoutes();
     if (lanMonitor) lanMonitor.stop();
-    if (watcher) {
-      watcher.close();
-    }
     if (activeLanIp) cleanupMdns();
     closeAuxiliaryServers();
     try {
@@ -1238,7 +1159,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    resetProxyMarkers(store);
+    state.reset();
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1275,12 +1196,7 @@ function sudoStopOrHint(port: number): boolean {
 
 /** Read a state file, returning null only when it does not exist. */
 function readStateFile(file: string): string | null {
-  try {
-    return fs.readFileSync(file, "utf-8").trim();
-  } catch (err: unknown) {
-    if (isErrnoException(err) && err.code === "ENOENT") return null;
-    throw err;
-  }
+  return readProxyStateFile(file);
 }
 
 /** Remove a state file only while its contents still match the expected value. */
@@ -1332,46 +1248,6 @@ function isProcessSuspended(pid: number): boolean | null {
   return state === null ? null : /^[Tt]/.test(state);
 }
 
-/** Record the listening proxy's start time, so a later stop can tell it from a recycled PID. */
-function writeProxyStartTime(store: RouteStore): void {
-  const startTime = getProcessStartTime(process.pid);
-  const tempPath = `${store.startTimePath}.tmp`;
-  const discardTemp = () => {
-    try {
-      fs.rmSync(tempPath, { force: true });
-    } catch {
-      return;
-    }
-  };
-  try {
-    discardTemp();
-    if (startTime === null) {
-      fs.rmSync(store.startTimePath, { force: true });
-      return;
-    }
-    fs.writeFileSync(tempPath, startTime, { encoding: "utf-8", mode: FILE_MODE, flag: "wx" });
-    fixOwnership(tempPath);
-    fs.renameSync(tempPath, store.startTimePath);
-  } catch {
-    discardTemp();
-  }
-}
-
-/** Forget the recorded proxy identity and runtime settings once its process is gone. */
-function resetProxyMarkers(store: RouteStore): void {
-  for (const file of [store.startTimePath, `${store.startTimePath}.tmp`]) {
-    try {
-      fs.rmSync(file, { force: true });
-    } catch {
-      continue;
-    }
-  }
-  writeTlsMarker(store.dir, false);
-  writeCustomCertMarker(store.dir, false);
-  writeTldFile(store.dir, DEFAULT_TLD);
-  writeLanMarker(store.dir, null);
-}
-
 type ProxyIdentity = "proxy" | "recycled" | "unknown";
 
 /**
@@ -1406,7 +1282,7 @@ async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): P
     console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
     return false;
   }
-  resetProxyMarkers(store);
+  new ProxyState(store.dir).reset();
   return true;
 }
 
@@ -1444,7 +1320,7 @@ async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<
     if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
     return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
   }
-  const pid = parseInt(fs.readFileSync(store.pidPath, "utf-8"), 10);
+  const pid = parseInt(readStateFile(store.pidPath) ?? "", 10);
   if (isNaN(pid)) return { state: "corrupt" };
   try {
     process.kill(pid, 0);
@@ -1519,13 +1395,13 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       case "corrupt":
         console.error(colors.red("Corrupted PID file. Removing it."));
         fs.unlinkSync(store.pidPath);
-        resetProxyMarkers(store);
+        new ProxyState(store.dir).reset();
         return true;
       case "dead":
         console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
         fs.unlinkSync(store.pidPath);
         fs.rmSync(store.portFilePath, { force: true });
-        resetProxyMarkers(store);
+        new ProxyState(store.dir).reset();
         return true;
       case "unrecorded": {
         console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
@@ -1666,22 +1542,17 @@ interface ProxyDesiredState {
   envTlds: string[];
 }
 
-function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
-  const envTlds = getDefaultTlds();
-  const envTld = primaryTld(envTlds);
-  const explicit: ProxyConfigExplicitness = {
-    useHttps: process.env.PORTLESS_HTTPS !== undefined,
-    customCert: false,
-    lanMode: process.env.PORTLESS_LAN !== undefined,
-    lanIp: process.env.PORTLESS_LAN_IP !== undefined,
-    tlds: process.env.PORTLESS_TLD !== undefined,
-    useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
-    unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
-  };
-  const desiredConfig = resolveProxyConfig({
-    persistedLanMode: lanMode,
-    persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
-    explicit,
+function readEnvProxyOptions(envTlds: string[]) {
+  return {
+    explicit: {
+      useHttps: process.env.PORTLESS_HTTPS !== undefined,
+      customCert: false,
+      lanMode: process.env.PORTLESS_LAN !== undefined,
+      lanIp: process.env.PORTLESS_LAN_IP !== undefined,
+      tlds: process.env.PORTLESS_TLD !== undefined,
+      useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+      unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    } satisfies ProxyConfigExplicitness,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
     customCertPath: null,
@@ -1691,8 +1562,21 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: envTlds,
     useWildcard: isWildcardEnvEnabled(),
     unprivileged: isUnprivilegedEnvEnabled(),
+  };
+}
+
+function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
+  const envTlds = getDefaultTlds();
+  const envTld = primaryTld(envTlds);
+  const envOptions = readEnvProxyOptions(envTlds);
+  const persistedState = new ProxyState(resolveStateDir());
+  const desiredConfig = resolveProxyConfig({
+    ...envOptions,
+    persistedLanMode: lanMode,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
   });
-  return { explicit, desiredConfig, envTld, envTlds };
+  return { explicit: envOptions.explicit, desiredConfig, envTld, envTlds };
 }
 
 /**
@@ -1704,35 +1588,30 @@ function resolveProxyStart(desired: ProxyDesiredState): {
   startConfig: ReturnType<typeof resolveProxyConfig>;
   startPort: number | undefined;
 } {
-  const { explicit, desiredConfig } = desired;
-  const persisted = readPersistedProxyState();
-  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
-  const startConfig = { ...desiredConfig };
-  let startPort: number | undefined;
-
-  if (persisted) {
-    if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
-      startConfig.useHttps = persisted.tls;
-    }
-    if (
-      !explicit.tlds &&
-      (persisted.tlds.length !== desiredConfig.tlds.length ||
-        persisted.tlds.some((tld, index) => tld !== desiredConfig.tlds[index]))
-    ) {
-      startConfig.tlds = persisted.tlds;
-      startConfig.tld = primaryTld(persisted.tlds);
-    }
-    if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
-      startConfig.lanMode = persisted.lanMode;
-    }
-    if (!explicit.unprivileged && persisted.unprivileged !== desiredConfig.unprivileged) {
-      startConfig.unprivileged = persisted.unprivileged;
-    }
-    const envPort = getDefaultPort(startConfig.useHttps);
-    if (!configuredEnvPort && persisted.port !== envPort) {
-      startPort = persisted.port;
-    }
+  const persistedState = new ProxyState(resolveStateDir());
+  const persistedPort = persistedState.readPort();
+  if (persistedPort === null) {
+    return { startConfig: { ...desired.desiredConfig }, startPort: undefined };
   }
+
+  const envOptions = readEnvProxyOptions(desired.envTlds);
+  const persistedTls = persistedState.readTls();
+  const startConfig = resolveProxyConfig({
+    ...envOptions,
+    persistedLanMode: persistedState.readLanIp() !== null,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedTls,
+    persistedTlds: envOptions.explicit.tlds ? undefined : persistedState.readTlds(),
+    recoverCrashedState: true,
+  });
+
+  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
+  const envPort = getDefaultPort(startConfig.useHttps);
+  const persistedDefaultPort = getDefaultPort(persistedTls);
+  const startPort =
+    !configuredEnvPort && persistedPort !== envPort && persistedPort !== persistedDefaultPort
+      ? persistedPort
+      : undefined;
 
   return { startConfig, startPort };
 }
@@ -1811,7 +1690,7 @@ async function ensureProxyRunning(
 
   if (!discovered) {
     console.error(colors.red("Failed to start proxy."));
-    const fallbackDir = resolveStateDir(effectivePort);
+    const fallbackDir = resolveStateDir();
     const logPath = path.join(fallbackDir, "proxy.log");
     console.error(colors.blue("Try starting it manually:"));
     console.error(colors.cyan(`  ${manualStartCommand}`));
@@ -1904,7 +1783,7 @@ async function runApp(
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
     store.recoverCorruptRoutesFile();
-    if (tls) await ensureStartupTrust(stateDir);
+    await trustProxyCaIfAllowed(stateDir, tls);
   } else {
     const runningConfig = readCurrentProxyConfig(stateDir);
 
@@ -1950,19 +1829,24 @@ async function runApp(
     }
   }
 
-  const port = desiredPort ?? (await findFreePort());
-  if (desiredPort) {
-    console.error(colors.green(`  Using port ${port} (fixed)`));
-  } else {
-    console.error(colors.green(`  Using port ${port}`));
-  }
-
   await stopOrphanedProcessGroups(store);
 
-  // Register route (--force kills the existing owner if any)
-  let killedPids: number[] = [];
+  let port: number;
+  let killedPids: number[];
   try {
-    killedPids = addRoutes(store, hostnames, port, process.pid, force);
+    const registration = await store.register({
+      hostnames,
+      pid: process.pid,
+      port: desiredPort,
+      force,
+    });
+    port = registration.port;
+    killedPids = registration.killedPids;
+    if (desiredPort) {
+      console.error(colors.green(`  Using port ${port} (fixed)`));
+    } else {
+      console.error(colors.green(`  Using port ${port}`));
+    }
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
     if (err instanceof RouteConflictError) {
@@ -2110,7 +1994,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        removeRoutes(store, hostnames, process.pid);
+        store.remove(hostnames, process.pid);
       } catch {
         // Best-effort cleanup; non-fatal
       }
@@ -2213,7 +2097,7 @@ async function runApp(
         // Best-effort cleanup; non-fatal
       }
       try {
-        removeRoutes(store, hostnames, process.pid);
+        store.remove(hostnames, process.pid);
       } catch {
         // Lock acquisition may fail during cleanup; non-fatal
       }
@@ -2563,7 +2447,8 @@ ${colors.bold("Environment variables:")}
 Precedence: flags override PORTLESS_* variables, which override project config.
 Project config lookup: portless.json, .config/portless.json, then package.json portless.
 Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
-unexpected proxy exit. A normal portless proxy stop clears them.
+unexpected proxy exit. A normal portless proxy stop clears them, except an
+unprivileged proxy keeps unprivileged mode and its HTTPS choice.
 Proxy options: portless proxy --help
 Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
@@ -2602,6 +2487,15 @@ ${colors.bold("Usage:")}
 ${colors.bold("Options:")}
   --help, -h             Show this help
 `);
+}
+
+/** Trust the generated CA after auto-start unless the proxy runs in unprivileged mode. */
+async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
+  if (!tls || new ProxyState(dir).readUnprivileged()) return;
+  const trust = inspectTrust(dir);
+  if (trust.stores.system === "untrusted" || trust.stores.browser === "untrusted") {
+    await handleTrust();
+  }
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
@@ -2707,14 +2601,6 @@ async function handleTrust(args: string[] = []): Promise<void> {
     console.error(colors.yellow(result.hint));
   }
   process.exit(1);
-}
-
-/** Trust the CA before an auto-started proxy serves TLS, unless the OS store already trusts it. */
-async function ensureStartupTrust(stateDir: string): Promise<void> {
-  const trust = inspectTrust(stateDir);
-  if (trust.stores.system === "untrusted" || trust.stores.browser === "untrusted") {
-    await handleTrust();
-  }
 }
 
 /** Parse the internal allowlist of cleanup steps requested by a sudo retry. */
@@ -2958,9 +2844,7 @@ async function handleClean(args: string[]): Promise<void> {
 
   console.log(colors.cyan("Stopping proxy if it is running..."));
   const { dir, port, tls } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   let proxyStopped = await stopProxy(store, port, tls);
   if (!proxyStopped) {
     problems++;
@@ -2972,9 +2856,9 @@ async function handleClean(args: string[]): Promise<void> {
   const preserveProxyRuntime = !proxyStopped;
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
-  let routesForClean: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  let routesForClean: ReturnType<RouteStore["loadRoutes"]> = [];
   try {
-    routesForClean = store.untrustedReason() ? [] : store.loadRoutesRaw();
+    routesForClean = store.untrustedReason() ? [] : store.loadRoutes({ includeStale: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.warn(colors.yellow(`Could not read routes for tunnel cleanup: ${message}`));
@@ -3119,9 +3003,7 @@ async function handlePrune(args: string[]): Promise<void> {
   );
 
   const { dir } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
 
   const unsafe = store.untrustedReason();
   if (unsafe) {
@@ -3229,9 +3111,7 @@ async function handlePrune(args: string[]): Promise<void> {
 async function handleList(args: string[]): Promise<void> {
   const json = parseCommandArgs("list", args.slice(1), { "--json": "boolean" }, 0).has("--json");
   const { dir, port, tls } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   listRoutes(store, port, tls, json);
 }
 
@@ -3468,13 +3348,23 @@ async function handleAlias(args: string[]): Promise<void> {
       process.exit(1);
     }
     // Owner pid 0: a hostname re-registered by a live app since loadRoutes survives.
-    removeRoutes(store, aliases, 0);
+    try {
+      store.remove(aliases, 0);
+    } catch (error) {
+      void error;
+    }
     console.log(colors.green(`Removed alias: ${aliases.join(", ")}`));
     return;
   }
 
   const hostnames = buildHostnames(aliasName!, tlds, targetTlds);
-  addRoutes(store, hostnames, port!, 0, parsed.has("--force"), upstream);
+  await store.register({
+    hostnames,
+    pid: 0,
+    port: port!,
+    force: parsed.has("--force"),
+    upstream,
+  });
   console.log(colors.green(`Alias registered: ${hostnames.join(", ")} -> 127.0.0.1:${port}`));
   // Awaited: this command exits, and a warning printed after exit reaches nobody.
   await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
@@ -3530,9 +3420,7 @@ async function handleHosts(args: string[]): Promise<void> {
   }
 
   const { dir } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
 
   const unsafe = store.untrustedReason();
   if (unsafe) {
@@ -3702,9 +3590,7 @@ async function handleDoctor(args: string[]): Promise<void> {
     };
   }
 
-  const store = new RouteStore(state.dir, {
-    onWarning: (msg) => add("warn", msg),
-  });
+  const store = new RouteStore(state.dir, { onWarning: (msg) => add("warn", msg) });
   const hasPortFile = fs.existsSync(store.portFilePath);
   const configuredTls = hasPortFile ? state.tls : !isHttpsEnvDisabled();
   const configuredPort = hasPortFile ? state.port : getDefaultPort(configuredTls);
@@ -3719,7 +3605,7 @@ async function handleDoctor(args: string[]): Promise<void> {
   const proxyPort = proxyRunning || portListening || hasPortFile ? probePort : configuredPort;
   const proxyTls = proxyRunning || portListening || hasPortFile ? probeTls : configuredTls;
   const currentProxyStateIsHttp = (proxyRunning || portListening || hasPortFile) && !proxyTls;
-  const proxyUsesCustomCert = proxyTls && readCustomCertMarker(state.dir);
+  const proxyUsesCustomCert = proxyTls && new ProxyState(state.dir).readCustomCert();
   const stateExists = fs.existsSync(state.dir);
 
   const version = __VERSION__;
@@ -3808,7 +3694,7 @@ async function handleDoctor(args: string[]): Promise<void> {
 
   if (fs.existsSync(store.pidPath)) {
     try {
-      const rawPid = fs.readFileSync(store.pidPath, "utf-8").trim();
+      const rawPid = readStateFile(store.pidPath) ?? "";
       const pid = parseInt(rawPid, 10);
       if (isNaN(pid) || pid <= 0) {
         add("fail", `Proxy PID file is invalid: ${store.pidPath}`);
@@ -3894,9 +3780,9 @@ async function handleDoctor(args: string[]): Promise<void> {
     add("info", "HTTPS is disabled for the current proxy state.");
   }
 
-  let rawRoutes: ReturnType<RouteStore["loadRoutesRaw"]> = [];
+  let rawRoutes: RouteMapping[] = [];
   try {
-    rawRoutes = store.loadRoutesRaw();
+    rawRoutes = store.loadRoutes({ includeStale: true });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     add("fail", `Could not read routes: ${message}`);
@@ -4076,7 +3962,9 @@ ${colors.bold("LAN mode (--lan):")}
 
 ${colors.bold("Unprivileged mode (--unprivileged):")}
   Binds without sudo, installs nothing, and never writes the hosts file.
-  Stopped proxies keep the mode; use PORTLESS_UNPRIVILEGED=0 to switch back.
+  Stopped proxies keep unprivileged mode and its HTTPS choice for auto-start
+  and bare proxy start. Pass --unprivileged without --https, or pass --no-tls,
+  to return to plain HTTP; use PORTLESS_UNPRIVILEGED=0 to switch back.
 `);
 }
 
@@ -4107,16 +3995,12 @@ async function handleProxy(args: string[]): Promise<void> {
     const explicitPort = portValue === undefined ? undefined : parsePort(portValue)!;
 
     if (explicitPort !== undefined) {
-      const dir = resolveStateDir(explicitPort);
-      const store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(msg)),
-      });
+      const dir = resolveStateDir();
+      const store = new RouteStore(dir);
       if (!(await stopProxy(store, explicitPort, false))) process.exitCode = 1;
     } else {
       const { dir, port, tls } = await discoverState();
-      const store = new RouteStore(dir, {
-        onWarning: (msg) => console.warn(colors.yellow(msg)),
-      });
+      const store = new RouteStore(dir);
       if (!(await stopProxy(store, port, tls))) process.exitCode = 1;
     }
     return;
@@ -4222,8 +4106,8 @@ async function handleProxy(args: string[]): Promise<void> {
   };
 
   // Resolve state directory based on the port
-  let stateDir = resolveStateDir(proxyPort);
-  let persistedLanMode = readLanMarker(stateDir) !== null;
+  let stateDir = resolveStateDir();
+  let persistedLanMode = new ProxyState(stateDir).readLanIp() !== null;
   let runningPort: number | null = null;
   if (!hasExplicitPort) {
     const currentState = await discoverState();
@@ -4237,9 +4121,11 @@ async function handleProxy(args: string[]): Promise<void> {
       stateDir = currentState.dir;
     }
   }
+  const persistedState = new ProxyState(stateDir);
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
-    persistedUnprivileged: readUnprivilegedMarker(stateDir),
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
@@ -4263,7 +4149,16 @@ async function handleProxy(args: string[]): Promise<void> {
 
   if (!hasExplicitPort && runningPort === null) {
     proxyPort = getDefaultPort(useHttps);
-    stateDir = resolveStateDir(proxyPort);
+    stateDir = resolveStateDir();
+  }
+
+  const savedPort = new ProxyState(stateDir).readPort();
+  if (savedPort !== null && savedPort !== proxyPort && (await isProxyRunning(savedPort))) {
+    console.error(
+      colors.red(`Error: A proxy is already running on port ${savedPort} for this state directory.`)
+    );
+    console.error(colors.blue("Run portless proxy stop first, then start the proxy again."));
+    process.exit(1);
   }
 
   if (lanMode && tldFlagValues.length > 0) {
@@ -4450,7 +4345,7 @@ async function handleProxy(args: string[]): Promise<void> {
           console.log(colors.green(`Proxy started on port ${proxyPort}.`));
         } else {
           console.error(colors.red("Proxy process started but is not responding."));
-          const logPath = path.join(resolveStateDir(proxyPort), "proxy.log");
+          const logPath = path.join(resolveStateDir(), "proxy.log");
           if (fs.existsSync(logPath)) {
             console.error(colors.gray(`Logs: ${logPath}`));
           }
@@ -4825,9 +4720,7 @@ async function handleDefaultSingle(
   });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   await runApp(
     store,
     port,
@@ -4935,13 +4828,13 @@ async function spawnProxiedApp(
       onWarning: (msg) => console.warn(colors.yellow(`[${name}] ${msg}`)),
     });
 
-    appPort = app.appPort ?? (await findFreePort());
     hostnames = buildHostnames(app, tlds);
+    store.recoverCorruptRoutesFile();
+    appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
 
-    addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
@@ -4995,7 +4888,12 @@ async function spawnProxiedApp(
           // Best-effort; the routes are removed below.
         })
         .finally(() => {
-          removeRoutes(capturedStore, capturedHostnames, process.pid);
+          try {
+            capturedStore.remove(capturedHostnames, process.pid);
+          } catch {
+            resolve();
+            return;
+          }
           resolve();
         });
     });
@@ -5254,7 +5152,7 @@ async function handleDefaultMulti(
       checkHostnameCollisions(tlds);
     }
 
-    if (tls) await ensureStartupTrust(dir);
+    await trustProxyCaIfAllowed(dir, tls);
   }
 
   if (useTurbo) {
@@ -5287,9 +5185,7 @@ async function runWithTurbo(
   taskApps: MultiAppEntry[],
   extraArgs: string[] = []
 ): Promise<void> {
-  const store = new RouteStore(stateDir, {
-    onWarning: (msg: string) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(stateDir);
 
   const manifest: Record<string, ManifestEntry> = {};
   const routes: { hostnames: string[] }[] = [];
@@ -5302,13 +5198,13 @@ async function runWithTurbo(
       continue;
     }
 
-    const appPort = app.appPort ?? (await findFreePort());
     const hostnames = buildHostnames(app, tlds);
+    store.recoverCorruptRoutesFile();
+    const appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
 
-    addRoutes(store, hostnames, appPort, process.pid);
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 
@@ -5383,7 +5279,11 @@ async function runWithTurbo(
     }, SIGKILL_TIMEOUT_MS).unref();
 
     for (const { hostnames } of routes) {
-      removeRoutes(store, hostnames, process.pid);
+      try {
+        store.remove(hostnames, process.pid);
+      } catch {
+        continue;
+      }
     }
   };
 
@@ -5418,8 +5318,6 @@ async function runWithDirectSpawn(
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
   const routeSettlements: Promise<void>[] = [];
 
-  // Sequential: each spawnProxiedApp calls findFreePort() which binds/releases
-  // a port, so parallel spawning could cause port collisions.
   for (const app of proxiedApps) {
     const { child, displayUrl, route, settled } = await spawnProxiedApp(
       app,
@@ -5471,7 +5369,11 @@ async function runWithDirectSpawn(
     }, SIGKILL_TIMEOUT_MS).unref();
 
     for (const { store, hostnames } of routeEntries) {
-      removeRoutes(store, hostnames, process.pid);
+      try {
+        store.remove(hostnames, process.pid);
+      } catch {
+        continue;
+      }
     }
   };
 
@@ -5549,9 +5451,7 @@ async function handleRunMode(
   const worktree = resolveWorktreeNaming({ config: appConfig?.worktree, override });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   await runApp(
     store,
     port,
@@ -5602,9 +5502,7 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
   buildHostnames(nameInput, [DEFAULT_TLD]);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
-  const store = new RouteStore(dir, {
-    onWarning: (msg) => console.warn(colors.yellow(msg)),
-  });
+  const store = new RouteStore(dir);
   await runApp(
     store,
     port,
@@ -5763,7 +5661,11 @@ async function composeDown(args: string[], globals: string[], input?: string): P
   const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
   store.recoverCorruptRoutesFile();
   const aliases = store.loadRoutes().filter((r) => r.pid === 0);
-  removeRoutes(store, staleAliases(aliases, project, tlds, after));
+  try {
+    store.remove(staleAliases(aliases, project, tlds, after));
+  } catch (error) {
+    void error;
+  }
   if (after.ports.size === 0) {
     // The resolved model can hold env_file values; drop it with the project.
     const files = composeStatePaths(dir, project);
@@ -5843,13 +5745,6 @@ function assertUniqueProjectLabel(stateDir: string, project: string): void {
   }
 }
 
-function isPortFree(port: number): Promise<boolean> {
-  return findFreePort(port, port).then(
-    () => true,
-    () => false
-  );
-}
-
 /** Ports saved by every other compose project in the state dir. */
 function reservedComposePorts(stateDir: string, project: string): Set<number> {
   const dir = path.join(stateDir, "compose");
@@ -5904,13 +5799,13 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   );
   if (ensured.started) {
     state = ensured.state;
-    if (state.tls) await ensureStartupTrust(state.dir);
+    await trustProxyCaIfAllowed(state.dir, state.tls);
   } else {
     const running = readCurrentProxyConfig(state.dir);
     state = { ...state, tlds: running.tlds, lanMode: running.lanMode, lanIp: running.lanIp };
   }
   const { dir, port: proxyPort, tls, tlds, lanMode } = state;
-  const store = new RouteStore(dir, { onWarning: (msg) => console.warn(colors.yellow(msg)) });
+  const store = new RouteStore(dir);
 
   const project = source.name;
   const files = composeStatePaths(dir, project);
@@ -5965,40 +5860,55 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
 
   // Register the routes of running services. Ports are fixed, so this only
   // picks up services as they start.
-  const sync = (): boolean => {
-    const containers = readComposeContainers(["-p", plan.project]);
-    if (!containers) return false;
-    for (const route of plan.routes) {
-      const port = routePort(route, containers);
-      const primary = route.hostnames[0]!;
-      if (port === undefined || registered.get(primary) === port) continue;
+  let syncInFlight = false;
+  let syncPromise: Promise<boolean> | undefined;
+  const sync = async (): Promise<boolean> => {
+    if (syncInFlight) return syncPromise ?? true;
+    syncInFlight = true;
+    syncPromise = (async () => {
       try {
-        // Aliases from an earlier up -d are ours to replace; a live process is not.
-        addRoutes(store, route.hostnames, port, ownerPid, isAliasConflict(store, primary));
-      } catch (err) {
-        if (!(err instanceof RouteConflictError)) throw err;
-        if (!conflicts.has(primary)) {
-          console.error(
-            colors.red(
-              `Error: ${primary} is already registered by another process (PID ${err.existingPid}). Stop it, or rename the service with portless.name.`
-            )
-          );
+        const containers = readComposeContainers(["-p", plan.project]);
+        if (!containers) return false;
+        for (const route of plan.routes) {
+          const port = routePort(route, containers);
+          const primary = route.hostnames[0]!;
+          if (port === undefined || registered.get(primary) === port) continue;
+          try {
+            await store.register({
+              hostnames: route.hostnames,
+              pid: ownerPid,
+              port,
+              force: isAliasConflict(store, primary),
+            });
+          } catch (err) {
+            if (!(err instanceof RouteConflictError)) throw err;
+            if (!conflicts.has(primary)) {
+              console.error(
+                colors.red(
+                  `Error: ${primary} is already registered by another process (PID ${err.existingPid}). Stop it, or rename the service with portless.name.`
+                )
+              );
+            }
+            conflicts.add(primary);
+            continue;
+          }
+          conflicts.delete(primary);
+          registered.set(primary, port);
+          console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
         }
-        conflicts.add(primary);
-        continue;
+        return true;
+      } finally {
+        syncInFlight = false;
       }
-      conflicts.delete(primary);
-      registered.set(primary, port);
-      console.error(colors.cyan(`  -> ${route.url}  (${route.service}:${route.target})`));
-    }
-    return true;
+    })();
+    return syncPromise;
   };
 
   if (detached) {
     const code = await spawnDockerCompose(upArgs).exited;
     if (code === 0) {
       console.error("");
-      if (!sync()) {
+      if (!(await sync())) {
         console.warn(
           colors.yellow(
             "Could not read the project's containers, so no routes were registered. Run portless compose up -d again."
@@ -6016,18 +5926,26 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   const { child, exited } = spawnDockerCompose(upArgs);
   let reported = false;
   const timer = setInterval(() => {
-    sync();
-    if (!reported && registered.size > 0) {
-      reported = true;
-      void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
-    }
+    void sync().then(() => {
+      if (!reported && registered.size > 0) {
+        reported = true;
+        void reportHostsSyncHere([...registered.keys()], proxyPort, tls, lanMode);
+      }
+    });
   }, 1000);
   // Ctrl+C reaches compose through the process group; wait for it to stop.
   process.on("SIGINT", () => {});
   process.on("SIGTERM", () => child.kill("SIGTERM"));
   const code = await exited;
   clearInterval(timer);
-  for (const route of plan.routes) removeRoutes(store, route.hostnames, process.pid);
+  if (syncInFlight && syncPromise) await syncPromise;
+  for (const route of plan.routes) {
+    try {
+      store.remove(route.hostnames, process.pid);
+    } catch {
+      continue;
+    }
+  }
   fs.rmSync(files.model, { force: true });
   process.exit(code);
 }

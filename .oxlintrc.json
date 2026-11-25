@@ -73,6 +73,35 @@
     "no-nonoctal-decimal-escape": "error",
     "no-prototype-builtins": "error",
     "no-regex-spaces": "error",
+    "no-restricted-imports": [
+      "error",
+      {
+        "patterns": [
+          {
+            "group": ["**/routes.js"],
+            "importNames": ["isPortFree"],
+            "message": "isPortFree belongs to routes.ts. Import it in cli.ts only, for port allocation."
+          }
+        ]
+      }
+    ],
+    "no-restricted-properties": [
+      "error",
+      {
+        "property": "getRoutesPath",
+        "message": "Route paths belong to RouteStore. Only the CLI may print store.getRoutesPath()."
+      },
+      {
+        "object": "fs",
+        "property": "watch",
+        "message": "Route file watching belongs to RouteStore."
+      },
+      {
+        "object": "fs",
+        "property": "watchFile",
+        "message": "Route file watching belongs to RouteStore."
+      }
+    ],
     "no-self-assign": [
       "error",
       {
@@ -172,5 +201,33 @@
     "**/.nuxt/",
     "**/.angular/",
     "**/.output/"
+  ],
+  "overrides": [
+    {
+      "files": ["packages/portless/src/cli.ts"],
+      "rules": {
+        "no-restricted-imports": "off",
+        "no-restricted-properties": "off"
+      }
+    },
+    {
+      "files": ["packages/portless/src/index.ts"],
+      "rules": {
+        "no-restricted-imports": "off"
+      }
+    },
+    {
+      "files": ["packages/portless/src/routes.ts"],
+      "rules": {
+        "no-restricted-properties": "off"
+      }
+    },
+    {
+      "files": ["**/*.test.ts", "**/*.spec.ts"],
+      "rules": {
+        "no-restricted-imports": "off",
+        "no-restricted-properties": "off"
+      }
+    }
   ]
 }
