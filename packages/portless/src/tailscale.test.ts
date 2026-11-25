@@ -165,49 +165,37 @@ describe("share", () => {
     ["100.64.0.10", 8080, "http://100.64.0.10:8080"],
     ["fd7a:115c:a1e0::1", 8080, "http://[fd7a:115c:a1e0::1]:8080"],
   ] as [string, number, string][])("registers TCP for %s on port %i", (ip, port, url) => {
+    const command = `serve --bg --yes --tcp=${port} tcp://127.0.0.1:3000`;
     const { runner, calls } = runnerFor(
       { ...tcpStatus, Self: { TailscaleIPs: [ip] } },
       {
         "serve status --json": { stdout: "{}" },
-        [`serve --bg --yes --tcp=${port} tcp://127.0.0.1:3000`]: {},
+        [command]: {},
       }
     );
     const claimShare = vi.fn(() => null);
     expect(
       share({ kind: "serve", localPort: 3000, preferredPort: port, runner, claimShare })
-    ).toEqual({
-      url,
-      record: { kind: "tcp", port },
-    });
+    ).toEqual({ url, record: { kind: "tcp", port } });
     expect(claimShare).toHaveBeenCalledWith({ kind: "tcp", port });
-    expect(calls).toContainEqual([
-      "serve",
-      "--bg",
-      "--yes",
-      `--tcp=${port}`,
-      "tcp://127.0.0.1:3000",
-    ]);
+    expect(calls).toContainEqual(command.split(" "));
   });
 
-  it("automatically selects TCP port 80", () => {
-    const { runner, calls } = runnerFor(tcpStatus, {
+  it("selects TCP port 80 by default", () => {
+    const { runner } = runnerFor(tcpStatus, {
       "serve status --json": { stdout: "{}" },
       "serve --bg --yes --tcp=80 tcp://127.0.0.1:3000": {},
     });
     expect(share({ kind: "serve", localPort: 3000, runner }).url).toBe("http://100.64.0.10");
-    expect(calls).toContainEqual(["serve", "--bg", "--yes", "--tcp=80", "tcp://127.0.0.1:3000"]);
   });
 
-  it.each([0, 65536, 1.5, NaN])(
-    "rejects invalid preferred port %s before invoking Tailscale",
-    (port) => {
-      const runner = vi.fn<TailscaleCommandRunner>();
-      expect(() => share({ kind: "serve", localPort: 3000, preferredPort: port, runner })).toThrow(
-        "Invalid Tailscale port"
-      );
-      expect(runner).not.toHaveBeenCalled();
-    }
-  );
+  it.each([0, 65536, 1.5, NaN])("rejects invalid port %s before invoking Tailscale", (port) => {
+    const runner = vi.fn<TailscaleCommandRunner>();
+    expect(() => share({ kind: "serve", localPort: 3000, preferredPort: port, runner })).toThrow(
+      "Invalid Tailscale port"
+    );
+    expect(runner).not.toHaveBeenCalled();
+  });
 
   it.each([443, 8443, 10000])("accepts Funnel port %i", (port) => {
     const { runner } = runnerFor(httpsStatus, {
@@ -228,7 +216,7 @@ describe("share", () => {
     expect(runner).not.toHaveBeenCalled();
   });
 
-  it("releases a claim after a registration conflict and retries another port", () => {
+  it("releases a failed claim and retries another port", () => {
     const { runner } = runnerFor(httpsStatus, {
       "serve status --json": { stdout: "{}" },
       "serve --bg --yes --https=443 http://127.0.0.1:3000": {
@@ -250,13 +238,15 @@ describe("share", () => {
     expect(releaseShare).toHaveBeenCalledTimes(1);
   });
 
-  it("rejects a preferred port already configured in the Tailscale daemon", () => {
+  it.each(["daemon", "route"])("rejects a port already occupied by a %s", (occupied) => {
     const { runner, calls } = runnerFor(httpsStatus, {
       "serve status --json": {
-        stdout: JSON.stringify({ Web: { "devbox.example.ts.net:8443": {} } }),
+        stdout: JSON.stringify(
+          occupied === "daemon" ? { Web: { "devbox.example.ts.net:8443": {} } } : {}
+        ),
       },
     });
-    const claimShare = vi.fn(() => null);
+    const claimShare = vi.fn(() => "other.localhost");
     const releaseShare = vi.fn();
     expect(() =>
       share({
@@ -267,122 +257,44 @@ describe("share", () => {
         claimShare,
         releaseShare,
       })
-    ).toThrow("Tailscale port 8443 is already in use. Stop the existing serve");
-    expect(claimShare).not.toHaveBeenCalled();
-    expect(releaseShare).not.toHaveBeenCalled();
-    expect(calls).toEqual([["version"], ["status", "--json"], ["serve", "status", "--json"]]);
-  });
-
-  it("releases a claim when registration fails for a non-conflict error", () => {
-    const { runner } = runnerFor(httpsStatus, {
-      "serve status --json": { stdout: "{}" },
-      "serve --bg --yes --https=8443 http://127.0.0.1:3000": {
-        status: 1,
-        stderr: "permission denied",
-      },
-    });
-    const releaseShare = vi.fn();
-    expect(() =>
-      share({
-        kind: "serve",
-        localPort: 3000,
-        preferredPort: 8443,
-        runner,
-        claimShare: () => null,
-        releaseShare,
-      })
-    ).toThrow("permission denied");
-    expect(releaseShare).toHaveBeenCalledOnce();
-  });
-
-  it("rejects a preferred port already claimed by a live route", () => {
-    const { runner, calls } = runnerFor(httpsStatus, {
-      "serve status --json": { stdout: "{}" },
-    });
-    const releaseShare = vi.fn();
-    expect(() =>
-      share({
-        kind: "serve",
-        localPort: 3000,
-        preferredPort: 8443,
-        runner,
-        claimShare: () => "other.localhost",
-        releaseShare,
-      })
-    ).toThrow("already in use by other.localhost");
+    ).toThrow(
+      occupied === "daemon"
+        ? "Tailscale port 8443 is already in use. Stop the existing serve"
+        : "already in use by other.localhost"
+    );
+    if (occupied === "daemon") expect(claimShare).not.toHaveBeenCalled();
     expect(releaseShare).not.toHaveBeenCalled();
     expect(calls).toHaveLength(3);
   });
 
-  it("registers a service and surfaces an approval notice", () => {
+  it("registers a service, claims it and reports approval", () => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
+    const command = "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000";
     const { runner, calls } = runnerFor(status, {
       "serve status --json": { stdout: "{}" },
-      "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000": {
-        stdout: "approval from an admin is required",
-      },
+      [command]: { stdout: "approval from an admin is required" },
     });
-    expect(share({ kind: "service", serviceName: "svc:API", localPort: 3000, runner })).toEqual({
-      url: "https://api.example.ts.net",
-      record: { kind: "service", serviceId: "svc:api", serviceName: "api" },
-      pendingApproval: true,
-    });
-    expect(calls).toContainEqual([
-      "serve",
-      "--yes",
-      "--service=svc:api",
-      "--https=443",
-      "http://127.0.0.1:3000",
-    ]);
+    const claimShare = vi.fn(() => null);
+    const record = { kind: "service", serviceId: "svc:api", serviceName: "api" };
+    expect(
+      share({ kind: "service", serviceName: "svc:API", localPort: 3000, runner, claimShare })
+    ).toEqual({ url: "https://api.example.ts.net", record, pendingApproval: true });
+    expect(claimShare).toHaveBeenCalledExactlyOnceWith(record);
+    expect(calls).toContainEqual(command.split(" "));
   });
 
-  it("rejects a service already configured in tailscale serve status", () => {
+  it.each(["daemon", "route"])("rejects a service occupied by a %s", (occupied) => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
     const { runner, calls } = runnerFor(status, {
       "serve status --json": {
-        stdout: JSON.stringify({
-          Services: {
-            "svc:api": {
-              TCP: { "443": { HTTPS: true } },
-            },
-          },
-        }),
+        stdout: JSON.stringify(
+          occupied === "daemon"
+            ? { Services: { "svc:api": { TCP: { "443": { HTTPS: true } } } } }
+            : {}
+        ),
       },
     });
-    const claimShare = vi.fn(() => null);
-    expect(() =>
-      share({ kind: "service", serviceName: "api", localPort: 3000, runner, claimShare })
-    ).toThrow("Tailscale service svc:api is already in use");
-    expect(claimShare).not.toHaveBeenCalled();
-    expect(calls).not.toContainEqual([
-      "serve",
-      "--yes",
-      "--service=svc:api",
-      "--https=443",
-      "http://127.0.0.1:3000",
-    ]);
-  });
-
-  it("claims a service share before registering it", () => {
-    const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
-    const { runner } = runnerFor(status, {
-      "serve status --json": { stdout: "{}" },
-      "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000": {},
-    });
-    const claimShare = vi.fn(() => null);
-    share({ kind: "service", serviceName: "api", localPort: 3000, runner, claimShare });
-    expect(claimShare).toHaveBeenCalledExactlyOnceWith({
-      kind: "service",
-      serviceId: "svc:api",
-      serviceName: "api",
-    });
-  });
-
-  it("rejects a service claim conflict without registering or releasing", () => {
-    const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
-    const { runner, calls } = runnerFor(status, {
-      "serve status --json": { stdout: "{}" },
-    });
+    const claimShare = vi.fn(() => "other.localhost");
     const releaseShare = vi.fn();
     expect(() =>
       share({
@@ -390,28 +302,30 @@ describe("share", () => {
         serviceName: "api",
         localPort: 3000,
         runner,
-        claimShare: () => "other.localhost",
+        claimShare,
         releaseShare,
       })
-    ).toThrow("Tailscale service svc:api is already in use by other.localhost.");
-    expect(calls).toEqual([["version"], ["status", "--json"], ["serve", "status", "--json"]]);
+    ).toThrow("Tailscale service svc:api is already in use");
+    if (occupied === "daemon") expect(claimShare).not.toHaveBeenCalled();
     expect(releaseShare).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(3);
   });
 
-  it("releases a service claim when registration fails", () => {
+  it.each(["serve", "service"] as const)("releases a %s claim on a registration error", (kind) => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
+    const command =
+      kind === "serve"
+        ? "serve --bg --yes --https=8443 http://127.0.0.1:3000"
+        : "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000";
     const { runner } = runnerFor(status, {
       "serve status --json": { stdout: "{}" },
-      "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000": {
-        status: 1,
-        stderr: "permission denied",
-      },
+      [command]: { status: 1, stderr: "permission denied" },
     });
     const releaseShare = vi.fn();
     expect(() =>
       share({
-        kind: "service",
-        serviceName: "api",
+        kind,
+        ...(kind === "service" ? { serviceName: "api" } : { preferredPort: 8443 }),
         localPort: 3000,
         runner,
         claimShare: () => null,

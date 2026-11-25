@@ -1,6 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
-import * as net from "node:net";
 import { guardWindowsOrphans } from "./cli-utils.js";
 
 const START_TIMEOUT_MS = 30_000;
@@ -35,7 +34,6 @@ export interface TunnelStartOptions {
   password?: string;
   pin?: string;
   groups?: string[];
-  relayHost?: string;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   spawner?: TunnelSpawner;
   timeoutMs?: number;
@@ -414,189 +412,15 @@ const netbird: TunnelProvider = {
     "Timed out waiting for NetBird to print a public URL. Check that NetBird is connected and try again.",
 };
 
-/** Extract the peer's NetBird WireGuard IP from `netbird status --json` output. */
-export function extractNetbirdIp(stdout: string): string | null {
-  return extractNetbirdInterface(stdout)?.ip ?? null;
-}
-
-function extractNetbirdInterface(
-  stdout: string
-): { ip: string; prefixLength: number | null } | null {
-  try {
-    const parsed: unknown = JSON.parse(stdout);
-    if (!parsed || typeof parsed !== "object" || !("netbirdIp" in parsed)) return null;
-    const raw = (parsed as { netbirdIp?: unknown }).netbirdIp;
-    if (typeof raw !== "string") return null;
-    const [rawIp = "", rawMask] = raw.trim().split("/");
-    const family = net.isIP(rawIp);
-    if (family === 0) return null;
-    const maxBits = family === 4 ? 32 : 128;
-    const parsedMask = rawMask !== undefined && /^\d+$/.test(rawMask) ? Number(rawMask) : null;
-    const prefixLength =
-      parsedMask !== null && parsedMask >= 0 && parsedMask <= maxBits ? parsedMask : null;
-    return { ip: rawIp, prefixLength };
-  } catch {
-    return null;
-  }
-}
-
-function ipv4ToInt(ip: string): number | null {
-  const parts = ip.split(".");
-  if (parts.length !== 4) return null;
-  let value = 0;
-  for (const part of parts) {
-    const num = Number(part);
-    if (!Number.isInteger(num) || num < 0 || num > 255) return null;
-    value = (value << 8) | num;
-  }
-  return value >>> 0;
-}
-
-function ipv6ToBigInt(ip: string): bigint | null {
-  const [head, tail] = ip.split("::");
-  if (ip.split("::").length > 2) return null;
-  const left = head ? head.split(":") : [];
-  const right = tail ? tail.split(":") : [];
-  const missing = 8 - left.length - right.length;
-  if (tail === undefined ? left.length !== 8 : missing < 0) return null;
-  const groups =
-    tail === undefined ? left : [...left, ...Array<string>(missing).fill("0"), ...right];
-  let value = 0n;
-  for (const group of groups) {
-    if (!/^[0-9a-f]{1,4}$/i.test(group)) return null;
-    value = (value << 16n) | BigInt(parseInt(group, 16));
-  }
-  return value;
-}
-
-function isInCidr(candidate: string, base: string, prefixLength: number): boolean {
-  const family = net.isIP(base);
-  if (family === 0 || net.isIP(candidate) !== family) return false;
-  if (prefixLength === 0) return true;
-  if (family === 4) {
-    const a = ipv4ToInt(candidate);
-    const b = ipv4ToInt(base);
-    if (a === null || b === null) return false;
-    const mask = prefixLength === 32 ? 0xffffffff : (~0 << (32 - prefixLength)) >>> 0;
-    return (a & mask) === (b & mask);
-  }
-  const a = ipv6ToBigInt(candidate);
-  const b = ipv6ToBigInt(base);
-  if (a === null || b === null) return false;
-  const shift = BigInt(128 - prefixLength);
-  return a >> shift === b >> shift;
-}
-
-/** Whether a peer source address belongs to loopback or the NetBird overlay subnet. */
-export function isAllowedNetbirdRelayPeer(
-  remoteAddress: string | undefined,
-  bindHost: string,
-  prefixLength: number | null = null
-): boolean {
-  if (!remoteAddress) return false;
-  const normalized = remoteAddress.startsWith("::ffff:") ? remoteAddress.slice(7) : remoteAddress;
-  if (normalized === bindHost || normalized === "127.0.0.1" || normalized === "::1") return true;
-  if (prefixLength !== null && isInCidr(normalized, bindHost, prefixLength)) return true;
-  if (prefixLength === null && isInCidr(bindHost, "100.64.0.0", 10)) {
-    return isInCidr(normalized, "100.64.0.0", 10);
-  }
-  return false;
-}
-
-function createNetbirdLoopbackRelay(
-  bindHost: string,
-  prefixLength: number | null,
-  localPort: number
-): Promise<{ port: number; close: () => void } | null> {
-  return new Promise((resolve) => {
-    const sockets = new Set<net.Socket>();
-    const server = net.createServer((client) => {
-      if (!isAllowedNetbirdRelayPeer(client.remoteAddress, bindHost, prefixLength)) {
-        client.destroy();
-        return;
-      }
-      const upstream = net.connect(localPort, "127.0.0.1");
-      sockets.add(client);
-      sockets.add(upstream);
-      const cleanup = () => {
-        sockets.delete(client);
-        sockets.delete(upstream);
-        client.destroy();
-        upstream.destroy();
-      };
-      client.on("error", cleanup);
-      upstream.on("error", cleanup);
-      client.on("close", cleanup);
-      upstream.on("close", cleanup);
-      client.pipe(upstream);
-      upstream.pipe(client);
-    });
-    server.once("error", () => resolve(null));
-    server.listen(0, bindHost, () => {
-      const address = server.address();
-      if (!address || typeof address === "string") {
-        server.close();
-        resolve(null);
-        return;
-      }
-      resolve({
-        port: address.port,
-        close: () => {
-          for (const socket of sockets) socket.destroy();
-          sockets.clear();
-          try {
-            server.close();
-          } catch {
-            return;
-          }
-        },
-      });
-    });
-  });
-}
-
 export function ensureNetbirdAvailable(runner?: TunnelCommandRunner): void {
   ensureTunnelAvailable(netbird, runner);
 }
 
-export async function startNetbird(
+export function startNetbird(
   localPort: number,
   options: TunnelStartOptions = {}
 ): Promise<StartedTunnel> {
-  let relayHost = options.relayHost;
-  let relayPrefix: number | null = null;
-  if (!relayHost && !options.spawner) {
-    const status = defaultRunner(netbird.binary, netbird.versionArgs);
-    if (!status.error && status.status === 0) {
-      const iface = extractNetbirdInterface(status.stdout);
-      relayHost = iface?.ip;
-      relayPrefix = iface?.prefixLength ?? null;
-    }
-  }
-  const relay = relayHost
-    ? await createNetbirdLoopbackRelay(relayHost, relayPrefix, localPort)
-    : null;
-  const exposePort = relay ? relay.port : localPort;
-  const closeRelay = () => relay?.close();
-  try {
-    const started = await startTunnel(netbird, exposePort, {
-      ...options,
-      onExit: (code, signal) => {
-        closeRelay();
-        options.onExit?.(code, signal);
-      },
-    });
-    if (!relay) return started;
-    const rawKill = started.child.kill.bind(started.child);
-    started.child.kill = (signal?: NodeJS.Signals) => {
-      closeRelay();
-      return rawKill(signal);
-    };
-    return started;
-  } catch (err) {
-    closeRelay();
-    throw err;
-  }
+  return startTunnel(netbird, localPort, options);
 }
 
 export const PROCESS_TUNNELS: readonly ProcessTunnelSpec[] = [

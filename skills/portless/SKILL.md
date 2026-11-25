@@ -343,7 +343,7 @@ Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--n
 portless myapp --netbird next dev
 ```
 
-`--netbird` or `PORTLESS_NETBIRD=1` exposes the app via `netbird expose`; `PORTLESS_NETBIRD=0` disables it. Install the NetBird CLI and connect with `netbird up` first. Portless keeps the child server bound to `127.0.0.1`, relays traffic through the local NetBird interface when available, and sets `PORTLESS_NETBIRD_URL` on the child. It records the tunnel PID for cleanup on exit and by `portless prune`.
+`--netbird` or `PORTLESS_NETBIRD=1` exposes the app via `netbird expose`; `PORTLESS_NETBIRD=0` disables it. Install the NetBird CLI and connect with `netbird up` first. Portless keeps the child server bound to `127.0.0.1` and sets `PORTLESS_NETBIRD_URL` on the child. It records the tunnel PID for cleanup on exit and by `portless prune`.
 
 Use `--netbird-password <pw>` or `PORTLESS_NETBIRD_PASSWORD`, `--netbird-pin <code>` or `PORTLESS_NETBIRD_PIN`, and `--netbird-groups <csv>` or `PORTLESS_NETBIRD_GROUPS` to configure access. Each implies `--netbird`.
 

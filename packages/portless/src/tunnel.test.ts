@@ -1,6 +1,5 @@
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
-import * as net from "node:net";
 import * as os from "node:os";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
@@ -12,9 +11,7 @@ import {
   ensureNgrokAvailable,
   ensureNetbirdAvailable,
   extractNgrokUrl,
-  extractNetbirdIp,
   extractNetbirdUrl,
-  isAllowedNetbirdRelayPeer,
   normalizeNgrokUrl,
   startNgrok,
   startNetbird,
@@ -97,63 +94,6 @@ describe("ngrok", () => {
   describe("PROCESS_TUNNELS", () => {
     it("registers ngrok, cloudflare, and netbird in one registry", () => {
       expect(PROCESS_TUNNELS.map((t) => t.id)).toEqual(["ngrok", "cloudflare", "netbird"]);
-    });
-  });
-
-  describe("extractNetbirdIp and NetBird loopback relay", () => {
-    it("parses CIDR and bare netbirdIp values from netbird status JSON", () => {
-      expect(extractNetbirdIp(JSON.stringify({ netbirdIp: "100.64.0.5/16" }))).toBe("100.64.0.5");
-      expect(extractNetbirdIp(JSON.stringify({ netbirdIp: "100.64.0.5" }))).toBe("100.64.0.5");
-      expect(extractNetbirdIp(JSON.stringify({ netbirdIp: "not-an-ip" }))).toBeNull();
-      expect(extractNetbirdIp("invalid")).toBeNull();
-    });
-
-    it("allows NetBird WireGuard subnet peers and rejects physical LAN peers", () => {
-      expect(isAllowedNetbirdRelayPeer("100.64.0.1", "100.64.0.5", 16)).toBe(true);
-      expect(isAllowedNetbirdRelayPeer("::ffff:100.64.12.3", "100.64.0.5", 16)).toBe(true);
-      expect(isAllowedNetbirdRelayPeer("100.64.200.1", "100.64.0.5", null)).toBe(true);
-      expect(isAllowedNetbirdRelayPeer("127.0.0.1", "100.64.0.5", 16)).toBe(true);
-      expect(isAllowedNetbirdRelayPeer("192.168.1.50", "100.64.0.5", 16)).toBe(false);
-      expect(isAllowedNetbirdRelayPeer("10.0.0.9", "100.64.0.5", null)).toBe(false);
-    });
-
-    it("relays traffic from the bound relay port to the loopback backend and closes on kill", async () => {
-      const backend = net.createServer((socket) => {
-        socket.end("hello-loopback");
-      });
-      await new Promise<void>((resolve) => backend.listen(0, "127.0.0.1", resolve));
-      const backendPort = (backend.address() as net.AddressInfo).port;
-      const child = new MockNgrokChild();
-      const calls: string[][] = [];
-
-      try {
-        const promise = startNetbird(backendPort, {
-          relayHost: "127.0.0.1",
-          spawner: createSpawner(child, calls),
-          timeoutMs: 1000,
-        });
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        child.stdout.write("URL: https://app.netbird.cloud\n");
-        const started = await promise;
-        const exposedPort = Number(calls[0][calls[0].length - 1]);
-        expect(exposedPort).not.toBe(backendPort);
-
-        const data = await new Promise<string>((resolve, reject) => {
-          const client = net.connect(exposedPort, "127.0.0.1");
-          let buf = "";
-          client.on("data", (chunk) => {
-            buf += chunk.toString();
-          });
-          client.on("end", () => resolve(buf));
-          client.on("error", reject);
-        });
-        expect(data).toBe("hello-loopback");
-
-        started.child.kill("SIGTERM");
-        expect(child.killedWith).toBe("SIGTERM");
-      } finally {
-        backend.close();
-      }
     });
   });
 

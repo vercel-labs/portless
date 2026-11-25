@@ -1778,21 +1778,16 @@ async function runApp(
     }
   }
   const netbirdDisabled = isDisabledEnv(process.env.PORTLESS_NETBIRD);
-  const rawNetbirdPassword = process.env.PORTLESS_NETBIRD_PASSWORD;
-  const rawNetbirdPin = process.env.PORTLESS_NETBIRD_PIN;
-  const rawNetbirdGroups = process.env.PORTLESS_NETBIRD_GROUPS;
-  const netbirdPassword =
-    !netbirdDisabled && rawNetbirdPassword !== undefined
-      ? parseNonEmptyCredential("PORTLESS_NETBIRD_PASSWORD", rawNetbirdPassword, false)
-      : undefined;
-  const netbirdPin =
-    !netbirdDisabled && rawNetbirdPin !== undefined
-      ? parseNonEmptyCredential("PORTLESS_NETBIRD_PIN", rawNetbirdPin, false)
-      : undefined;
-  const netbirdGroups =
-    !netbirdDisabled && rawNetbirdGroups !== undefined
-      ? parseNetbirdGroups("PORTLESS_NETBIRD_GROUPS", rawNetbirdGroups, false)
-      : undefined;
+  const parseNetbirdEnv = <T>(
+    env: string,
+    parse: (name: string, raw: string, isFlag: boolean) => T
+  ): T | undefined => {
+    const raw = process.env[env];
+    return !netbirdDisabled && raw !== undefined ? parse(env, raw, false) : undefined;
+  };
+  const netbirdPassword = parseNetbirdEnv("PORTLESS_NETBIRD_PASSWORD", parseNonEmptyCredential);
+  const netbirdPin = parseNetbirdEnv("PORTLESS_NETBIRD_PIN", parseNonEmptyCredential);
+  const netbirdGroups = parseNetbirdEnv("PORTLESS_NETBIRD_GROUPS", parseNetbirdGroups);
   const tunnels = PROCESS_TUNNELS.filter(
     (t) =>
       isEnabledEnv(process.env[t.env]) ||
@@ -2024,7 +2019,7 @@ async function runApp(
         claimShare: (record) => store.claimTailscaleShare(hostname, record),
         releaseShare: () => {
           try {
-            store.updateRoute(hostname, { tailscaleShare: null });
+            store.updateRoute(hostname, { tailscaleShare: null, tailscaleSharePending: null });
           } catch {
             return;
           }
@@ -2062,7 +2057,11 @@ async function runApp(
         console.error(chalk.gray("  (accessible from your tailnet)\n"));
       }
       try {
-        store.updateRoute(hostname, { tailscaleUrl, tailscaleShare: shared.record });
+        store.updateRoute(hostname, {
+          tailscaleUrl,
+          tailscaleShare: shared.record,
+          tailscaleSharePending: null,
+        });
       } catch {
         console.warn(
           colors.yellow(`Warning: Could not persist Tailscale metadata for ${hostname}.`)
@@ -3271,6 +3270,13 @@ async function handlePrune(args: string[]): Promise<void> {
     const removal = store.removeStaleRouteWithShare(route.hostname, route.pid, (rec) =>
       unshare(rec, { ignoreMissing: true })
     );
+    if (removal.pendingClaim) {
+      console.log(
+        `  ${route.hostname} :${route.port} - tailscale share replacement in progress; route kept`
+      );
+      skipped++;
+      continue;
+    }
     if (removal.error) {
       const shareLabel = tsRecord ? describeTailscaleShare(tsRecord) : "tailscale share";
       console.warn(

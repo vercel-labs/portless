@@ -1,20 +1,17 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-
 const TAILSCALE_BINARY = "tailscale";
 const TAILSCALE_COMMAND_TIMEOUT_MS = 30_000;
 const FUNNEL_PORTS = [443, 8443, 10000];
 const PREFERRED_SERVE_PORTS = [443, 8443, 8444, 8445, 8446, 8447, 8448, 8449, 8450];
 const PREFERRED_HTTP_SERVE_PORTS = [80, 8080, 8081, 8082, 8083, 8084, 8085, 8086, 8087];
-
 interface TailscaleCommandResult {
   status: number | null;
   stdout: string;
   stderr: string;
   error?: Error;
 }
-
 export type TailscaleCommandRunner = (args: string[]) => TailscaleCommandResult;
 export type TailscaleShareKind = "serve" | "funnel" | "service";
 export type TailscaleShareRequest =
@@ -26,7 +23,6 @@ export type TailscaleShareRecord =
   | { kind: "tcp"; port: number }
   | { kind: "funnel"; port: number }
   | { kind: "service"; serviceId: string; serviceName: string };
-
 export interface TailscaleReady {
   readonly request: TailscaleShareRequest;
   readonly transport: "https" | "tcp" | "funnel" | "service";
@@ -35,11 +31,9 @@ export interface TailscaleReady {
   readonly serviceId?: string;
   readonly serviceName?: string;
 }
-
 export interface EnsureTailscaleReadyOptions {
   runner?: TailscaleCommandRunner;
 }
-
 export interface ShareTailscaleOptions {
   localPort: number;
   kind: TailscaleShareKind;
@@ -50,13 +44,11 @@ export interface ShareTailscaleOptions {
   releaseShare?: () => void;
   runner?: TailscaleCommandRunner;
 }
-
 export interface TailscaleShareResult {
   url: string;
   record: TailscaleShareRecord;
   pendingApproval?: boolean;
 }
-
 interface TailscaleStatusJson {
   Self?: {
     Capabilities?: string[];
@@ -72,14 +64,12 @@ interface TailscaleStatusJson {
     MagicDNSEnabled?: boolean;
   };
 }
-
 interface ServeStatusJson {
   Web?: Record<string, unknown>;
   TCP?: Record<string, unknown>;
   Services?: Record<string, { Web?: Record<string, unknown>; TCP?: Record<string, unknown> }>;
   Foreground?: Record<string, ServeStatusJson>;
 }
-
 function runTailscaleCommand(command: string, args: string[]): TailscaleCommandResult {
   const result = spawnSync(command, args, {
     encoding: "utf-8",
@@ -94,7 +84,6 @@ function runTailscaleCommand(command: string, args: string[]): TailscaleCommandR
     ...(result.error ? { error: result.error } : {}),
   };
 }
-
 /** Resolve an existing Windows `.cmd` shim on PATH. */
 export function findWindowsCmdShim(
   name: string,
@@ -112,31 +101,24 @@ export function findWindowsCmdShim(
   }
   return null;
 }
-
 function defaultRunner(args: string[]): TailscaleCommandResult {
   const result = runTailscaleCommand(TAILSCALE_BINARY, args);
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  if (process.platform !== "win32" || (code !== "ENOENT" && code !== "EINVAL")) {
-    return result;
-  }
+  if (process.platform !== "win32" || (code !== "ENOENT" && code !== "EINVAL")) return result;
   const shim = findWindowsCmdShim(TAILSCALE_BINARY);
   if (!shim) return result;
   return runTailscaleCommand(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", shim, ...args]);
 }
-
 function normalizeSpace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
-
 function throwCommandError(error: Error, action: string): never {
-  if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT")
     throw new Error(
       "Tailscale CLI not found. Install Tailscale (https://tailscale.com/download) and ensure `tailscale` is on PATH."
     );
-  }
   throw new Error(`Failed to ${action}: ${error.message}`);
 }
-
 function runOrThrow(
   args: string[],
   action: string,
@@ -150,16 +132,12 @@ function runOrThrow(
   }
   return result;
 }
-
 function trimDot(value: string): string {
   return value.replace(/\.+$/, "");
 }
-
 function statusToDnsName(status: TailscaleStatusJson): string {
   const dnsName = status.Self?.DNSName;
-  if (typeof dnsName === "string" && trimDot(dnsName).length > 0) {
-    return trimDot(dnsName);
-  }
+  if (typeof dnsName === "string" && trimDot(dnsName).length > 0) return trimDot(dnsName);
   const host = status.Self?.HostName;
   const suffix = status.CurrentTailnet?.MagicDNSSuffix;
   if (
@@ -174,7 +152,6 @@ function statusToDnsName(status: TailscaleStatusJson): string {
     "Could not determine Tailscale node DNS name from `tailscale status --json`. Is Tailscale connected?"
   );
 }
-
 function hasCapability(status: TailscaleStatusJson, capability: string): boolean {
   const matches = (value: string): boolean => {
     const normalized = value.toLowerCase();
@@ -186,14 +163,12 @@ function hasCapability(status: TailscaleStatusJson, capability: string): boolean
     Boolean(status.Self?.CapMap && Object.keys(status.Self.CapMap).some(matches))
   );
 }
-
 function throwHttpsNotEnabled(): never {
   throw new Error(
     "Tailscale HTTPS is not enabled on your tailnet. " +
       "Enable HTTPS certificates in Tailscale DNS settings, then run portless again."
   );
 }
-
 function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
   const nodeId = status.Self?.ID;
   const enableUrl =
@@ -206,18 +181,15 @@ function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
       enableUrl
   );
 }
-
 /** Normalize and validate a Tailscale service name. */
 export function normalizeServiceName(raw: string): string {
   const name = raw.trim().replace(/^svc:/i, "").toLowerCase();
-  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name)) {
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name))
     throw new Error(
       `Invalid Tailscale service name "${raw}". Use 1-63 lowercase letters, numbers, and hyphens, starting and ending with a letter or number.`
     );
-  }
   return name;
 }
-
 export function inferServiceName(raw: string): string {
   const name = raw
     .toLowerCase()
@@ -227,18 +199,14 @@ export function inferServiceName(raw: string): string {
     .replace(/-+$/, "");
   return normalizeServiceName(name || raw);
 }
-
 function validatePort(port: number, kind: TailscaleShareKind): void {
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
     throw new Error(`Invalid Tailscale port "${port}". Must be a port number between 1 and 65535.`);
-  }
-  if (kind === "funnel" && !FUNNEL_PORTS.includes(port)) {
+  if (kind === "funnel" && !FUNNEL_PORTS.includes(port))
     throw new Error(
       `Tailscale Funnel cannot use port ${port}. Funnel supports ports 443, 8443, and 10000.`
     );
-  }
 }
-
 /** Verify Tailscale readiness and choose the transport for a share. */
 export function ensureTailscaleReady(
   request: TailscaleShareRequest = { kind: "serve" },
@@ -251,7 +219,6 @@ export function ensureTailscaleReady(
   if (normalizedRequest.kind !== "service" && normalizedRequest.preferredPort !== undefined) {
     validatePort(normalizedRequest.preferredPort, normalizedRequest.kind);
   }
-
   const runner = options.runner ?? defaultRunner;
   runOrThrow(["version"], "check tailscale version", runner);
   const statusResult = runOrThrow(["status", "--json"], "read tailscale status", runner);
@@ -261,22 +228,19 @@ export function ensureTailscaleReady(
   } catch {
     throw new Error("Failed to parse `tailscale status --json` output.");
   }
-
   if (normalizedRequest.kind === "serve" && status.CurrentTailnet?.MagicDNSEnabled === false) {
     const ips = status.Self?.TailscaleIPs;
     const validIps = Array.isArray(ips)
       ? ips.filter((ip) => typeof ip === "string" && ip.trim())
       : [];
     const ip = validIps.find((value) => value.includes(".")) ?? validIps[0];
-    if (!ip) {
+    if (!ip)
       throw new Error(
         "Could not determine this node's Tailscale IP from `tailscale status --json`. Is Tailscale connected?"
       );
-    }
     const host = ip.includes(".") || (ip.startsWith("[") && ip.endsWith("]")) ? ip : `[${ip}]`;
     return { request: normalizedRequest, transport: "tcp", host, baseUrl: `http://${host}` };
   }
-
   if (status.CurrentTailnet?.MagicDNSEnabled === false) {
     const feature = normalizedRequest.kind === "funnel" ? "Funnel" : "Services";
     throw new Error(
@@ -290,11 +254,10 @@ export function ensureTailscaleReady(
     return { request: normalizedRequest, transport: "funnel", host, baseUrl: `https://${host}` };
   }
   if (normalizedRequest.kind === "service") {
-    if (!Array.isArray(status.Self?.Tags) || status.Self.Tags.length === 0) {
+    if (!Array.isArray(status.Self?.Tags) || status.Self.Tags.length === 0)
       throw new Error(
         "Tailscale Services require this device to use a tag-based identity. Re-authenticate with --advertise-tags=tag:<name>, then run portless again."
       );
-    }
     let suffix = trimDot(status.CurrentTailnet?.MagicDNSSuffix?.trim() ?? "");
     if (!suffix) {
       try {
@@ -305,11 +268,10 @@ export function ensureTailscaleReady(
         suffix = "";
       }
     }
-    if (!suffix) {
+    if (!suffix)
       throw new Error(
         "Could not determine Tailscale MagicDNS suffix from `tailscale status --json`. Is MagicDNS enabled?"
       );
-    }
     const serviceName = normalizedRequest.serviceName;
     const serviceId = `svc:${serviceName}`;
     const host = `${serviceName}.${suffix}`;
@@ -325,47 +287,38 @@ export function ensureTailscaleReady(
   const host = statusToDnsName(status);
   return { request: normalizedRequest, transport: "https", host, baseUrl: `https://${host}` };
 }
-
-function getUsedServePorts(runner: TailscaleCommandRunner): Set<number> {
+function readServeStatus(runner: TailscaleCommandRunner): {
+  ports: Set<number>;
+  services: Set<string>;
+} {
+  const ports = new Set<number>();
+  const services = new Set<string>();
   const result = runner(["serve", "status", "--json"]);
-  if (result.error || result.status !== 0) return new Set();
+  if (result.error || result.status !== 0) return { ports, services };
   try {
     const config = JSON.parse(result.stdout) as ServeStatusJson;
-    const ports = new Set<number>();
     for (const session of [config, ...Object.values(config.Foreground ?? {})]) {
       if (!session || typeof session !== "object") continue;
       for (const key of [...Object.keys(session.Web ?? {}), ...Object.keys(session.TCP ?? {})]) {
         const match = key.match(/:(\d+)$/) ?? key.match(/^(\d+)$/);
         if (match) ports.add(Number(match[1]));
       }
-    }
-    return ports;
-  } catch {
-    return new Set();
-  }
-}
-
-function getUsedServeServices(runner: TailscaleCommandRunner): Set<string> {
-  const result = runner(["serve", "status", "--json"]);
-  if (result.error || result.status !== 0) return new Set();
-  try {
-    const config = JSON.parse(result.stdout) as ServeStatusJson;
-    const services = new Set<string>();
-    for (const session of [config, ...Object.values(config.Foreground ?? {})]) {
-      if (!session || typeof session !== "object" || !session.Services) continue;
-      for (const [serviceId, entry] of Object.entries(session.Services)) {
-        if (!entry || typeof entry !== "object") continue;
-        const hasHandlers =
-          Object.keys(entry.Web ?? {}).length > 0 || Object.keys(entry.TCP ?? {}).length > 0;
-        if (hasHandlers) services.add(serviceId.toLowerCase());
+      for (const [id, entry] of Object.entries(session.Services ?? {})) {
+        if (
+          entry &&
+          typeof entry === "object" &&
+          (Object.keys(entry.Web ?? {}).length > 0 || Object.keys(entry.TCP ?? {}).length > 0)
+        ) {
+          services.add(id.toLowerCase());
+        }
       }
     }
-    return services;
   } catch {
-    return new Set();
+    ports.clear();
+    services.clear();
   }
+  return { ports, services };
 }
-
 function findAvailablePort(used: Set<number>, transport: "https" | "tcp" | "funnel"): number {
   const pool =
     transport === "funnel"
@@ -373,26 +326,17 @@ function findAvailablePort(used: Set<number>, transport: "https" | "tcp" | "funn
       : transport === "tcp"
         ? PREFERRED_HTTP_SERVE_PORTS
         : PREFERRED_SERVE_PORTS;
-  for (const port of pool) {
-    if (!used.has(port)) return port;
-  }
-  if (transport === "funnel") {
+  for (const port of pool) if (!used.has(port)) return port;
+  if (transport === "funnel")
     throw new Error(
       "All Tailscale Funnel ports are in use (443, 8443, 10000). Stop an existing funnel to free a port."
     );
-  }
   let port = pool[pool.length - 1] + 1;
   while (port <= 65535 && used.has(port)) port++;
   if (port > 65535) throw new Error("No Tailscale ports are available.");
   return port;
 }
-
-function isConflictError(text: string): boolean {
-  return /already in use|already exists|port conflict|address already/i.test(text);
-}
-
 class TailscalePortConflictError extends Error {}
-
 function registerPort(
   transport: "https" | "tcp" | "funnel",
   port: number,
@@ -404,14 +348,10 @@ function registerPort(
   const target = `${transport === "tcp" ? "tcp" : "http"}://127.0.0.1:${localPort}`;
   const result = runner([mode, "--bg", "--yes", `--${protocol}=${port}`, target]);
   if (result.error) {
-    if ((result.error as NodeJS.ErrnoException).code === "ENOENT") {
-      throwCommandError(result.error, `register tailscale ${mode}`);
-    }
-    if (transport === "funnel" && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT") {
+    if (transport === "funnel" && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
       throw new Error(
         "Tailscale Funnel registration timed out. Make sure Funnel is enabled on your tailnet, then run portless again."
       );
-    }
     throwCommandError(result.error, `register tailscale ${mode}`);
   }
   if (result.status !== 0) {
@@ -423,16 +363,14 @@ function registerPort(
           (details ? ` Tailscale said: ${details}` : "")
       );
     }
-    if (isConflictError(output)) {
+    if (/already in use|already exists|port conflict|address already/i.test(output))
       throw new TailscalePortConflictError(`Tailscale port ${port} is already in use.`);
-    }
     const details = normalizeSpace(result.stderr || result.stdout);
     throw new Error(
       `Failed to register tailscale ${mode} on port ${port}: ${details || "unknown tailscale error"}`
     );
   }
 }
-
 /** Register a Tailscale share and return its URL and cleanup record. */
 export function share(options: ShareTailscaleOptions): TailscaleShareResult {
   const runner = options.runner ?? defaultRunner;
@@ -448,10 +386,8 @@ export function share(options: ShareTailscaleOptions): TailscaleShareResult {
         }
       : { kind: options.kind, preferredPort: options.preferredPort };
   const ready = options.ready ?? ensureTailscaleReady(request, { runner });
-  if (ready.request.kind !== options.kind) {
+  if (ready.request.kind !== options.kind)
     throw new Error("Tailscale readiness does not match the requested share kind.");
-  }
-
   switch (ready.transport) {
     case "service": {
       const record: TailscaleShareRecord = {
@@ -459,15 +395,13 @@ export function share(options: ShareTailscaleOptions): TailscaleShareResult {
         serviceId: ready.serviceId!,
         serviceName: ready.serviceName!,
       };
-      if (getUsedServeServices(runner).has(record.serviceId.toLowerCase())) {
+      if (readServeStatus(runner).services.has(record.serviceId.toLowerCase()))
         throw new Error(
           `Tailscale service ${record.serviceId} is already in use. Stop the existing service serve or choose a different service name.`
         );
-      }
       const conflict = options.claimShare?.(record);
-      if (conflict) {
+      if (conflict)
         throw new Error(`Tailscale service ${record.serviceId} is already in use by ${conflict}.`);
-      }
       try {
         const result = runner([
           "serve",
@@ -482,11 +416,10 @@ export function share(options: ShareTailscaleOptions): TailscaleShareResult {
         if (result.error)
           throwCommandError(result.error, `register tailscale service ${record.serviceId}`);
         if (result.status !== 0) {
-          if (pendingApproval) {
+          if (pendingApproval)
             throw new Error(
               `Tailscale service ${record.serviceId} requires admin approval in the Tailscale admin console.`
             );
-          }
           const details = normalizeSpace(result.stderr || result.stdout);
           throw new Error(
             `Failed to register tailscale service ${record.serviceId}: ${details || "unknown tailscale error"}`
@@ -510,12 +443,11 @@ export function share(options: ShareTailscaleOptions): TailscaleShareResult {
       let lastConflict: Error | undefined;
       const maxAttempts = options.preferredPort === undefined ? 3 : 1;
       for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const used = getUsedServePorts(runner);
-        if (options.preferredPort !== undefined && used.has(options.preferredPort)) {
+        const used = readServeStatus(runner).ports;
+        if (options.preferredPort !== undefined && used.has(options.preferredPort))
           throw new Error(
             `Tailscale port ${options.preferredPort} is already in use. Stop the existing serve or choose a different port.`
           );
-        }
         for (const port of tried) used.add(port);
         const port = options.preferredPort ?? findAvailablePort(used, transport);
         const record: Extract<TailscaleShareRecord, { port: number }> = { kind: transport, port };
@@ -546,7 +478,6 @@ export function share(options: ShareTailscaleOptions): TailscaleShareResult {
     }
   }
 }
-
 /** Remove a Tailscale share described by a cleanup record. */
 export function unshare(
   record: TailscaleShareRecord,
@@ -575,14 +506,12 @@ export function unshare(
     if (
       options.ignoreMissing &&
       /not found|no serve config|nothing to remove|does not exist/i.test(output)
-    ) {
+    )
       return;
-    }
     const details = normalizeSpace(result.stderr || result.stdout);
     throw new Error(`Failed to remove ${description}: ${details || "unknown tailscale error"}`);
   }
 }
-
 /** Read a Tailscale share record, including legacy route metadata. */
 export function tailscaleShareFromRoute(route: {
   tailscaleShare?: TailscaleShareRecord;
@@ -590,17 +519,14 @@ export function tailscaleShareFromRoute(route: {
   tailscaleFunnel?: boolean;
 }): TailscaleShareRecord | undefined {
   if (route.tailscaleShare) return route.tailscaleShare;
-  if (route.tailscaleHttpsPort !== undefined) {
+  if (route.tailscaleHttpsPort !== undefined)
     return { kind: route.tailscaleFunnel ? "funnel" : "https", port: route.tailscaleHttpsPort };
-  }
   return undefined;
 }
-
 /** Return a stable key for a Tailscale share. */
 export function tailscaleShareKey(record: TailscaleShareRecord): string {
   return record.kind === "service" ? `service:${record.serviceId}` : `port:${record.port}`;
 }
-
 /** Describe a Tailscale share for display. */
 export function describeTailscaleShare(record: TailscaleShareRecord): string {
   switch (record.kind) {
