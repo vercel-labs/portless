@@ -496,7 +496,13 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         freshConnection: isReplay || undefined,
         onReject: (reason) => {
           if (res.destroyed || res.headersSent) {
-            if (!res.destroyed) res.destroy();
+            if (!res.destroyed) {
+              res.destroy(
+                Object.assign(new Error(`Upstream request rejected: ${reason}`), {
+                  code: reason === "queue_full" ? "ECONNABORTED" : "ETIMEDOUT",
+                })
+              );
+            }
             return;
           }
           const requestHost = getRequestHost(req);
@@ -593,6 +599,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
                 `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
               )
             );
+          } else if (!res.writableFinished && !res.destroyed) {
+            res.destroy(err);
           }
         });
 

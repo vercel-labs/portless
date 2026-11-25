@@ -94,10 +94,36 @@ function removeWaiter(admission: BackendAdmission, waiting: WaitingDispatch): vo
   waiting.res.removeListener("close", waiting.cancelWait);
 }
 
+/** Destroy a downstream response with an error so HTTP/2 resets the stream instead of ending it cleanly. */
+function abortResponse(res: http.ServerResponse, error: Error): void {
+  if (res.destroyed) return;
+  res.destroy(error);
+}
+
+function rejectError(reason: UpstreamRejectReason): NodeJS.ErrnoException {
+  if (reason === "gateway_timeout") {
+    return Object.assign(new Error("Gateway Timeout: upstream did not respond in time"), {
+      code: "ETIMEDOUT",
+    });
+  }
+  if (reason === "queue_full") {
+    return Object.assign(new Error("Service Unavailable: upstream request queue is full"), {
+      code: "ECONNABORTED",
+    });
+  }
+  return Object.assign(new Error("Service Unavailable: upstream request queue timed out"), {
+    code: "ETIMEDOUT",
+  });
+}
+
+function closingError(): NodeJS.ErrnoException {
+  return Object.assign(new Error("Upstream pool is closing"), { code: "ABORT_ERR" });
+}
+
 function sendFallbackReject(res: http.ServerResponse, reason: UpstreamRejectReason): void {
   if (res.destroyed) return;
   if (res.headersSent) {
-    res.destroy();
+    abortResponse(res, rejectError(reason));
     return;
   }
   if (reason === "gateway_timeout") {
@@ -210,7 +236,7 @@ export class UpstreamPool {
       const item = admission.waiting[i];
       if (item.pool.closing) {
         removeWaiter(admission, item);
-        item.res.destroy();
+        abortResponse(item.res, closingError());
         continue;
       }
       if (
@@ -337,7 +363,7 @@ export class UpstreamPool {
   ): void {
     if (res.destroyed) return;
     if (this.closing) {
-      res.destroy();
+      abortResponse(res, closingError());
       return;
     }
     const admission = getAdmission(route.port);
@@ -351,7 +377,7 @@ export class UpstreamPool {
     const start = () => {
       if (res.destroyed) return;
       if (this.closing) {
-        res.destroy();
+        abortResponse(res, closingError());
         return;
       }
       let slotPhase: "active" | "longLived" | "released" = "active";
@@ -401,7 +427,10 @@ export class UpstreamPool {
         bodyIdleTimer = setTimeout(() => {
           bodyIdleTimer = undefined;
           proxyReq.destroy();
-          if (!res.destroyed) res.destroy();
+          abortResponse(
+            res,
+            Object.assign(new Error("Upstream response body timed out"), { code: "ETIMEDOUT" })
+          );
           release();
         }, UPSTREAM_BODY_IDLE_TIMEOUT_MS);
       };
@@ -414,7 +443,10 @@ export class UpstreamPool {
         stallTimer = setTimeout(() => {
           stallTimer = undefined;
           proxyReq.destroy();
-          if (!res.destroyed) res.destroy();
+          abortResponse(
+            res,
+            Object.assign(new Error("Downstream response stalled"), { code: "ETIMEDOUT" })
+          );
           release();
         }, RESPONSE_STALL_TIMEOUT_MS);
       };
@@ -583,7 +615,7 @@ export class UpstreamPool {
       for (const item of [...admission.waiting]) {
         if (item.pool !== this) continue;
         removeWaiter(admission, item);
-        item.res.destroy();
+        abortResponse(item.res, closingError());
       }
       pruneAdmission(admission);
     }

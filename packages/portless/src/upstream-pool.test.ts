@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as http from "node:http";
+import * as http2 from "node:http2";
 import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -86,9 +87,13 @@ class FakeServerResponse extends Writable {
   statusCode = 0;
   headers: http.OutgoingHttpHeaders = {};
   body = "";
+  destroyedError: Error | undefined;
 
   constructor(remoteAddress: string, viaSession = false) {
     super();
+    this.on("error", (err) => {
+      this.destroyedError = err;
+    });
     fakeResponses.add(this);
     this.once("close", () => fakeResponses.delete(this));
     if (viaSession) this.stream = { session: { socket: { remoteAddress } } };
@@ -859,5 +864,150 @@ describe("UpstreamPool", () => {
     expect(received).toBe(48);
     for (const res of held) res.end("ok");
     expect(await initial).toEqual(Array(48).fill({ status: 200, body: "ok" }));
+  }, 30_000);
+
+  it("resets HTTP/2 streams with an error on stalled readers, body-idle timeouts, and shutdown of queued requests", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-h2-abort-"));
+    tempDirs.push(dir);
+    const certs = ensureCerts(dir);
+    const tls = {
+      cert: fs.readFileSync(certs.certPath),
+      key: fs.readFileSync(certs.keyPath),
+      ca: fs.readFileSync(certs.caPath),
+    };
+    const held: http.ServerResponse[] = [];
+    let stalledBackpressure = false;
+    let bodyIdleHeadersSent = false;
+    const backend = http.createServer((req, res) => {
+      if (req.url === "/stalled") {
+        const size = 64 * 1024 * 1024;
+        let sent = 0;
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": String(size),
+        });
+        const chunk = Buffer.alloc(64 * 1024, "a");
+        const writeMore = () => {
+          while (sent < size) {
+            const next = Math.min(chunk.length, size - sent);
+            if (!res.write(chunk.subarray(0, next))) {
+              stalledBackpressure = true;
+              res.once("drain", writeMore);
+              return;
+            }
+            sent += next;
+          }
+        };
+        writeMore();
+        return;
+      }
+      if (req.url === "/body-idle") {
+        res.writeHead(200, {
+          "content-type": "application/octet-stream",
+          "content-length": "1048576",
+        });
+        res.write("partial", () => {
+          bodyIdleHeadersSent = true;
+        });
+        return;
+      }
+      held.push(res);
+    });
+    const backendPort = await listen(backend);
+    const server = createProxyServer({
+      getRoutes: () => [{ hostname: "app.localhost", port: backendPort }],
+      proxyPort: 1355,
+      onError: () => {},
+      tls,
+    });
+    const proxyPort = await listen(server);
+    const client = http2.connect(`https://127.0.0.1:${proxyPort}`, {
+      ca: tls.ca,
+      servername: "app.localhost",
+      rejectUnauthorized: false,
+    });
+    client.on("error", () => {});
+    try {
+      const watchStream = (stream: http2.ClientHttp2Stream) => {
+        let ended = false;
+        let errorCode: string | undefined;
+        let bytes = 0;
+        const closed = new Promise<void>((resolve) => {
+          stream.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+          });
+          stream.once("end", () => {
+            ended = true;
+          });
+          stream.once("error", (err: NodeJS.ErrnoException) => {
+            errorCode = err.code;
+          });
+          stream.once("close", resolve);
+        });
+        return {
+          closed,
+          result: () => ({ ended, errorCode, rstCode: stream.rstCode, bytes }),
+        };
+      };
+
+      const stalledStream = client.request({
+        ":path": "/stalled",
+        ":authority": "app.localhost",
+      });
+      const stalledWatcher = watchStream(stalledStream);
+      stalledStream.pause();
+      stalledStream.end();
+
+      const bodyIdleStream = client.request({
+        ":path": "/body-idle",
+        ":authority": "app.localhost",
+      });
+      const bodyIdleWatcher = watchStream(bodyIdleStream);
+      bodyIdleStream.end();
+
+      await waitFor(() => stalledBackpressure && bodyIdleHeadersSent);
+
+      await vi.advanceTimersByTimeAsync(30_001);
+      await stalledWatcher.closed;
+      expect(stalledWatcher.result().ended).toBe(false);
+      expect(stalledWatcher.result().errorCode).toBe("ERR_HTTP2_STREAM_ERROR");
+      expect(stalledWatcher.result().rstCode).toBe(http2.constants.NGHTTP2_INTERNAL_ERROR);
+
+      await vi.advanceTimersByTimeAsync(90_001);
+      await bodyIdleWatcher.closed;
+      expect(bodyIdleWatcher.result().ended).toBe(false);
+      expect(bodyIdleWatcher.result().errorCode).toBe("ERR_HTTP2_STREAM_ERROR");
+      expect(bodyIdleWatcher.result().rstCode).toBe(http2.constants.NGHTTP2_INTERNAL_ERROR);
+
+      const activeStreams = Array.from({ length: 48 }, (_, index) => {
+        const s = client.request({
+          ":path": `/hold/${index}`,
+          ":authority": "app.localhost",
+        });
+        s.on("error", () => {});
+        s.end();
+        return s;
+      });
+      await waitFor(() => held.length === 48);
+
+      const queuedStream = client.request({
+        ":path": "/queued",
+        ":authority": "app.localhost",
+      });
+      const queuedWatcher = watchStream(queuedStream);
+      queuedStream.end();
+      for (let i = 0; i < 20; i++) await settle();
+
+      server.close();
+      await queuedWatcher.closed;
+      expect(queuedWatcher.result().ended).toBe(false);
+      expect(queuedWatcher.result().errorCode).toBe("ERR_HTTP2_STREAM_ERROR");
+      expect(queuedWatcher.result().rstCode).toBe(http2.constants.NGHTTP2_INTERNAL_ERROR);
+      for (const s of activeStreams) s.destroy();
+    } finally {
+      for (const res of held) res.destroy();
+      client.destroy();
+    }
   }, 30_000);
 });
