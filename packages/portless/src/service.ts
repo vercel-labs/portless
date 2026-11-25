@@ -497,6 +497,7 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
     env.HOME = ctx.user.home;
     if (ctx.user.uid) env.SUDO_UID = ctx.user.uid;
     if (ctx.user.gid) env.SUDO_GID = ctx.user.gid;
+    if (ctx.user.username && ctx.user.username !== "root") env.SUDO_USER = ctx.user.username;
   }
 
   return env;

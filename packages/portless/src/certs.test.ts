@@ -961,6 +961,40 @@ describe("Linux CA trust", () => {
       expect(fs.existsSync(path.join(nssdb, ".stub-nss-store.pem"))).toBe(false);
     }
   );
+
+  it.skipIf(process.platform !== "linux")(
+    "refuses to execute certutil as root without a non-root user identity",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      const nssdb = path.join(homeDir, ".pki", "nssdb");
+      fs.mkdirSync(nssdb, { recursive: true });
+      const { bundlePath, config } = createTrustConfig();
+      fs.writeFileSync(bundlePath, fs.readFileSync(caPath));
+      const sentinel = path.join(tmpDir, "certutil-ran-as-root");
+      writeCommand("certutil", `#!/bin/sh\ntouch "${sentinel}"\nexit 0\n`);
+      vi.stubEnv("PATH", fakePath());
+      vi.stubEnv("SUDO_USER", "");
+      vi.stubEnv("SUDO_UID", "");
+      vi.stubEnv("SUDO_GID", "");
+      const getuidSpy = vi.spyOn(process, "getuid").mockReturnValue(0);
+      try {
+        const linux = { activeConfig: config, osRelease: "ID=ubuntu\n", envPath: fakePath() };
+        const inspected = inspectTrust(tmpDir, { linux });
+        expect(inspected.stores).toEqual({ system: "trusted", browser: "unavailable" });
+        expect(inspected.hint).toMatch(/as root/);
+
+        const ensured = ensureTrust(tmpDir, { linux });
+        expect(ensured.state).toBe("unavailable");
+
+        const removed = untrustCA(tmpDir);
+        expect(removed.removed).toBe(false);
+        expect(removed.error).toMatch(/as root/);
+        expect(fs.existsSync(sentinel)).toBe(false);
+      } finally {
+        getuidSpy.mockRestore();
+      }
+    }
+  );
 });
 
 describe("untrustCA", () => {

@@ -884,6 +884,69 @@ function nssNickname(caCertPath: string): string {
   return `${CA_COMMON_NAME} ${certificate.fingerprint256.replace(/:/g, "")}`;
 }
 
+type LinuxNSSIdentity = {
+  uid: number;
+  gid: number;
+  user?: string;
+};
+
+function parsePositiveId(value: string | undefined): number | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const parsed = Number.parseInt(value, 10);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
+function lookupPasswdIdentity(username: string): LinuxNSSIdentity | null {
+  try {
+    const passwd = fs.readFileSync("/etc/passwd", "utf-8");
+    for (const line of passwd.split("\n")) {
+      const fields = line.split(":");
+      if (fields[0] !== username) continue;
+      const uid = parsePositiveId(fields[2]);
+      const gid = parsePositiveId(fields[3]);
+      if (uid !== null && gid !== null) {
+        return { uid, gid, user: username };
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+function resolveLinuxNSSIdentity(): LinuxNSSIdentity | null {
+  const sudoUid = parsePositiveId(process.env.SUDO_UID);
+  const sudoGid = parsePositiveId(process.env.SUDO_GID);
+  const sudoUser = process.env.SUDO_USER;
+  if (sudoUid !== null && sudoGid !== null) {
+    return {
+      uid: sudoUid,
+      gid: sudoGid,
+      ...(sudoUser && sudoUser !== "root" ? { user: sudoUser } : {}),
+    };
+  }
+  if (sudoUser && sudoUser !== "root") {
+    return lookupPasswdIdentity(sudoUser);
+  }
+  return null;
+}
+
+function resolveRootNSSDrop(database: string): LinuxNSSIdentity {
+  const identity = resolveLinuxNSSIdentity();
+  if (!identity) {
+    throw new Error(
+      `Refusing to access Chrome/Chromium NSS database (${database}) as root without a non-root user identity.`
+    );
+  }
+  const stat = fs.statSync(database);
+  if (stat.uid !== identity.uid) {
+    throw new Error(
+      `Refusing to access Chrome/Chromium NSS database (${database}) owned by UID ${stat.uid} as UID ${identity.uid}.`
+    );
+  }
+  return identity;
+}
+
 function nssCertutil(
   database: string,
   args: string[],
@@ -891,13 +954,22 @@ function nssCertutil(
   certutilPath = "certutil"
 ): string {
   const options = { encoding: "utf-8" as const, stdio: "pipe" as const, timeout: 15_000, input };
-  const sudoUser = process.env.SUDO_USER;
-  if (process.getuid?.() === 0 && sudoUser && sudoUser !== "root") {
-    return execFileSync(
-      "sudo",
-      ["-u", sudoUser, "--", certutilPath, "-d", `sql:${database}`, ...args],
-      options
-    );
+  if (process.getuid?.() === 0) {
+    const identity = resolveRootNSSDrop(database);
+    const sudoArgs = identity.user
+      ? ["-u", identity.user, "--", certutilPath, "-d", `sql:${database}`, ...args]
+      : [
+          "-u",
+          `#${identity.uid}`,
+          "-g",
+          `#${identity.gid}`,
+          "--",
+          certutilPath,
+          "-d",
+          `sql:${database}`,
+          ...args,
+        ];
+    return execFileSync("sudo", sudoArgs, options);
   }
   return execFileSync(certutilPath, ["-d", `sql:${database}`, ...args], options);
 }
@@ -919,6 +991,16 @@ function inspectLinuxNSSStore(
 ): { state: BrowserTrustStoreState; hint?: string } {
   const database = linuxNSSDatabase();
   if (!database) return { state: "not-applicable" };
+  if (process.getuid?.() === 0) {
+    try {
+      resolveRootNSSDrop(database);
+    } catch (error: unknown) {
+      return {
+        state: "unavailable",
+        hint: `${error instanceof Error ? error.message : String(error)} Run portless trust as your regular user.`,
+      };
+    }
+  }
   const certutilPath = resolveExecutable("certutil", envPath);
   if (!certutilPath) {
     return { state: "unavailable", hint: nssInstallHint(database) };
@@ -952,6 +1034,16 @@ function installLinuxNSSStore(
 ): { state: BrowserTrustStoreState; error?: string } {
   const database = linuxNSSDatabase();
   if (!database) return { state: "not-applicable" };
+  if (process.getuid?.() === 0) {
+    try {
+      resolveRootNSSDrop(database);
+    } catch (error: unknown) {
+      return {
+        state: "unavailable",
+        error: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
   const certutilPath = resolveExecutable("certutil", envPath);
   if (!certutilPath) {
     return { state: "unavailable", error: nssInstallHint(database) };

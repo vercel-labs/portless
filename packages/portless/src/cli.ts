@@ -4514,56 +4514,62 @@ async function handleProxy(args: string[]): Promise<void> {
         console.error(colors.green("Generated local CA certificate."));
       }
 
-      if (desiredUnprivileged) {
-        const trust = inspectTrust(stateDir);
-        if (trust.state !== "trusted") {
-          if (trust.stores.system !== "trusted") {
-            console.warn(colors.yellow("The portless CA is not in the system trust store."));
-            console.warn(
-              colors.yellow(
-                "Browsers will show certificate warnings. Trust it once (asks for admin rights):"
-              )
-            );
-            console.warn(colors.cyan("  portless trust"));
-            if (trust.hint) {
-              console.warn(colors.yellow(trust.hint));
+      if (!skipTrust) {
+        if (desiredUnprivileged) {
+          const trust = inspectTrust(stateDir);
+          if (trust.state !== "trusted") {
+            if (trust.stores.system !== "trusted") {
+              console.warn(colors.yellow("The portless CA is not in the system trust store."));
+              console.warn(
+                colors.yellow(
+                  "Browsers will show certificate warnings. Trust it once (asks for admin rights):"
+                )
+              );
+              console.warn(colors.cyan("  portless trust"));
+              if (trust.hint) {
+                console.warn(colors.yellow(trust.hint));
+              }
+            } else {
+              console.warn(
+                colors.yellow(
+                  trust.hint ??
+                    "Browser trust for the portless CA is incomplete. Run: portless trust"
+                )
+              );
             }
-          } else {
-            console.warn(
-              colors.yellow(
-                trust.hint ?? "Browser trust for the portless CA is incomplete. Run: portless trust"
-              )
-            );
           }
-        }
-      } else if (!skipTrust) {
-        const trustResult = ensureTrust(stateDir);
-        if (trustResult.state === "installed") {
-          if (
-            trustResult.stores.browser === "unavailable" ||
-            trustResult.stores.browser === "untrusted"
+        } else {
+          const trustResult = ensureTrust(stateDir);
+          if (trustResult.state === "installed") {
+            if (
+              trustResult.stores.browser === "unavailable" ||
+              trustResult.stores.browser === "untrusted"
+            ) {
+              console.error(colors.green("CA added to system trust store."));
+              if (trustResult.hint) {
+                console.warn(colors.yellow(trustResult.hint));
+              }
+            } else {
+              console.error(
+                colors.green("CA added to system trust store. Browsers will trust portless certs.")
+              );
+            }
+          } else if (
+            trustResult.state === "needs-elevation" ||
+            trustResult.state === "unavailable"
           ) {
-            console.error(colors.green("CA added to system trust store."));
+            console.warn(colors.yellow("Could not add CA to system trust store."));
+            if (trustResult.error) {
+              console.warn(colors.gray(trustResult.error));
+            }
             if (trustResult.hint) {
               console.warn(colors.yellow(trustResult.hint));
+            } else {
+              console.warn(
+                colors.yellow("Browsers will show certificate warnings. To fix this later, run:")
+              );
+              console.warn(colors.cyan("  portless trust"));
             }
-          } else {
-            console.error(
-              colors.green("CA added to system trust store. Browsers will trust portless certs.")
-            );
-          }
-        } else if (trustResult.state === "needs-elevation" || trustResult.state === "unavailable") {
-          console.warn(colors.yellow("Could not add CA to system trust store."));
-          if (trustResult.error) {
-            console.warn(colors.gray(trustResult.error));
-          }
-          if (trustResult.hint) {
-            console.warn(colors.yellow(trustResult.hint));
-          } else {
-            console.warn(
-              colors.yellow("Browsers will show certificate warnings. To fix this later, run:")
-            );
-            console.warn(colors.cyan("  portless trust"));
           }
         }
       }

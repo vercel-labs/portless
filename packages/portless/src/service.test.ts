@@ -146,6 +146,7 @@ describe("buildServiceSpec", () => {
       userHome: "/home/alice",
       uid: "1000",
       gid: "1000",
+      username: "alice",
     });
 
     expect(spec.platform).toBe("linux");
@@ -165,6 +166,7 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain("Description=Portless HTTPS proxy");
     expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
+    expect(spec.unit).toContain('Environment=SUDO_USER="alice"');
     expect(spec.unit).toContain(
       'ExecStart="/usr/bin/node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
