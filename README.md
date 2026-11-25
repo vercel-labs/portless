@@ -156,6 +156,14 @@ pnpm format
 
 [AGENTS.md](AGENTS.md) lists the files to update with each change and the release process.
 
+## Community tools
+
+These companion tools are maintained independently by community members, not by Vercel.
+
+- [portless-manager](https://github.com/SiyeolBaek/portless-manager): SwiftBar menu bar companion for macOS
+- [portless-studio](https://github.com/keven-bardales/portless-studio): standalone local dashboard for active routes
+- [PortlessBar](https://github.com/akshitkrnagpal/portlessbar): native macOS menu bar app for active routes, proxy controls, and nearby app discovery
+
 ## Documentation
 
 - [portless.sh](https://portless.sh): getting started, commands, HTTPS, and configuration

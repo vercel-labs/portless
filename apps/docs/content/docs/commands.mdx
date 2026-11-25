@@ -209,6 +209,16 @@ portless alias api 8080 --upstream https://api.internal # TLS, Host and SNI over
 portless alias --remove my-postgres                    # remove the alias
 ```
 
+### Windows troubleshooting
+
+On Windows, portless runs wrapped commands through `cmd.exe`. If your dev server ignores `PORT` or a wrapper script has shell-escaping issues, run `portless proxy start`, start the server on a fixed port, and map it with `portless alias <name> <port>`. The alias points to `127.0.0.1:<port>` and does not start the proxy.
+
+Alternatively, pass `PORT` explicitly through PowerShell:
+
+```powershell
+portless myapp powershell -NoProfile -Command "next dev -p $env:PORT"
+```
+
 ## Docker Compose
 
 ```bash
