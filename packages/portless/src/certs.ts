@@ -1756,6 +1756,18 @@ export function untrustCALinux(
     }
   }
 
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  const bundleTrustedBefore =
+    fileExists(caCertPath) && verifyLinuxTrustBundle(caCertPath, activeConfig);
+  if (bundleTrustedBefore && !refreshNeeded) {
+    try {
+      writeStateMarkerFile(pendingRefreshPath, "1\n");
+      refreshNeeded = true;
+    } catch (err: unknown) {
+      errors.push(err instanceof Error ? err.message : String(err));
+    }
+  }
+
   if (refreshNeeded) {
     try {
       runUpdate(activeConfig.updateCommand);
@@ -1764,12 +1776,13 @@ export function untrustCALinux(
     }
   }
 
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  const bundleStillTrusted =
+    fileExists(caCertPath) && verifyLinuxTrustBundle(caCertPath, activeConfig);
   const sourceStillInstalled = configs.some((config) =>
     linuxTrustSourceMatches(config, caCertPath)
   );
 
-  if (errors.length > 0 || isCATrustedLinux(stateDir, activeConfig) || sourceStillInstalled) {
+  if (errors.length > 0 || bundleStillTrusted || sourceStillInstalled) {
     return {
       removed: false,
       error:

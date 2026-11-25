@@ -1062,4 +1062,48 @@ describe("untrustCA", () => {
       expect(fs.readFileSync(pendingLink, "utf-8")).toBe("1\n");
     }
   );
+
+  it.skipIf(process.platform !== "linux")(
+    "reports failure when a no-op trust update leaves the CA trusted in the compiled bundle",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      const trustDir = path.join(tmpDir, "linux-trust");
+      const bundlePath = path.join(tmpDir, "ca-bundle.crt");
+      const installedCA = path.join(trustDir, "portless-ca.crt");
+      const config = {
+        certDir: trustDir,
+        updateCommand: "refresh-linux-trust",
+        bundlePaths: [bundlePath],
+      };
+      fs.mkdirSync(trustDir);
+      fs.copyFileSync(caPath, installedCA);
+      fs.copyFileSync(caPath, bundlePath);
+
+      const noopUpdate = vi.fn<(command: string) => void>();
+      const first = untrustCALinux(tmpDir, {
+        configs: [config],
+        activeConfig: config,
+        runUpdate: noopUpdate,
+      });
+
+      expect(first.removed).toBe(false);
+      expect(first.error).toContain("CA still trusted");
+      expect(fs.existsSync(installedCA)).toBe(false);
+      expect(isCATrustRefreshPending(tmpDir)).toBe(true);
+      expect(noopUpdate).toHaveBeenCalledTimes(1);
+
+      const realUpdate = vi.fn<(command: string) => void>(() => {
+        fs.writeFileSync(bundlePath, "");
+      });
+      const second = untrustCALinux(tmpDir, {
+        configs: [config],
+        activeConfig: config,
+        runUpdate: realUpdate,
+      });
+
+      expect(second).toEqual({ removed: true });
+      expect(isCATrustRefreshPending(tmpDir)).toBe(false);
+      expect(realUpdate).toHaveBeenCalledTimes(1);
+    }
+  );
 });
