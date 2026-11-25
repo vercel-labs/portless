@@ -5,6 +5,7 @@ import type { RouteInfo } from "./types.js";
 import { createLoopbackConnection } from "./utils.js";
 
 const MAX_PENDING_DIALS = 8;
+const MAX_REQUEST_SOCKETS = 48;
 const UPSTREAM_CONNECT_TIMEOUT_MS = 10_000;
 
 /** Options for dispatching an HTTP request through an upstream pool. */
@@ -15,19 +16,41 @@ export interface UpstreamDispatchOptions {
   freshConnection?: boolean;
 }
 
-type BackendState = "idle" | "dialing";
+type BackendState = "idle" | "dialing" | "atCapacity";
 type WaitingDispatch = {
   freshConnection: boolean;
   res: http.ServerResponse;
   cancelWait: () => void;
   start: () => void;
 };
-type BackendEntry = { key: string; dialing: number; waiting: WaitingDispatch[] };
-type DialRef = { cancel?: () => void };
+type BackendEntry = {
+  key: string;
+  activeRequests: number;
+  dialing: number;
+  longLived: number;
+  waiting: WaitingDispatch[];
+};
+type DialRef = { cancel?: () => void; onDialError: () => void };
 type UpstreamOptions = http.RequestOptions & {
   upstreamRoute: RouteInfo;
   upstreamDial: DialRef;
 };
+
+function isLongLivedResponse(res: http.IncomingMessage, method?: string): boolean {
+  const mediaType = res.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
+  if (
+    mediaType === "text/event-stream" ||
+    mediaType === "application/x-ndjson" ||
+    mediaType === "multipart/x-mixed-replace"
+  ) {
+    return true;
+  }
+  const status = res.statusCode ?? 0;
+  if (method === "HEAD" || (status >= 100 && status < 200) || status === 204 || status === 304) {
+    return false;
+  }
+  return res.headers["content-length"] === undefined;
+}
 
 /** Manages per-backend upstream pooling, dial pacing, fresh-connection replay, and shutdown. */
 export class UpstreamPool {
@@ -45,23 +68,29 @@ export class UpstreamPool {
     };
     this.keepAliveAgent.createConnection = (options, callback) => {
       const { upstreamRoute: route, upstreamDial: dialRef } = options as UpstreamOptions;
-      dialRef.cancel = this.dial(this.getBackend(route), route, false, callback!);
+      dialRef.cancel = this.dial(this.getBackend(route), route, false, callback!, dialRef.onDialError);
       return undefined;
     };
+    this.keepAliveAgent.on("free", (_socket, options) => {
+      const entry = this.backends.get(this.keepAliveAgent.getName(options));
+      if (entry) this.drain(entry);
+    });
   }
 
   private getBackend(route: RouteInfo): BackendEntry {
     const key = this.keepAliveAgent.getName({ port: route.port, upstreamRoute: route } as UpstreamOptions);
     let entry = this.backends.get(key);
     if (!entry) {
-      entry = { key, dialing: 0, waiting: [] };
+      entry = { key, activeRequests: 0, dialing: 0, longLived: 0, waiting: [] };
       this.backends.set(key, entry);
     }
     return entry;
   }
 
   private getBackendState(entry: BackendEntry): BackendState {
-    return entry.dialing >= MAX_PENDING_DIALS ? "dialing" : "idle";
+    if (entry.activeRequests >= MAX_REQUEST_SOCKETS) return "atCapacity";
+    if (entry.dialing >= MAX_PENDING_DIALS) return "dialing";
+    return "idle";
   }
 
   private hasIdleSocket(key: string): boolean {
@@ -70,6 +99,8 @@ export class UpstreamPool {
 
   private canDispatch(entry: BackendEntry, freshConnection: boolean): boolean {
     switch (this.getBackendState(entry)) {
+      case "atCapacity":
+        return false;
       case "dialing":
         return !freshConnection && this.hasIdleSocket(entry.key);
       case "idle":
@@ -156,11 +187,13 @@ export class UpstreamPool {
     entry: BackendEntry,
     route: RouteInfo,
     freshConnection: boolean,
-    callback: (error: NodeJS.ErrnoException | null, socket: net.Socket) => void
+    callback: (error: NodeJS.ErrnoException | null, socket: net.Socket) => void,
+    onDialError: () => void
   ): () => void {
     entry.dialing++;
     return this.connect(route, (error, socket) => {
       entry.dialing--;
+      if (error) onDialError();
       if (!error && freshConnection) {
         this.freshSockets.add(socket);
         socket.once("close", () => this.freshSockets.delete(socket));
@@ -171,7 +204,7 @@ export class UpstreamPool {
     });
   }
 
-  /** Dispatch an HTTP request to `route`, queueing when dial slots are saturated. */
+  /** Dispatch an HTTP request to `route`, respecting request capacity and dial pacing. */
   dispatch(
     route: RouteInfo,
     options: UpstreamDispatchOptions,
@@ -191,39 +224,70 @@ export class UpstreamPool {
         res.destroy();
         return;
       }
-      const dialRef: DialRef = {};
+      let slotPhase: "active" | "longLived" | "released" = "active";
+      entry.activeRequests++;
+      let proxyReq: http.ClientRequest;
+      const onClientClose = () => {
+        dialRef.cancel?.();
+        if (!proxyReq.destroyed) proxyReq.destroy();
+      };
+      const release = () => {
+        if (slotPhase === "released") return;
+        const prev = slotPhase;
+        slotPhase = "released";
+        if (prev === "active") entry.activeRequests--;
+        else entry.longLived--;
+        res.removeListener("close", onClientClose);
+        if (this.closing) this.prune(entry);
+        else this.drain(entry);
+      };
+      const promoteToLongLived = () => {
+        if (slotPhase !== "active") return;
+        slotPhase = "longLived";
+        entry.activeRequests--;
+        entry.longLived++;
+        if (this.closing) this.prune(entry);
+        else this.drain(entry);
+      };
+      const dialRef: DialRef = { onDialError: release };
       const requestOptions = {
         port: route.port,
         method: options.method,
         path: options.path,
         headers: options.headers,
       };
-      const proxyReq = freshConnection
-        ? http.request({
-            ...requestOptions,
-            createConnection: (_opts, callback) => {
-              dialRef.cancel = this.dial(entry, route, true, callback);
-              return undefined;
-            },
-          })
-        : http.request({
-            ...requestOptions,
-            agent: this.keepAliveAgent,
-            upstreamRoute: route,
-            upstreamDial: dialRef,
-          } as UpstreamOptions);
-      const onClientClose = () => {
+      try {
+        proxyReq = freshConnection
+          ? http.request({
+              ...requestOptions,
+              createConnection: (_opts, callback) => {
+                dialRef.cancel = this.dial(entry, route, true, callback, release);
+                return undefined;
+              },
+            })
+          : http.request({
+              ...requestOptions,
+              agent: this.keepAliveAgent,
+              upstreamRoute: route,
+              upstreamDial: dialRef,
+            } as UpstreamOptions);
+      } catch (error) {
+        release();
+        throw error;
+      }
+      let hasResponse = false;
+      proxyReq.once("response", (proxyRes) => {
+        hasResponse = true;
+        if (isLongLivedResponse(proxyRes, options.method)) promoteToLongLived();
+        proxyRes.once("end", () => process.nextTick(release));
+        proxyRes.once("close", release);
+      });
+      proxyReq.once("error", release);
+      proxyReq.once("close", () => {
         dialRef.cancel?.();
-        if (!proxyReq.destroyed) proxyReq.destroy();
-      };
-      const detach = () => res.removeListener("close", onClientClose);
-      const onProxyClose = () => {
-        dialRef.cancel?.();
-        detach();
-      };
+        if (!hasResponse) release();
+      });
       res.once("close", onClientClose);
-      proxyReq.once("error", detach);
-      proxyReq.once("close", onProxyClose);
       onRequest(proxyReq);
     };
     if (this.canDispatch(entry, freshConnection)) {
@@ -257,7 +321,13 @@ export class UpstreamPool {
   }
 
   private prune(entry: BackendEntry): void {
-    if (entry.dialing === 0 && entry.waiting.length === 0 && this.backends.get(entry.key) === entry) {
+    if (
+      entry.activeRequests === 0 &&
+      entry.dialing === 0 &&
+      entry.longLived === 0 &&
+      entry.waiting.length === 0 &&
+      this.backends.get(entry.key) === entry
+    ) {
       this.backends.delete(entry.key);
     }
   }
