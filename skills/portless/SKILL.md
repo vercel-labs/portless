@@ -263,6 +263,10 @@ Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpec
 
 LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling). Linux also needs a running `avahi-daemon`. While it is stopped, `portless doctor` warns and `.local` names are published once it starts.
 
+With HTTPS, a device needs the portless CA to load `.local` apps without warnings. `portless trust --device` prints a QR code and the CA's SHA-256 fingerprint, and serves the CA certificate (never its key) over plain HTTP on the LAN address at a one-time path for ten minutes. The page offers a configuration profile on iOS (install it in Settings, then turn on full trust under General > About > Certificate Trust Settings), the certificate on Android (install it from Settings by searching for "CA certificate", then restart Chrome), and PEM elsewhere. It runs in the foreground, so a person has to scan the code.
+
+mDNS does not resolve wildcard subdomains, so `--wildcard` applies only to local clients in LAN mode.
+
 - **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
 
   ```js
@@ -351,6 +355,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless list --json`                            | Print routes as JSON                                           |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
 | `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
+| `portless trust --device`                         | Trust the local CA on a phone or other device (QR code)        |
 | `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
 | `portless prune`                                  | Remove stale routes and shares; stop matching process groups   |
 | `portless prune --force`                          | Send SIGKILL instead of SIGTERM on a retry                     |
@@ -363,7 +368,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless proxy start --tld localhost --tld test` | Serve both TLDs from one proxy                                 |
 | `portless proxy start --tld dev.example.com`      | Use a multi-segment TLD for production-parity URLs             |
 | `portless proxy start --foreground`               | Start the proxy in foreground (for debugging)                  |
-| `portless proxy start --wildcard`                 | Allow unregistered subdomains to fall back to parent route     |
+| `portless proxy start --wildcard`                 | Allow unregistered subdomains to fall back to parent route (local only in LAN mode) |
 | `portless proxy stop`                             | Stop the proxy                                                 |
 | `portless service install`                        | Start the HTTPS proxy when the OS starts                       |
 | `portless service install --lan`                  | Start the service in LAN mode                                  |

@@ -35,6 +35,7 @@ import {
   untrustCA,
 } from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
+import { serveDeviceTrust } from "./lan.js";
 import {
   generateHostsSyncToken,
   removeHostsSyncToken,
@@ -2491,6 +2492,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
+  ${colors.cyan("portless trust --device")}          Trust the local CA on a phone or other device (QR code)
   ${colors.cyan("portless clean")}                   Remove portless state and trust entry
   ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
@@ -2564,15 +2566,23 @@ owned by you or root and not writable by group or others. A sticky parent
 such as /tmp is allowed. Otherwise trust exits with the reason.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless trust")}
+  ${colors.cyan("portless trust")}           Trust the CA on this machine
+  ${colors.cyan("portless trust --device")}  Trust the CA on a phone or other device on the same network
 
 ${colors.bold("Options:")}
+  --device               Serve the CA certificate over plain HTTP on the LAN address with a QR code
   --help, -h             Show this help
+
+--device serves the CA certificate (never its key) over plain HTTP on this
+machine's LAN address at a one-time path for ten minutes. It prints a QR code
+and the certificate's SHA-256 fingerprint. The page offers a configuration
+profile on iOS, a DER certificate on Android, and PEM elsewhere, along with
+remaining steps for each platform.
 `);
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
-  parseCommandArgs("trust", args.slice(1), {}, 0);
+  const parsed = parseCommandArgs("trust", args.slice(1), { "--device": "boolean" }, 0);
   const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) ensureStateDir(dir);
   const unsafe = explainUnsafeStateDir(dir);
@@ -2594,6 +2604,10 @@ async function handleTrust(args: string[] = []): Promise<void> {
         colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
       );
     }
+  }
+  if (parsed.has("--device")) {
+    if (!(await serveDeviceTrust(dir))) process.exit(1);
+    return;
   }
   const result = trustCA(dir);
   if (result.trusted) {
@@ -3935,7 +3949,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
-  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent (local only)
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("Stop:")}
@@ -3954,6 +3968,8 @@ ${colors.bold("LAN mode (--lan):")}
   via mDNS (.local domains). Useful for testing on real mobile devices.
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
+  mDNS does not resolve wildcard subdomains, so --wildcard applies only to
+  local clients; other devices reach explicitly registered routes.
 
 ${colors.bold("Unprivileged mode (--unprivileged):")}
   Binds without sudo, installs nothing, and never writes the hosts file.
