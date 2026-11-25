@@ -10,7 +10,6 @@ import { ensureCerts } from "./certs.js";
 import {
   createDeviceTrustHandler,
   detectDevicePlatform,
-  buildMobileConfig,
   readDeviceCA,
   renderTerminalQr,
   type DeviceCA,
@@ -97,31 +96,9 @@ describe("readDeviceCA", () => {
   });
 });
 
-describe("buildMobileConfig", () => {
-  it("holds the CA as a root payload with stable per-CA identifiers and UUIDs", () => {
-    const profile = buildMobileConfig(ca);
-    expect(profile).toContain("<string>com.apple.security.root</string>");
-    expect(profile).toContain(`<data>${ca.der.toString("base64")}</data>`);
-    expect(buildMobileConfig(ca)).toBe(profile);
-    const uuids = profile.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g);
-    const ids = profile.match(/sh\.portless\.ca\.[0-9a-f]{12}(?:\.certificate)?/g);
-    expect(new Set(uuids).size).toBe(2);
-    expect(new Set(ids).size).toBe(2);
-    const other = buildMobileConfig({ ...ca, fingerprint: "different" });
-    expect(
-      other.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g)
-    ).not.toEqual(uuids);
-    expect(other.match(/sh\.portless\.ca\.[0-9a-f]{12}(?:\.certificate)?/g)).not.toEqual(ids);
-  });
-
-  it("escapes the CA name", () => {
-    expect(buildMobileConfig({ ...ca, name: "a <b> & c" })).toContain("a &lt;b&gt; &amp; c");
-  });
-});
-
 describe("createDeviceTrustHandler", () => {
   it.each([
-    ["an iPhone", IPHONE, "portless-ca.mobileconfig", "Certificate Trust Settings"],
+    ["an iPhone", IPHONE, "portless-ca.cer", "Certificate Trust Settings"],
     ["an Android phone", ANDROID, "portless-ca.crt", "CA certificate"],
     ["a Mac", MAC, "portless-ca.pem", "Always Trust"],
   ])("serves %s the steps for its platform", async (_device, userAgent, file, step) => {
@@ -135,7 +112,7 @@ describe("createDeviceTrustHandler", () => {
   });
 
   it.each([
-    ["portless-ca.mobileconfig", "application/x-apple-aspen-config", null],
+    ["portless-ca.cer", "application/x-x509-ca-cert", null],
     ["portless-ca.crt", "application/x-x509-ca-cert", 'attachment; filename="portless-ca.crt"'],
     ["portless-ca.pem", "application/x-pem-file", 'attachment; filename="portless-ca.pem"'],
   ])("serves %s as %s", async (file, type, disposition) => {
@@ -161,6 +138,10 @@ describe("createDeviceTrustHandler", () => {
   });
 
   it("serves the certificate, never the key", async () => {
+    const cer = Buffer.from(
+      await (await fetch(`${origin}/${TOKEN}/portless-ca.cer`)).arrayBuffer()
+    );
+    expect(cer.equals(ca.der)).toBe(true);
     const der = Buffer.from(
       await (await fetch(`${origin}/${TOKEN}/portless-ca.crt`)).arrayBuffer()
     );
@@ -174,6 +155,7 @@ describe("createDeviceTrustHandler", () => {
     ["/", "GET", 404],
     ["/portless-ca.pem", "GET", 404],
     ["/wrong-token/portless-ca.pem", "GET", 404],
+    [`/${TOKEN}/portless-ca.mobileconfig`, "GET", 404],
     [`/${TOKEN}/ca-key.pem`, "GET", 404],
     [`/${TOKEN}/`, "POST", 405],
   ])("answers %s %s with %i", async (pathname, method, status) => {

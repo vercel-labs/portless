@@ -1,4 +1,4 @@
-import { createHash, randomBytes, X509Certificate } from "node:crypto";
+import { randomBytes, X509Certificate } from "node:crypto";
 import * as fs from "node:fs";
 import * as http from "node:http";
 import type { IncomingMessage, ServerResponse } from "node:http";
@@ -40,7 +40,7 @@ export interface DeviceCA {
 export type DevicePlatform = "ios" | "android" | "other";
 
 const FILES = {
-  profile: "portless-ca.mobileconfig",
+  ios: "portless-ca.cer",
   der: "portless-ca.crt",
   pem: "portless-ca.pem",
 } as const;
@@ -78,52 +78,11 @@ export function renderTerminalQr(text: string, color: boolean): string {
   return lines.join("\n");
 }
 
-function uuidFrom(seed: string): string {
-  const hex = createHash("sha256").update(seed).digest("hex");
-  return [
-    hex.slice(0, 8),
-    hex.slice(8, 12),
-    `4${hex.slice(13, 16)}`,
-    `a${hex.slice(17, 20)}`,
-    hex.slice(20, 32),
-  ].join("-");
-}
-
-export function buildMobileConfig(ca: DeviceCA): string {
-  const name = escapeHtml(ca.name);
-  const id = createHash("sha256").update(ca.fingerprint).digest("hex").slice(0, 12);
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>PayloadContent</key>
-  <array>
-    <dict>
-      <key>PayloadCertificateFileName</key><string>portless-ca.cer</string>
-      <key>PayloadContent</key><data>${ca.der.toString("base64")}</data>
-      <key>PayloadDescription</key><string>Trusts HTTPS from the portless proxy on a developer's machine.</string>
-      <key>PayloadDisplayName</key><string>${name}</string>
-      <key>PayloadIdentifier</key><string>sh.portless.ca.${id}.certificate</string>
-      <key>PayloadType</key><string>com.apple.security.root</string>
-      <key>PayloadUUID</key><string>${uuidFrom(`certificate:${ca.fingerprint}`)}</string>
-      <key>PayloadVersion</key><integer>1</integer>
-    </dict>
-  </array>
-  <key>PayloadDisplayName</key><string>${name}</string>
-  <key>PayloadIdentifier</key><string>sh.portless.ca.${id}</string>
-  <key>PayloadType</key><string>Configuration</string>
-  <key>PayloadUUID</key><string>${uuidFrom(`profile:${ca.fingerprint}`)}</string>
-  <key>PayloadVersion</key><integer>1</integer>
-</dict>
-</plist>
-`;
-}
-
 function steps(platform: DevicePlatform, name: string, base: string): string {
   if (platform === "ios") {
     return `<ol class="steps">
-<li><a class="button" href="${base}${FILES.profile}">Download the profile</a>Tap <strong>Allow</strong>. iOS saves the profile and installs it from Settings.</li>
-<li>Open <strong>Settings</strong>, tap <strong>Profile Downloaded</strong>, then <strong>Install</strong>.</li>
+<li><a class="button" href="${base}${FILES.ios}">Download the certificate</a>Tap <strong>Allow</strong>. iOS saves the certificate so you can install it from Settings.</li>
+<li>Open <strong>Settings</strong>, tap <strong>Profile Downloaded</strong>, verify the SHA-256 fingerprint under <strong>More Details</strong> against the terminal, then tap <strong>Install</strong>.</li>
 <li>Go to <strong>Settings &gt; General &gt; About &gt; Certificate Trust Settings</strong> and turn on <strong>${name}</strong>. Safari keeps warning until you do.</li>
 <li>Open your app at its <strong>.local</strong> address.</li>
 </ol>`;
@@ -161,7 +120,7 @@ export function renderDeviceTrustPage(
 <p class="label">Install</p>
 ${steps(platform, name, base)}
 </div>
-<p class="formats section">Other formats: <a href="${base}${FILES.profile}">iOS profile</a> &middot; <a href="${base}${FILES.der}">DER</a> &middot; <a href="${base}${FILES.pem}">PEM</a></p>
+<p class="formats section">Other formats: <a href="${base}${FILES.ios}">iOS (DER)</a> &middot; <a href="${base}${FILES.der}">Android (DER)</a> &middot; <a href="${base}${FILES.pem}">PEM</a></p>
 </div>`;
   return renderBrandedPage(`Trust ${name}`, "portless", "Trust the local CA", body);
 }
@@ -201,8 +160,8 @@ export function createDeviceTrustHandler(
         "text/html; charset=utf-8",
         renderDeviceTrustPage(ca, detectDevicePlatform(userAgent), base)
       );
-    } else if (file === FILES.profile) {
-      send("application/x-apple-aspen-config", buildMobileConfig(ca));
+    } else if (file === FILES.ios) {
+      send("application/x-x509-ca-cert", ca.der);
     } else if (file === FILES.der) {
       send("application/x-x509-ca-cert", ca.der, FILES.der);
     } else if (file === FILES.pem) {

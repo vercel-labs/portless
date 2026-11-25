@@ -2560,9 +2560,9 @@ ${colors.bold("Options:")}
 
 --device serves the CA certificate (never its key) over plain HTTP on this
 machine's LAN address at a random path for ten minutes. It prints a QR code
-and the certificate's SHA-256 fingerprint. The page offers a configuration
-profile on iOS, a DER certificate on Android, and PEM elsewhere, along with
-remaining steps for each platform.
+and the certificate's SHA-256 fingerprint. The page offers a DER certificate on
+iOS and Android, and PEM elsewhere, along with remaining steps for each
+platform.
 `);
 }
 
