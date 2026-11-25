@@ -2967,6 +2967,10 @@ kept, never killed. On Windows, process groups cannot be verified or signaled.
 Recorded ngrok and cloudflared tunnels are stopped only when their executable
 names match, including on Windows.
 
+App ports in stale Tailscale Serve or Funnel records stay reserved after the
+server stops. Automatic assignment skips them; fixed-port registration refuses
+them even with --force. Prune stale shares before reusing their ports.
+
 ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}
   ${colors.cyan("portless prune --force")}     Send SIGKILL instead of SIGTERM

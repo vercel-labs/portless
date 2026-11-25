@@ -133,6 +133,8 @@ On Linux with Node under your home directory (nvm, fnm, volta, or mise), `portle
 
 `portless prune` removes stale routes and shares without killing unrelated port holders. A recorded process group that still has a live member keeps its route and shares even after it closes its port; prune records the member that survived and stops it on a retry with `portless prune --force`. A group prune cannot verify is kept and reported, never signaled. A port holder that cannot be proven part of the recorded group is kept and reported, never killed. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows.
 
+App ports referenced by stale Tailscale Serve or Funnel records stay reserved, even after the dev server stops. Automatic assignment skips them, and fixed-port registration refuses them even with `--force`. Run `portless prune` to clean up stale shares before reusing their ports.
+
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
 The proxy returns `503` when a request waits more than 30 seconds in the per-backend queue or the queue is full at 512 waiting requests. It returns `504` when the backend takes more than 120 seconds to send response headers after the request upload finishes. To distinguish these from app responses, look for `Vary: Accept` and a JSON body with `upstream` and an `error` of `service_unavailable` or `gateway_timeout`, or a portless HTML error page; app responses pass through unchanged.
