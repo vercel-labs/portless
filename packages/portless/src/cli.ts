@@ -90,7 +90,6 @@ import {
 import {
   buildProxyStartConfig,
   canBindProxyPort,
-  DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_ENV,
   INTERNAL_LAN_IP_FLAG,
@@ -112,8 +111,6 @@ import {
   getProxyBindTargets,
   canBindWithoutRoot,
   isUnprivilegedEnvEnabled,
-  readUnprivilegedMarker,
-  writeUnprivilegedMarker,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -128,25 +125,15 @@ import {
   isWindows,
   killTree,
   listenOnProxyInterface,
-  parseTldList,
   prompt,
-  readLanMarker,
-  readCustomCertMarker,
-  readPersistedProxyState,
-  readTldsFromDir,
-  readTlsMarker,
   resolveStateDir,
   spawnCommand,
   reportHostsSync,
   syncHostsWithWarning,
   augmentedPath,
   waitForProxy,
-  writeCustomCertMarker,
-  writeLanMarker,
-  writeTldFile,
-  writeTldsFile,
-  writeTlsMarker,
 } from "./cli-utils.js";
+import { ProxyState, DEFAULT_TLD, parseTldList, readProxyStateFile } from "./proxy-state.js";
 import {
   attemptCATrustRemovalForCleanup,
   collectStateDirsForCleanupWithFailures,
@@ -278,9 +265,31 @@ function defaultProxyConfig(
   };
 }
 
+/**
+ * Decide whether the proxy serves HTTPS from explicit overrides, unprivileged
+ * mode rules, and any persisted TLS marker.
+ */
+function resolveProxyUseHttps(options: {
+  explicit: ProxyConfigExplicitness;
+  useHttps: boolean;
+  unprivileged: boolean;
+  persistedHttps: boolean;
+  recoverCrashedState: boolean;
+}): boolean {
+  if (options.explicit.customCert) return true;
+  if (options.explicit.useHttps) return options.useHttps;
+  if (options.unprivileged) {
+    return options.explicit.unprivileged ? false : options.persistedHttps;
+  }
+  return options.recoverCrashedState ? options.persistedHttps : options.useHttps;
+}
+
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
   persistedUnprivileged: boolean;
+  persistedHttps: boolean;
+  persistedTlds?: string[];
+  recoverCrashedState?: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -292,22 +301,20 @@ function resolveProxyConfig(options: {
   useWildcard: boolean;
   unprivileged: boolean;
 }): ProxyConfig {
+  const recoverCrashedState = options.recoverCrashedState ?? false;
+  const usePersistedTlds =
+    recoverCrashedState &&
+    options.persistedTlds !== undefined &&
+    !(options.explicit.lanMode && !options.lanMode && options.persistedLanMode);
+  const baseTlds = usePersistedTlds ? options.persistedTlds! : options.defaultTlds;
+
   const config = defaultProxyConfig(
-    options.defaultTlds,
+    baseTlds,
     options.useHttps,
     options.explicit.lanMode ? options.lanMode : options.persistedLanMode
   );
 
-  if (options.explicit.useHttps) {
-    config.useHttps = options.useHttps;
-    if (!options.useHttps) {
-      config.customCertPath = null;
-      config.customKeyPath = null;
-    }
-  }
-
   if (options.explicit.customCert) {
-    config.useHttps = true;
     config.customCertPath = options.customCertPath;
     config.customKeyPath = options.customKeyPath;
   }
@@ -318,7 +325,7 @@ function resolveProxyConfig(options: {
       config.lanIp = null;
       config.lanIpExplicit = false;
       if (!options.explicit.tlds) {
-        config.tlds = normalizeTlds(options.defaultTlds);
+        config.tlds = normalizeTlds(baseTlds);
         config.tld = primaryTld(config.tlds);
       }
     }
@@ -339,17 +346,17 @@ function resolveProxyConfig(options: {
     config.useWildcard = options.useWildcard;
   }
 
-  // Like LAN mode, a stopped unprivileged proxy keeps its mode for the next
-  // start through proxy.unprivileged unless PORTLESS_UNPRIVILEGED overrides it.
   config.unprivileged = options.explicit.unprivileged
     ? options.unprivileged
     : options.persistedUnprivileged;
 
-  // Unprivileged mode promises no prompt of any kind, and trusting a
-  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for.
-  if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
-    config.useHttps = false;
-  }
+  config.useHttps = resolveProxyUseHttps({
+    explicit: options.explicit,
+    useHttps: options.useHttps,
+    unprivileged: config.unprivileged,
+    persistedHttps: options.persistedHttps,
+    recoverCrashedState,
+  });
 
   if (!config.lanMode) {
     config.lanIp = null;
@@ -373,21 +380,19 @@ function resolveProxyConfig(options: {
 }
 
 function readCurrentProxyConfig(dir: string): ProxyConfig {
-  const lanIp = readLanMarker(dir);
-  const tlds = readTldsFromDir(dir);
-  const tld = primaryTld(tlds);
+  const settings = new ProxyState(dir).read();
 
   return {
-    useHttps: readTlsMarker(dir),
+    useHttps: settings.tls,
     customCertPath: null,
     customKeyPath: null,
-    lanMode: lanIp !== null,
-    lanIp,
+    lanMode: settings.lanIp !== null,
+    lanIp: settings.lanIp,
     lanIpExplicit: false,
-    tld,
-    tlds,
+    tld: primaryTld(settings.tlds),
+    tlds: settings.tlds,
     useWildcard: false,
-    unprivileged: readUnprivilegedMarker(dir),
+    unprivileged: settings.unprivileged,
   };
 }
 
@@ -871,6 +876,7 @@ function startProxyServer(
   unprivileged = false
 ): void {
   store.ensureDir();
+  const state = new ProxyState(store.dir);
 
   const isTls = !!tlsOptions;
   const mdnsSupport = isMdnsSupported();
@@ -913,7 +919,7 @@ function startProxyServer(
     }
 
     activeLanIp = nextIp;
-    writeLanMarker(store.dir, activeLanIp);
+    state.setLanIp(activeLanIp);
 
     if (previousIp && nextIp) {
       console.log(chalk.green(`LAN IP changed: ${previousIp} -> ${nextIp}`));
@@ -1102,15 +1108,8 @@ function startProxyServer(
       console.warn(colors.yellow("Could not publish hosts sync authorization."));
     }
     // Save PID and port once the server is actually listening
-    writeProxyStartTime(store);
-    fs.writeFileSync(store.pidPath, process.pid.toString(), { mode: FILE_MODE });
-    fs.writeFileSync(store.portFilePath, proxyPort.toString(), { mode: FILE_MODE });
-    writeTlsMarker(store.dir, isTls);
-    writeCustomCertMarker(store.dir, isTls && customCert);
-    writeTldsFile(store.dir, tlds);
-    writeLanMarker(store.dir, activeLanIp);
-    writeUnprivilegedMarker(store.dir, unprivileged);
-    fixOwnership(store.dir, store.pidPath, store.portFilePath, store.startTimePath);
+    state.publishListener(process.pid, proxyPort, getProcessStartTime(process.pid));
+    state.publish({ tls: isTls, customCert, unprivileged, lanIp: activeLanIp, tlds });
     console.log(
       colors.green(
         `${proto} proxy listening on ${formatBindEndpoint(primaryBindTarget.host, proxyPort)}${tldLabel}${modeLabel}`
@@ -1155,7 +1154,7 @@ function startProxyServer(
     } catch {
       // Port file may already be removed; non-fatal
     }
-    resetProxyMarkers(store);
+    state.reset();
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
     server.close(() => process.exit(0));
@@ -1192,12 +1191,7 @@ function sudoStopOrHint(port: number): boolean {
 
 /** Read a state file, returning null only when it does not exist. */
 function readStateFile(file: string): string | null {
-  try {
-    return fs.readFileSync(file, "utf-8").trim();
-  } catch (err: unknown) {
-    if (isErrnoException(err) && err.code === "ENOENT") return null;
-    throw err;
-  }
+  return readProxyStateFile(file);
 }
 
 /** Remove a state file only while its contents still match the expected value. */
@@ -1249,46 +1243,6 @@ function isProcessSuspended(pid: number): boolean | null {
   return state === null ? null : /^[Tt]/.test(state);
 }
 
-/** Record the listening proxy's start time, so a later stop can tell it from a recycled PID. */
-function writeProxyStartTime(store: RouteStore): void {
-  const startTime = getProcessStartTime(process.pid);
-  const tempPath = `${store.startTimePath}.tmp`;
-  const discardTemp = () => {
-    try {
-      fs.rmSync(tempPath, { force: true });
-    } catch {
-      return;
-    }
-  };
-  try {
-    discardTemp();
-    if (startTime === null) {
-      fs.rmSync(store.startTimePath, { force: true });
-      return;
-    }
-    fs.writeFileSync(tempPath, startTime, { encoding: "utf-8", mode: FILE_MODE, flag: "wx" });
-    fixOwnership(tempPath);
-    fs.renameSync(tempPath, store.startTimePath);
-  } catch {
-    discardTemp();
-  }
-}
-
-/** Forget the recorded proxy identity and runtime settings once its process is gone. */
-function resetProxyMarkers(store: RouteStore): void {
-  for (const file of [store.startTimePath, `${store.startTimePath}.tmp`]) {
-    try {
-      fs.rmSync(file, { force: true });
-    } catch {
-      continue;
-    }
-  }
-  writeTlsMarker(store.dir, false);
-  writeCustomCertMarker(store.dir, false);
-  writeTldFile(store.dir, DEFAULT_TLD);
-  writeLanMarker(store.dir, null);
-}
-
 type ProxyIdentity = "proxy" | "recycled" | "unknown";
 
 /**
@@ -1323,7 +1277,7 @@ async function clearProxyStateAfterStop(store: RouteStore, proxyPort: number): P
     console.error(colors.red(`Proxy restarted on port ${proxyPort}; leaving its state in place.`));
     return false;
   }
-  resetProxyMarkers(store);
+  new ProxyState(store.dir).reset();
   return true;
 }
 
@@ -1361,7 +1315,7 @@ async function readRecordedProxy(store: RouteStore, proxyPort: number): Promise<
     if (!(await isProxyRunning(proxyPort))) return { state: "stopped" };
     return { state: "unrecorded", pid: findPidOnPort(proxyPort) };
   }
-  const pid = parseInt(fs.readFileSync(store.pidPath, "utf-8"), 10);
+  const pid = parseInt(readStateFile(store.pidPath) ?? "", 10);
   if (isNaN(pid)) return { state: "corrupt" };
   try {
     process.kill(pid, 0);
@@ -1436,13 +1390,13 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
       case "corrupt":
         console.error(colors.red("Corrupted PID file. Removing it."));
         fs.unlinkSync(store.pidPath);
-        resetProxyMarkers(store);
+        new ProxyState(store.dir).reset();
         return true;
       case "dead":
         console.log(colors.yellow("Proxy process is no longer running. Cleaning up stale files."));
         fs.unlinkSync(store.pidPath);
         fs.rmSync(store.portFilePath, { force: true });
-        resetProxyMarkers(store);
+        new ProxyState(store.dir).reset();
         return true;
       case "unrecorded": {
         console.log(colors.yellow(`PID file is missing but port ${proxyPort} is still in use.`));
@@ -1583,22 +1537,17 @@ interface ProxyDesiredState {
   envTlds: string[];
 }
 
-function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
-  const envTlds = getDefaultTlds();
-  const envTld = primaryTld(envTlds);
-  const explicit: ProxyConfigExplicitness = {
-    useHttps: process.env.PORTLESS_HTTPS !== undefined,
-    customCert: false,
-    lanMode: process.env.PORTLESS_LAN !== undefined,
-    lanIp: process.env.PORTLESS_LAN_IP !== undefined,
-    tlds: process.env.PORTLESS_TLD !== undefined,
-    useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
-    unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
-  };
-  const desiredConfig = resolveProxyConfig({
-    persistedLanMode: lanMode,
-    persistedUnprivileged: readUnprivilegedMarker(resolveStateDir()),
-    explicit,
+function readEnvProxyOptions(envTlds: string[]) {
+  return {
+    explicit: {
+      useHttps: process.env.PORTLESS_HTTPS !== undefined,
+      customCert: false,
+      lanMode: process.env.PORTLESS_LAN !== undefined,
+      lanIp: process.env.PORTLESS_LAN_IP !== undefined,
+      tlds: process.env.PORTLESS_TLD !== undefined,
+      useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+      unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    } satisfies ProxyConfigExplicitness,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
     customCertPath: null,
@@ -1608,8 +1557,21 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: envTlds,
     useWildcard: isWildcardEnvEnabled(),
     unprivileged: isUnprivilegedEnvEnabled(),
+  };
+}
+
+function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
+  const envTlds = getDefaultTlds();
+  const envTld = primaryTld(envTlds);
+  const envOptions = readEnvProxyOptions(envTlds);
+  const persistedState = new ProxyState(resolveStateDir());
+  const desiredConfig = resolveProxyConfig({
+    ...envOptions,
+    persistedLanMode: lanMode,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
   });
-  return { explicit, desiredConfig, envTld, envTlds };
+  return { explicit: envOptions.explicit, desiredConfig, envTld, envTlds };
 }
 
 /**
@@ -1621,35 +1583,30 @@ function resolveProxyStart(desired: ProxyDesiredState): {
   startConfig: ReturnType<typeof resolveProxyConfig>;
   startPort: number | undefined;
 } {
-  const { explicit, desiredConfig } = desired;
-  const persisted = readPersistedProxyState();
-  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
-  const startConfig = { ...desiredConfig };
-  let startPort: number | undefined;
-
-  if (persisted) {
-    if (!explicit.useHttps && persisted.tls !== desiredConfig.useHttps) {
-      startConfig.useHttps = persisted.tls;
-    }
-    if (
-      !explicit.tlds &&
-      (persisted.tlds.length !== desiredConfig.tlds.length ||
-        persisted.tlds.some((tld, index) => tld !== desiredConfig.tlds[index]))
-    ) {
-      startConfig.tlds = persisted.tlds;
-      startConfig.tld = primaryTld(persisted.tlds);
-    }
-    if (!explicit.lanMode && persisted.lanMode !== desiredConfig.lanMode) {
-      startConfig.lanMode = persisted.lanMode;
-    }
-    if (!explicit.unprivileged && persisted.unprivileged !== desiredConfig.unprivileged) {
-      startConfig.unprivileged = persisted.unprivileged;
-    }
-    const envPort = getDefaultPort(startConfig.useHttps);
-    if (!configuredEnvPort && persisted.port !== envPort) {
-      startPort = persisted.port;
-    }
+  const persistedState = new ProxyState(resolveStateDir());
+  const persistedPort = persistedState.readPort();
+  if (persistedPort === null) {
+    return { startConfig: { ...desired.desiredConfig }, startPort: undefined };
   }
+
+  const envOptions = readEnvProxyOptions(desired.envTlds);
+  const persistedTls = persistedState.readTls();
+  const startConfig = resolveProxyConfig({
+    ...envOptions,
+    persistedLanMode: persistedState.readLanIp() !== null,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedTls,
+    persistedTlds: envOptions.explicit.tlds ? undefined : persistedState.readTlds(),
+    recoverCrashedState: true,
+  });
+
+  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
+  const envPort = getDefaultPort(startConfig.useHttps);
+  const persistedDefaultPort = getDefaultPort(persistedTls);
+  const startPort =
+    !configuredEnvPort && persistedPort !== envPort && persistedPort !== persistedDefaultPort
+      ? persistedPort
+      : undefined;
 
   return { startConfig, startPort };
 }
@@ -1728,7 +1685,7 @@ async function ensureProxyRunning(
 
   if (!discovered) {
     console.error(colors.red("Failed to start proxy."));
-    const fallbackDir = resolveStateDir(effectivePort);
+    const fallbackDir = resolveStateDir();
     const logPath = path.join(fallbackDir, "proxy.log");
     console.error(colors.blue("Try starting it manually:"));
     console.error(colors.cyan(`  ${manualStartCommand}`));
@@ -1821,9 +1778,7 @@ async function runApp(
       onWarning: (msg: string) => console.warn(colors.yellow(msg)),
     });
     store.recoverCorruptRoutesFile();
-    if (tls && !isCATrusted(stateDir)) {
-      await handleTrust();
-    }
+    await trustProxyCaIfAllowed(stateDir, tls);
   } else {
     const runningConfig = readCurrentProxyConfig(stateDir);
 
@@ -2487,7 +2442,8 @@ ${colors.bold("Environment variables:")}
 Precedence: flags override PORTLESS_* variables, which override project config.
 Project config lookup: portless.json, .config/portless.json, then package.json portless.
 Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
-unexpected proxy exit. A normal portless proxy stop clears them.
+unexpected proxy exit. A normal portless proxy stop clears them, except an
+unprivileged proxy keeps unprivileged mode and its HTTPS choice.
 Proxy options: portless proxy --help
 Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
@@ -2518,6 +2474,12 @@ ${colors.bold("Usage:")}
 ${colors.bold("Options:")}
   --help, -h             Show this help
 `);
+}
+
+/** Trust the generated CA after auto-start unless the proxy runs in unprivileged mode. */
+async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
+  if (!tls || new ProxyState(dir).readUnprivileged() || isCATrusted(dir)) return;
+  await handleTrust();
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
@@ -3574,7 +3536,7 @@ async function handleDoctor(args: string[]): Promise<void> {
   const proxyPort = proxyRunning || portListening || hasPortFile ? probePort : configuredPort;
   const proxyTls = proxyRunning || portListening || hasPortFile ? probeTls : configuredTls;
   const currentProxyStateIsHttp = (proxyRunning || portListening || hasPortFile) && !proxyTls;
-  const proxyUsesCustomCert = proxyTls && readCustomCertMarker(state.dir);
+  const proxyUsesCustomCert = proxyTls && new ProxyState(state.dir).readCustomCert();
   const stateExists = fs.existsSync(state.dir);
 
   const version = __VERSION__;
@@ -3654,7 +3616,7 @@ async function handleDoctor(args: string[]): Promise<void> {
 
   if (fs.existsSync(store.pidPath)) {
     try {
-      const rawPid = fs.readFileSync(store.pidPath, "utf-8").trim();
+      const rawPid = readStateFile(store.pidPath) ?? "";
       const pid = parseInt(rawPid, 10);
       if (isNaN(pid) || pid <= 0) {
         add("fail", `Proxy PID file is invalid: ${store.pidPath}`);
@@ -3905,7 +3867,9 @@ ${colors.bold("LAN mode (--lan):")}
 
 ${colors.bold("Unprivileged mode (--unprivileged):")}
   Binds without sudo, installs nothing, and never writes the hosts file.
-  Stopped proxies keep the mode; use PORTLESS_UNPRIVILEGED=0 to switch back.
+  Stopped proxies keep unprivileged mode and its HTTPS choice for auto-start
+  and bare proxy start. Pass --unprivileged without --https, or pass --no-tls,
+  to return to plain HTTP; use PORTLESS_UNPRIVILEGED=0 to switch back.
 `);
 }
 
@@ -3936,7 +3900,7 @@ async function handleProxy(args: string[]): Promise<void> {
     const explicitPort = portValue === undefined ? undefined : parsePort(portValue)!;
 
     if (explicitPort !== undefined) {
-      const dir = resolveStateDir(explicitPort);
+      const dir = resolveStateDir();
       const store = new RouteStore(dir);
       if (!(await stopProxy(store, explicitPort, false))) process.exitCode = 1;
     } else {
@@ -4047,8 +4011,8 @@ async function handleProxy(args: string[]): Promise<void> {
   };
 
   // Resolve state directory based on the port
-  let stateDir = resolveStateDir(proxyPort);
-  let persistedLanMode = readLanMarker(stateDir) !== null;
+  let stateDir = resolveStateDir();
+  let persistedLanMode = new ProxyState(stateDir).readLanIp() !== null;
   let runningPort: number | null = null;
   if (!hasExplicitPort) {
     const currentState = await discoverState();
@@ -4062,9 +4026,11 @@ async function handleProxy(args: string[]): Promise<void> {
       stateDir = currentState.dir;
     }
   }
+  const persistedState = new ProxyState(stateDir);
   const desiredConfig = resolveProxyConfig({
     persistedLanMode,
-    persistedUnprivileged: readUnprivilegedMarker(stateDir),
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
     explicit,
     defaultTlds: getDefaultTlds(),
     useHttps: wantHttps || !!(customCertPath && customKeyPath),
@@ -4088,7 +4054,16 @@ async function handleProxy(args: string[]): Promise<void> {
 
   if (!hasExplicitPort && runningPort === null) {
     proxyPort = getDefaultPort(useHttps);
-    stateDir = resolveStateDir(proxyPort);
+    stateDir = resolveStateDir();
+  }
+
+  const savedPort = new ProxyState(stateDir).readPort();
+  if (savedPort !== null && savedPort !== proxyPort && (await isProxyRunning(savedPort))) {
+    console.error(
+      colors.red(`Error: A proxy is already running on port ${savedPort} for this state directory.`)
+    );
+    console.error(colors.blue("Run portless proxy stop first, then start the proxy again."));
+    process.exit(1);
   }
 
   if (lanMode && tldFlagValues.length > 0) {
@@ -4275,7 +4250,7 @@ async function handleProxy(args: string[]): Promise<void> {
           console.log(colors.green(`Proxy started on port ${proxyPort}.`));
         } else {
           console.error(colors.red("Proxy process started but is not responding."));
-          const logPath = path.join(resolveStateDir(proxyPort), "proxy.log");
+          const logPath = path.join(resolveStateDir(), "proxy.log");
           if (fs.existsSync(logPath)) {
             console.error(colors.gray(`Logs: ${logPath}`));
           }
@@ -5050,9 +5025,7 @@ async function handleDefaultMulti(
       checkHostnameCollisions(tlds);
     }
 
-    if (tls && !isCATrusted(dir)) {
-      await handleTrust();
-    }
+    await trustProxyCaIfAllowed(dir, tls);
   }
 
   if (useTurbo) {
@@ -5699,7 +5672,7 @@ async function composeUp(source: ComposeModel, globals: string[], rest: string[]
   );
   if (ensured.started) {
     state = ensured.state;
-    if (state.tls && !isCATrusted(state.dir)) await handleTrust();
+    await trustProxyCaIfAllowed(state.dir, state.tls);
   } else {
     const running = readCurrentProxyConfig(state.dir);
     state = { ...state, tlds: running.tlds, lanMode: running.lanMode, lanIp: running.lanIp };
