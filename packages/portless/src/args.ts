@@ -11,7 +11,7 @@ export class UsageError extends Error {
   }
 }
 
-export type FlagKind = "boolean" | "value" | "text";
+export type FlagKind = "boolean" | "value" | "text" | "optional-equals";
 
 export interface ParsedArgs {
   positionals: string[];
@@ -66,6 +66,13 @@ function readFlagToken(
   if (kind === "boolean") {
     if (eq !== -1) throw new UsageError(`${flag} does not take a value.`, hint);
     return { flag, value: undefined, end: index };
+  }
+
+  if (kind === "optional-equals") {
+    if (eq === -1) return { flag, value: undefined, end: index };
+    const inline = arg.slice(eq + 1);
+    if (inline === "") throw new UsageError(`${flag}= requires a value.`, hint);
+    return { flag, value: inline, end: index };
   }
 
   const value = eq === -1 ? args[index + 1] : arg.slice(eq + 1);

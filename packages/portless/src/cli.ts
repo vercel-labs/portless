@@ -81,16 +81,25 @@ import {
 } from "./routes.js";
 import type { RouteInfo } from "./types.js";
 import {
+  describeTailscaleShare,
   ensureTailscaleReady,
-  findAvailableServePort,
-  formatTailscaleUrl,
-  getUsedServePorts,
-  registerFunnel,
-  registerServe,
-  unregisterTailscale,
+  inferServiceName,
+  normalizeServiceName,
+  share,
+  tailscaleShareFromRoute,
+  unshare,
+  type TailscaleReady,
+  type TailscaleShareRecord,
+  type TailscaleShareRequest,
 } from "./tailscale.js";
-import { ensureNgrokAvailable, startNgrok, stopNgrokProcess, stopTunnelPid } from "./tunnel.js";
-import { ensureCloudflaredAvailable, startCloudflare } from "./cloudflare.js";
+import {
+  PROCESS_TUNNELS,
+  normalizeNgrokUrl,
+  stopTunnelPid,
+  stopTunnelProcess,
+  type ProcessTunnelSpec,
+  type StartedTunnel,
+} from "./tunnel.js";
 import {
   inferProjectName,
   resolveWorktreeNaming,
@@ -205,6 +214,7 @@ const PROXY_STOP_POLL_MS = 50;
 const CLEAN_ELEVATED_STEPS_ENV = "PORTLESS_INTERNAL_CLEAN_STEPS";
 const CLEAN_ELEVATED_DIRS_ENV = "PORTLESS_INTERNAL_CLEAN_DIRS";
 const CLEAN_ELEVATED_PRESERVE_PROXY_ENV = "PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY";
+const CLEAN_ELEVATED_PRESERVE_ROUTES_ENV = "PORTLESS_INTERNAL_CLEAN_PRESERVE_ROUTES";
 
 /** Cleanup steps that may be retried with elevation. */
 type CleanupStep = "ca" | "files" | "hosts";
@@ -584,6 +594,36 @@ function isEnabledEnv(value: string | undefined): boolean {
   return value === "1" || value === "true";
 }
 
+function isDisabledEnv(value: string | undefined): boolean {
+  const v = value?.trim().toLowerCase();
+  return v === "0" || v === "false";
+}
+
+function parseNonEmptyCredential(flagOrEnv: string, raw: string, isFlag: boolean): string {
+  const value = raw.trim();
+  if (!value) {
+    const message = `${flagOrEnv} cannot be blank.`;
+    if (isFlag) throw new UsageError(message);
+    console.error(colors.red(`Error: ${message}`));
+    process.exit(1);
+  }
+  return value;
+}
+
+function parseNetbirdGroups(flagOrEnv: string, raw: string, isFlag: boolean): string[] {
+  const groups = raw
+    .split(",")
+    .map((group) => group.trim())
+    .filter(Boolean);
+  if (groups.length === 0) {
+    const message = `${flagOrEnv} requires at least one group name.`;
+    if (isFlag) throw new UsageError(message);
+    console.error(colors.red(`Error: ${message}`));
+    process.exit(1);
+  }
+  return groups;
+}
+
 /**
  * Whether the proxy should be accepted as already running. Shared with the
  * multi-app collision preflight so both agree on which TLDs are in effect.
@@ -704,7 +744,7 @@ async function stopRecordedGroups(
  * Tailscale share is unregistered by prune or clean, so its record must stay.
  */
 function keepsStaleRecordAfterRecovery(route: RouteMapping): boolean {
-  return route.tailscaleHttpsPort !== undefined;
+  return tailscaleShareFromRoute(route) !== undefined;
 }
 
 /**
@@ -749,35 +789,8 @@ async function stopOrphanedProcessGroups(store: RouteStore): Promise<void> {
   }
 }
 
-const PROCESS_TUNNELS = [
-  {
-    label: "ngrok",
-    binary: "ngrok",
-    env: "PORTLESS_NGROK",
-    via: "ngrok",
-    install: "https://ngrok.com/download",
-    urlField: "ngrokUrl",
-    pidField: "ngrokPid",
-    ensure: ensureNgrokAvailable,
-    start: startNgrok,
-  },
-  {
-    label: "Cloudflare",
-    binary: "cloudflared",
-    env: "PORTLESS_CLOUDFLARE",
-    via: "Cloudflare Tunnel",
-    install: "https://developers.cloudflare.com/tunnel/downloads/",
-    urlField: "cloudflareUrl",
-    pidField: "cloudflarePid",
-    ensure: ensureCloudflaredAvailable,
-    start: startCloudflare,
-  },
-] as const;
-
-type ProcessTunnel = (typeof PROCESS_TUNNELS)[number];
-
 /** Stop the tunnel processes recorded on a route; `verify` skips pids not running the tunnel binary. */
-function stopRecordedTunnels(route: RouteMapping, verify = false): ProcessTunnel[] {
+function stopRecordedTunnels(route: RouteMapping, verify = false): ProcessTunnelSpec[] {
   return PROCESS_TUNNELS.filter((t) => {
     const pid = route[t.pidField];
     if (!pid || (verify && getProcessCommand(pid) !== t.binary)) return false;
@@ -787,12 +800,18 @@ function stopRecordedTunnels(route: RouteMapping, verify = false): ProcessTunnel
 }
 
 /** Print the install or auth hint that matches a tunnel error message. */
-function printTunnelHint(t: ProcessTunnel, message: string): void {
-  if (message.includes(`${t.binary} CLI not found`)) {
+function printTunnelHint(t: ProcessTunnelSpec, message: string): void {
+  if (
+    message.includes(`${t.binary} CLI not found`) ||
+    message.includes(`${t.label} CLI not found`)
+  ) {
     console.error(colors.blue(`Install ${t.binary}: ${t.install}`));
-  } else if (t.binary === "ngrok" && message.includes("authentication is not configured")) {
-    console.error(colors.blue("Configure ngrok authentication:"));
-    console.error(colors.cyan("  ngrok config add-authtoken <token>"));
+  } else {
+    const lines = t.formatHint?.(message);
+    if (lines?.length) {
+      console.error(colors.blue(lines[0]));
+      for (const line of lines.slice(1)) console.error(colors.cyan(line));
+    }
   }
 }
 
@@ -1445,18 +1464,25 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: bo
   const routes = store.loadRoutes();
 
   if (json) {
-    const output = routes.map((route) => ({
-      hostname: route.hostname,
-      url: formatUrl(route.hostname, proxyPort, tls),
-      port: route.port,
-      pid: route.pid,
-      registeredAt: route.registeredAt,
-      ...(route.upstream ? { upstream: route.upstream } : {}),
-      ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
-      ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
-      ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
-      ...(route.cloudflareUrl ? { cloudflareUrl: route.cloudflareUrl } : {}),
-    }));
+    const output = routes.map((route) => {
+      const tsRecord = tailscaleShareFromRoute(route);
+      return {
+        hostname: route.hostname,
+        url: formatUrl(route.hostname, proxyPort, tls),
+        port: route.port,
+        pid: route.pid,
+        registeredAt: route.registeredAt,
+        ...(route.upstream ? { upstream: route.upstream } : {}),
+        ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
+        ...(tsRecord?.kind === "funnel" || route.tailscaleFunnel ? { tailscaleFunnel: true } : {}),
+        ...(tsRecord?.kind === "service" ? { tailscaleService: tsRecord.serviceName } : {}),
+        ...Object.fromEntries(
+          PROCESS_TUNNELS.flatMap((t) =>
+            route[t.urlField] ? [[t.urlField, route[t.urlField]]] : []
+          )
+        ),
+      };
+    });
     console.log(JSON.stringify({ routes: output }));
     return;
   }
@@ -1483,7 +1509,13 @@ function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: bo
       console.log(`    ${colors.gray("Host:")} ${colors.white(upstream.host)}`);
     }
     if (route.tailscaleUrl) {
-      const tsLabel = route.tailscaleFunnel ? "funnel" : "tailscale";
+      const tsRecord = tailscaleShareFromRoute(route);
+      const tsLabel =
+        tsRecord?.kind === "funnel" || route.tailscaleFunnel
+          ? "funnel"
+          : tsRecord?.kind === "service"
+            ? "tailscale service"
+            : "tailscale";
       console.log(`    ${colors.gray(tsLabel + ":")} ${colors.green(route.tailscaleUrl)}`);
     }
     for (const t of PROCESS_TUNNELS) {
@@ -1685,26 +1717,108 @@ async function runApp(
   initialStore.recoverCorruptRoutesFile();
   console.error(chalk.blue.bold(`\nportless\n`));
 
-  // Check tailscale readiness early, before auto-starting the proxy.
-  // No point starting the proxy if tailscale will fail afterward.
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
-  const wantsTailscale = wantsFunnel || isEnabledEnv(process.env.PORTLESS_TAILSCALE);
-  const tunnels = PROCESS_TUNNELS.filter((t) => isEnabledEnv(process.env[t.env]));
-  let tsBaseUrl: string | undefined;
-
-  if (wantsTailscale) {
+  const tailscaleDisabled = isDisabledEnv(process.env.PORTLESS_TAILSCALE) && !wantsFunnel;
+  const rawTsPort = tailscaleDisabled ? undefined : process.env.PORTLESS_TAILSCALE_PORT?.trim();
+  const parsedTsPort = rawTsPort ? parsePort(rawTsPort) : undefined;
+  if (parsedTsPort === null) {
+    console.error(
+      colors.red(
+        `Error: Invalid PORTLESS_TAILSCALE_PORT="${rawTsPort}". Must be a port number between 1 and 65535.`
+      )
+    );
+    process.exit(1);
+  }
+  const preferredTailscalePort = parsedTsPort;
+  const rawTsService = tailscaleDisabled
+    ? undefined
+    : process.env.PORTLESS_TAILSCALE_SERVICE?.trim();
+  let serviceName: string | undefined;
+  if (rawTsService && rawTsService !== "0" && rawTsService !== "false") {
     try {
-      const tsReady = ensureTailscaleReady({
-        requireFunnel: wantsFunnel,
-        requireHttps: true,
-      });
-      tsBaseUrl = tsReady.baseUrl;
+      serviceName =
+        rawTsService === "1" || rawTsService === "true"
+          ? inferServiceName(name.baseName)
+          : rawTsService;
+    } catch (err) {
+      console.error(colors.red(`Error: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+  }
+  if (wantsFunnel && serviceName !== undefined) {
+    console.error(colors.red("Error: --funnel cannot be combined with --tailscale-service."));
+    process.exit(1);
+  }
+  if (preferredTailscalePort !== undefined && serviceName !== undefined) {
+    console.error(
+      colors.red("Error: --tailscale-port cannot be combined with --tailscale-service.")
+    );
+    process.exit(1);
+  }
+  const wantsTailscale =
+    wantsFunnel ||
+    serviceName !== undefined ||
+    preferredTailscalePort !== undefined ||
+    (!tailscaleDisabled && isEnabledEnv(process.env.PORTLESS_TAILSCALE));
+  const tailscaleRequest: TailscaleShareRequest | undefined = !wantsTailscale
+    ? undefined
+    : serviceName !== undefined
+      ? { kind: "service", serviceName }
+      : wantsFunnel
+        ? { kind: "funnel", preferredPort: preferredTailscalePort }
+        : { kind: "serve", preferredPort: preferredTailscalePort };
+  const rawNgrokUrl = process.env.PORTLESS_NGROK_URL?.trim();
+  let ngrokUrl: string | undefined;
+  if (rawNgrokUrl && !isDisabledEnv(process.env.PORTLESS_NGROK)) {
+    try {
+      ngrokUrl = normalizeNgrokUrl(rawNgrokUrl);
+    } catch (err) {
+      console.error(colors.red(`Error: ${err instanceof Error ? err.message : String(err)}`));
+      process.exit(1);
+    }
+  }
+  const netbirdDisabled = isDisabledEnv(process.env.PORTLESS_NETBIRD);
+  const rawNetbirdPassword = process.env.PORTLESS_NETBIRD_PASSWORD;
+  const rawNetbirdPin = process.env.PORTLESS_NETBIRD_PIN;
+  const rawNetbirdGroups = process.env.PORTLESS_NETBIRD_GROUPS;
+  const netbirdPassword =
+    !netbirdDisabled && rawNetbirdPassword !== undefined
+      ? parseNonEmptyCredential("PORTLESS_NETBIRD_PASSWORD", rawNetbirdPassword, false)
+      : undefined;
+  const netbirdPin =
+    !netbirdDisabled && rawNetbirdPin !== undefined
+      ? parseNonEmptyCredential("PORTLESS_NETBIRD_PIN", rawNetbirdPin, false)
+      : undefined;
+  const netbirdGroups =
+    !netbirdDisabled && rawNetbirdGroups !== undefined
+      ? parseNetbirdGroups("PORTLESS_NETBIRD_GROUPS", rawNetbirdGroups, false)
+      : undefined;
+  const tunnels = PROCESS_TUNNELS.filter(
+    (t) =>
+      isEnabledEnv(process.env[t.env]) ||
+      (t.id === "ngrok" && !isDisabledEnv(process.env[t.env]) && Boolean(ngrokUrl)) ||
+      (t.id === "netbird" &&
+        !netbirdDisabled &&
+        Boolean(netbirdPassword || netbirdPin || netbirdGroups?.length))
+  );
+  let tsReady: TailscaleReady | undefined;
+  if (tailscaleRequest) {
+    try {
+      tsReady = ensureTailscaleReady(tailscaleRequest);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       console.error(colors.red(`Error: ${message}`));
       if (message.includes("not found")) {
         console.error(colors.blue("Install Tailscale: https://tailscale.com/download"));
-      } else if (!message.includes("not enabled on your tailnet")) {
+      } else if (
+        ![
+          "not enabled on your tailnet",
+          "MagicDNS",
+          "Funnel supports ports",
+          "tag-based identity",
+          "Invalid Tailscale",
+        ].some((text) => message.includes(text))
+      ) {
         console.error(colors.blue("Make sure Tailscale is connected:"));
         console.error(colors.cyan("  tailscale up"));
       }
@@ -1837,13 +1951,11 @@ async function runApp(
     console.error(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
-  // Tailscale sharing: register with tailscale serve (or funnel).
-  // Readiness was already checked at the top of runApp().
-  let tailscaleHttpsPort: number | undefined;
+  let tailscaleRecord: TailscaleShareRecord | undefined;
   let tailscaleUrl: string | undefined;
   type TunnelRun = {
-    t: ProcessTunnel;
-    proc?: Awaited<ReturnType<typeof startNgrok>>;
+    t: ProcessTunnelSpec;
+    proc?: StartedTunnel;
     ready?: boolean;
     handled?: boolean;
     pending?: () => void;
@@ -1876,49 +1988,90 @@ async function runApp(
     }
   };
 
-  if (wantsTailscale && tsBaseUrl) {
-    const maxAttempts = 3;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const usedPorts = getUsedServePorts();
-      tailscaleHttpsPort = findAvailableServePort(usedPorts, wantsFunnel ? "funnel" : "serve");
-      try {
-        if (wantsFunnel) {
-          registerFunnel(port, tailscaleHttpsPort);
-        } else {
-          registerServe(port, tailscaleHttpsPort);
-        }
-        break;
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        const isConflict = message.includes("already in use");
-        if (isConflict && attempt < maxAttempts) continue;
-        console.error(colors.red(`Error: ${message}`));
-        process.exit(1);
-      }
-    }
-
-    // tailscaleHttpsPort is always assigned: the loop either breaks after
-    // a successful register or exits the process on final failure.
-    tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
-    const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
-    console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
-    if (wantsFunnel) {
-      console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
-    } else {
-      console.error(chalk.gray("  (accessible from your tailnet)\n"));
-    }
-
+  const cleanupTailscaleAndRoutes = () => {
     try {
-      store.updateRoute(hostname, {
-        tailscaleUrl: tailscaleUrl,
-        tailscaleHttpsPort,
-        tailscaleFunnel: wantsFunnel || undefined,
-      });
+      if (tailscaleRecord) {
+        const result = store.releaseOwnedTailscaleShare(
+          hostname,
+          process.pid,
+          hostnames,
+          port,
+          tailscaleRecord,
+          tailscaleUrl,
+          (rec) => unshare(rec, { ignoreMissing: true })
+        );
+        if (result.error) {
+          console.warn(
+            colors.yellow(
+              `Warning: Could not remove ${describeTailscaleShare(tailscaleRecord)}: ${result.error.message}. Run \`portless prune\` to retry.`
+            )
+          );
+        }
+        return;
+      }
+      store.remove(hostnames, process.pid);
     } catch {
-      // Non-fatal: the local hostname keeps routing without it, but the
-      // proxy needs tailscaleUrl to route requests arriving with the
-      // public .ts.net Host header (see findRoute), so the tailscale URL
-      // may 404 until the route is re-registered.
+      return;
+    }
+  };
+
+  if (tailscaleRequest) {
+    try {
+      const shared = share({
+        localPort: port,
+        ...tailscaleRequest,
+        ready: tsReady,
+        claimShare: (record) => store.claimTailscaleShare(hostname, record),
+        releaseShare: () => {
+          try {
+            store.updateRoute(hostname, { tailscaleShare: null });
+          } catch {
+            return;
+          }
+        },
+      });
+      tailscaleUrl = shared.url;
+      tailscaleRecord = shared.record;
+      const label =
+        shared.record.kind === "funnel"
+          ? "Funnel (public)"
+          : shared.record.kind === "service"
+            ? "Tailscale Service"
+            : shared.record.kind === "tcp"
+              ? "Tailscale (HTTP)"
+              : "Tailscale";
+      console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
+      if (shared.record.kind === "funnel") {
+        console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
+      } else if (shared.record.kind === "service") {
+        if (shared.pendingApproval) {
+          console.error(
+            colors.yellow("  (pending admin approval in Tailscale; DNS will not resolve yet)")
+          );
+          console.error(chalk.gray("  Approve at: https://login.tailscale.com/admin/services\n"));
+        } else {
+          console.error(
+            chalk.gray(`  (accessible on your tailnet as ${shared.record.serviceId})\n`)
+          );
+        }
+      } else if (shared.record.kind === "tcp") {
+        console.error(
+          chalk.gray("  (accessible from your tailnet over HTTP; MagicDNS is disabled)\n")
+        );
+      } else {
+        console.error(chalk.gray("  (accessible from your tailnet)\n"));
+      }
+      try {
+        store.updateRoute(hostname, { tailscaleUrl, tailscaleShare: shared.record });
+      } catch {
+        console.warn(
+          colors.yellow(`Warning: Could not persist Tailscale metadata for ${hostname}.`)
+        );
+      }
+    } catch (err) {
+      console.error(colors.red(`Error: ${err instanceof Error ? err.message : String(err)}`));
+      cleanupTailscaleAndRoutes();
+      process.exit(1);
     }
   }
 
@@ -1926,8 +2079,13 @@ async function runApp(
     try {
       run.proc = await run.t.start(port, {
         hostHeader: hostname,
-        onExit: (code, signal) => handleTunnelExit(run, code, signal),
+        url: ngrokUrl,
+        appName: name.baseName,
         configPath: path.join(store.dir, "cloudflared.yml"),
+        password: netbirdPassword,
+        pin: netbirdPin,
+        groups: netbirdGroups,
+        onExit: (code, signal) => handleTunnelExit(run, code, signal),
       });
       console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
       console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
@@ -1948,20 +2106,8 @@ async function runApp(
       console.error(colors.red(`Error: ${message}`));
       printTunnelHint(run.t, message);
       stoppingTunnels = true;
-      for (const started of tunnelRuns) stopNgrokProcess(started.proc?.child);
-      try {
-        unregisterTailscale({
-          tailscaleHttpsPort,
-          tailscaleFunnel: wantsFunnel || undefined,
-        });
-      } catch {
-        // Best-effort cleanup; non-fatal
-      }
-      try {
-        store.remove(hostnames, process.pid);
-      } catch {
-        // Best-effort cleanup; non-fatal
-      }
+      for (const started of tunnelRuns) stopTunnelProcess(started.proc?.child);
+      cleanupTailscaleAndRoutes();
       process.exit(1);
     }
   }
@@ -1974,7 +2120,8 @@ async function runApp(
   // still Expo, and reading commandArgs[0] here would see only `bun`.
   const framework = resolveFrameworkBasename(commandArgs);
   const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
-  const hostBind = isExpoLan ? undefined : "127.0.0.1";
+  const requiresAllInterfaces = tunnels.some((t) => t.bindAllInterfaces);
+  const hostBind = isExpoLan ? undefined : requiresAllInterfaces ? "0.0.0.0" : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
   // was started with --lan separately and discovered from the state marker,
@@ -1984,8 +2131,8 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
-  injectPackageScriptFrameworkFlags(commandArgs, port);
-  injectFrameworkFlags(commandArgs, port);
+  injectPackageScriptFrameworkFlags(commandArgs, port, process.cwd(), hostBind);
+  injectFrameworkFlags(commandArgs, port, hostBind);
 
   // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
   // Server Components) trust portless-proxied HTTPS services. Node.js does
@@ -2051,20 +2198,8 @@ async function runApp(
     },
     onCleanup: () => {
       stoppingTunnels = true;
-      for (const run of tunnelRuns) stopNgrokProcess(run.proc?.child);
-      try {
-        unregisterTailscale({
-          tailscaleHttpsPort,
-          tailscaleFunnel: wantsFunnel || undefined,
-        });
-      } catch {
-        // Best-effort cleanup; non-fatal
-      }
-      try {
-        store.remove(hostnames, process.pid);
-      } catch {
-        // Lock acquisition may fail during cleanup; non-fatal
-      }
+      for (const run of tunnelRuns) stopTunnelProcess(run.proc?.child);
+      cleanupTailscaleAndRoutes();
     },
   });
 }
@@ -2117,9 +2252,16 @@ const LAN_FLAG_SPEC = { "--lan": "boolean", "--ip": "value" } as const;
 
 const SHARE_FLAG_SPEC = {
   "--tailscale": "boolean",
+  "--tailscale-port": "value",
+  "--tailscale-service": "optional-equals",
   "--funnel": "boolean",
   "--ngrok": "boolean",
+  "--ngrok-url": "value",
   "--cloudflare": "boolean",
+  "--netbird": "boolean",
+  "--netbird-password": "value",
+  "--netbird-pin": "value",
+  "--netbird-groups": "value",
 } as const;
 
 const WORKTREE_FLAG_SPEC = { "--no-worktree": "boolean" } as const;
@@ -2155,12 +2297,52 @@ const LEADING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
 /** Sets the environment a LAN or sharing flag stands for. Rejects an --ip value that is not an IP address. */
 function applyGlobalFlag(flag: string, value?: string): void {
   if (flag === "--tailscale") process.env.PORTLESS_TAILSCALE = "1";
-  else if (flag === "--funnel") {
+  else if (flag === "--tailscale-port") {
+    const port = parsePort(value ?? "");
+    if (port === null) throw new UsageError("--tailscale-port requires a port number (1-65535).");
+    process.env.PORTLESS_TAILSCALE_PORT = String(port);
+    process.env.PORTLESS_TAILSCALE = "1";
+  } else if (flag === "--tailscale-service") {
+    if (value !== undefined) {
+      try {
+        process.env.PORTLESS_TAILSCALE_SERVICE = `svc:${normalizeServiceName(value)}`;
+      } catch (err) {
+        throw new UsageError(err instanceof Error ? err.message : String(err));
+      }
+    } else {
+      process.env.PORTLESS_TAILSCALE_SERVICE = "1";
+    }
+    process.env.PORTLESS_TAILSCALE = "1";
+  } else if (flag === "--funnel") {
     process.env.PORTLESS_FUNNEL = "1";
     process.env.PORTLESS_TAILSCALE = "1";
   } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
-  else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
-  else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
+  else if (flag === "--ngrok-url") {
+    try {
+      process.env.PORTLESS_NGROK_URL = normalizeNgrokUrl(value ?? "");
+    } catch (err) {
+      throw new UsageError(err instanceof Error ? err.message : String(err));
+    }
+    process.env.PORTLESS_NGROK = "1";
+  } else if (flag === "--cloudflare") process.env.PORTLESS_CLOUDFLARE = "1";
+  else if (flag === "--netbird") process.env.PORTLESS_NETBIRD = "1";
+  else if (
+    flag === "--netbird-password" ||
+    flag === "--netbird-pin" ||
+    flag === "--netbird-groups"
+  ) {
+    const env =
+      flag === "--netbird-password"
+        ? "PORTLESS_NETBIRD_PASSWORD"
+        : flag === "--netbird-pin"
+          ? "PORTLESS_NETBIRD_PIN"
+          : "PORTLESS_NETBIRD_GROUPS";
+    process.env[env] =
+      flag === "--netbird-groups"
+        ? parseNetbirdGroups(flag, value ?? "", true).join(",")
+        : parseNonEmptyCredential(flag, value ?? "", true);
+    process.env.PORTLESS_NETBIRD = "1";
+  } else if (flag === "--lan") process.env.PORTLESS_LAN = "1";
   else if (flag === "--ip" || flag === INTERNAL_LAN_IP_FLAG) {
     if (isIP(value ?? "") === 0) {
       throw new UsageError(`${flag} requires an IP address, but got "${value}".`, [
@@ -2204,9 +2386,16 @@ ${colors.bold("Options:")}
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
+  --tailscale-port <port>  Set the Tailscale share port
+  --tailscale-service[=<name>]  Share as a Tailscale Service (defaults to app name)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
+  --ngrok-url <url>      Use a custom ngrok URL
   --cloudflare           Share the app publicly via a Cloudflare quick tunnel (requires cloudflared)
+  --netbird              Share the app via NetBird
+  --netbird-password <pw>  Protect the NetBird share with a password
+  --netbird-pin <code>   Protect the NetBird share with a PIN
+  --netbird-groups <csv> Restrict the NetBird share to user groups
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
@@ -2390,9 +2579,16 @@ ${colors.bold("Options:")}
   --lan                         Enable LAN access for app commands
   --ip <address>                Pin the LAN IP (implies --lan)
   --tailscale                   Share the app on your tailnet
+  --tailscale-port <port>       Set the Tailscale share port
+  --tailscale-service[=<name>]  Share as a Tailscale Service (defaults to app name)
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
+  --ngrok-url <url>             Use a custom ngrok URL
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
+  --netbird                     Share the app via NetBird
+  --netbird-password <pw>       Protect the NetBird share with a password
+  --netbird-pin <code>          Protect the NetBird share with a PIN
+  --netbird-groups <csv>        Restrict the NetBird share to user groups
   --                            Stop flag parsing and pass remaining arguments to the app
 
 ${colors.bold("Options for run and <name> <command>:")}
@@ -2646,7 +2842,8 @@ function canInspectStateDir(stateDir: string): boolean {
 function removeStateFilesForCleanup(
   stateDirs: string[],
   failedCAStateDirs: Set<string>,
-  preserveProxyRuntime: boolean
+  preserveProxyRuntime: boolean,
+  preserveRoutes: boolean
 ): string[] {
   const failures = new Set<string>();
   for (const stateDir of stateDirs) {
@@ -2654,6 +2851,7 @@ function removeStateFilesForCleanup(
       preserveCAIdentity:
         preserveProxyRuntime || shouldPreserveCAIdentity(stateDir, failedCAStateDirs),
       preserveProxyRuntime,
+      preserveRoutes,
     });
     for (const file of removed) failures.add(file);
   }
@@ -2664,7 +2862,8 @@ function removeStateFilesForCleanup(
 function runCleanupSteps(
   steps: readonly CleanupStep[],
   stateDirs: string[],
-  preserveProxyRuntime: boolean
+  preserveProxyRuntime: boolean,
+  preserveRoutes: boolean
 ) {
   const caResults = steps.includes("ca")
     ? attemptCATrustRemovalForCleanup(stateDirs, untrustCA)
@@ -2673,7 +2872,7 @@ function runCleanupSteps(
     [...caResults].filter(([, result]) => !result.removed).map(([stateDir]) => stateDir)
   );
   const stateFailures = steps.includes("files")
-    ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime)
+    ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime, preserveRoutes)
     : [];
   const hostsCleaned = !steps.includes("hosts") || cleanHostsFile();
   return { caResults, failedCAStateDirs, stateFailures, hostsCleaned };
@@ -2687,7 +2886,8 @@ function runCleanupSteps(
 function runElevatedCleanup(
   steps: CleanupStep[],
   stateDirs: string[],
-  preserveProxyRuntime: boolean
+  preserveProxyRuntime: boolean,
+  preserveRoutes = false
 ): number | null {
   if (steps.length === 0) return 0;
   const labels = steps.map(cleanupStepLabel).join(", ");
@@ -2701,6 +2901,7 @@ function runElevatedCleanup(
       `${CLEAN_ELEVATED_STEPS_ENV}=${steps.join(",")}`,
       `${CLEAN_ELEVATED_DIRS_ENV}=${JSON.stringify(stateDirs)}`,
       ...(preserveProxyRuntime ? [`${CLEAN_ELEVATED_PRESERVE_PROXY_ENV}=1`] : []),
+      ...(preserveRoutes ? [`${CLEAN_ELEVATED_PRESERVE_ROUTES_ENV}=1`] : []),
       process.execPath,
       getEntryScript(),
       "clean",
@@ -2728,6 +2929,8 @@ from ${HOSTS_DISPLAY}.
 Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
 fails, the CA certificate and key are retained so clean can safely retry.
+If removing a Tailscale share fails, routes.json is kept so portless prune or
+a later portless clean can retry.
 
 On macOS and Linux, a state directory that another user owns or can write to
 is left alone. Clean prints the reason and exits nonzero. A /tmp/portless
@@ -2763,8 +2966,14 @@ async function handleClean(args: string[]): Promise<void> {
     }
     const approvedDirs = parseCleanupDirs(process.env[CLEAN_ELEVATED_DIRS_ENV]);
     const preserveProxyRuntime = process.env[CLEAN_ELEVATED_PRESERVE_PROXY_ENV] === "1";
+    const preserveRoutes = process.env[CLEAN_ELEVATED_PRESERVE_ROUTES_ENV] === "1";
     const cleanableDirs = approvedDirs.filter(isCleanableStateDir);
-    const left = runCleanupSteps(requestedCleanupSteps, cleanableDirs, preserveProxyRuntime);
+    const left = runCleanupSteps(
+      requestedCleanupSteps,
+      cleanableDirs,
+      preserveProxyRuntime,
+      preserveRoutes
+    );
     const clean =
       cleanableDirs.length === approvedDirs.length &&
       left.failedCAStateDirs.size === 0 &&
@@ -2837,6 +3046,7 @@ async function handleClean(args: string[]): Promise<void> {
 
   // Clean up any tailscale serve/funnel registrations tied to stale routes
   let routesForClean: ReturnType<RouteStore["loadRoutes"]> = [];
+  let preserveRoutes = false;
   try {
     routesForClean = store.untrustedReason() ? [] : store.loadRoutes({ includeStale: true });
   } catch (err) {
@@ -2845,13 +3055,15 @@ async function handleClean(args: string[]): Promise<void> {
     problems++;
   }
   for (const route of routesForClean) {
-    if (route.tailscaleHttpsPort) {
+    const tsRecord = tailscaleShareFromRoute(route);
+    if (tsRecord) {
       try {
-        unregisterTailscale(route);
-        console.log(colors.green(`Removed tailscale serve on port ${route.tailscaleHttpsPort}.`));
+        unshare(tsRecord, { ignoreMissing: true });
+        console.log(colors.green(`Removed ${describeTailscaleShare(tsRecord)}.`));
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         console.warn(colors.yellow(message));
+        preserveRoutes = true;
         problems++;
       }
     }
@@ -2860,13 +3072,21 @@ async function handleClean(args: string[]): Promise<void> {
     }
   }
 
+  if (preserveRoutes) {
+    console.warn(
+      colors.yellow(
+        "Kept routes.json so remaining Tailscale shares can be retried with portless prune or portless clean."
+      )
+    );
+  }
   if (!proxyStopped) {
     console.warn(colors.yellow("Kept the CA in the trust store while proxy stop is unconfirmed."));
   }
   const outcome = runCleanupSteps(
     proxyStopped ? CLEANUP_STEP_ORDER : ["files", "hosts"],
     stateDirs,
-    preserveProxyRuntime
+    preserveProxyRuntime,
+    preserveRoutes
   );
   const { caResults: caRemovalResults, failedCAStateDirs } = outcome;
   let { stateFailures, hostsCleaned } = outcome;
@@ -2876,7 +3096,12 @@ async function handleClean(args: string[]): Promise<void> {
   if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
   if (!hostsCleaned) retrySteps.push("hosts");
   if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
-    const elevatedStatus = runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
+    const elevatedStatus = runElevatedCleanup(
+      retrySteps,
+      stateDirs,
+      preserveProxyRuntime,
+      preserveRoutes
+    );
     if (elevatedStatus === 0) {
       failedCAStateDirs.clear();
       if (retrySteps.includes("files")) stateFailures = [];
@@ -2895,7 +3120,8 @@ async function handleClean(args: string[]): Promise<void> {
         stateFailures = removeStateFilesForCleanup(
           stateDirs,
           failedCAStateDirs,
-          preserveProxyRuntime
+          preserveProxyRuntime,
+          preserveRoutes
         );
       }
       if (!hostsCleaned) hostsCleaned = cleanHostsFile();
@@ -2964,8 +3190,9 @@ leader is gone is recorded so --force can retry it. Stale routes and their
 Tailscale and tunnel shares are removed only once the recorded group is gone. A
 port holder that cannot be proven part of the recorded group is reported and
 kept, never killed. On Windows, process groups cannot be verified or signaled.
-Recorded ngrok and cloudflared tunnels are stopped only when their executable
-names match, including on Windows.
+Recorded ngrok, cloudflared, and netbird tunnels are stopped only when their
+executable names match, including on Windows. Stale Tailscale records are kept
+when removal fails so portless prune can retry.
 
 App ports in stale Tailscale Serve or Funnel records stay reserved after the
 server stops. Automatic assignment skips them; fixed-port registration refuses
@@ -3001,13 +3228,6 @@ async function handlePrune(args: string[]): Promise<void> {
     console.log("No orphaned routes found.");
     return;
   }
-  const liveTailscalePorts = new Set(
-    store
-      .loadRoutes()
-      .flatMap((route) =>
-        route.tailscaleHttpsPort === undefined ? [] : [route.tailscaleHttpsPort]
-      )
-  );
 
   let pruned = 0;
   let skipped = 0;
@@ -3048,7 +3268,21 @@ async function handlePrune(args: string[]): Promise<void> {
     }
     const holders = findPidsOnPort(route.port);
     const held = holders.length > 0 || (await isPortListening(route.port));
-    if (!store.removeStaleRoute(route.hostname, route.pid)) {
+    const tsRecord = tailscaleShareFromRoute(route);
+    const removal = store.removeStaleRouteWithShare(route.hostname, route.pid, (rec) =>
+      unshare(rec, { ignoreMissing: true })
+    );
+    if (removal.error) {
+      const shareLabel = tsRecord ? describeTailscaleShare(tsRecord) : "tailscale share";
+      console.warn(
+        colors.yellow(
+          `  ${route.hostname} - could not remove ${shareLabel}; route kept. Retry with portless prune`
+        )
+      );
+      skipped++;
+      continue;
+    }
+    if (!removal.removed) {
       console.log(
         `  ${route.hostname} :${route.port} - route changed or owner is alive; route kept`
       );
@@ -3060,16 +3294,8 @@ async function handlePrune(args: string[]): Promise<void> {
     console.log(
       `  ${route.hostname} :${route.port} - route removed${held ? `; ${holder} still holds the port and was not killed` : ""}`
     );
-    if (route.tailscaleHttpsPort && !liveTailscalePorts.has(route.tailscaleHttpsPort)) {
-      try {
-        unregisterTailscale(route);
-        console.log(
-          `  ${route.hostname} - removed tailscale serve on port ${route.tailscaleHttpsPort}`
-        );
-      } catch {
-        console.warn(colors.yellow(`  ${route.hostname} - could not remove tailscale serve`));
-      }
-    }
+    if (removal.unshared)
+      console.log(`  ${route.hostname} - removed ${describeTailscaleShare(removal.unshared)}`);
     for (const t of stopRecordedTunnels(route, true)) {
       console.log(`  ${route.hostname} - stopped ${t.label} tunnel`);
     }
@@ -6024,7 +6250,7 @@ async function main() {
     const equalsIndex = arg.startsWith("--") ? arg.indexOf("=") : -1;
     const kind = spec[equalsIndex === -1 ? arg : arg.slice(0, equalsIndex)];
     if (!kind) return null;
-    return index + (kind === "boolean" || equalsIndex !== -1 ? 1 : 2);
+    return index + (kind === "boolean" || kind === "optional-equals" || equalsIndex !== -1 ? 1 : 2);
   };
 
   const flagLimit = (): number => {
@@ -6096,8 +6322,32 @@ async function main() {
   }
   if (typeof ipResult === "string") applyGlobalFlag("--ip", ipResult);
 
-  for (const flag of Object.keys(SHARE_FLAG_SPEC)) {
-    if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
+  const stripGlobalOptionalEqualsFlag = (flag: string): string | true | null => {
+    const end = globalFlagEnd(flag);
+    const idx = args.findIndex(
+      (arg, index) => index < end && (arg === flag || arg.startsWith(`${flag}=`))
+    );
+    if (idx === -1) return null;
+    const arg = args[idx];
+    const value = arg === flag ? true : arg.slice(flag.length + 1);
+    if (value === "") throw new UsageError(`${flag}= requires a value.`);
+    args.splice(idx, 1);
+    if (stripGlobalOptionalEqualsFlag(flag) !== null)
+      throw new UsageError(`${flag} can only be given once.`);
+    return value;
+  };
+
+  for (const [flag, kind] of Object.entries(SHARE_FLAG_SPEC)) {
+    if (kind === "boolean") {
+      if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
+    } else if (kind === "value") {
+      const result = stripGlobalFlag(flag, true);
+      if (result === false) throw new UsageError(`${flag} requires a value.`);
+      if (typeof result === "string") applyGlobalFlag(flag, result);
+    } else {
+      const result = stripGlobalOptionalEqualsFlag(flag);
+      if (result !== null) applyGlobalFlag(flag, result === true ? undefined : result);
+    }
   }
 
   // --script flag: override the default "dev" script for zero-arg mode.

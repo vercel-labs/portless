@@ -25,10 +25,12 @@ const PORTLESS_STATE_FILES = [
 const HOST_CERTS_DIR = "host-certs";
 const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem", "ca.trust-refresh-pending"]);
 const PROXY_RUNTIME_FILES = new Set(PROXY_FILES);
+const ROUTE_FILES = new Set(["routes.json", "routes.json.tmp", "routes.lock"]);
 
 export type RemovePortlessStateFilesOptions = {
   preserveCAIdentity?: boolean;
   preserveProxyRuntime?: boolean;
+  preserveRoutes?: boolean;
 };
 
 export type CATrustRemovalResult = {
@@ -125,6 +127,7 @@ export function removePortlessStateFiles(
   for (const f of PORTLESS_STATE_FILES) {
     if (options.preserveCAIdentity && CA_IDENTITY_FILES.has(f)) continue;
     if (options.preserveProxyRuntime && PROXY_RUNTIME_FILES.has(f)) continue;
+    if (options.preserveRoutes && ROUTE_FILES.has(f)) continue;
     const file = path.join(dir, f);
     try {
       if (f === "routes.lock") fs.rmSync(file, { recursive: true, force: true });
