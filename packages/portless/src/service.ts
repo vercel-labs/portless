@@ -631,9 +631,21 @@ function resolveServiceLaunch(ctx: ServiceContext): ServiceLaunch {
     return { command: [ctx.nodePath, ...proxyCommand], pathEnv: entries.join(";") };
   }
   const isUserUnit = ctx.platform === "linux" && ctx.linuxScope === "user";
+  const isSafeRootPathDir = (entry: string): boolean => {
+    if (!isRootControlledPosixPath(entry, "dir")) return false;
+    const nodeCandidate = path.posix.join(entry, "node");
+    try {
+      const stat = fs.lstatSync(nodeCandidate, { throwIfNoEntry: false });
+      if (stat === undefined) return true;
+    } catch (err) {
+      const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
+      return code === "ENOENT" || code === "ENOTDIR";
+    }
+    return isRootControlledPosixPath(nodeCandidate, "file");
+  };
   const isAllowedPathDir = (entry: string): boolean => {
     if (!entry || !path.posix.isAbsolute(entry)) return false;
-    return isUserUnit || isRootControlledPosixPath(entry, "dir");
+    return isUserUnit || isSafeRootPathDir(entry);
   };
   const nodeDir = path.posix.isAbsolute(ctx.nodePath) ? path.posix.dirname(ctx.nodePath) : "";
   const canResolveNodeFromPath =

@@ -151,14 +151,19 @@ function mockRootControlledPaths(
       isSymbolicLink: () => entry.kind === "symlink",
     }) as never;
 
-  vi.mocked(lstatSync).mockImplementation((file) => {
+  vi.mocked(lstatSync).mockImplementation((file, options) => {
     const resolved = path.posix.resolve(String(file));
     if (resolved === "/") {
       return makeStat(normalizedEntries.get("/") ?? { kind: "dir", uid: 0, mode: 0o40755 });
     }
     const entry = normalizedEntries.get(resolved);
     if (entry === undefined) {
-      throw new Error(`ENOENT: ${file}`);
+      if (options && typeof options === "object" && options.throwIfNoEntry === false) {
+        return undefined as never;
+      }
+      const err = new Error(`ENOENT: ${file}`) as NodeJS.ErrnoException;
+      err.code = "ENOENT";
+      throw err;
     }
     return makeStat(entry);
   });
@@ -591,6 +596,26 @@ describe("buildServiceSpec", () => {
       "/usr/local/bin/node",
       "/usr/local/lib/portless/cli.js",
     ]);
+  });
+
+  it("drops a root-owned PATH directory whose node entry is not root-owned", () => {
+    mockTrustedUnixPaths({
+      "/usr/local/bin/node": { kind: "file", uid: 501, mode: 0o100755 },
+      "/usr/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+    });
+
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.programArguments.slice(0, 2)).toEqual(["/usr/bin/env", "node"]);
+    expect(spec.plist).toContain("<key>PATH</key>\n    <string>/usr/bin:/bin</string>");
+    expect(spec.plist).not.toContain("/usr/local/bin:");
   });
 
   it("traverses a root-owned relative symlink with dot dot one segment at a time", () => {
