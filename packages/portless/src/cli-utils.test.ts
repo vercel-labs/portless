@@ -2181,6 +2181,19 @@ describe("resolveScriptArgForwarding", () => {
       2,
     ],
     [
+      "npm run --omit dev start",
+      { start: "npm run inner", inner: "node server.js" },
+      "npm@10.0.0",
+      2,
+    ],
+    [
+      "npm run --include dev start",
+      { start: "npm run inner", inner: "node server.js" },
+      "npm@10.0.0",
+      2,
+    ],
+    ["npm run -m dev start", { start: "npm run inner", inner: "node server.js" }, "npm@10.0.0", 2],
+    [
       "npm run --unknown-flag foo start",
       { foo: "npm run inner", start: "node server.js", inner: "node server.js" },
       "npm@10.0.0",
@@ -2241,6 +2254,21 @@ describe("resolveScriptArgForwarding", () => {
     ],
     ["yarn run start", { start: "node server.js" }, "yarn@1.22.19", 1],
     ["yarn run start", { start: "node server.js" }, "yarn@4.0.0", 0],
+    [
+      "yarn run --silent start",
+      { start: "npm run inner", inner: "node server.js" },
+      "yarn@1.22.22",
+      2,
+    ],
+    ["yarn run --inspect start", { start: "node server.js" }, "yarn@1.22.22", 0],
+    [
+      "yarn run --inspect start",
+      { start: "npm run inner", inner: "node server.js" },
+      "yarn@4.0.0",
+      1,
+    ],
+    ["yarn run --no-foo start", { start: "node server.js" }, "yarn@1.22.22", 0],
+    ["yarn run --production start", { start: "node server.js" }, "yarn@1.22.22", 0],
     [
       "yarn --cwd apps/web run start",
       { "apps/web": "npm run inner", start: "npm run inner", inner: "node server.js" },
