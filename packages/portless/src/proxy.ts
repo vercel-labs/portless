@@ -370,7 +370,14 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
   const renderProxyPage = (context: ProxyPageContext): string => {
     if (customRenderPage) {
       try {
-        const rendered = customRenderPage(context);
+        const rendered = customRenderPage({
+          ...context,
+          routes: context.routes.map((route) => ({
+            ...route,
+            ...(route.upstream ? { upstream: { ...route.upstream } } : {}),
+          })),
+          tlds: [...context.tlds],
+        });
         if (typeof rendered === "string") return rendered;
       } catch (error) {
         onError(

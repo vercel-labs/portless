@@ -418,13 +418,16 @@ describe("createProxyServer", () => {
     );
 
     it("logs a renderer error and falls back to the built-in page", async () => {
+      const routes: RouteInfo[] = [{ hostname: "app.localhost", port: 4001 }];
       const onError = vi.fn();
       const server = trackServer(
         createProxyServer({
-          getRoutes: () => [],
+          getRoutes: () => routes,
           proxyPort: TEST_PROXY_PORT,
           onError,
-          renderPage: () => {
+          renderPage: (ctx) => {
+            (ctx.routes as RouteInfo[]).pop();
+            (ctx.tlds as string[]).push("mutated");
             throw new Error("renderer failed");
           },
         })
@@ -433,7 +436,9 @@ describe("createProxyServer", () => {
 
       const res = await request(server, { host: "portless.localhost" });
       expect(res.status).toBe(200);
-      expect(res.body).toContain("No apps running.");
+      expect(res.body).toContain("app.localhost");
+      expect(res.body).not.toContain("mutated");
+      expect(routes).toHaveLength(1);
       expect(onError).toHaveBeenCalledWith(expect.stringContaining("renderer failed"));
     });
 
