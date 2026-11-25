@@ -183,6 +183,7 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain("Description=Portless HTTPS proxy");
     expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
+    expect(spec.unit).toContain('Environment=PATH="/usr/bin:/bin:/usr/sbin:/sbin"');
     expect(spec.unit).toContain(
       'ExecStart="/usr/bin/node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
@@ -333,19 +334,22 @@ describe("buildServiceSpec", () => {
     expect(spec.script).toContain("--skip-trust");
   });
 
-  it("preserves PATH in the Windows startup script", () => {
+  it("limits PATH in the Windows startup script to core system and Program Files directories", () => {
     const spec = buildServiceSpec({
       platform: "win32",
       nodePath: "C:\\nodejs\\node.exe",
       entryScript: "C:\\cli.js",
       userHome: "C:\\Users\\Alice",
-      pathEnv: "C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%Done",
+      pathEnv:
+        "C:\\Windows\\System32;C:\\Windows\\Temp;C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\100%Done;C:\\Tools\\100%Done",
     });
 
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
     expect(spec.script).toContain(
-      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%%Done"'
+      'set "PATH=C:\\Windows\\System32;C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\100%%Done"'
     );
+    expect(spec.script).not.toContain("C:\\Windows\\Temp");
+    expect(spec.script).not.toContain("C:\\Tools");
   });
 
   it("escapes percent signs in Windows batch env values", () => {
@@ -1475,7 +1479,11 @@ describe("handleService", () => {
       file === installedSpec.unitPath ? installedSpec.unit : ""
     );
     vi.mocked(isProxyRunning).mockResolvedValue(false);
-    const runner = vi.fn(() => ({ status: 0, stdout: "active\n", stderr: "" }));
+    const runner = vi.fn((_: string, _args: string[]) => ({
+      status: 0,
+      stdout: "active\n",
+      stderr: "",
+    }));
 
     try {
       await handleService(["service", "status"], { entryScript: "/fake/cli.js", runner });

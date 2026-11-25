@@ -571,6 +571,34 @@ function userServicePathEnv(ctx: ServiceContext): string {
   return entries.join(":");
 }
 
+function windowsSystemPathEnv(pathEnv: string): string {
+  const systemDrive = /^[a-z]:$/i.test(process.env.SystemDrive ?? "")
+    ? process.env.SystemDrive!.toLowerCase()
+    : "c:";
+  const coreDirs = new Set([
+    `${systemDrive}\\windows`,
+    `${systemDrive}\\windows\\system32`,
+    `${systemDrive}\\windows\\syswow64`,
+  ]);
+  const programRoots = [`${systemDrive}\\program files`, `${systemDrive}\\program files (x86)`];
+  const entries: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of pathEnv.split(";")) {
+    if (!entry || !path.win32.isAbsolute(entry) || entry.split(/[\\/]/).includes("..")) continue;
+    const key = path.win32.resolve(entry).replace(/\\+$/, "").toLowerCase();
+    const allowed =
+      coreDirs.has(key) ||
+      programRoots.some((root) => {
+        const rel = path.win32.relative(root, key);
+        return rel !== "" && rel !== ".." && !rel.startsWith("..\\") && !path.win32.isAbsolute(rel);
+      });
+    if (!allowed || seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
+  }
+  return entries.join(";");
+}
+
 function buildServiceEnv(ctx: ServiceContext, scope?: LinuxServiceScope): Record<string, string> {
   const env: Record<string, string> = {
     PORTLESS_STATE_DIR: ctx.stateDir,
@@ -594,7 +622,8 @@ function buildServiceEnv(ctx: ServiceContext, scope?: LinuxServiceScope): Record
 
   if (ctx.platform === "win32") {
     env.USERPROFILE = ctx.user.home;
-    env.PATH = ctx.pathEnv;
+    const winPath = windowsSystemPathEnv(ctx.pathEnv);
+    if (winPath) env.PATH = winPath;
   } else {
     env.HOME = ctx.user.home;
     if (ctx.platform === "linux" && scope === "user") {
@@ -661,7 +690,7 @@ function buildSystemdUnit(
   const envLines = Object.entries(env)
     .map(([key, value]) => `Environment=${key}=${systemdEscape(value)}`)
     .join("\n");
-  const pathEnv = scope === "user" ? userServicePathEnv(ctx) : ctx.pathEnv;
+  const pathEnv = scope === "user" ? userServicePathEnv(ctx) : "/usr/bin:/bin:/usr/sbin:/sbin";
   const networkTargets =
     scope === "system" ? "After=network-online.target\nWants=network-online.target\n" : "";
   const wantedBy = scope === "user" ? "default.target" : "multi-user.target";
