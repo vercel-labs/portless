@@ -172,55 +172,163 @@ export function createDeviceTrustHandler(
   };
 }
 
-export async function serveDeviceTrust(stateDir: string): Promise<boolean> {
+type DeviceTrustServerState =
+  | { state: "starting" }
+  | { state: "listening"; server: http.Server }
+  | { state: "stopping"; done: Promise<void> }
+  | { state: "stopped" };
+
+export type DeviceTrustStartResult =
+  | {
+      ok: true;
+      ca: DeviceCA;
+      ip: string;
+      port: number;
+      url: string;
+      closed: Promise<void>;
+      stop: () => Promise<void>;
+    }
+  | { ok: false; code: "no-lan-ip" | "bind-failed"; message: string };
+
+export interface DeviceTrustServerOptions {
+  resolveIp?: () => Promise<string | null>;
+  onServe?: (file: string, userAgent: string | undefined) => void;
+}
+
+function formatUrlHost(ip: string): string {
+  return ip.includes(":") && !ip.startsWith("[") ? `[${ip}]` : ip;
+}
+
+/**
+ * Start the ephemeral HTTP onboarding server bound strictly to the resolved LAN IP.
+ */
+export async function startDeviceTrustServer(
+  stateDir: string,
+  options: DeviceTrustServerOptions = {}
+): Promise<DeviceTrustStartResult> {
   const ca = readDeviceCA(stateDir);
-  const ip = await getLocalNetworkIp();
+  const ip = await (options.resolveIp ?? getLocalNetworkIp)();
   if (!ip) {
-    console.error(colors.red("No LAN address found for a device to reach."));
-    console.error(
-      colors.blue("Connect this machine to the same network as the device and try again.")
-    );
+    return {
+      ok: false,
+      code: "no-lan-ip",
+      message: "No LAN address found for a device to reach.",
+    };
+  }
+
+  let lifecycle: DeviceTrustServerState = { state: "starting" };
+  const token = randomBytes(16).toString("base64url");
+  const server = http.createServer(createDeviceTrustHandler(ca, token, options.onServe));
+  let markClosed = () => {};
+  const closed = new Promise<void>((resolve) => {
+    markClosed = resolve;
+  });
+
+  const stop = (): Promise<void> => {
+    if (lifecycle.state === "stopped") return Promise.resolve();
+    if (lifecycle.state === "stopping") return lifecycle.done;
+    if (lifecycle.state === "starting") {
+      lifecycle = { state: "stopped" };
+      markClosed();
+      return Promise.resolve();
+    }
+    const activeServer = lifecycle.server;
+    const done = new Promise<void>((resolve) => {
+      activeServer.close(() => {
+        lifecycle = { state: "stopped" };
+        markClosed();
+        resolve();
+      });
+      activeServer.closeAllConnections();
+    });
+    lifecycle = { state: "stopping", done };
+    return done;
+  };
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const onError = (err: Error) => {
+        server.removeListener("listening", onListening);
+        reject(err);
+      };
+      const onListening = () => {
+        server.removeListener("error", onError);
+        resolve();
+      };
+      server.once("error", onError);
+      server.once("listening", onListening);
+      server.listen(0, ip);
+    });
+  } catch (error) {
+    lifecycle = { state: "stopped" };
+    markClosed();
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      ok: false,
+      code: "bind-failed",
+      message: `Could not bind device trust server on ${ip}: ${detail}`,
+    };
+  }
+
+  lifecycle = { state: "listening", server };
+  server.on("error", () => {
+    void stop();
+  });
+
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    await stop();
+    return {
+      ok: false,
+      code: "bind-failed",
+      message: `Could not determine bound port on ${ip}.`,
+    };
+  }
+
+  const boundIp = address.address;
+  const url = `http://${formatUrlHost(boundIp)}:${address.port}/${token}/`;
+  return { ok: true, ca, ip: boundIp, port: address.port, url, closed, stop };
+}
+
+export async function serveDeviceTrust(stateDir: string): Promise<boolean> {
+  const started = await startDeviceTrustServer(stateDir, {
+    onServe: (file, userAgent) => {
+      const agent = (userAgent ?? "unknown device").slice(0, 60).replace(/\p{Cc}/gu, " ");
+      console.log(`${new Date().toISOString()} ${agent}: ${file || "opened the page"}`);
+    },
+  });
+  if (!started.ok) {
+    console.error(colors.red(started.message));
+    if (started.code === "no-lan-ip") {
+      console.error(
+        colors.blue("Connect this machine to the same network as the device and try again.")
+      );
+    }
     return false;
   }
 
-  const token = randomBytes(16).toString("base64url");
-  const server = http.createServer(
-    createDeviceTrustHandler(ca, token, (file, userAgent) => {
-      const agent = (userAgent ?? "unknown device").slice(0, 60).replace(/\p{Cc}/gu, " ");
-      console.log(`${new Date().toISOString()} ${agent}: ${file || "opened the page"}`);
-    })
-  );
-  await new Promise<void>((resolve, reject) => {
-    server.once("error", reject);
-    server.listen(0, "0.0.0.0", () => {
-      server.removeListener("error", reject);
-      resolve();
-    });
-  });
-  const address = server.address();
-  if (!address || typeof address === "string") throw new Error("Unable to determine server port");
-  const url = `http://${ip}:${address.port}/${token}/`;
   console.log("Scan this QR code with your device on a trusted local network:");
-  console.log(renderTerminalQr(url, stdoutColor));
-  console.log(colors.cyan(url));
-  console.log(`SHA-256 ${ca.fingerprint}`);
+  console.log(renderTerminalQr(started.url, stdoutColor));
+  console.log(colors.cyan(started.url));
+  console.log(`SHA-256 ${started.ca.fingerprint}`);
   console.log(
     "Before trusting the downloaded CA, compare this SHA-256 fingerprint against the certificate details in device settings (do not rely on the webpage alone)."
   );
   console.log("Start the proxy in LAN mode with portless proxy start --lan.");
   console.log("Serving for ten minutes. Press Ctrl+C to stop sooner.");
 
-  await new Promise<void>((resolve, reject) => {
-    const stop = () => {
-      clearTimeout(timeout);
-      process.removeListener("SIGINT", stop);
-      process.removeListener("SIGTERM", stop);
-      server.close((error) => (error ? reject(error) : resolve()));
-      server.closeAllConnections();
-    };
-    const timeout = setTimeout(stop, DEVICE_TRUST_MS);
-    process.once("SIGINT", stop);
-    process.once("SIGTERM", stop);
-  });
+  const onSignal = () => {
+    void started.stop();
+  };
+  const timeout = setTimeout(onSignal, DEVICE_TRUST_MS);
+  process.once("SIGINT", onSignal);
+  process.once("SIGTERM", onSignal);
+  try {
+    await started.closed;
+  } finally {
+    clearTimeout(timeout);
+    process.removeListener("SIGINT", onSignal);
+    process.removeListener("SIGTERM", onSignal);
+  }
   return true;
 }

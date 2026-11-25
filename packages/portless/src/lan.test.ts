@@ -12,6 +12,7 @@ import {
   detectDevicePlatform,
   readDeviceCA,
   renderTerminalQr,
+  startDeviceTrustServer,
   type DeviceCA,
 } from "./lan.js";
 
@@ -203,5 +204,49 @@ describe("createDeviceTrustHandler", () => {
       ["", IPHONE],
       ["portless-ca.crt", ANDROID],
     ]);
+  });
+});
+
+describe("startDeviceTrustServer", () => {
+  it("binds strictly to the resolved IP rather than 0.0.0.0 and stops idempotently", async () => {
+    const started = await startDeviceTrustServer(stateDir, {
+      resolveIp: async () => "127.0.0.1",
+    });
+    expect(started.ok).toBe(true);
+    if (!started.ok) return;
+
+    try {
+      expect(started.ip).toBe("127.0.0.1");
+      expect(started.url).toMatch(new RegExp(`^http://127\\.0\\.0\\.1:${started.port}/[^/]+/$`));
+      const res = await fetch(`${started.url}portless-ca.pem`);
+      expect(res.status).toBe(200);
+      expect(await res.text()).toBe(ca.pem);
+    } finally {
+      await Promise.all([started.stop(), started.stop()]);
+      await started.stop();
+    }
+
+    await expect(fetch(started.url)).rejects.toThrow();
+  });
+
+  it("returns no-lan-ip when no LAN address is available", async () => {
+    const result = await startDeviceTrustServer(stateDir, {
+      resolveIp: async () => null,
+    });
+    expect(result).toEqual({
+      ok: false,
+      code: "no-lan-ip",
+      message: "No LAN address found for a device to reach.",
+    });
+  });
+
+  it("returns bind-failed when the resolved IP cannot be bound locally", async () => {
+    const result = await startDeviceTrustServer(stateDir, {
+      resolveIp: async () => "192.0.2.1",
+    });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.code).toBe("bind-failed");
+    expect(result.message).toContain("192.0.2.1");
   });
 });
