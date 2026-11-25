@@ -36,20 +36,16 @@ type UpstreamOptions = http.RequestOptions & {
   upstreamDial: DialRef;
 };
 
-function isLongLivedResponse(res: http.IncomingMessage, method?: string): boolean {
+const STREAMING_MEDIA_TYPES = new Set([
+  "text/event-stream",
+  "application/x-ndjson",
+  "application/stream+json",
+  "multipart/x-mixed-replace",
+]);
+
+function isLongLivedResponse(res: http.IncomingMessage): boolean {
   const mediaType = res.headers["content-type"]?.split(";", 1)[0].trim().toLowerCase();
-  if (
-    mediaType === "text/event-stream" ||
-    mediaType === "application/x-ndjson" ||
-    mediaType === "multipart/x-mixed-replace"
-  ) {
-    return true;
-  }
-  const status = res.statusCode ?? 0;
-  if (method === "HEAD" || (status >= 100 && status < 200) || status === 204 || status === 304) {
-    return false;
-  }
-  return res.headers["content-length"] === undefined;
+  return mediaType !== undefined && STREAMING_MEDIA_TYPES.has(mediaType);
 }
 
 /** Manages per-backend upstream pooling, dial pacing, fresh-connection replay, and shutdown. */
@@ -289,7 +285,7 @@ export class UpstreamPool {
       let hasResponse = false;
       proxyReq.once("response", (proxyRes) => {
         hasResponse = true;
-        if (isLongLivedResponse(proxyRes, options.method)) promoteToLongLived();
+        if (isLongLivedResponse(proxyRes)) promoteToLongLived();
         proxyRes.once("close", release);
       });
       proxyReq.once("error", release);

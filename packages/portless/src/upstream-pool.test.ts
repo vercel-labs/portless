@@ -105,11 +105,11 @@ describe("UpstreamPool", () => {
     expect(peak).toBeLessThanOrEqual(48);
   }, 30_000);
 
-  it("promotes chunked streaming responses out of the request cap", async () => {
+  it("promotes streaming media-type responses out of the request cap", async () => {
     const backend = http.createServer((req, res) => {
       if (req.url === "/stream") {
-        res.writeHead(200, { "content-type": "text/plain" });
-        res.write("open\n");
+        res.writeHead(200, { "content-type": "application/x-ndjson" });
+        res.write('{"ok":true}\n');
       } else {
         res.end("ok");
       }
@@ -130,7 +130,7 @@ describe("UpstreamPool", () => {
               let body = "";
               res.on("data", (chunk: string) => {
                 body += chunk;
-                if (body.includes("open\n")) resolve();
+                if (body.includes('{"ok":true}\n')) resolve();
               });
               res.once("error", reject);
             });
@@ -139,6 +139,31 @@ describe("UpstreamPool", () => {
     );
     expect(await response(get(proxyPort, "/health"))).toEqual({ status: 200, body: "ok" });
     for (const stream of streams) stream.destroy();
+  }, 30_000);
+
+  it("keeps finite chunked responses inside the request cap", async () => {
+    let active = 0;
+    let peak = 0;
+    const errors: string[] = [];
+    const backend = http.createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/javascript" });
+      res.write("// chunk\n");
+      const timer = setTimeout(() => res.end("export default 1;"), 25);
+      res.once("close", () => clearTimeout(timer));
+    });
+    backend.on("connection", (socket) => {
+      active++;
+      peak = Math.max(peak, active);
+      socket.once("close", () => (active -= 1));
+    });
+    const backendPort = await listen(backend, 128);
+    const proxyPort = await listen(proxy(backendPort, (error) => errors.push(error)));
+
+    const results = await Promise.all(Array.from({ length: 200 }, () => response(get(proxyPort))));
+
+    expect(results).toEqual(Array(200).fill({ status: 200, body: "// chunk\nexport default 1;" }));
+    expect(errors).toEqual([]);
+    expect(peak).toBeLessThanOrEqual(48);
   }, 30_000);
 
   it("does not let a waiting fresh-connection replay block a normal request when an idle socket is free", async () => {
