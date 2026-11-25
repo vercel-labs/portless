@@ -6929,6 +6929,16 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("--tailscale flag", () => {
+    let emptyPathDir: string;
+
+    beforeEach(() => {
+      emptyPathDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-no-ts-path-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(emptyPathDir, { recursive: true, force: true });
+    });
+
     it("shows --tailscale in help output", () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
@@ -6938,7 +6948,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("fails with actionable message when tailscale is not installed", () => {
       const { status, stderr } = run(["--tailscale", "myapp", "echo", "hello"], {
-        env: { PATH: "/tmp/portless-no-ts-path" },
+        env: { PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("Tailscale");
@@ -6946,7 +6956,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("fails with --funnel when tailscale is not installed", () => {
       const { status, stderr } = run(["--funnel", "myapp", "echo", "hello"], {
-        env: { PATH: "/tmp/portless-no-ts-path" },
+        env: { PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("Tailscale");
@@ -6954,7 +6964,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("accepts PORTLESS_TAILSCALE=1 env var", () => {
       const { status, stderr } = run(["myapp", "echo", "hello"], {
-        env: { PORTLESS_TAILSCALE: "1", PATH: "/tmp/portless-no-ts-path" },
+        env: { PORTLESS_TAILSCALE: "1", PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("Tailscale");
@@ -6962,7 +6972,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("accepts --tailscale after app name", () => {
       const { status, stderr } = run(["myapp", "--tailscale", "echo", "hello"], {
-        env: { PATH: "/tmp/portless-no-ts-path" },
+        env: { PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("Tailscale");
@@ -6974,7 +6984,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
         const { status, stderr } = run(["run", "--tailscale", "echo", "hello"], {
           cwd: tmpDir,
-          env: { PATH: "/tmp/portless-no-ts-path" },
+          env: { PATH: emptyPathDir },
         });
         expect(status).toBe(1);
         expect(stderr).toContain("Tailscale");
@@ -6985,6 +6995,16 @@ describe("CLI", { timeout: 15_000 }, () => {
   });
 
   describe("--ngrok flag", () => {
+    let emptyPathDir: string;
+
+    beforeEach(() => {
+      emptyPathDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-no-ngrok-path-"));
+    });
+
+    afterEach(() => {
+      fs.rmSync(emptyPathDir, { recursive: true, force: true });
+    });
+
     it("shows --ngrok in help output", () => {
       const { status, stdout } = run(["--help"]);
       expect(status).toBe(0);
@@ -6993,7 +7013,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("fails with actionable message when ngrok is not installed", () => {
       const { status, stderr } = run(["--ngrok", "myapp", "echo", "hello"], {
-        env: { PATH: "/tmp/portless-no-ngrok-path" },
+        env: { PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("ngrok CLI not found");
@@ -7001,7 +7021,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("accepts PORTLESS_NGROK=1 env var", () => {
       const { status, stderr } = run(["myapp", "echo", "hello"], {
-        env: { PORTLESS_NGROK: "1", PATH: "/tmp/portless-no-ngrok-path" },
+        env: { PORTLESS_NGROK: "1", PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("ngrok CLI not found");
@@ -7009,7 +7029,7 @@ describe("CLI", { timeout: 15_000 }, () => {
 
     it("accepts --ngrok after app name", () => {
       const { status, stderr } = run(["myapp", "--ngrok", "echo", "hello"], {
-        env: { PATH: "/tmp/portless-no-ngrok-path" },
+        env: { PATH: emptyPathDir },
       });
       expect(status).toBe(1);
       expect(stderr).toContain("ngrok CLI not found");
@@ -7021,7 +7041,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test-app" }));
         const { status, stderr } = run(["run", "--ngrok", "echo", "hello"], {
           cwd: tmpDir,
-          env: { PATH: "/tmp/portless-no-ngrok-path" },
+          env: { PATH: emptyPathDir },
         });
         expect(status).toBe(1);
         expect(stderr).toContain("ngrok CLI not found");
@@ -7114,14 +7134,19 @@ describe("CLI", { timeout: 15_000 }, () => {
 
   describe("--cloudflare flag", () => {
     it("fails with actionable message when cloudflared is not installed", () => {
-      for (const [args, env] of [
-        [["myapp", "--cloudflare", "echo", "hi"], {}],
-        [["myapp", "echo", "hi"], { PORTLESS_CLOUDFLARE: "1" }],
-        [["run", "--cloudflare", "echo", "hi"], {}],
-      ] as const) {
-        const result = run([...args], { env: { ...env, PATH: "/tmp/portless-no-cloudflared" } });
-        expect(result.status).toBe(1);
-        expect(result.stderr).toContain("cloudflared CLI not found");
+      const emptyPathDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-no-cloudflared-"));
+      try {
+        for (const [args, env] of [
+          [["myapp", "--cloudflare", "echo", "hi"], {}],
+          [["myapp", "echo", "hi"], { PORTLESS_CLOUDFLARE: "1" }],
+          [["run", "--cloudflare", "echo", "hi"], {}],
+        ] as const) {
+          const result = run([...args], { env: { ...env, PATH: emptyPathDir } });
+          expect(result.status).toBe(1);
+          expect(result.stderr).toContain("cloudflared CLI not found");
+        }
+      } finally {
+        fs.rmSync(emptyPathDir, { recursive: true, force: true });
       }
     });
   });
