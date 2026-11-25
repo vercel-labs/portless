@@ -96,6 +96,7 @@ import {
   resolveWorktreeNaming,
   composeHostname,
   sanitizeForHostname,
+  truncateLabel,
   type WorktreeNaming,
 } from "./auto.js";
 import {
@@ -176,7 +177,19 @@ import {
   tryUninstallService,
 } from "./service.js";
 import { printMcpHelp, runMcp } from "./mcp.js";
-import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
+import {
+  COMMAND_NAMES,
+  hasHelpFlag,
+  isCommandName,
+  suggestCommand,
+  type CommandName,
+} from "./commands.js";
+import {
+  COMPLETION_SHELLS,
+  generateCompletionScript,
+  isCompletionShell,
+  type CompletionSpec,
+} from "./completion.js";
 import {
   parseCommandArgs,
   visitLeadingFlags,
@@ -615,6 +628,30 @@ function buildHostnames(
       ? input
       : composeHostname(stripTld(input.baseName, [...normalizedTlds, DEFAULT_TLD]), input.naming);
   return parseHostnames(name, normalizedTlds, targetTlds);
+}
+
+function buildAppHostnames(
+  inputs: readonly WorktreeHostnameInput[],
+  tlds: readonly string[],
+  labels?: readonly string[]
+): string[] {
+  const owners = new Map<string, number>();
+  const hostnames: string[] = [];
+  for (const [index, input] of inputs.entries()) {
+    for (const hostname of buildHostnames(input, tlds)) {
+      const owner = owners.get(hostname);
+      if (owner !== undefined && owner !== index) {
+        throw new Error(
+          `Names "${labels?.[owner] ?? inputs[owner]!.baseName}" and "${labels?.[index] ?? input.baseName}" both resolve to "${hostname}". Use distinct names; if using worktree.hostnameTemplate, include {name}.`
+        );
+      }
+      if (owner === undefined) {
+        owners.set(hostname, index);
+        hostnames.push(hostname);
+      }
+    }
+  }
+  return hostnames;
 }
 
 /**
@@ -1441,22 +1478,41 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   }
 }
 
+interface RouteView extends Pick<
+  RouteMapping,
+  | "hostname"
+  | "port"
+  | "pid"
+  | "registeredAt"
+  | "upstream"
+  | "tailscaleUrl"
+  | "tailscaleFunnel"
+  | "ngrokUrl"
+  | "cloudflareUrl"
+> {
+  url: string;
+}
+
+function toRouteView(route: RouteMapping, proxyPort: number, tls: boolean): RouteView {
+  return {
+    hostname: route.hostname,
+    url: formatUrl(route.hostname, proxyPort, tls),
+    port: route.port,
+    pid: route.pid,
+    registeredAt: route.registeredAt,
+    ...(route.upstream ? { upstream: route.upstream } : {}),
+    ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
+    ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
+    ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
+    ...(route.cloudflareUrl ? { cloudflareUrl: route.cloudflareUrl } : {}),
+  };
+}
+
 function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: boolean): void {
   const routes = store.loadRoutes();
 
   if (json) {
-    const output = routes.map((route) => ({
-      hostname: route.hostname,
-      url: formatUrl(route.hostname, proxyPort, tls),
-      port: route.port,
-      pid: route.pid,
-      registeredAt: route.registeredAt,
-      ...(route.upstream ? { upstream: route.upstream } : {}),
-      ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
-      ...(route.tailscaleFunnel === undefined ? {} : { tailscaleFunnel: route.tailscaleFunnel }),
-      ...(route.ngrokUrl ? { ngrokUrl: route.ngrokUrl } : {}),
-      ...(route.cloudflareUrl ? { cloudflareUrl: route.cloudflareUrl } : {}),
-    }));
+    const output = routes.map((route) => toRouteView(route, proxyPort, tls));
     console.log(JSON.stringify({ routes: output }));
     return;
   }
@@ -1668,22 +1724,68 @@ async function ensureProxyRunning(
   return { started: true, state: discovered };
 }
 
+/** Formats stderr progress output for app runs, hiding informational status when quiet. */
+interface RunReporter {
+  banner(): void;
+  status(message: string): void;
+  urls(urls: readonly string[]): void;
+  share(label: string, url: string, caption?: string): void;
+  tableEnd(): void;
+}
+
+/** Create a run output reporter from a verbosity flag resolved once at startup. */
+function createRunReporter(options: { quiet: boolean }): RunReporter {
+  const { quiet } = options;
+  const status = (message: string): void => {
+    if (!quiet) console.error(message);
+  };
+  return {
+    banner() {
+      status(chalk.blue.bold("\nportless\n"));
+    },
+    status,
+    urls(urls) {
+      const [primary, ...extra] = urls;
+      if (!primary) return;
+      console.error(chalk.cyan.bold(quiet ? `  -> ${primary}` : `\n  -> ${primary}\n`));
+      for (const extraUrl of extra) {
+        console.error(chalk.cyan(`  also -> ${extraUrl}`));
+      }
+      if (extra.length > 0) status("");
+    },
+    share(label, url, caption) {
+      console.error(chalk.green(`  ${label} -> ${url}`));
+      if (caption) status(chalk.gray(`  ${caption}`));
+    },
+    tableEnd() {
+      status("");
+    },
+  };
+}
+
 async function runApp(
   initialStore: RouteStore,
   proxyPort: number,
   stateDir: string,
-  name: WorktreeHostnameInput & { nameSource?: string; childPrefix?: string },
+  name: {
+    baseNames: readonly string[];
+    naming: WorktreeNaming | null;
+    nameSource?: string;
+    childPrefix?: string;
+  },
   commandArgs: string[],
   tls: boolean,
   tlds: string[],
   force: boolean,
-  desiredPort?: number,
-  lanMode = false,
-  lanIp?: string | null
+  desiredPort: number | undefined,
+  lanMode: boolean,
+  lanIp: string | null | undefined,
+  reporter: RunReporter,
+  noStdin = false
 ) {
   let store = initialStore;
   initialStore.recoverCorruptRoutesFile();
-  console.error(chalk.blue.bold(`\nportless\n`));
+  reporter.banner();
 
   // Check tailscale readiness early, before auto-starting the proxy.
   // No point starting the proxy if tailscale will fail afterward.
@@ -1732,7 +1834,8 @@ async function runApp(
   }
 
   // Validate the hostname before we try to auto-start the proxy.
-  buildHostnames(name, tlds);
+  const nameInputs = name.baseNames.map((baseName) => ({ baseName, naming: name.naming }));
+  buildAppHostnames(nameInputs, tlds, name.baseNames);
 
   const ensureResult = await ensureProxyRunning(proxyPort, tls, desired);
 
@@ -1762,11 +1865,11 @@ async function runApp(
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
     tlds = runningConfig.tlds;
-    console.error(chalk.gray("  Proxy is running"));
+    reporter.status(chalk.gray("  Proxy is running"));
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
-  const hostnames = buildHostnames(name, tlds);
+  const hostnames = buildAppHostnames(nameInputs, tlds, name.baseNames);
   const hostname = hostnames[0]!;
 
   if (
@@ -1782,14 +1885,18 @@ async function runApp(
   }
 
   if (lanIp) {
-    console.error(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
+    reporter.status(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
   } else {
-    console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
+    reporter.status(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (name.nameSource !== undefined) {
-    console.error(chalk.gray(`  Name "${name.baseName}" (from ${name.nameSource})`));
+    reporter.status(
+      chalk.gray(
+        `  ${name.baseNames.length === 1 ? "Name" : "Names"} ${name.baseNames.map((baseName) => `"${baseName}"`).join(", ")} (from ${name.nameSource})`
+      )
+    );
     if (name.naming) {
-      console.error(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
+      reporter.status(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
     }
   }
 
@@ -1807,9 +1914,9 @@ async function runApp(
     port = registration.port;
     killedPids = registration.killedPids;
     if (desiredPort) {
-      console.error(colors.green(`  Using port ${port} (fixed)`));
+      reporter.status(colors.green(`  Using port ${port} (fixed)`));
     } else {
-      console.error(colors.green(`  Using port ${port}`));
+      reporter.status(colors.green(`  Using port ${port}`));
     }
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
@@ -1825,16 +1932,10 @@ async function runApp(
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   const allUrls = formatUrls(hostnames, proxyPort, tls);
-  console.error(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
-  for (const extraUrl of allUrls.slice(1)) {
-    console.error(chalk.cyan(`  also -> ${extraUrl}`));
-  }
-  if (allUrls.length > 1) {
-    console.error("");
-  }
+  reporter.urls(allUrls);
   if (lanIp) {
-    console.error(chalk.green(`  LAN -> ${finalUrl}`));
-    console.error(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+    reporter.status(chalk.green(`  LAN -> ${finalUrl}`));
+    reporter.status(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
   // Tailscale sharing: register with tailscale serve (or funnel).
@@ -1901,12 +2002,13 @@ async function runApp(
     // a successful register or exits the process on final failure.
     tailscaleUrl = formatTailscaleUrl(tsBaseUrl, tailscaleHttpsPort!);
     const label = wantsFunnel ? "Funnel (public)" : "Tailscale";
-    console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
-    if (wantsFunnel) {
-      console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
-    } else {
-      console.error(chalk.gray("  (accessible from your tailnet)\n"));
-    }
+    reporter.share(
+      label,
+      tailscaleUrl,
+      wantsFunnel
+        ? "(accessible from the public internet via Tailscale Funnel)\n"
+        : "(accessible from your tailnet)\n"
+    );
 
     try {
       store.updateRoute(hostname, {
@@ -1929,8 +2031,11 @@ async function runApp(
         onExit: (code, signal) => handleTunnelExit(run, code, signal),
         configPath: path.join(store.dir, "cloudflared.yml"),
       });
-      console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
-      console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
+      reporter.share(
+        run.t.label,
+        run.proc.url,
+        `(accessible from the public internet via ${run.t.via})\n`
+      );
 
       try {
         store.updateRoute(hostname, {
@@ -2007,7 +2112,7 @@ async function runApp(
   const caFragment = caEnv.NODE_EXTRA_CA_CERTS
     ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
     : "";
-  console.error(
+  reporter.status(
     chalk.gray(
       `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
     )
@@ -2020,6 +2125,7 @@ async function runApp(
   }
 
   spawnCommand(commandArgs, {
+    noStdin,
     env: {
       ...process.env,
       ...(name.childPrefix !== undefined ? { PORTLESS_PREFIX: name.childPrefix } : {}),
@@ -2077,8 +2183,7 @@ interface ParsedRunArgs {
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
-  /** Override the inferred base name (from --name flag). */
-  name?: string;
+  names: string[];
   /** Override the worktree label (from --prefix flag). Empty disables it. */
   prefix?: string;
   noWorktree?: boolean;
@@ -2086,7 +2191,7 @@ interface ParsedRunArgs {
   commandArgs: string[];
 }
 
-interface ParsedAppArgs extends ParsedRunArgs {
+interface ParsedAppArgs extends Omit<ParsedRunArgs, "names"> {
   /** App name. */
   name: string;
 }
@@ -2127,6 +2232,8 @@ const WORKTREE_FLAG_SPEC = { "--no-worktree": "boolean" } as const;
 const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--force": "boolean",
   "--app-port": "value",
+  "--quiet": "boolean",
+  "--no-stdin": "boolean",
   ...WORKTREE_FLAG_SPEC,
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
@@ -2134,23 +2241,97 @@ const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "-h": "boolean",
 };
 
-const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+const NAMING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--name": "value",
   "--prefix": "text",
-  "--force": "boolean",
-  "--app-port": "value",
-  ...WORKTREE_FLAG_SPEC,
+};
+
+const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...NAMING_FLAG_SPEC,
+  ...APP_FLAG_SPEC,
   "--script": "value",
-  ...LAN_FLAG_SPEC,
-  ...SHARE_FLAG_SPEC,
-  "--help": "boolean",
-  "-h": "boolean",
 };
 
 const LEADING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   ...APP_FLAG_SPEC,
   "--script": "value",
 };
+
+const TRUST_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--device": "boolean" };
+const CLEAN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--yes": "boolean", "-y": "boolean" };
+const PRUNE_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--force": "boolean" };
+const LIST_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--json": "boolean" };
+const GET_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...WORKTREE_FLAG_SPEC,
+  "--json": "boolean",
+};
+const ALIAS_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--remove": "value",
+  "--force": "boolean",
+  "--tld": "value",
+  "--upstream": "value",
+};
+const DOCTOR_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--json": "boolean",
+  ...LAN_FLAG_SPEC,
+};
+const PROXY_STOP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--port": "value",
+  "-p": "value",
+};
+const PROXY_START_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--foreground": "boolean",
+  "--skip-trust": "boolean",
+  "--unprivileged": "boolean",
+  "--https": "boolean",
+  "--no-tls": "boolean",
+  "--wildcard": "boolean",
+  "--cert": "value",
+  "--key": "value",
+  "--port": "value",
+  "-p": "value",
+  "--tld": "value",
+  ...LAN_FLAG_SPEC,
+};
+
+function buildCompletionSpec(): CompletionSpec {
+  return {
+    commands: COMMAND_NAMES,
+    globalFlags: [...Object.keys(LEADING_FLAG_SPEC), "--name", "--version", "-v"],
+    byCommand: {
+      run: { flags: Object.keys(RUN_FLAG_SPEC) },
+      get: { flags: Object.keys(GET_FLAG_SPEC) },
+      list: { flags: Object.keys(LIST_FLAG_SPEC) },
+      alias: { flags: Object.keys(ALIAS_FLAG_SPEC) },
+      compose: { subcommands: ["up", "down"], subcommandFlags: { up: ["-d"] } },
+      proxy: {
+        subcommands: ["start", "stop"],
+        subcommandFlags: {
+          start: Object.keys(PROXY_START_FLAG_SPEC),
+          stop: Object.keys(PROXY_STOP_FLAG_SPEC),
+        },
+      },
+      service: {
+        subcommands: ["install", "uninstall", "status"],
+        subcommandFlags: {
+          install: [
+            ...Object.keys(PROXY_START_FLAG_SPEC).filter(
+              (flag) => flag !== "--foreground" && flag !== "--skip-trust"
+            ),
+            "--state-dir",
+          ],
+        },
+      },
+      hosts: { subcommands: ["sync", "clean"] },
+      doctor: { flags: Object.keys(DOCTOR_FLAG_SPEC) },
+      trust: { flags: Object.keys(TRUST_FLAG_SPEC) },
+      clean: { flags: Object.keys(CLEAN_FLAG_SPEC) },
+      prune: { flags: Object.keys(PRUNE_FLAG_SPEC) },
+      mcp: { flags: ["--tools"] },
+      completion: { subcommands: COMPLETION_SHELLS },
+    },
+  };
+}
 
 /** Sets the environment a LAN or sharing flag stands for. Rejects an --ip value that is not an IP address. */
 function applyGlobalFlag(flag: string, value?: string): void {
@@ -2198,11 +2379,13 @@ ${colors.bold("Usage:")}
   or can write to the state directory.
 
 ${colors.bold("Options:")}
-  --name <name>          Override the inferred base name (worktree prefix still applies)
+  --name <name>          Override the inferred name (repeatable; worktree prefix still applies)
   --prefix <label>       Override the worktree label (an empty value disables it)
   --no-worktree          Use the base name without worktree naming; overrides --prefix
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --quiet                Print only app URLs, warnings, and errors (or PORTLESS_QUIET=1)
+  --no-stdin             Detach stdin from the child process (useful for interactive runtimes)
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
@@ -2244,7 +2427,7 @@ ${colors.bold("Examples:")}
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
-  let name: string | undefined;
+  const names: string[] = [];
   let prefix: string | undefined;
   let noWorktree = false;
 
@@ -2261,7 +2444,8 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
         appPort = parseAppPort(value);
         break;
       case "--name":
-        name = value;
+        if (!value || value.startsWith("-")) throw new UsageError("--name requires a name.");
+        names.push(value);
         break;
       case "--prefix":
         prefix = value;
@@ -2277,7 +2461,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   return {
     force,
     appPort: appPort ?? appPortFromEnv(),
-    name,
+    names,
     prefix,
     noWorktree,
     commandArgs,
@@ -2367,6 +2551,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("portless completion <shell>")}      Print shell completion script (bash, zsh, fish)
 
 Every command accepts --help or -h, which only prints help. After run <cmd>,
 compose <subcommand>, or --, they belong to the wrapped command.
@@ -2393,6 +2578,8 @@ ${colors.bold("Options:")}
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
+  --quiet                       Print only app URLs, warnings, and errors for app commands
+  --no-stdin                    Detach stdin from the child process
   --                            Stop flag parsing and pass remaining arguments to the app
 
 ${colors.bold("Options for run and <name> <command>:")}
@@ -2408,6 +2595,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
   PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
+  PORTLESS_QUIET=1              Same as --quiet
 
 Precedence: flags override PORTLESS_* variables, which override project config.
 Project config lookup: portless.json, .config/portless.json, then package.json portless.
@@ -2419,6 +2607,39 @@ Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
 `);
   process.exit(0);
+}
+
+function printCompletionHelp(): void {
+  console.log(`
+${colors.bold("portless completion")} - Print shell completion script for bash, zsh, or fish.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless completion <bash|zsh|fish>")}
+
+${colors.bold("Examples:")}
+  source <(portless completion bash)
+  eval "$(portless completion zsh)"
+  portless completion fish > ~/.config/fish/completions/portless.fish
+
+${colors.bold("Options:")}
+  --help, -h             Show this help
+`);
+}
+
+async function handleCompletion(args: string[]): Promise<void> {
+  const parsed = parseCommandArgs("completion", args.slice(1), {}, 1);
+  const shell = parsed.positionals[0];
+  if (!shell) {
+    printCompletionHelp();
+    return;
+  }
+  if (!isCompletionShell(shell)) {
+    throw new UsageError(
+      `Unknown shell "${shell}". Supported shells: ${COMPLETION_SHELLS.join(", ")}.`,
+      ["Usage:", "  portless completion <bash|zsh|fish>"]
+    );
+  }
+  process.stdout.write(generateCompletionScript(shell, buildCompletionSpec()));
 }
 
 function printVersion(): void {
@@ -2472,7 +2693,7 @@ async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
-  const parsed = parseCommandArgs("trust", args.slice(1), { "--device": "boolean" }, 0);
+  const parsed = parseCommandArgs("trust", args.slice(1), TRUST_FLAG_SPEC, 0);
   const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) ensureStateDir(dir);
   const unsafe = explainUnsafeStateDir(dir);
@@ -2749,12 +2970,7 @@ ${colors.bold("Options:")}
 }
 
 async function handleClean(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs(
-    "clean",
-    args.slice(1),
-    { "--yes": "boolean", "-y": "boolean" },
-    0
-  );
+  const parsed = parseCommandArgs("clean", args.slice(1), CLEAN_FLAG_SPEC, 0);
 
   const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
   if (requestedCleanupSteps) {
@@ -2982,9 +3198,7 @@ ${colors.bold("Options:")}
 }
 
 async function handlePrune(args: string[]): Promise<void> {
-  const forceKill = parseCommandArgs("prune", args.slice(1), { "--force": "boolean" }, 0).has(
-    "--force"
-  );
+  const forceKill = parseCommandArgs("prune", args.slice(1), PRUNE_FLAG_SPEC, 0).has("--force");
 
   const { dir } = await discoverState();
   const store = new RouteStore(dir);
@@ -3093,7 +3307,7 @@ async function handlePrune(args: string[]): Promise<void> {
 }
 
 async function handleList(args: string[]): Promise<void> {
-  const json = parseCommandArgs("list", args.slice(1), { "--json": "boolean" }, 0).has("--json");
+  const json = parseCommandArgs("list", args.slice(1), LIST_FLAG_SPEC, 0).has("--json");
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir);
   listRoutes(store, port, tls, json);
@@ -3128,7 +3342,7 @@ PORTLESS_PREFIX="" skips worktree naming.
 
 ${colors.bold("Options:")}
   --no-worktree          Skip config loading and worktree naming
-  --json                 Print name, hostname, and URL as JSON
+  --json                 Print name, hostname, URL, and active route port as JSON
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -3139,12 +3353,7 @@ ${colors.bold("Examples:")}
 }
 
 async function handleGet(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs(
-    "get",
-    args.slice(1),
-    { ...WORKTREE_FLAG_SPEC, "--json": "boolean" },
-    1
-  );
+  const parsed = parseCommandArgs("get", args.slice(1), GET_FLAG_SPEC, 1);
   const name = parsed.positionals[0];
   if (!name) {
     throw new UsageError("Missing service name.", [
@@ -3162,11 +3371,18 @@ async function handleGet(args: string[]): Promise<void> {
     config: appConfig?.worktree,
     override: skipWorktree ? null : undefined,
   });
-  const { port, tls, tlds } = await discoverState();
+  const { dir, port, tls, tlds } = await discoverState();
   const hostname = buildHostnames({ baseName: name, naming: worktree }, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
+  const activeRoute = json
+    ? new RouteStore(dir, { onWarning: () => {} }).loadRoutes().find((r) => r.hostname === hostname)
+    : undefined;
   // Print bare URL to stdout so it works in $(portless get <name>)
-  process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
+  process.stdout.write(
+    (json
+      ? JSON.stringify({ name, hostname, url, ...(activeRoute ? { port: activeRoute.port } : {}) })
+      : url) + "\n"
+  );
 }
 
 function printAliasHelp(): void {
@@ -3223,17 +3439,7 @@ async function handleAlias(args: string[]): Promise<void> {
     printAliasHelp();
     return;
   }
-  const parsed = parseCommandArgs(
-    "alias",
-    args.slice(1),
-    {
-      "--remove": "value",
-      "--force": "boolean",
-      "--tld": "value",
-      "--upstream": "value",
-    },
-    2
-  );
+  const parsed = parseCommandArgs("alias", args.slice(1), ALIAS_FLAG_SPEC, 2);
   const isRemove = parsed.has("--remove");
   const removeName = parsed.value("--remove");
   const [aliasName, aliasPortValue] = parsed.positionals;
@@ -3543,12 +3749,7 @@ ${colors.bold("Exit codes:")}
 }
 
 async function handleDoctor(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs(
-    "doctor",
-    args.slice(1),
-    { "--json": "boolean", ...LAN_FLAG_SPEC },
-    0
-  );
+  const parsed = parseCommandArgs("doctor", args.slice(1), DOCTOR_FLAG_SPEC, 0);
   applyLanFlags(parsed);
   const json = parsed.has("--json");
 
@@ -3969,12 +4170,7 @@ async function handleProxy(args: string[]): Promise<void> {
   }
 
   if (args[1] === "stop") {
-    const parsed = parseCommandArgs(
-      "proxy stop",
-      args.slice(2),
-      { "--port": "value", "-p": "value" },
-      0
-    );
+    const parsed = parseCommandArgs("proxy stop", args.slice(2), PROXY_STOP_FLAG_SPEC, 0);
     for (const value of [...parsed.values("--port"), ...parsed.values("-p")]) {
       if (parsePort(value) === null) {
         throw new UsageError(`Invalid port number: ${value}`, [
@@ -4002,25 +4198,7 @@ async function handleProxy(args: string[]): Promise<void> {
   if (autoIpIndex !== -1) {
     applyGlobalFlag(INTERNAL_LAN_IP_FLAG, startArgs.splice(autoIpIndex, 2)[1]);
   }
-  const startFlags = parseCommandArgs(
-    "proxy start",
-    startArgs,
-    {
-      "--foreground": "boolean",
-      "--skip-trust": "boolean",
-      "--unprivileged": "boolean",
-      "--https": "boolean",
-      "--no-tls": "boolean",
-      "--wildcard": "boolean",
-      "--cert": "value",
-      "--key": "value",
-      "--port": "value",
-      "-p": "value",
-      "--tld": "value",
-      ...LAN_FLAG_SPEC,
-    },
-    0
-  );
+  const startFlags = parseCommandArgs("proxy start", startArgs, PROXY_START_FLAG_SPEC, 0);
   applyLanFlags(startFlags);
   const isForeground = startFlags.has("--foreground");
   const skipTrust = startFlags.has("--skip-trust");
@@ -4607,7 +4785,9 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null 
 async function handleDefaultMode(
   globalScript: string | undefined,
   extraArgs: string[],
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean
 ): Promise<boolean> {
   const cwd = process.cwd();
 
@@ -4629,7 +4809,7 @@ async function handleDefaultMode(
     }
     const hasMatchingPackages = packages.some((p) => p.scripts[wsScriptName]);
     if (hasMatchingPackages) {
-      await handleDefaultMulti(cwd, globalScript, extraArgs, worktreeOverride);
+      await handleDefaultMulti(cwd, globalScript, extraArgs, worktreeOverride, reporter, noStdin);
       return true;
     }
   }
@@ -4637,7 +4817,15 @@ async function handleDefaultMode(
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
   if (hasScript(scriptName, cwd)) {
-    await handleDefaultSingle(cwd, scriptName, appConfig, extraArgs, worktreeOverride);
+    await handleDefaultSingle(
+      cwd,
+      scriptName,
+      appConfig,
+      extraArgs,
+      worktreeOverride,
+      reporter,
+      noStdin
+    );
     return true;
   }
 
@@ -4686,7 +4874,9 @@ async function handleDefaultSingle(
   scriptName: string,
   appConfig: AppConfigWithSource | null,
   extraArgs: string[],
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean
 ): Promise<void> {
   const forwardedArgs = forwardScriptExtraArgs(scriptName, cwd, extraArgs);
   const resolved = resolveScriptCommand(scriptName, cwd, forwardedArgs);
@@ -4719,14 +4909,16 @@ async function handleDefaultSingle(
     store,
     port,
     dir,
-    { baseName, naming: worktree, nameSource },
+    { baseNames: [baseName], naming: worktree, nameSource },
     resolved,
     tls,
     tlds,
     false,
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    reporter,
+    noStdin
   );
 }
 
@@ -4924,7 +5116,9 @@ async function handleDefaultMulti(
   wsRoot: string,
   globalScript: string | undefined,
   extraArgs: string[],
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean
 ): Promise<void> {
   let loaded: ReturnType<typeof loadConfig>;
   try {
@@ -5088,7 +5282,7 @@ async function handleDefaultMulti(
     );
   }
 
-  console.error(chalk.blue.bold(`\nportless\n`));
+  reporter.banner();
 
   let { dir, port, tls, tlds, lanMode } = await discoverState();
 
@@ -5160,10 +5354,12 @@ async function handleDefaultMulti(
       scriptName,
       proxiedApps,
       taskApps,
-      extraArgs
+      extraArgs,
+      reporter,
+      noStdin
     );
   } else {
-    await runWithDirectSpawn(dir, port, tls, tlds, lanMode, proxiedApps, taskApps);
+    await runWithDirectSpawn(dir, port, tls, tlds, lanMode, proxiedApps, taskApps, reporter);
   }
 }
 
@@ -5177,7 +5373,9 @@ async function runWithTurbo(
   scriptName: string,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[],
-  extraArgs: string[] = []
+  extraArgs: string[],
+  reporter: RunReporter,
+  noStdin: boolean
 ): Promise<void> {
   const store = new RouteStore(stateDir);
 
@@ -5228,7 +5426,7 @@ async function runWithTurbo(
       console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.error("");
+  reporter.tableEnd();
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
@@ -5248,7 +5446,7 @@ async function runWithTurbo(
 
   const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
-    stdio: "inherit",
+    stdio: noStdin ? ["ignore", "inherit", "inherit"] : "inherit",
     cwd: wsRoot,
     env: {
       ...process.env,
@@ -5304,7 +5502,8 @@ async function runWithDirectSpawn(
   tlds: string[],
   lanMode: boolean,
   proxiedApps: MultiAppEntry[],
-  taskApps: MultiAppEntry[]
+  taskApps: MultiAppEntry[],
+  reporter: RunReporter
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
   const exitCodes = new Map<MultiAppEntry, number | null>();
@@ -5342,7 +5541,7 @@ async function runWithDirectSpawn(
       console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.error("");
+  reporter.tableEnd();
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
@@ -5399,7 +5598,9 @@ async function runWithDirectSpawn(
 async function handleRunMode(
   args: string[],
   globalScript: string | undefined,
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean
 ): Promise<void> {
   const parsed = parseRunArgs(args);
 
@@ -5422,18 +5623,20 @@ async function handleRunMode(
     ]);
   }
 
-  let baseName: string;
+  let baseNames: string[];
   let nameSource: string;
 
-  if (parsed.name) {
-    baseName = parsed.name;
-    nameSource = "--name flag";
+  if (parsed.names.length > 0) {
+    baseNames = [
+      ...new Set(parsed.names.map((name) => name.split(".").map(truncateLabel).join("."))),
+    ];
+    nameSource = parsed.names.length === 1 ? "--name flag" : "--name flags";
   } else if (appConfig?.name) {
-    baseName = appConfig.name;
+    baseNames = [appConfig.name];
     nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName();
-    baseName = inferred.name;
+    baseNames = [inferred.name];
     nameSource = inferred.source;
   }
 
@@ -5450,14 +5653,16 @@ async function handleRunMode(
     store,
     port,
     dir,
-    { baseName, naming: worktree, nameSource, childPrefix: override ?? undefined },
+    { baseNames, naming: worktree, nameSource, childPrefix: override ?? undefined },
     parsed.commandArgs,
     tls,
     tlds,
     parsed.force,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    reporter,
+    noStdin
   );
 }
 
@@ -5468,7 +5673,12 @@ const NAMED_USAGE = [
   "  portless myapp next dev",
 ];
 
-async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
+async function handleNamedMode(
+  args: string[],
+  explicitName: boolean,
+  reporter: RunReporter,
+  noStdin: boolean
+): Promise<void> {
   const { name, hasCommand } = readNamedArgs(args);
   const suggestion = explicitName || hasCommand ? undefined : suggestCommand(name);
   if (name && suggestion) {
@@ -5501,14 +5711,16 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     store,
     port,
     dir,
-    nameInput,
+    { baseNames: [parsed.name], naming: null },
     parsed.commandArgs,
     tls,
     tlds,
     parsed.force,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    reporter,
+    noStdin
   );
 }
 
@@ -5962,15 +6174,20 @@ function isPortlessSkipped(): boolean {
 interface CommandEntry {
   run: (
     args: string[],
-    context: { globalScript?: string; worktreeOverride?: null }
+    context: {
+      globalScript?: string;
+      worktreeOverride?: null;
+      reporter: RunReporter;
+      noStdin: boolean;
+    }
   ) => Promise<void>;
   help?: () => void;
 }
 
 const COMMANDS: Record<CommandName, CommandEntry> = {
   run: {
-    run: (args, { globalScript, worktreeOverride }) =>
-      handleRunMode(args.slice(1), globalScript, worktreeOverride),
+    run: (args, { globalScript, worktreeOverride, reporter, noStdin }) =>
+      handleRunMode(args.slice(1), globalScript, worktreeOverride, reporter, noStdin),
   },
   get: { run: handleGet, help: printGetHelp },
   list: { run: handleList, help: printListHelp },
@@ -5987,6 +6204,7 @@ const COMMANDS: Record<CommandName, CommandEntry> = {
   clean: { run: handleClean, help: printCleanHelp },
   prune: { run: handlePrune, help: printPruneHelp },
   mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp },
+  completion: { run: handleCompletion, help: printCompletionHelp },
 };
 
 async function main() {
@@ -6100,6 +6318,11 @@ async function main() {
     if (stripGlobalFlag(flag, false)) applyGlobalFlag(flag);
   }
 
+  const quiet =
+    stripGlobalFlag("--quiet", false) === true || isEnabledEnv(process.env.PORTLESS_QUIET);
+  const reporter = createRunReporter({ quiet });
+  const noStdin = stripGlobalFlag("--no-stdin", false) === true;
+
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);
   if (scriptResult === false) {
@@ -6152,7 +6375,7 @@ async function main() {
     const forwardedArgs = forwardScriptExtraArgs(scriptName, process.cwd(), scriptArgs);
     const resolved = resolveScriptCommand(scriptName, process.cwd(), forwardedArgs);
     if (resolved) {
-      spawnCommand(resolved);
+      spawnCommand(resolved, { noStdin });
       return;
     }
     throw new UsageError("No command provided.");
@@ -6171,7 +6394,7 @@ async function main() {
       if (resolved) commandArgs = resolved;
     }
     if (commandArgs.length === 0) throw new UsageError("No command provided.");
-    spawnCommand(commandArgs);
+    spawnCommand(commandArgs, { noStdin });
     return;
   }
 
@@ -6180,7 +6403,7 @@ async function main() {
       command.help();
       return;
     }
-    await command.run(args, { globalScript, worktreeOverride });
+    await command.run(args, { globalScript, worktreeOverride, reporter, noStdin });
     return;
   }
   if (!explicitName) {
@@ -6190,7 +6413,13 @@ async function main() {
     }
     if (args.length === 0 || args[0] === "--") {
       const extraArgs = args[0] === "--" ? args.slice(1) : [];
-      const handled = await handleDefaultMode(globalScript, extraArgs, worktreeOverride);
+      const handled = await handleDefaultMode(
+        globalScript,
+        extraArgs,
+        worktreeOverride,
+        reporter,
+        noStdin
+      );
       if (handled) return;
       printHelp();
       return;
@@ -6201,7 +6430,7 @@ async function main() {
     }
   }
 
-  await handleNamedMode(args, explicitName);
+  await handleNamedMode(args, explicitName, reporter, noStdin);
 }
 
 main().catch((err: unknown) => {

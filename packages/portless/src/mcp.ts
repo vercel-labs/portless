@@ -144,7 +144,11 @@ export const TOOLS: ToolDef[] = [
         description:
           "Skip config loading and worktree naming, including PORTLESS_PREFIX and git worktree detection, so the URL has no worktree label.",
       },
-      json: { type: "boolean", description: "Return the name, hostname, and URL as JSON." },
+      json: {
+        type: "boolean",
+        description:
+          "Return the name, hostname, and URL as JSON, including the port when the route is active.",
+      },
     },
     ["name"],
     {
@@ -619,7 +623,7 @@ function resultResponse(id: unknown, result: Record<string, unknown>): Record<st
 
 /** A server for the given canonical profile names. */
 export function createServer(profiles: string[]): {
-  handleLine(line: string): Promise<Record<string, unknown> | null>;
+  handleLine(line: string): Promise<string | null>;
   readonly shutdown: boolean;
 } {
   let shutdown = false;
@@ -794,18 +798,33 @@ export function createServer(profiles: string[]): {
   }
 
   return {
-    async handleLine(line: string): Promise<Record<string, unknown> | null> {
+    async handleLine(line: string): Promise<string | null> {
       if (line.trim().length === 0) return null;
       let message: unknown;
       try {
         message = JSON.parse(line);
       } catch (error) {
-        return errorResponse(null, -32700, `Parse error: ${(error as Error).message}`);
+        return JSON.stringify(
+          errorResponse(null, -32700, `Parse error: ${(error as Error).message}`)
+        );
       }
-      if (!isObject(message)) {
-        return null;
+      if (Array.isArray(message)) {
+        if (message.length === 0)
+          return JSON.stringify(errorResponse(null, -32600, "Invalid Request"));
+        const responses: Record<string, unknown>[] = [];
+        for (const item of message) {
+          if (!isObject(item)) {
+            responses.push(errorResponse(null, -32600, "Invalid Request"));
+          } else {
+            const response = await handleRequest(item);
+            if (response !== null) responses.push(response);
+          }
+        }
+        return responses.length > 0 ? JSON.stringify(responses) : null;
       }
-      return handleRequest(message);
+      if (!isObject(message)) return null;
+      const response = await handleRequest(message);
+      return response === null ? null : JSON.stringify(response);
     },
     get shutdown() {
       return shutdown;
@@ -829,7 +848,7 @@ export function printMcpHelp(): void {
       "",
       "Common tools:",
       "  list            List active routes (json: true for JSON).",
-      "  get             Print an app URL (json: true for JSON).",
+      "  get             Print an app URL (json: true includes the active route port).",
       "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
       "",
@@ -903,10 +922,10 @@ export async function runMcp(args: string[]): Promise<void> {
   process.stdout.on("error", onStreamError);
 
   for await (const line of rl) {
-    const response = await server.handleLine(line);
-    if (response !== null) {
+    const reply = await server.handleLine(line);
+    if (reply !== null) {
       try {
-        process.stdout.write(`${JSON.stringify(response)}\n`);
+        process.stdout.write(`${reply}\n`);
       } catch {
         break;
       }

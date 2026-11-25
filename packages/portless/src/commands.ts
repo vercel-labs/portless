@@ -13,6 +13,7 @@ export const COMMAND_NAMES = [
   "clean",
   "prune",
   "mcp",
+  "completion",
 ] as const;
 
 export type CommandName = (typeof COMMAND_NAMES)[number];
