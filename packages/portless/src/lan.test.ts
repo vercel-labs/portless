@@ -98,17 +98,20 @@ describe("readDeviceCA", () => {
 });
 
 describe("buildMobileConfig", () => {
-  it("holds the CA as a root payload with UUIDs that stay the same", () => {
+  it("holds the CA as a root payload with stable per-CA identifiers and UUIDs", () => {
     const profile = buildMobileConfig(ca);
     expect(profile).toContain("<string>com.apple.security.root</string>");
     expect(profile).toContain(`<data>${ca.der.toString("base64")}</data>`);
     expect(buildMobileConfig(ca)).toBe(profile);
     const uuids = profile.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g);
+    const ids = profile.match(/sh\.portless\.ca\.[0-9a-f]{12}(?:\.certificate)?/g);
     expect(new Set(uuids).size).toBe(2);
+    expect(new Set(ids).size).toBe(2);
     const other = buildMobileConfig({ ...ca, fingerprint: "different" });
     expect(
       other.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g)
     ).not.toEqual(uuids);
+    expect(other.match(/sh\.portless\.ca\.[0-9a-f]{12}(?:\.certificate)?/g)).not.toEqual(ids);
   });
 
   it("escapes the CA name", () => {
