@@ -1245,6 +1245,9 @@ async function generateHostCertAsync(
       "-extfile",
       extPath,
     ]);
+    await fs.promises.chmod(keyPath, 0o600);
+    await fs.promises.chmod(certPath, 0o644);
+    fixOwnership(keyPath, certPath, srlPath);
   } catch (error) {
     await Promise.all([
       fs.promises.rm(certPath, { force: true }),
@@ -1258,137 +1261,214 @@ async function generateHostCertAsync(
     ]);
   }
 
-  await fs.promises.chmod(keyPath, 0o600);
-  await fs.promises.chmod(certPath, 0o644);
-  fixOwnership(keyPath, certPath, srlPath);
-
   return { certPath, keyPath };
 }
 
-/**
- * Create an SNI callback for the TLS server.
- *
- * Only `localhost` itself uses the default server cert. All subdomains
- * (e.g., `tools.localhost`, `chat.myapp.localhost`) get a per-hostname
- * certificate generated on demand and signed by the local CA.
- *
- * RFC 2606 §2 reserves `.localhost` as a top-level domain (TLD). Because
- * `localhost` is a TLD, `*.localhost` sits at the public-suffix boundary and
- * TLS implementations are not permitted to honour wildcard certificates there.
- * Each subdomain therefore requires a certificate with an exact SAN entry.
- *
- * Certificate generation is async to avoid blocking the event loop. A
- * pending-promise map deduplicates concurrent requests for the same hostname.
- *
- * @see https://datatracker.ietf.org/doc/html/rfc2606#section-2
- */
-export function createSNICallback(
-  stateDir: string,
-  defaultCert: Buffer,
-  defaultKey: Buffer,
-  tlds: string | readonly string[] = "localhost",
-  caCert?: Buffer
-): (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void {
-  const cache = new Map<string, tls.SecureContext>();
-  const pending = new Map<string, Promise<tls.SecureContext>>();
-  const configuredTlds = Array.isArray(tlds) ? tlds : [tlds];
+/** Configuration for bounded per-hostname TLS certificate issuance. */
+export interface CertIssuerOptions {
+  stateDir: string;
+  tlds?: string | readonly string[];
+  getAllowedHostnames: () => readonly string[];
+  allowWildcards?: boolean;
+  maxMemoryEntries?: number;
+  maxDiskEntries?: number;
+}
 
-  // Pre-cache the default context for the built-in localhost certificate.
-  // Include the CA certificate so clients receive the full chain.
-  const defaultCtx = tls.createSecureContext({
-    cert: caCert ? Buffer.concat([defaultCert, caCert]) : defaultCert,
-    key: defaultKey,
-  });
-
-  return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
-    // The bare localhost name uses the default cert.
-    // All subdomains need a cert with an exact SAN entry.
-    // For .localhost: RFC 2606 §2 designates it as a reserved TLD, so
-    // "*.localhost" sits at the public-suffix boundary and TLS specs do
-    // not permit wildcard certificates at that level.
-    if (servername === "localhost") {
-      cb(null, defaultCtx);
-      return;
-    }
-
-    const name = servername.toLowerCase();
-    if (!/^[a-z0-9.-]+$/.test(name) || !configuredTlds.some((tld) => name.endsWith(`.${tld}`))) {
-      cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
-      return;
-    }
-
-    // Check memory cache
-    if (cache.has(servername)) {
-      cb(null, cache.get(servername));
-      return;
-    }
-
-    // Check if a cert already exists on disk
-    const safeName = sanitizeHostForFilename(servername);
-    const hostDir = path.join(stateDir, HOST_CERTS_DIR);
-    const certPath = path.join(hostDir, `${safeName}.pem`);
-    const keyPath = path.join(hostDir, `${safeName}-key.pem`);
-
-    // Try reading existing cert from disk (may fail if files are root-owned)
-    if (
-      fileExists(certPath) &&
-      fileExists(keyPath) &&
-      isCertValid(certPath) &&
-      isCertSignatureStrong(certPath) &&
-      !hasTldWildcardSan(certPath)
-    ) {
-      try {
-        const hostCert = fs.readFileSync(certPath);
-        const ctx = tls.createSecureContext({
-          cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
-          key: fs.readFileSync(keyPath),
-        });
-        cache.set(servername, ctx);
-        cb(null, ctx);
-        return;
-      } catch {
-        // Permission error reading cached cert; regenerate below
-      }
-    }
-
-    // If a generation is already in flight for this hostname, wait for it
-    if (pending.has(servername)) {
-      pending
-        .get(servername)!
-        .then((ctx) => cb(null, ctx))
-        .catch((err) => cb(err instanceof Error ? err : new Error(String(err))));
-      return;
-    }
-
-    // Generate a new cert for this hostname asynchronously
-    const promise = generateHostCertAsync(stateDir, servername).then(async (generated) => {
-      const [hostCert, key] = await Promise.all([
-        fs.promises.readFile(generated.certPath),
-        fs.promises.readFile(generated.keyPath),
-      ]);
-      return tls.createSecureContext({
-        cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
-        key,
-      });
-    });
-
-    pending.set(servername, promise);
-
-    promise
-      .then((ctx) => {
-        cache.set(servername, ctx);
-        pending.delete(servername);
-        cb(null, ctx);
-      })
-      .catch((err) => {
-        pending.delete(servername);
-        const error = err instanceof Error ? err : new Error(String(err));
-        console.error(
-          `[portless] Failed to prepare a TLS certificate for ${servername}: ${error.message}`
-        );
-        cb(error);
-      });
+/** Issues and caches per-hostname TLS certificates for admitted routes within configured TLDs. */
+export class CertIssuer {
+  readonly tlsOptions: {
+    cert: Buffer;
+    key: Buffer;
+    ca?: Buffer;
+    SNICallback: (
+      servername: string,
+      cb: (err: Error | null, ctx?: tls.SecureContext) => void
+    ) => void;
   };
+  readonly sniCallback: (
+    servername: string,
+    cb: (err: Error | null, ctx?: tls.SecureContext) => void
+  ) => void;
+
+  constructor(options: CertIssuerOptions) {
+    const { stateDir, getAllowedHostnames, allowWildcards = false } = options;
+    const tlds = options.tlds ?? ["localhost"];
+    const configuredTlds = [
+      ...new Set((typeof tlds === "string" ? [tlds] : tlds).map((tld) => tld.toLowerCase())),
+    ];
+    const maxMemoryEntries = Math.max(1, options.maxMemoryEntries ?? 128);
+    const maxDiskEntries = Math.max(1, options.maxDiskEntries ?? 128);
+    const cert = fs.readFileSync(path.join(stateDir, SERVER_CERT_FILE));
+    const key = fs.readFileSync(path.join(stateDir, SERVER_KEY_FILE));
+    const caPath = path.join(stateDir, CA_CERT_FILE);
+    const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
+    const defaultCtx = tls.createSecureContext({
+      cert: ca ? Buffer.concat([cert, ca]) : cert,
+      key,
+    });
+    const cache = new Map<string, tls.SecureContext>();
+    const pending = new Map<string, Promise<tls.SecureContext>>();
+    const hostDir = path.join(stateDir, HOST_CERTS_DIR);
+
+    const remember = (name: string, ctx: tls.SecureContext) => {
+      cache.delete(name);
+      cache.set(name, ctx);
+      while (cache.size > maxMemoryEntries) {
+        const oldest = cache.keys().next().value;
+        if (oldest === undefined) break;
+        cache.delete(oldest);
+      }
+    };
+
+    const prune = (safeName: string) => {
+      try {
+        const protectedNames = new Set([...pending.keys()].map(sanitizeHostForFilename));
+        protectedNames.add(safeName);
+        const entries = fs
+          .readdirSync(hostDir)
+          .filter((file) => file.endsWith(".pem") && !file.endsWith("-key.pem"))
+          .map((file) => {
+            try {
+              return {
+                base: file.slice(0, -4),
+                mtime: fs.statSync(path.join(hostDir, file)).mtimeMs,
+              };
+            } catch {
+              return undefined;
+            }
+          })
+          .filter((entry): entry is { base: string; mtime: number } => entry !== undefined);
+        let excess = entries.length - maxDiskEntries;
+        for (const entry of entries.sort((a, b) => a.mtime - b.mtime)) {
+          if (excess <= 0) break;
+          if (protectedNames.has(entry.base)) continue;
+          try {
+            fs.unlinkSync(path.join(hostDir, `${entry.base}.pem`));
+            excess--;
+          } catch {
+            continue;
+          }
+          fs.rmSync(path.join(hostDir, `${entry.base}-key.pem`), { force: true });
+        }
+      } catch {
+        return;
+      }
+    };
+
+    this.sniCallback = (servername, cb) => {
+      const name = servername.toLowerCase();
+      let admission: "default" | "outsideTld" | "unregistered" | "admitted";
+      if (name === "localhost") {
+        admission = "default";
+      } else {
+        const valid =
+          name.length > 0 &&
+          name.length <= 253 &&
+          /^[a-z0-9.-]+$/.test(name) &&
+          !name.startsWith(".") &&
+          !name.endsWith(".") &&
+          !name.includes("..");
+        if (
+          !valid ||
+          !configuredTlds.some((tld) => name.endsWith(`.${tld}`) && name.length > tld.length + 1)
+        ) {
+          admission = "outsideTld";
+        } else {
+          const allowed = getAllowedHostnames().map((hostname) => hostname.toLowerCase());
+          admission =
+            allowed.includes(name) ||
+            (allowWildcards && allowed.some((parent) => name.endsWith(`.${parent}`)))
+              ? "admitted"
+              : "unregistered";
+        }
+      }
+      switch (admission) {
+        case "default":
+          cb(null, defaultCtx);
+          return;
+        case "outsideTld":
+          cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
+          return;
+        case "unregistered":
+          cb(new Error(`Refusing certificate for ${servername}: hostname is not registered`));
+          return;
+        case "admitted":
+          break;
+      }
+      const cached = cache.get(name);
+      if (cached) {
+        remember(name, cached);
+        cb(null, cached);
+        return;
+      }
+      const inFlight = pending.get(name);
+      if (inFlight) {
+        inFlight.then(
+          (ctx) => cb(null, ctx),
+          (error: Error) => cb(error)
+        );
+        return;
+      }
+      const safeName = sanitizeHostForFilename(name);
+      const certPath = path.join(hostDir, `${safeName}.pem`);
+      const keyPath = path.join(hostDir, `${safeName}-key.pem`);
+      if (
+        fileExists(certPath) &&
+        fileExists(keyPath) &&
+        isCertValid(certPath) &&
+        isCertSignatureStrong(certPath) &&
+        !hasTldWildcardSan(certPath)
+      ) {
+        try {
+          const hostCert = fs.readFileSync(certPath);
+          const ctx = tls.createSecureContext({
+            cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+            key: fs.readFileSync(keyPath),
+          });
+          try {
+            const now = new Date();
+            fs.utimesSync(certPath, now, now);
+          } catch {
+            void 0;
+          }
+          remember(name, ctx);
+          cb(null, ctx);
+          return;
+        } catch {
+          void 0;
+        }
+      }
+      const promise = generateHostCertAsync(stateDir, name)
+        .then(async (generated) => {
+          const [hostCert, hostKey] = await Promise.all([
+            fs.promises.readFile(generated.certPath),
+            fs.promises.readFile(generated.keyPath),
+          ]);
+          const ctx = tls.createSecureContext({
+            cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+            key: hostKey,
+          });
+          remember(name, ctx);
+          pending.delete(name);
+          prune(safeName);
+          return ctx;
+        })
+        .catch((err: unknown) => {
+          pending.delete(name);
+          const error = err instanceof Error ? err : new Error(String(err));
+          console.error(
+            `[portless] Failed to prepare a TLS certificate for ${name}: ${error.message}`
+          );
+          throw error;
+        });
+      pending.set(name, promise);
+      promise.then(
+        (ctx) => cb(null, ctx),
+        (error: Error) => cb(error)
+      );
+    };
+    this.tlsOptions = { cert, key, ...(ca ? { ca } : {}), SNICallback: this.sniCallback };
+  }
 }
 
 function trustStateFromStores(stores: TrustStores): TrustInspectionState {

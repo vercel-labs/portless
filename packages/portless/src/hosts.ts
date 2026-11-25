@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as dns from "node:dns";
 import * as path from "node:path";
@@ -10,6 +11,43 @@ const HOSTS_PATH = isWindows
 const LOOPBACK_ADDRESS = "127.0.0.1";
 const MARKER_START = "# portless-start";
 const MARKER_END = "# portless-end";
+
+/** Integrity of the portless-managed block in the hosts file. */
+export type HostsBlockState = "ok" | "malformed";
+
+/** Outcome of reconciling the portless-managed hosts block. */
+export type HostsAction = "synced" | "cleaned" | "unchanged" | "failed";
+
+/** Explicit result returned by hosts file sync and cleanup operations. */
+export interface HostsResult {
+  action: HostsAction;
+  block: HostsBlockState;
+  changed: boolean;
+}
+
+type ManagedBlockInspection =
+  | { status: "absent" }
+  | { status: "present"; startIdx: number; endIdx: number }
+  | { status: "malformed" };
+
+function inspectManagedBlock(content: string): ManagedBlockInspection {
+  const occurrences = (marker: string): number[] => {
+    const indices: number[] = [];
+    let index = content.indexOf(marker);
+    while (index !== -1) {
+      indices.push(index);
+      index = content.indexOf(marker, index + 1);
+    }
+    return indices;
+  };
+  const starts = occurrences(MARKER_START);
+  const ends = occurrences(MARKER_END);
+  if (starts.length === 0 && ends.length === 0) return { status: "absent" };
+  if (starts.length === 1 && ends.length === 1 && starts[0] < ends[0]) {
+    return { status: "present", startIdx: starts[0], endIdx: ends[0] };
+  }
+  return { status: "malformed" };
+}
 
 /**
  * Read the current /etc/hosts file content.
@@ -29,10 +67,9 @@ function readHostsFile(): string | null {
  * if no managed block exists.
  */
 export function extractManagedBlock(content: string): string[] {
-  const startIdx = content.indexOf(MARKER_START);
-  const endIdx = content.indexOf(MARKER_END);
-  if (startIdx === -1 || endIdx === -1 || endIdx <= startIdx) return [];
-  const block = content.slice(startIdx + MARKER_START.length, endIdx);
+  const inspected = inspectManagedBlock(content);
+  if (inspected.status !== "present") return [];
+  const block = content.slice(inspected.startIdx + MARKER_START.length, inspected.endIdx);
   return block
     .split("\n")
     .map((l) => l.trim())
@@ -44,11 +81,10 @@ export function extractManagedBlock(content: string): string[] {
  * the cleaned content with trailing newlines normalized.
  */
 export function removeBlock(content: string): string {
-  const startIdx = content.indexOf(MARKER_START);
-  const endIdx = content.indexOf(MARKER_END);
-  if (startIdx === -1 || endIdx === -1) return content;
-  const before = content.slice(0, startIdx);
-  const after = content.slice(endIdx + MARKER_END.length);
+  const inspected = inspectManagedBlock(content);
+  if (inspected.status !== "present") return content;
+  const before = content.slice(0, inspected.startIdx);
+  const after = content.slice(inspected.endIdx + MARKER_END.length);
   return (before + after).replace(/\n{3,}/g, "\n\n").trimEnd() + "\n";
 }
 
@@ -75,6 +111,10 @@ export function shouldAutoSyncHosts(syncVal: string | undefined): boolean {
  * still resolving. Pure so it is testable without the hosts path.
  */
 export function blockMatchesHostnames(content: string, hostnames: string[]): boolean {
+  const inspected = inspectManagedBlock(content);
+  if (inspected.status === "malformed") return false;
+  if (hostnames.length === 0) return inspected.status === "absent";
+  if (inspected.status === "absent") return false;
   const lines = extractManagedBlock(content);
   const wanted = new Set(hostnames);
   if (wanted.size !== hostnames.length) return false;
@@ -91,50 +131,73 @@ export function blockMatchesHostnames(content: string, hostnames: string[]): boo
   return seen.size === wanted.size;
 }
 
-/**
- * Rewrite the managed block to exactly these hostnames. Needs privilege.
- *
- * Returns whether the block matches afterwards, which is the writer's question.
- * Whether some hostname resolves is a weaker, different question: use
- * `checkHostResolution`, since a hosts entry is only one reason a name resolves.
- *
- * Skips the write when the block already matches, so a no-op reload does not
- * rewrite the file.
- */
-export function syncHostsFile(hostnames: string[]): boolean {
-  const content = readHostsFile();
-  if (content === null) return false;
-  if (blockMatchesHostnames(content, hostnames)) return true;
+function tryIgnore(fn: () => void): void {
   try {
-    const cleaned = removeBlock(content);
-    if (hostnames.length === 0) {
-      fs.writeFileSync(HOSTS_PATH, cleaned);
-    } else {
-      const block = buildBlock(hostnames);
-      fs.writeFileSync(HOSTS_PATH, cleaned.trimEnd() + "\n\n" + block + "\n");
-    }
+    fn();
   } catch {
-    return false;
+    return;
   }
-  // Re-read rather than assume the write landed.
-  const verification = readHostsFile();
-  return verification !== null && blockMatchesHostnames(verification, hostnames);
 }
 
-/**
- * Remove the portless-managed block from /etc/hosts.
- * Returns true on success, false on failure.
- */
-export function cleanHostsFile(): boolean {
-  const content = readHostsFile();
-  if (content === null) return false;
+function writeHostsFileAtomic(content: string): void {
+  const tempPath = path.join(
+    path.dirname(HOSTS_PATH),
+    `.portless-hosts.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
+  );
+  let mode = 0o644;
+  tryIgnore(() => {
+    mode = fs.statSync(HOSTS_PATH).mode & 0o777;
+  });
   try {
-    if (!content.includes(MARKER_START)) return true;
-    fs.writeFileSync(HOSTS_PATH, removeBlock(content));
-    return true;
-  } catch {
-    return false;
+    fs.writeFileSync(tempPath, content, { mode, flag: "wx" });
+    tryIgnore(() => {
+      fs.chmodSync(tempPath, mode);
+    });
+    fs.renameSync(tempPath, HOSTS_PATH);
+  } catch (error) {
+    tryIgnore(() => {
+      fs.rmSync(tempPath, { force: true });
+    });
+    throw error;
   }
+}
+
+function reconcileHostsFile(hostnames: string[]): HostsResult {
+  const content = readHostsFile();
+  if (content === null) return { action: "failed", block: "ok", changed: false };
+  if (inspectManagedBlock(content).status === "malformed") {
+    return { action: "failed", block: "malformed", changed: false };
+  }
+  if (blockMatchesHostnames(content, hostnames)) {
+    return { action: "unchanged", block: "ok", changed: false };
+  }
+  const cleaned = removeBlock(content);
+  const next =
+    hostnames.length === 0 ? cleaned : cleaned.trimEnd() + "\n\n" + buildBlock(hostnames) + "\n";
+  try {
+    writeHostsFileAtomic(next);
+  } catch {
+    return { action: "failed", block: "ok", changed: false };
+  }
+  const verification = readHostsFile();
+  if (verification === null) return { action: "failed", block: "ok", changed: false };
+  if (inspectManagedBlock(verification).status === "malformed") {
+    return { action: "failed", block: "malformed", changed: false };
+  }
+  if (!blockMatchesHostnames(verification, hostnames)) {
+    return { action: "failed", block: "ok", changed: false };
+  }
+  return { action: hostnames.length === 0 ? "cleaned" : "synced", block: "ok", changed: true };
+}
+
+/** Rewrite the managed block to match the hostnames and report the result. */
+export function syncHostsFile(hostnames: string[]): HostsResult {
+  return reconcileHostsFile(hostnames);
+}
+
+/** Remove the managed block and report the result. */
+export function cleanHostsFile(): HostsResult {
+  return reconcileHostsFile([]);
 }
 
 /**

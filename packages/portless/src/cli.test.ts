@@ -111,6 +111,8 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         'const { syncBuiltinESMExports } = require("node:module");',
         "const originalReadFileSync = fs.readFileSync;",
         "const originalWriteFileSync = fs.writeFileSync;",
+        "const originalRenameSync = fs.renameSync;",
+        "const originalChmodSync = fs.chmodSync;",
         "const originalUnlinkSync = fs.unlinkSync;",
         "const originalRmSync = fs.rmSync;",
         "const originalExistsSync = fs.existsSync;",
@@ -120,6 +122,8 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         '  ? path.join(process.env.SystemRoot || "C:\\\\Windows", "System32", "drivers", "etc", "hosts")',
         '  : "/etc/hosts";',
         'let content = process.env.PORTLESS_TEST_HOSTS_CONTENT || "";',
+        "const tempHosts = new Map();",
+        'const isHostsTemp = (file) => path.dirname(String(file)) === path.dirname(hostsPath) && path.basename(String(file)).startsWith(".portless-hosts.");',
         "let reads = 0;",
         "const capture = { writes: [], sudo: null, sudoCalls: [] };",
         "const elevated = () => Boolean(process.env.PORTLESS_INTERNAL_CLEAN_STEPS);",
@@ -152,6 +156,7 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "  return originalUnlinkSync.call(this, file, ...rest);",
         "};",
         "fs.rmSync = function (file, ...rest) {",
+        "  if (isHostsTemp(file)) { tempHosts.delete(String(file)); return; }",
         "  if (failUntilElevated && !elevated() && isStatePath(file) && originalExistsSync.call(this, file)) {",
         '    throw denied("state file removal denied");',
         "  }",
@@ -179,13 +184,26 @@ function runWithHostsFileMock(args: string[], options: HostsFileMockOptions) {
         "  return content;",
         "};",
         "fs.writeFileSync = function (file, data, ...rest) {",
-        "  if (String(file) !== hostsPath) return originalWriteFileSync.call(this, file, data, ...rest);",
+        "  if (!isHostsTemp(file) && String(file) !== hostsPath) return originalWriteFileSync.call(this, file, data, ...rest);",
         "  capture.writes.push(String(data));",
         '  if (process.env.PORTLESS_TEST_HOSTS_WRITE_MODE === "error" ||',
         '      (process.env.PORTLESS_TEST_HOSTS_WRITE_MODE === "privileged" && !elevated())) {',
         '    throw denied("hosts write failed");',
         "  }",
-        "  content = String(data);",
+        "  if (String(file) === hostsPath) content = String(data);",
+        "  else tempHosts.set(String(file), String(data));",
+        "};",
+        "fs.chmodSync = function (file, ...rest) {",
+        "  if (isHostsTemp(file)) return;",
+        "  return originalChmodSync.call(this, file, ...rest);",
+        "};",
+        "fs.renameSync = function (oldPath, newPath, ...rest) {",
+        "  if (isHostsTemp(oldPath) && String(newPath) === hostsPath) {",
+        "    content = tempHosts.get(String(oldPath));",
+        "    tempHosts.delete(String(oldPath));",
+        "    return;",
+        "  }",
+        "  return originalRenameSync.call(this, oldPath, newPath, ...rest);",
         "};",
         "if (process.env.PORTLESS_TEST_HOSTS_UID !== undefined) {",
         "  const mockUid = Number(process.env.PORTLESS_TEST_HOSTS_UID);",
@@ -3403,6 +3421,25 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       );
 
+      it.each(["sync", "clean"])(
+        "rejects malformed blocks during hosts %s without sudo",
+        (action) => {
+          const content = "127.0.0.1 localhost\n# portless-start\n127.0.0.1 stale.test\n";
+          const { status, stderr, capture } = runWithHostsFileMock(["hosts", action], {
+            content,
+            stateDir: tmpDir,
+            uid: 1000,
+            sudoStatus: 0,
+          });
+
+          expect(status).toBe(1);
+          expect(stderr).toContain("Malformed portless block");
+          expect(capture.content).toBe(content);
+          expect(capture.writes).toEqual([]);
+          expect(capture.sudoCalls).toEqual([]);
+        }
+      );
+
       it("uses the normal failure path for a cleanup read error", () => {
         const { status, stderr, capture } = runWithHostsFileMock(["hosts", "clean"], {
           content: staleHosts,
@@ -3479,6 +3516,35 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
       }
     );
+
+    it("reports a malformed hosts block without retrying hosts through sudo", async () => {
+      const content = "127.0.0.1 localhost\n# portless-start\n";
+      const result = runWithHostsFileMock(["clean", "--yes"], {
+        content,
+        stateDir,
+        uid: 1000,
+        sudoStatus: 0,
+        extraEnv: {
+          HOME: home,
+          PORTLESS_PORT: String(await getFreePort()),
+          PORTLESS_HTTPS: "0",
+        },
+      });
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("Malformed portless block");
+      expect(result.capture.content).toBe(content);
+      expect(result.capture.writes).toEqual([]);
+      for (const call of result.capture.sudoCalls) {
+        expect(
+          call.args.some(
+            (arg) =>
+              arg.startsWith("PORTLESS_INTERNAL_CLEAN_STEPS=") &&
+              arg.split("=")[1]?.split(",").includes("hosts")
+          )
+        ).toBe(false);
+      }
+    });
 
     it.skipIf(process.platform === "win32")(
       "reports a failure when a tailscale share cannot be removed",

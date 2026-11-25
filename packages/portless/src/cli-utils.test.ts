@@ -2669,9 +2669,11 @@ describe("syncHostsWithWarning", () => {
   // This latch bounds the daemon's own proxy.log on repeated route reloads. It
   // never bounds what users are told: delivery is per request, so each
   // registering CLI gets its own answer even while this is latched.
+  const fail = () => ({ action: "failed", block: "ok", changed: false }) as const;
+  const succeed = () => ({ action: "synced", block: "ok", changed: true }) as const;
+
   it("warns once and stays quiet while the sync keeps failing", () => {
     let warns = 0;
-    const fail = () => false;
     let latched = syncHostsWithWarning(["a.localhost"], false, () => warns++, fail);
     expect(warns).toBe(1);
     latched = syncHostsWithWarning(["a.localhost"], latched, () => warns++, fail);
@@ -2681,19 +2683,9 @@ describe("syncHostsWithWarning", () => {
 
   it("re-arms after a success so a later failure warns again", () => {
     let warns = 0;
-    const latched = syncHostsWithWarning(
-      ["a.localhost"],
-      true,
-      () => warns++,
-      () => true
-    );
+    const latched = syncHostsWithWarning(["a.localhost"], true, () => warns++, succeed);
     expect(latched).toBe(false);
-    syncHostsWithWarning(
-      ["a.localhost"],
-      latched,
-      () => warns++,
-      () => false
-    );
+    syncHostsWithWarning(["a.localhost"], latched, () => warns++, fail);
     expect(warns).toBe(1);
   });
 
@@ -2701,12 +2693,7 @@ describe("syncHostsWithWarning", () => {
   // first real route's failure would find it already gone and log nothing.
   it("does not let an empty warm-up sync consume the latch", () => {
     let warns = 0;
-    const latched = syncHostsWithWarning(
-      [],
-      false,
-      () => warns++,
-      () => false
-    );
+    const latched = syncHostsWithWarning([], false, () => warns++, fail);
     expect(warns).toBe(0);
     expect(latched).toBe(false);
   });
