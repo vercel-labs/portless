@@ -3,13 +3,19 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import { PassThrough } from "node:stream";
 import { describe, expect, it } from "vitest";
-import { buildCloudflareArgs, extractCloudflareUrl, startCloudflare } from "./cloudflare.js";
+import { buildCloudflareArgs, extractCloudflareUrl, startCloudflare } from "./tunnel.js";
 import {
+  PROCESS_TUNNELS,
   buildNgrokArgs,
+  buildNetbirdArgs,
   ensureNgrokAvailable,
+  ensureNetbirdAvailable,
   extractNgrokUrl,
+  extractNetbirdUrl,
+  normalizeNgrokUrl,
   startNgrok,
-  stopNgrokProcess,
+  startNetbird,
+  stopTunnelProcess,
   type TunnelCommandRunner as NgrokCommandRunner,
   type TunnelChildProcess as NgrokChildProcess,
   type TunnelSpawner as NgrokSpawner,
@@ -70,6 +76,31 @@ describe("ngrok", () => {
     });
   });
 
+  describe("normalizeNgrokUrl", () => {
+    it("adds https and trims a trailing slash", () => {
+      expect(normalizeNgrokUrl("abc123.ngrok.dev/")).toBe("https://abc123.ngrok.dev");
+      expect(normalizeNgrokUrl("http://abc123.ngrok.dev/Path/Case")).toBe(
+        "http://abc123.ngrok.dev/Path/Case"
+      );
+    });
+
+    it("rejects invalid URLs", () => {
+      expect(() => normalizeNgrokUrl("ftp://abc123.ngrok.dev")).toThrow("Invalid ngrok URL");
+      expect(() => normalizeNgrokUrl("http://[")).toThrow("Invalid ngrok URL");
+      expect(() => normalizeNgrokUrl("   ")).toThrow("ngrok URL cannot be empty.");
+    });
+  });
+
+  describe("PROCESS_TUNNELS", () => {
+    it("marks NetBird as binding all interfaces", () => {
+      expect(PROCESS_TUNNELS).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ id: "netbird", bindAllInterfaces: true }),
+        ])
+      );
+    });
+  });
+
   describe("buildNgrokArgs", () => {
     it("forwards HTTP traffic to the local app port with host rewriting", () => {
       expect(buildNgrokArgs(4123)).toEqual([
@@ -81,32 +112,46 @@ describe("ngrok", () => {
       ]);
     });
 
-    it("uses the requested upstream host header", () => {
-      expect(buildNgrokArgs(4123, "myapp.localhost")).toEqual([
+    it("normalizes a configured public URL before passing it to ngrok", () => {
+      expect(buildNgrokArgs(4123, "myapp.localhost", "abc123.ngrok.dev/")).toEqual([
         "http",
         "--log=stdout",
         "--log-format=logfmt",
         "--host-header=myapp.localhost",
+        "--url=https://abc123.ngrok.dev",
         "http://127.0.0.1:4123",
       ]);
     });
   });
 
   describe("extractNgrokUrl", () => {
-    it("extracts the public URL from text output", () => {
-      const output = "Forwarding https://abc123.ngrok.app -> http://127.0.0.1:4123";
-      expect(extractNgrokUrl(output)).toBe("https://abc123.ngrok.app");
+    it("extracts the public URL from forwarding output", () => {
+      expect(extractNgrokUrl("Forwarding https://abc123.ngrok.app -> http://127.0.0.1:4123")).toBe(
+        "https://abc123.ngrok.app"
+      );
     });
 
-    it("extracts the public URL from structured log output", () => {
-      const output =
-        't=2026-06-04 lvl=info msg="started tunnel" obj=tunnels url=https://abc123.ngrok-free.app';
-      expect(extractNgrokUrl(output)).toBe("https://abc123.ngrok-free.app");
+    it("extracts the public URL from logged url output", () => {
+      expect(
+        extractNgrokUrl(
+          't=2026-06-04 lvl=info msg="started tunnel" obj=tunnels url=http://abc123.ngrok-free.app'
+        )
+      ).toBe("http://abc123.ngrok-free.app");
     });
+
+    it.each(["https", "http"])(
+      "extracts the public %s URL instead of the local address",
+      (scheme) => {
+        expect(
+          extractNgrokUrl(
+            `msg="started tunnel" addr=http://127.0.0.1:4000 url=${scheme}://my-app.ngrok.dev`
+          )
+        ).toBe(`${scheme}://my-app.ngrok.dev`);
+      }
+    );
 
     it("ignores ngrok docs URLs from errors", () => {
-      const output = "ERROR see https://ngrok.com/docs/errors/err_ngrok_4018";
-      expect(extractNgrokUrl(output)).toBeNull();
+      expect(extractNgrokUrl("ERROR see https://ngrok.com/docs/errors/err_ngrok_4018")).toBeNull();
     });
   });
 
@@ -208,14 +253,36 @@ describe("ngrok", () => {
     });
   });
 
-  describe("stopNgrokProcess", () => {
+  describe("stopTunnelProcess", () => {
     it("terminates the child process", () => {
       const child = new MockNgrokChild();
-      stopNgrokProcess(child as unknown as NgrokChildProcess);
+      stopTunnelProcess(child as unknown as NgrokChildProcess);
       expect(child.killedWith).toBe("SIGTERM");
     });
   });
 });
+
+class MockNetbirdChild extends EventEmitter {
+  pid = 67890;
+  stdout = new PassThrough();
+  stderr = new PassThrough();
+  killedWith: NodeJS.Signals | undefined;
+
+  kill(signal?: NodeJS.Signals): boolean {
+    this.killedWith = signal;
+    return true;
+  }
+}
+
+function createNetbirdSpawner(
+  child: MockNetbirdChild,
+  calls: string[][] = []
+): (args: string[]) => MockNetbirdChild {
+  return (args: string[]) => {
+    calls.push(args);
+    return child;
+  };
+}
 
 const BANNER =
   "INF Thank you for trying Cloudflare Tunnel.\nINF |  https://red-fox-ab.trycloudflare.com  |\n";
@@ -259,5 +326,107 @@ describe("cloudflare", () => {
     expect(await fail(BANNER)).toBe(
       "Failed to start Cloudflare tunnel: cloudflared exited before connecting (exit 1)"
     );
+  });
+});
+
+describe("netbird", () => {
+  describe("ensureNetbirdAvailable", () => {
+    it("checks the netbird CLI status", () => {
+      const calls: string[][] = [];
+      const runner = (args: string[]) => {
+        calls.push(args);
+        return { status: 0, stdout: '{"daemonStatus":"Connected"}', stderr: "" };
+      };
+
+      expect(() => ensureNetbirdAvailable(runner)).not.toThrow();
+      expect(calls).toEqual([["status", "--json"]]);
+    });
+
+    it("throws an install hint when the netbird CLI is missing", () => {
+      const error = Object.assign(new Error("spawn netbird ENOENT"), { code: "ENOENT" });
+      const runner = () => ({ status: null, stdout: "", stderr: "", error });
+
+      expect(() => ensureNetbirdAvailable(runner)).toThrow("NetBird CLI not found");
+    });
+
+    it("throws when netbird is not connected", () => {
+      const runner = () => ({ status: 0, stdout: '{"daemonStatus":"Disconnected"}', stderr: "" });
+
+      expect(() => ensureNetbirdAvailable(runner)).toThrow(
+        "NetBird is not connected (status: Disconnected)"
+      );
+    });
+  });
+
+  describe("buildNetbirdArgs", () => {
+    it("builds the expose command with sanitized prefix and groups", () => {
+      expect(
+        buildNetbirdArgs(4123, {
+          appName: "My App! 2026 With A Very Long Name That Keeps Going",
+          password: "secret",
+          pin: "123456",
+          groups: [" dev ", "", "ops"],
+        })
+      ).toEqual([
+        "expose",
+        "--protocol",
+        "http",
+        "--with-password",
+        "secret",
+        "--with-pin",
+        "123456",
+        "--with-name-prefix",
+        "my-app--2026-with-a-very-long-na",
+        "--with-user-groups",
+        "dev,ops",
+        "4123",
+      ]);
+    });
+  });
+
+  describe("extractNetbirdUrl", () => {
+    it("extracts the public URL from status output", () => {
+      expect(extractNetbirdUrl("URL: https://abc123.netbird.cloud/\n")).toBe(
+        "https://abc123.netbird.cloud"
+      );
+    });
+
+    it("ignores invalid URLs", () => {
+      expect(extractNetbirdUrl("URL: not-a-url\n")).toBeNull();
+    });
+  });
+
+  describe("startNetbird", () => {
+    it("spawns netbird and resolves with the public URL", async () => {
+      const child = new MockNetbirdChild();
+      const calls: string[][] = [];
+      const promise = startNetbird(4123, {
+        spawner: createNetbirdSpawner(child, calls),
+        timeoutMs: 1000,
+      });
+
+      child.stdout.write("URL: https://abc123.netbird.cloud/\n");
+
+      await expect(promise).resolves.toMatchObject({
+        url: "https://abc123.netbird.cloud",
+        pid: 67890,
+      });
+      expect(calls).toEqual([["expose", "--protocol", "http", "4123"]]);
+    });
+
+    it("throws when netbird exits before printing a URL", async () => {
+      const child = new MockNetbirdChild();
+      const promise = startNetbird(4123, {
+        spawner: createNetbirdSpawner(child),
+        timeoutMs: 1000,
+      });
+
+      child.stderr.write("netbird error\n");
+      child.emit("exit", 1, null);
+
+      await expect(promise).rejects.toThrow(
+        "Failed to start NetBird tunnel: netbird error (exit 1)"
+      );
+    });
   });
 });

@@ -11,6 +11,21 @@ describe("parseCommandArgs", () => {
     expect(parseCommandArgs("deploy", ["--port", "3000"], spec).value("--port")).toBe("3000");
   });
 
+  it("reads optional values only when attached with equals", () => {
+    const optional = { "--flag": "optional-equals" } as const;
+    const bare = parseCommandArgs("deploy", ["--flag", "app"], optional);
+    expect(bare.has("--flag")).toBe(true);
+    expect(bare.value("--flag")).toBeUndefined();
+    expect(bare.positionals).toEqual(["app"]);
+    const inline = parseCommandArgs("deploy", ["--flag=value", "app"], optional);
+    expect(inline.value("--flag")).toBe("value");
+    expect(inline.positionals).toEqual(["app"]);
+    expect(() => parseCommandArgs("deploy", ["--flag="], optional)).toThrow(UsageError);
+    expect(() => parseCommandArgs("deploy", ["--flag="], optional)).toThrow(
+      "--flag= requires a value."
+    );
+  });
+
   it("collects repeated value flags in order", () => {
     const parsed = parseCommandArgs(
       "deploy",
@@ -80,6 +95,22 @@ describe("visitLeadingFlags", () => {
       ["--force", undefined],
     ]);
     expect(rest).toEqual(["next", "dev", "--port", "3000"]);
+  });
+
+  it("visits optional values only when attached with equals", () => {
+    const optional = { "--flag": "optional-equals" } as const;
+    const visits: [string, string | undefined][] = [];
+    const visit = (flag: string, value: string | undefined) => visits.push([flag, value]);
+    expect(visitLeadingFlags("run", ["--flag", "app"], optional, visit)).toEqual(["app"]);
+    expect(visitLeadingFlags("run", ["--flag=value", "app"], optional, visit)).toEqual(["app"]);
+    expect(visits).toEqual([
+      ["--flag", undefined],
+      ["--flag", "value"],
+    ]);
+    expect(() => visitLeadingFlags("run", ["--flag="], optional, visit)).toThrow(UsageError);
+    expect(() => visitLeadingFlags("run", ["--flag="], optional, visit)).toThrow(
+      "--flag= requires a value."
+    );
   });
 
   it("reports every value in order so a caller can keep the last one", () => {

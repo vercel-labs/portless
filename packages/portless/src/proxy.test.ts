@@ -978,6 +978,48 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("app on :443");
     });
 
+    it("prefers an exact tailscale authority match over the :80 default-port equivalent", async () => {
+      const backendDefault = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("default https");
+        })
+      );
+      const backendExact = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("https on :80");
+        })
+      );
+      await listen(backendDefault);
+      await listen(backendExact);
+      const addrDefault = backendDefault.address();
+      const addrExact = backendExact.address();
+      if (!addrDefault || typeof addrDefault === "string") throw new Error("no addr");
+      if (!addrExact || typeof addrExact === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "app-https.localhost",
+          port: addrDefault.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net",
+        },
+        {
+          hostname: "app-http.localhost",
+          port: addrExact.port,
+          tailscaleUrl: "https://my-device.tail1234.ts.net:80",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "my-device.tail1234.ts.net:80" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("https on :80");
+    });
+
     it("matches a tailscale hostname case-insensitively (review: ctate)", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
@@ -1004,6 +1046,62 @@ describe("createProxyServer", () => {
       const res = await request(server, { host: "My-Device.Tail1234.TS.net" });
       expect(res.status).toBe(200);
       expect(res.body).toBe("mixed case funnel hit");
+    });
+
+    it("matches a tailscale HTTP URL with an explicit :80 Host header", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("http port 80 funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "http://100.64.0.10",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "100.64.0.10:80" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("http port 80 funnel hit");
+    });
+
+    it("matches an IPv6 tailscale URL with a nondefault port", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.end("ipv6 funnel hit");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [
+        {
+          hostname: "myapp.localhost",
+          port: backendAddr.port,
+          tailscaleUrl: "http://[fd7a:115c:a1e0::1]:8080",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "[fd7a:115c:a1e0::1]:8080" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("ipv6 funnel hit");
     });
 
     it("returns 404 for unregistered subdomain prefix by default", async () => {

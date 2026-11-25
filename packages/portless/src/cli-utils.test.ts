@@ -476,6 +476,34 @@ describe("isHttpsEnvDisabled", () => {
 });
 
 describe("injectFrameworkFlags", () => {
+  it.each([
+    [
+      ["vite", "dev"],
+      ["--port", "4567", "--strictPort", "--host", "0.0.0.0"],
+    ],
+    [
+      ["wrangler", "dev"],
+      ["--port", "4567", "--ip", "0.0.0.0"],
+    ],
+  ] as [string[], string[]][])("uses the requested bind address for %j", (command, flags) => {
+    const args = [...command];
+    expect(injectFrameworkFlags(args, 4567, "0.0.0.0")).toEqual(flags);
+    expect(args).toEqual([...command, ...flags]);
+  });
+
+  it("keeps Expo on localhost when given a wildcard bind address", () => {
+    const previous = process.env.PORTLESS_LAN;
+    delete process.env.PORTLESS_LAN;
+    try {
+      const args = ["expo", "start"];
+      injectFrameworkFlags(args, 4567, "0.0.0.0");
+      expect(args).toEqual(["expo", "start", "--port", "4567", "--host", "localhost"]);
+    } finally {
+      if (previous === undefined) delete process.env.PORTLESS_LAN;
+      else process.env.PORTLESS_LAN = previous;
+    }
+  });
+
   it("injects --port, --strictPort, and --host for vite command", () => {
     const args = ["vite", "dev"];
     injectFrameworkFlags(args, 4567);
@@ -1408,6 +1436,30 @@ describe("injectPackageScriptFrameworkFlags", () => {
       JSON.stringify({ name: "test-app", scripts })
     );
   }
+
+  it.each([
+    ["vite dev", ["--port", "4567", "--strictPort", "--host", "0.0.0.0"]],
+    ["wrangler dev", ["--port", "4567", "--ip", "0.0.0.0"]],
+  ] as [string, string[]][])("forwards the requested bind address through %s", (script, flags) => {
+    writeScripts({ dev: script });
+    const args = ["pnpm", "run", "dev"];
+    injectPackageScriptFrameworkFlags(args, 4567, pkgDir, "0.0.0.0");
+    expect(args).toEqual(["pnpm", "run", "dev", ...flags]);
+  });
+
+  it("keeps Expo on localhost through a package script with a wildcard bind address", () => {
+    const previous = process.env.PORTLESS_LAN;
+    delete process.env.PORTLESS_LAN;
+    try {
+      writeScripts({ dev: "expo start" });
+      const args = ["pnpm", "run", "dev"];
+      injectPackageScriptFrameworkFlags(args, 4567, pkgDir, "0.0.0.0");
+      expect(args).toEqual(["pnpm", "run", "dev", "--port", "4567", "--host", "localhost"]);
+    } finally {
+      if (previous === undefined) delete process.env.PORTLESS_LAN;
+      else process.env.PORTLESS_LAN = previous;
+    }
+  });
 
   it("forwards vite flags through bun run <script>", () => {
     writeScripts({ dev: "vite dev --host 127.0.0.1" });
