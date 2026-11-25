@@ -23,6 +23,8 @@ const SYSTEMD_SERVICE = "portless.service";
 const WINDOWS_TASK_NAME = "Portless Proxy";
 const INTERNAL_ELEVATED_ENV = "PORTLESS_INTERNAL_SERVICE_ELEVATED";
 const SERVICE_ENV_KEYS = new Set(["PORTLESS_SYNC_HOSTS"]);
+const FIXED_UNIX_SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
+const ROOT_PATH_CHECKED_BINARIES = ["node", "openssl"];
 
 type SupportedPlatform = "darwin" | "linux" | "win32";
 type LinuxServiceScope = "system" | "user";
@@ -629,49 +631,69 @@ function resolveServiceLaunch(ctx: ServiceContext): ServiceLaunch {
     }
     return { command: [ctx.nodePath, ...proxyCommand], pathEnv: entries.join(";") };
   }
-  const isUserUnit = ctx.platform === "linux" && ctx.linuxScope === "user";
-  const isSafeRootPathDir = (entry: string): boolean => {
-    if (!isRootControlledPosixPath(entry, "dir")) return false;
-    const nodeCandidate = path.posix.join(entry, "node");
-    try {
-      const stat = fs.lstatSync(nodeCandidate, { throwIfNoEntry: false });
-      if (stat === undefined) return true;
-    } catch (err) {
-      const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
-      return code === "ENOENT" || code === "ENOTDIR";
-    }
-    return isRootControlledPosixPath(nodeCandidate, "file");
-  };
-  const isAllowedPathDir = (entry: string): boolean => {
-    if (!entry || !path.posix.isAbsolute(entry)) return false;
-    return isUserUnit || isSafeRootPathDir(entry);
-  };
-  const nodeDir = path.posix.isAbsolute(ctx.nodePath) ? path.posix.dirname(ctx.nodePath) : "";
-  const canResolveNodeFromPath =
-    isUserUnit ||
-    (isRootControlledPosixPath(ctx.nodePath, "file") &&
-      nodeDir !== "" &&
-      isRootControlledPosixPath(nodeDir, "dir"));
   const normalizeEntry = (entry: string): string =>
     entry.replace(/\/+$/, "") || path.posix.parse(entry).root;
-  const entries: string[] = [];
-  const seen = new Set<string>();
-  for (const entry of ctx.pathEnv.split(":")) {
-    if (!isAllowedPathDir(entry)) continue;
-    const key = normalizeEntry(entry);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    entries.push(entry);
+  const canonical = (value: string): string => realPathOrNull(value) ?? path.posix.resolve(value);
+  if (ctx.platform === "linux" && ctx.linuxScope === "user") {
+    const nodeDir = path.posix.isAbsolute(ctx.nodePath) ? path.posix.dirname(ctx.nodePath) : "";
+    const entries: string[] = [];
+    const seen = new Set<string>();
+    for (const entry of ctx.pathEnv.split(":")) {
+      if (!entry || !path.posix.isAbsolute(entry)) continue;
+      const key = normalizeEntry(entry);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      entries.push(entry);
+    }
+    if (nodeDir && !seen.has(normalizeEntry(nodeDir))) {
+      const firstPathNode = entries
+        .map((dir) => path.posix.join(dir, "node"))
+        .find((candidate) => fs.existsSync(candidate));
+      if (firstPathNode && canonical(firstPathNode) !== canonical(ctx.nodePath)) {
+        entries.unshift(nodeDir);
+      } else {
+        entries.push(nodeDir);
+      }
+    }
+    return { command: ["/usr/bin/env", "node", ...proxyCommand], pathEnv: entries.join(":") };
   }
-  if (canResolveNodeFromPath && nodeDir && !seen.has(normalizeEntry(nodeDir))) {
-    const firstPathNode = entries
-      .map((dir) => path.posix.join(dir, "node"))
-      .find((candidate) => fs.existsSync(candidate));
-    const canonical = (value: string): string => realPathOrNull(value) ?? path.posix.resolve(value);
-    if (firstPathNode && canonical(firstPathNode) !== canonical(ctx.nodePath)) {
+  const isSafeRootSystemDir = (entry: string): boolean => {
+    if (!isRootControlledPosixPath(entry, "dir")) return false;
+    for (const name of ROOT_PATH_CHECKED_BINARIES) {
+      const candidate = path.posix.join(entry, name);
+      try {
+        const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
+        if (stat !== undefined && !isRootControlledPosixPath(candidate, "file")) return false;
+      } catch (err) {
+        const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
+        if (code !== "ENOENT" && code !== "ENOTDIR") return false;
+      }
+    }
+    return true;
+  };
+  const nodeDir = path.posix.isAbsolute(ctx.nodePath) ? path.posix.dirname(ctx.nodePath) : "";
+  if (ctx.platform === "darwin") {
+    const canResolveNodeFromPath =
+      (nodeDir === "/usr/bin" || nodeDir === "/bin") &&
+      isSafeRootSystemDir(nodeDir) &&
+      isRootControlledPosixPath(ctx.nodePath, "file");
+    const command = canResolveNodeFromPath
+      ? ["/usr/bin/env", "node", ...proxyCommand]
+      : [ctx.nodePath, ...proxyCommand];
+    return { command, pathEnv: "" };
+  }
+  const entries = FIXED_UNIX_SYSTEM_DIRS.filter(isSafeRootSystemDir);
+  const canResolveNodeFromPath =
+    entries.includes(nodeDir) && isRootControlledPosixPath(ctx.nodePath, "file");
+  if (canResolveNodeFromPath) {
+    const nodeIndex = entries.indexOf(nodeDir);
+    const shadowed = entries.slice(0, nodeIndex).some((dir) => {
+      const candidate = path.posix.join(dir, "node");
+      return fs.existsSync(candidate) && canonical(candidate) !== canonical(ctx.nodePath);
+    });
+    if (shadowed) {
+      entries.splice(nodeIndex, 1);
       entries.unshift(nodeDir);
-    } else {
-      entries.push(nodeDir);
     }
   }
   const command = canResolveNodeFromPath
@@ -1653,10 +1675,11 @@ ${colors.bold("Notes:")}
   Value flags accept both --flag <value> and --flag=<value>.
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
-  Linux user services resolve node from PATH at startup. macOS and Linux root
-  services resolve node from PATH only when Node is in a verified root-owned
-  directory, keeping only verified root-owned PATH entries and using the explicit
-  Node path otherwise. Windows SYSTEM tasks always use the explicit Node path.
+  Linux user services resolve node from PATH at startup. Linux root services
+  use fixed system PATH directories (/usr/bin:/bin:/usr/sbin:/sbin) and resolve
+  node from PATH only when Node is installed there. macOS root services and
+  Windows SYSTEM tasks keep the explicit Node path when Node is outside core
+  system directories.
   On Linux, Node under a non-root user's home directory, such as with nvm, fnm,
   volta, or mise, uses a systemd user service (systemctl --user) instead of a
   root system service to avoid execution being blocked by SELinux enforcing mode.

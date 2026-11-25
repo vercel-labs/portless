@@ -127,6 +127,8 @@ const trustedUnixPaths: Record<string, MockRootControlledPath> = {
   "/usr/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
   "/bin": { kind: "dir", uid: 0, mode: 0o40755 },
   "/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+  "/usr/sbin": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/sbin": { kind: "dir", uid: 0, mode: 0o40755 },
 };
 
 function mockRootControlledPaths(
@@ -257,8 +259,7 @@ describe("buildServiceSpec", () => {
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
     expect(spec.plistPath).toBe("/Library/LaunchDaemons/sh.portless.proxy.plist");
     expect(spec.programArguments).toEqual([
-      "/usr/bin/env",
-      "node",
+      "/usr/local/bin/node",
       "/usr/local/lib/node_modules/portless/dist/cli.js",
       "proxy",
       "start",
@@ -270,7 +271,7 @@ describe("buildServiceSpec", () => {
     ]);
     expect(spec.plist).toContain("<key>RunAtLoad</key>");
     expect(spec.plist).toContain("<key>KeepAlive</key>");
-    expect(spec.plist).toContain("<key>PATH</key>");
+    expect(spec.plist).not.toContain("<key>PATH</key>");
     expect(spec.plist).toContain("<key>PORTLESS_STATE_DIR</key>");
     expect(spec.plist).toContain("<string>/Users/alice/.portless</string>");
     expect(spec.plist).toContain("<key>SUDO_UID</key>");
@@ -303,8 +304,7 @@ describe("buildServiceSpec", () => {
     expect(spec.scope).toBe("system");
     expect(spec.unitPath).toBe("/etc/systemd/system/portless.service");
     expect(spec.execStart).toEqual([
-      "/usr/bin/env",
-      "node",
+      "/opt/node/bin/node",
       "/usr/lib/node_modules/portless/dist/cli.js",
       "proxy",
       "start",
@@ -317,9 +317,9 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain("Description=Portless HTTPS proxy");
     expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
-    expect(spec.unit).toContain('Environment=PATH="/opt/node/bin:/usr/local/bin:/bin"');
+    expect(spec.unit).toContain('Environment=PATH="/usr/bin:/bin:/usr/sbin:/sbin"');
     expect(spec.unit).toContain(
-      'ExecStart="/usr/bin/env" "node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
+      'ExecStart="/opt/node/bin/node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
     expect(spec.unit).toContain("WantedBy=multi-user.target");
     const unitSection = spec.unit.split("[Service]")[0];
@@ -477,7 +477,7 @@ describe("buildServiceSpec", () => {
     expect(spec.script).not.toContain("C:\\Tools");
   });
 
-  it("appends the install-time Node directory after existing macOS PATH entries", () => {
+  it("keeps the explicit Node path and omits PATH in a macOS plist", () => {
     mockTrustedUnixPaths({
       "/opt": { kind: "dir", uid: 0, mode: 0o40755 },
       "/opt/homebrew": { kind: "dir", uid: 0, mode: 0o40755 },
@@ -497,9 +497,25 @@ describe("buildServiceSpec", () => {
     });
 
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
-    expect(spec.plist).toContain(
-      "<key>PATH</key>\n    <string>/usr/bin:/bin:/opt/homebrew/Cellar/node/22.1.0/bin</string>"
-    );
+    expect(spec.programArguments[0]).toBe("/opt/homebrew/Cellar/node/22.1.0/bin/node");
+    expect(spec.programArguments[1]).toBe("/usr/local/lib/portless/cli.js");
+    expect(spec.plist).not.toContain("<key>PATH</key>");
+  });
+
+  it("uses env node and the launchd default PATH when Node is in /usr/bin", () => {
+    mockTrustedUnixPaths();
+
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/Users/alice/.local/bin:/usr/local/bin:/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.programArguments.slice(0, 2)).toEqual(["/usr/bin/env", "node"]);
+    expect(spec.plist).not.toContain("<key>PATH</key>");
   });
 
   it.each(["darwin", "linux"] as const)(
@@ -598,24 +614,45 @@ describe("buildServiceSpec", () => {
     ]);
   });
 
-  it("drops a root-owned PATH directory whose node entry is not root-owned", () => {
+  it("drops a fixed system directory whose node binary is not root-owned", () => {
     mockTrustedUnixPaths({
-      "/usr/local/bin/node": { kind: "file", uid: 501, mode: 0o100755 },
-      "/usr/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+      "/usr/bin/node": { kind: "file", uid: 501, mode: 0o100755 },
     });
 
     const spec = buildServiceSpec({
-      platform: "darwin",
+      platform: "linux",
       nodePath: "/usr/bin/node",
-      entryScript: "/usr/local/lib/portless/cli.js",
-      userHome: "/Users/alice",
-      pathEnv: "/usr/local/bin:/usr/bin:/bin",
+      entryScript: "/usr/lib/portless/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      pathEnv: "/usr/bin:/bin",
     });
 
-    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
-    expect(spec.programArguments.slice(0, 2)).toEqual(["/usr/bin/env", "node"]);
-    expect(spec.plist).toContain("<key>PATH</key>\n    <string>/usr/bin:/bin</string>");
-    expect(spec.plist).not.toContain("/usr/local/bin:");
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("system");
+    expect(spec.execStart[0]).toBe("/usr/bin/node");
+    expect(spec.unit).toContain('Environment=PATH="/bin:/usr/sbin:/sbin"');
+  });
+
+  it("drops a fixed system directory whose openssl binary is not root-owned", () => {
+    mockTrustedUnixPaths({
+      "/usr/bin/openssl": { kind: "file", uid: 501, mode: 0o100755 },
+    });
+
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/lib/portless/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      pathEnv: "/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.execStart[0]).toBe("/usr/bin/node");
+    expect(spec.unit).toContain('Environment=PATH="/bin:/usr/sbin:/sbin"');
   });
 
   it("traverses a root-owned relative symlink with dot dot one segment at a time", () => {
@@ -661,30 +698,25 @@ describe("buildServiceSpec", () => {
     ]);
   });
 
-  it("prepends the install-time Node directory when an earlier PATH Node differs", () => {
-    mockTrustedUnixPaths(
-      {
-        "/opt": { kind: "dir", uid: 0, mode: 0o40755 },
-        "/opt/node": { kind: "dir", uid: 0, mode: 0o40755 },
-        "/opt/node/bin": { kind: "dir", uid: 0, mode: 0o40755 },
-        "/opt/node/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
-      },
-      ["/usr/bin/node"]
-    );
+  it("uses the fixed system PATH for a Linux root service", () => {
+    mockTrustedUnixPaths();
 
     const spec = buildServiceSpec({
       platform: "linux",
-      nodePath: "/opt/node/bin/node",
+      nodePath: "/usr/bin/node",
       entryScript: "/usr/lib/portless/cli.js",
       userHome: "/home/alice",
       uid: "1000",
       gid: "1000",
-      pathEnv: "/usr/bin:/bin",
+      pathEnv: "/home/alice/.local/bin:/usr/local/bin:/usr/bin:/bin",
     });
 
     if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("system");
     expect(spec.execStart.slice(0, 2)).toEqual(["/usr/bin/env", "node"]);
-    expect(spec.unit).toContain('Environment=PATH="/opt/node/bin:/usr/bin:/bin"');
+    expect(spec.unit).toContain('Environment=PATH="/usr/bin:/bin:/usr/sbin:/sbin"');
+    expect(spec.unit).not.toContain("/home/alice/.local/bin");
+    expect(spec.unit).not.toContain("/usr/local/bin");
   });
 
   it("keeps world-writable PATH entries for a Linux user service", () => {
@@ -1304,7 +1336,8 @@ describe("handleService", () => {
     expect(output).toContain("service uninstall");
     expect(output).toContain("service status");
     expect(output).toContain("Linux user services resolve node from PATH at startup");
-    expect(output).toContain("Windows SYSTEM tasks always use the explicit Node path");
+    expect(output).toContain("/usr/bin:/bin:/usr/sbin:/sbin");
+    expect(output).toContain("Windows SYSTEM tasks keep the explicit Node path");
     expect(output).toContain("systemctl --user");
     expect(output).toContain("SELinux enforcing mode");
     expect(output).toContain("loginctl enable-linger <user>");
