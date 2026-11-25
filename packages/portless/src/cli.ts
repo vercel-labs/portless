@@ -51,7 +51,6 @@ import {
   formatUrl,
   isErrnoException,
   isProcessAlive as isPidAlive,
-  parseHostname,
   parseHostnames,
   parsePort,
   stripTld,
@@ -84,12 +83,11 @@ import { ensureNgrokAvailable, startNgrok, stopNgrokProcess, stopTunnelPid } fro
 import { ensureCloudflaredAvailable, startCloudflare } from "./cloudflare.js";
 import {
   inferProjectName,
-  detectWorktreePrefix,
-  applyWorktreePrefix,
-  truncateLabel,
+  resolveWorktreeNaming,
+  composeHostname,
   sanitizeForHostname,
+  type WorktreeNaming,
 } from "./auto.js";
-import type { WorktreePrefix, WorktreePrefixStyle } from "./auto.js";
 import {
   buildProxyStartConfig,
   canBindProxyPort,
@@ -179,7 +177,7 @@ import {
   mergeWorktreeConfig,
   ConfigValidationError,
 } from "./config.js";
-import type { AppConfig, LoadedConfig, WorktreeConfig } from "./config.js";
+import type { AppConfig, LoadedConfig } from "./config.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import { EnvPublication, buildNodeOptions, hasTurboConfig } from "./turbo.js";
@@ -602,12 +600,22 @@ function formatProcessExitSuffix(code: number | null, signal: NodeJS.Signals | n
   return "";
 }
 
+interface WorktreeHostnameInput {
+  baseName: string;
+  naming: WorktreeNaming | null;
+}
+
 function buildHostnames(
-  name: string,
+  input: string | WorktreeHostnameInput,
   tlds: readonly string[],
   targetTlds?: readonly string[]
 ): string[] {
-  return parseHostnames(name, normalizeTlds(tlds), targetTlds);
+  const normalizedTlds = normalizeTlds(tlds);
+  const name =
+    typeof input === "string"
+      ? input
+      : composeHostname(stripTld(input.baseName, [...normalizedTlds, DEFAULT_TLD]), input.naming);
+  return parseHostnames(name, normalizedTlds, targetTlds);
 }
 
 /**
@@ -1821,12 +1829,11 @@ async function runApp(
   initialStore: RouteStore,
   proxyPort: number,
   stateDir: string,
-  name: string,
+  name: WorktreeHostnameInput & { nameSource?: string; childPrefix?: string },
   commandArgs: string[],
   tls: boolean,
   tlds: string[],
   force: boolean,
-  autoInfo?: { nameSource: string; baseName: string; prefix?: string; prefixSource?: string },
   desiredPort?: number,
   lanMode = false,
   lanIp?: string | null
@@ -1936,10 +1943,10 @@ async function runApp(
   } else {
     console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
-  if (autoInfo) {
-    console.error(chalk.gray(`  Name "${autoInfo.baseName}" (from ${autoInfo.nameSource})`));
-    if (autoInfo.prefix) {
-      console.error(chalk.gray(`  Prefix "${autoInfo.prefix}" (from ${autoInfo.prefixSource})`));
+  if (name.nameSource !== undefined) {
+    console.error(chalk.gray(`  Name "${name.baseName}" (from ${name.nameSource})`));
+    if (name.naming) {
+      console.error(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
     }
   }
 
@@ -2167,6 +2174,7 @@ async function runApp(
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
+      ...(name.childPrefix !== undefined ? { PORTLESS_PREFIX: name.childPrefix } : {}),
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
       PORTLESS_URL: finalUrl,
@@ -2225,6 +2233,7 @@ interface ParsedRunArgs {
   name?: string;
   /** Override the worktree label (from --prefix flag). Empty disables it. */
   prefix?: string;
+  noWorktree?: boolean;
   /** The child command and its arguments, passed through untouched. */
   commandArgs: string[];
 }
@@ -2265,9 +2274,12 @@ const SHARE_FLAG_SPEC = {
   "--cloudflare": "boolean",
 } as const;
 
+const WORKTREE_FLAG_SPEC = { "--no-worktree": "boolean" } as const;
+
 const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--force": "boolean",
   "--app-port": "value",
+  ...WORKTREE_FLAG_SPEC,
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
   "--help": "boolean",
@@ -2279,6 +2291,7 @@ const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--prefix": "text",
   "--force": "boolean",
   "--app-port": "value",
+  ...WORKTREE_FLAG_SPEC,
   "--script": "value",
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
@@ -2339,6 +2352,7 @@ ${colors.bold("Usage:")}
 ${colors.bold("Options:")}
   --name <name>          Override the inferred base name (worktree prefix still applies)
   --prefix <label>       Override the worktree label (an empty value disables it)
+  --no-worktree          Use the base name without worktree naming; overrides --prefix
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -2348,7 +2362,7 @@ ${colors.bold("Options:")}
   --help, -h             Show this help
 
 ${colors.bold("Name inference (in order):")}
-  1. portless.json "name" field
+  1. Config "name" field (portless.json, .config/portless.json, or package.json portless)
   2. package.json "name" field (walks up directories)
   3. Git repo root directory name
   4. Current directory basename
@@ -2356,9 +2370,10 @@ ${colors.bold("Name inference (in order):")}
   In git worktrees the branch becomes a subdomain prefix (e.g.
   feature-auth.myapp.localhost); the default label is its last segment. Set
   "worktree.prefix" to "branch" for the whole branch, or
-  "worktree.hostnameTemplate" with {worktree} and optional {name}. Templates
-  must render valid DNS labels. --prefix and PORTLESS_PREFIX override detection;
-  empty disables it. Template labels over 63 characters are hash-truncated.
+  "worktree.hostnameTemplate" with {worktree} and optional {name}. Without
+  a template, "worktree.flat" joins all labels or "worktree.base" inserts the
+  label before a matching suffix. --prefix and PORTLESS_PREFIX override
+  detection; an empty value disables it. Long labels are shortened with a hash.
   Duplicate proxied hostnames fail before apps start.
 
 ${colors.bold("Examples:")}
@@ -2383,6 +2398,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   let appPort: number | undefined;
   let name: string | undefined;
   let prefix: string | undefined;
+  let noWorktree = false;
 
   const commandArgs = visitLeadingFlags("run", args, RUN_FLAG_SPEC, (flag, value) => {
     if (flag === "--help" || flag === "-h") {
@@ -2402,6 +2418,9 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
       case "--prefix":
         prefix = value;
         break;
+      case "--no-worktree":
+        noWorktree = true;
+        break;
       default:
         applyGlobalFlag(flag, value);
     }
@@ -2412,6 +2431,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
     appPort: appPort ?? appPortFromEnv(),
     name,
     prefix,
+    noWorktree,
     commandArgs,
   };
 }
@@ -2517,6 +2537,7 @@ ${colors.bold("Examples:")}
 
 ${colors.bold("Options:")}
   --script <name>               Select a package.json script in zero-argument mode
+  --no-worktree                 Skip worktree naming for app launches and get
   --lan                         Enable LAN access for app commands
   --ip <address>                Pin the LAN IP (implies --lan)
   --tailscale                   Share the app on your tailnet
@@ -2539,7 +2560,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
   PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
 
-Precedence: flags override PORTLESS_* variables, which override portless.json.
+Precedence: flags override PORTLESS_* variables, which override project config.
+Project config lookup: portless.json, .config/portless.json, then package.json portless.
 Auto-start reuses the saved port, TLS, TLD, and LAN settings only after an
 unexpected proxy exit. A normal portless proxy stop clears them.
 Proxy options: portless proxy --help
@@ -3256,7 +3278,7 @@ async function handleGet(args: string[]): Promise<void> {
   const parsed = parseCommandArgs(
     "get",
     args.slice(1),
-    { "--no-worktree": "boolean", "--json": "boolean" },
+    { ...WORKTREE_FLAG_SPEC, "--json": "boolean" },
     1
   );
   const name = parsed.positionals[0];
@@ -3272,13 +3294,12 @@ async function handleGet(args: string[]): Promise<void> {
   const skipWorktree = parsed.has("--no-worktree");
   const json = parsed.has("--json");
   const appConfig = skipWorktree ? null : loadAppConfig();
-  const worktree = skipWorktree
-    ? null
-    : detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
-  const effectiveName = applyWorktreePrefix(name, worktree, appConfig?.worktree?.hostnameTemplate);
-
+  const worktree = resolveWorktreeNaming({
+    config: appConfig?.worktree,
+    override: skipWorktree ? null : undefined,
+  });
   const { port, tls, tlds } = await discoverState();
-  const hostname = buildHostnames(effectiveName, tlds)[0]!;
+  const hostname = buildHostnames({ baseName: name, naming: worktree }, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
@@ -4647,9 +4668,8 @@ async function handleProxy(args: string[]): Promise<void> {
 type AppConfigWithSource = AppConfig & { source: LoadedConfig["source"] };
 
 /**
- * Load the effective AppConfig for the current directory from portless.json or
- * the package.json "portless" key, tagged with the file it came from.
- * Handles both single-app (top-level fields) and monorepo (apps map) configs.
+ * Load the app config for the current directory with workspace worktree defaults.
+ * Return the source used for app settings.
  */
 function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null {
   try {
@@ -4687,12 +4707,12 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null 
  * Activates when:
  * - At a workspace root (pnpm, npm, yarn, or bun) -> multi-app mode
  * - In any directory with a package.json that has the target script -> single-app mode
- * Config (portless.json / package.json "portless" key) is loaded for overrides
- * but is not required.
+ * Project config supplies optional overrides.
  */
 async function handleDefaultMode(
-  globalScript?: string,
-  extraArgs: string[] = []
+  globalScript: string | undefined,
+  extraArgs: string[],
+  worktreeOverride: null | undefined
 ): Promise<boolean> {
   const cwd = process.cwd();
 
@@ -4714,7 +4734,7 @@ async function handleDefaultMode(
     }
     const hasMatchingPackages = packages.some((p) => p.scripts[wsScriptName]);
     if (hasMatchingPackages) {
-      await handleDefaultMulti(cwd, globalScript, extraArgs);
+      await handleDefaultMulti(cwd, globalScript, extraArgs, worktreeOverride);
       return true;
     }
   }
@@ -4722,7 +4742,7 @@ async function handleDefaultMode(
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
   if (hasScript(scriptName, cwd)) {
-    await handleDefaultSingle(cwd, scriptName, appConfig, extraArgs);
+    await handleDefaultSingle(cwd, scriptName, appConfig, extraArgs, worktreeOverride);
     return true;
   }
 
@@ -4770,7 +4790,8 @@ async function handleDefaultSingle(
   cwd: string,
   scriptName: string,
   appConfig: AppConfigWithSource | null,
-  extraArgs: string[] = []
+  extraArgs: string[],
+  worktreeOverride: null | undefined
 ): Promise<void> {
   const forwardedArgs = forwardScriptExtraArgs(scriptName, cwd, extraArgs);
   const resolved = resolveScriptCommand(scriptName, cwd, forwardedArgs);
@@ -4783,10 +4804,7 @@ async function handleDefaultSingle(
   let nameSource: string;
 
   if (appConfig?.name) {
-    baseName = appConfig.name
-      .split(".")
-      .map((label) => truncateLabel(label))
-      .join(".");
+    baseName = appConfig.name;
     nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName(cwd);
@@ -4794,12 +4812,11 @@ async function handleDefaultSingle(
     nameSource = inferred.source;
   }
 
-  const worktree = detectWorktreePrefix(cwd, appConfig?.worktree?.prefix);
-  const effectiveName = applyWorktreePrefix(
-    baseName,
-    worktree,
-    appConfig?.worktree?.hostnameTemplate
-  );
+  const worktree = resolveWorktreeNaming({
+    cwd,
+    config: appConfig?.worktree,
+    override: worktreeOverride,
+  });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -4809,12 +4826,11 @@ async function handleDefaultSingle(
     store,
     port,
     dir,
-    effectiveName,
+    { baseName, naming: worktree, nameSource },
     resolved,
     tls,
     tlds,
     false,
-    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
     lanIp
@@ -4825,10 +4841,8 @@ async function handleDefaultSingle(
  * Multi-app mode: discover workspace packages and run all that have
  * the target script through the proxy concurrently.
  */
-interface MultiAppEntry {
+interface MultiAppEntry extends WorktreeHostnameInput {
   pkg: WorkspacePackage;
-  /** Portless hostname (e.g. "web.json-render") */
-  name: string;
   /** Human-readable package label for display (e.g. "web") */
   label: string;
   commandArgs: string[];
@@ -4891,6 +4905,7 @@ async function spawnProxiedApp(
   route: { store: RouteStore; hostnames: string[] } | null;
   settled: Promise<void>;
 }> {
+  const name = composeHostname(app.baseName, app.naming);
   const usesPortless = app.commandArgs[0] === "portless";
 
   if (lanMode && !process.env.PORTLESS_LAN) {
@@ -4911,11 +4926,11 @@ async function spawnProxiedApp(
     displayUrl = "(managed by portless)";
   } else {
     store = new RouteStore(stateDir, {
-      onWarning: (msg) => console.warn(colors.yellow(`[${app.name}] ${msg}`)),
+      onWarning: (msg) => console.warn(colors.yellow(`[${name}] ${msg}`)),
     });
 
     appPort = app.appPort ?? (await findFreePort());
-    hostnames = buildHostnames(app.name, tlds);
+    hostnames = buildHostnames(app, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
@@ -4942,7 +4957,7 @@ async function spawnProxiedApp(
 
   const preexistingListener = appPort === undefined ? null : await findPreexistingListener(appPort);
   const child = spawnChildProcess(app.commandArgs, env, app.pkg.dir);
-  pipeOutput(child, chalk.cyan(`[${app.name}]`));
+  pipeOutput(child, chalk.cyan(`[${name}]`));
 
   const capturedStore = store;
   const capturedHostnames = hostnames;
@@ -4951,9 +4966,9 @@ async function spawnProxiedApp(
     child.on("exit", (code, signal) => {
       exitCodes.set(app, code);
       if (code !== 0 && code !== null) {
-        console.error(colors.red(`[${app.name}] exited with code ${code}`));
+        console.error(colors.red(`[${name}] exited with code ${code}`));
       } else if (signal) {
-        console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+        console.error(colors.yellow(`[${name}] killed by ${signal}`));
       }
       if (!capturedStore || capturedHostnames.length === 0 || capturedPort === undefined) {
         resolve();
@@ -4988,18 +5003,19 @@ function spawnTaskApp(
   app: MultiAppEntry,
   exitCodes: Map<MultiAppEntry, number | null>
 ): ReturnType<typeof spawn> {
+  const name = composeHostname(app.baseName, app.naming);
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
 
   const child = spawnChildProcess(app.commandArgs, pkgEnv, app.pkg.dir);
-  pipeOutput(child, chalk.gray(`[${app.name}]`));
+  pipeOutput(child, chalk.gray(`[${name}]`));
 
   child.on("exit", (code, signal) => {
     exitCodes.set(app, code);
     if (code !== 0 && code !== null) {
-      console.error(colors.red(`[${app.name}] exited with code ${code}`));
+      console.error(colors.red(`[${name}] exited with code ${code}`));
     } else if (signal) {
-      console.error(colors.yellow(`[${app.name}] killed by ${signal}`));
+      console.error(colors.yellow(`[${name}] killed by ${signal}`));
     }
   });
 
@@ -5008,8 +5024,9 @@ function spawnTaskApp(
 
 async function handleDefaultMulti(
   wsRoot: string,
-  globalScript?: string,
-  extraArgs: string[] = []
+  globalScript: string | undefined,
+  extraArgs: string[],
+  worktreeOverride: null | undefined
 ): Promise<void> {
   let loaded: ReturnType<typeof loadConfig>;
   try {
@@ -5061,10 +5078,7 @@ async function handleDefaultMulti(
   // Config name > common npm scope > workspace root inference.
   let projectName: string;
   if (loaded?.config.name) {
-    projectName = loaded.config.name
-      .split(".")
-      .map((label) => truncateLabel(label))
-      .join(".");
+    projectName = loaded.config.name;
   } else {
     const scopeCounts = new Map<string, number>();
     for (const p of packages) {
@@ -5088,21 +5102,10 @@ async function handleDefaultMulti(
   const apps: MultiAppEntry[] = [];
   const envAppPort = appPortFromEnv();
 
-  const detectedWorktrees = new Map<WorktreePrefixStyle, WorktreePrefix | null>();
-  const worktreeFor = (worktreeConfig: WorktreeConfig | undefined): WorktreePrefix | null => {
-    const style = worktreeConfig?.prefix ?? "last-segment";
-    if (!detectedWorktrees.has(style)) {
-      detectedWorktrees.set(style, detectWorktreePrefix(wsRoot, style));
-    }
-    return detectedWorktrees.get(style)!;
-  };
-
   for (const pkg of packages) {
     const rel = path.relative(wsRoot, pkg.dir).replace(/\\/g, "/");
     const rootOverride = loaded ? resolveAppConfig(loaded.config, loaded.configDir, pkg.dir) : null;
     let leafConfig: AppConfig | null;
-    // Worktree config matches default mode: the leaf portless.json (or its
-    // package.json "portless" fallback) wins over the workspace root config.
     try {
       const leaf = loadConfig(pkg.dir);
       leafConfig = leaf ? resolveAppConfig(leaf.config, leaf.configDir, pkg.dir) : null;
@@ -5138,10 +5141,7 @@ async function handleDefaultMulti(
     let name: string;
     let label: string;
     if (appOverride.name) {
-      name = appOverride.name
-        .split(".")
-        .map((l) => truncateLabel(l))
-        .join(".");
+      name = appOverride.name;
       label = appOverride.name;
     } else {
       let pkgLabel: string;
@@ -5155,15 +5155,15 @@ async function handleDefaultMulti(
       label = pkg.scope ? `@${pkg.scope}/${pkg.name}` : (pkg.name ?? rel);
     }
 
-    name = applyWorktreePrefix(
-      name,
-      worktreeFor(appOverride.worktree),
-      appOverride.worktree?.hostnameTemplate
-    );
-
+    const worktree = resolveWorktreeNaming({
+      cwd: wsRoot,
+      config: appOverride.worktree,
+      override: worktreeOverride,
+    });
     apps.push({
       pkg,
-      name,
+      baseName: name,
+      naming: worktree,
       label,
       commandArgs,
       appPort: envAppPort ?? appOverride.appPort,
@@ -5211,7 +5211,7 @@ async function handleDefaultMulti(
     const checkHostnameCollisions = (tldsForCheck: readonly string[]) => {
       const seen = new Map<string, MultiAppEntry>();
       for (const app of proxiedApps) {
-        for (const hostname of buildHostnames(app.name, tldsForCheck)) {
+        for (const hostname of buildHostnames(app, tldsForCheck)) {
           const existing = seen.get(hostname);
           if (existing) {
             throw new Error(
@@ -5297,7 +5297,7 @@ async function runWithTurbo(
     }
 
     const appPort = app.appPort ?? (await findFreePort());
-    const hostnames = buildHostnames(app.name, tlds);
+    const hostnames = buildHostnames(app, tlds);
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
@@ -5494,10 +5494,12 @@ async function runWithDirectSpawn(
   }
 }
 
-async function handleRunMode(args: string[], globalScript?: string): Promise<void> {
+async function handleRunMode(
+  args: string[],
+  globalScript: string | undefined,
+  worktreeOverride: null | undefined
+): Promise<void> {
   const parsed = parseRunArgs(args);
-
-  if (parsed.prefix !== undefined) process.env.PORTLESS_PREFIX = parsed.prefix;
 
   const appConfig = loadAppConfig();
 
@@ -5522,18 +5524,10 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
   let nameSource: string;
 
   if (parsed.name) {
-    // Truncate individual labels that exceed the DNS limit. Dots are preserved
-    // as intentional subdomain separators (e.g. --name local.myapp).
-    baseName = parsed.name
-      .split(".")
-      .map((label) => truncateLabel(label))
-      .join(".");
+    baseName = parsed.name;
     nameSource = "--name flag";
   } else if (appConfig?.name) {
-    baseName = appConfig.name
-      .split(".")
-      .map((label) => truncateLabel(label))
-      .join(".");
+    baseName = appConfig.name;
     nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName();
@@ -5545,12 +5539,8 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     parsed.appPort = appConfig.appPort;
   }
 
-  const worktree = detectWorktreePrefix(process.cwd(), appConfig?.worktree?.prefix);
-  const effectiveName = applyWorktreePrefix(
-    baseName,
-    worktree,
-    appConfig?.worktree?.hostnameTemplate
-  );
+  const override = parsed.noWorktree || worktreeOverride === null ? null : parsed.prefix;
+  const worktree = resolveWorktreeNaming({ config: appConfig?.worktree, override });
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -5560,12 +5550,11 @@ async function handleRunMode(args: string[], globalScript?: string): Promise<voi
     store,
     port,
     dir,
-    effectiveName,
+    { baseName, naming: worktree, nameSource, childPrefix: override ?? undefined },
     parsed.commandArgs,
     tls,
     tlds,
     parsed.force,
-    { nameSource, baseName, prefix: worktree?.prefix, prefixSource: worktree?.source },
     parsed.appPort,
     lanMode,
     lanIp
@@ -5603,12 +5592,8 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     }
   }
 
-  // Truncate individual labels that exceed the DNS limit, same as handleRunMode.
-  const safeName = parsed.name
-    .split(".")
-    .map((label) => truncateLabel(label))
-    .join(".");
-  parseHostname(safeName, DEFAULT_TLD);
+  const nameInput = { baseName: parsed.name, naming: null };
+  buildHostnames(nameInput, [DEFAULT_TLD]);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -5618,12 +5603,11 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     store,
     port,
     dir,
-    safeName,
+    nameInput,
     parsed.commandArgs,
     tls,
     tlds,
     parsed.force,
-    undefined,
     parsed.appPort,
     lanMode,
     lanIp
@@ -6058,13 +6042,17 @@ function isPortlessSkipped(): boolean {
 }
 
 interface CommandEntry {
-  run: (args: string[], context: { globalScript?: string }) => Promise<void>;
+  run: (
+    args: string[],
+    context: { globalScript?: string; worktreeOverride?: null }
+  ) => Promise<void>;
   help?: () => void;
 }
 
 const COMMANDS: Record<CommandName, CommandEntry> = {
   run: {
-    run: (args, { globalScript }) => handleRunMode(args.slice(1), globalScript),
+    run: (args, { globalScript, worktreeOverride }) =>
+      handleRunMode(args.slice(1), globalScript, worktreeOverride),
   },
   get: { run: handleGet, help: printGetHelp },
   list: { run: handleList, help: printListHelp },
@@ -6201,6 +6189,21 @@ async function main() {
   }
   const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
 
+  let worktreeOverride: null | undefined;
+  const leadingMode = args[skipFlags(0, LEADING_FLAG_SPEC)];
+  if (!isCommandName(leadingMode) || leadingMode === "run") {
+    for (let index = 0; index < flagLimit(); ) {
+      const next = advancePortlessFlag(index, LEADING_FLAG_SPEC);
+      if (next === null) break;
+      if (args[index] === "--no-worktree") {
+        args.splice(index, 1);
+        worktreeOverride = null;
+      } else {
+        index = next;
+      }
+    }
+  }
+
   // --name flag: treat the next arg as an explicit app name, bypassing
   // subcommand dispatch. Useful when the app name collides with a reserved
   // subcommand (see COMMAND_NAMES).
@@ -6259,7 +6262,7 @@ async function main() {
       command.help();
       return;
     }
-    await command.run(args, { globalScript });
+    await command.run(args, { globalScript, worktreeOverride });
     return;
   }
   if (!explicitName) {
@@ -6269,7 +6272,7 @@ async function main() {
     }
     if (args.length === 0 || args[0] === "--") {
       const extraArgs = args[0] === "--" ? args.slice(1) : [];
-      const handled = await handleDefaultMode(globalScript, extraArgs);
+      const handled = await handleDefaultMode(globalScript, extraArgs, worktreeOverride);
       if (handled) return;
       printHelp();
       return;

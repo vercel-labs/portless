@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "5223cb85e5d16353f713c5e4f60d46ba887faa2e9f72b0a2fc3c44b6077b7d45",
-      "markdownBodySha256": "5223cb85e5d16353f713c5e4f60d46ba887faa2e9f72b0a2fc3c44b6077b7d45",
+      "mdxSha256": "46b3441848491160c535ceb4cb32a222f610e822873d04d3c39df0a024a70679",
+      "markdownBodySha256": "46b3441848491160c535ceb4cb32a222f610e822873d04d3c39df0a024a70679",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",
@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "4ba1d025eb9934844a00c212c4c2b4e03631b80a10d365c58420c0f0de621879",
-      "markdownBodySha256": "4ba1d025eb9934844a00c212c4c2b4e03631b80a10d365c58420c0f0de621879",
+      "mdxSha256": "7eeae402cda2309f03aaef1e3cf1cb0d1e0f625612f4ac283e914e773fa30a7b",
+      "markdownBodySha256": "7eeae402cda2309f03aaef1e3cf1cb0d1e0f625612f4ac283e914e773fa30a7b",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -68,6 +68,7 @@
         [2, "Run an app", "run-an-app"],
         [2, "Get a service URL", "get-a-service-url"],
         [2, "Alias (static routes)", "alias-static-routes"],
+        [3, "Windows troubleshooting", "windows-troubleshooting"],
         [2, "Docker Compose", "docker-compose"],
         [2, "List routes", "list-routes"],
         [2, "Doctor", "doctor"],
@@ -92,8 +93,8 @@
       "title": "HTTPS | portless",
       "markdownTitle": "HTTPS",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "0a4cfdb206c25a9450ca2ca067b2572e0f80b7958e10d5e7f556e496f2d9e0d1",
-      "markdownBodySha256": "0a4cfdb206c25a9450ca2ca067b2572e0f80b7958e10d5e7f556e496f2d9e0d1",
+      "mdxSha256": "0ba3ee620fcb19f4120d8f3d908f63f0ad89c078f778a66e5ff7bb45f02f51da",
+      "markdownBodySha256": "0ba3ee620fcb19f4120d8f3d908f63f0ad89c078f778a66e5ff7bb45f02f51da",
       "ssr": [
         "HTTP/2 + TLS is enabled by default for faster dev server page loads.",
         "portless proxy start --cert ./cert.pem --key ./key.pem",
@@ -101,6 +102,7 @@
       ],
       "headings": [
         [1, "HTTPS", "https"],
+        [2, "Vite HMR connects to the app port", "vite-hmr-connects-to-the-app-port"],
         [2, "Custom certificates", "custom-certificates"],
         [2, "Trust the CA later", "trust-the-ca-later"],
         [2, "Disable HTTPS", "disable-https"]
@@ -112,8 +114,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "afb71ee2f5917f9000f13c32bb06a2d1a75a6d369d12509912ff12dffe9d8021",
-      "markdownBodySha256": "afb71ee2f5917f9000f13c32bb06a2d1a75a6d369d12509912ff12dffe9d8021",
+      "mdxSha256": "310a35e08f35ba77fca44b3bf386610147de7e7958f1b2edb31a27dca1a0f30a",
+      "markdownBodySha256": "310a35e08f35ba77fca44b3bf386610147de7e7958f1b2edb31a27dca1a0f30a",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",

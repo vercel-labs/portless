@@ -135,13 +135,13 @@ export const TOOLS: ToolDef[] = [
   tool(
     "get",
     "Get app URL",
-    "Print the URL for an app name, using the same hostname and worktree logic as portless run: PORTLESS_PREFIX, worktree config, and git worktree detection. Worktree config comes from the current directory, including workspace root defaults, not the named app, so cd into a package to use its per-app options; invalid config fails instead of returning a guessed URL. Template labels over 63 characters are shortened with a stable hash suffix. The app does not need to be running.",
+    "Print the URL for an app name using PORTLESS_PREFIX, worktree config, and git worktree detection. In each project directory, config is read from portless.json, then .config/portless.json, then the package.json portless key. Worktree options come from the current directory and workspace root defaults, not the named app; use cwd to select a package. Invalid config fails instead of returning a guessed URL. The hostname layout uses a template, flat name, matching base suffix, or default prefix, in that order. Template and flat labels over 63 characters are shortened with a stable hash. The app does not need to be running.",
     {
       name: NAME_PROPERTY,
       noWorktree: {
         type: "boolean",
         description:
-          "Skip worktree config and naming: PORTLESS_PREFIX, portless.json worktree style and template, and git worktree detection, so the URL has no worktree label.",
+          "Skip config loading and worktree naming, including PORTLESS_PREFIX and git worktree detection, so the URL has no worktree label.",
       },
       json: { type: "boolean", description: "Return the name, hostname, and URL as JSON." },
     },
@@ -831,8 +831,10 @@ export function printMcpHelp(): void {
       "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
       "",
-      "Worktree options inherit from the workspace root into package directories.",
-      "Local values override. Templates must render valid DNS labels; labels over 63 characters are shortened with a stable hash suffix.",
+      "Config lookup in each project directory: portless.json, .config/portless.json, then the package.json portless key.",
+      "Worktree options inherit from the workspace root into package directories; local values override.",
+      "Hostname layout: template, flat, matching base suffix, then default prefix. Long template and flat labels are shortened.",
+      "The get tool's noWorktree option skips config loading and worktree naming.",
       "",
       "Pass --tools with a comma separated list of profiles. The default is core.",
       "Aliases: default = core, full = all. Use the extraArgs argument on any tool",
