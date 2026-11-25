@@ -37,6 +37,7 @@ export const PORTLESS_HEADER = "X-Portless";
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 const HOP_BY_HOP_HEADERS = ["connection", "keep-alive", "proxy-connection", "upgrade"] as const;
+const PROTECTED_HEADERS = new Set(["content-length", "host"]);
 
 // HTTP/2 multiplexes a whole cold page load onto one client connection, so
 // without a limit the proxy dials the backend once per request at the same
@@ -65,8 +66,7 @@ function stripHopByHop(
   headers: http.OutgoingHttpHeaders,
   options: { direction: "request" | "response"; protocol: "http1" | "http2" }
 ): void {
-  const keepTransferEncoding =
-    options.direction === "request" || options.protocol === "http1";
+  const keepTransferEncoding = options.direction === "request" || options.protocol === "http1";
   const connection = headers.connection;
   if (connection !== undefined) {
     const values = Array.isArray(connection) ? connection : [String(connection)];
@@ -76,6 +76,7 @@ function stripHopByHop(
         if (
           name &&
           Object.hasOwn(headers, name) &&
+          !PROTECTED_HEADERS.has(name) &&
           (name !== "transfer-encoding" || !keepTransferEncoding)
         ) {
           delete headers[name];
@@ -222,18 +223,17 @@ function buildUpstreamHeaders(
   hops: number,
   stripHopByHopHeaders: boolean
 ): http.OutgoingHttpHeaders {
-  const headers: http.OutgoingHttpHeaders = {
-    ...req.headers,
-    ...buildForwardedHeaders(req, isEncrypted(req)),
-    [PORTLESS_HOPS_HEADER]: String(hops + 1),
-  };
+  const headers: http.OutgoingHttpHeaders = { ...req.headers };
   for (const key of Object.keys(headers)) {
     if (key.startsWith(":")) delete headers[key];
   }
   if (stripHopByHopHeaders) {
     stripHopByHop(headers, { direction: "request", protocol: "http1" });
   }
-  headers.host = route.upstream?.host ?? headers.host ?? getRequestHost(req);
+  Object.assign(headers, buildForwardedHeaders(req, isEncrypted(req)), {
+    [PORTLESS_HOPS_HEADER]: String(hops + 1),
+    host: route.upstream?.host ?? headers.host ?? getRequestHost(req),
+  });
   return headers;
 }
 
@@ -698,7 +698,19 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             direction: "response",
             protocol: h2Stream ? "http2" : "http1",
           });
+          const te = responseHeaders["transfer-encoding"];
+          if (
+            te !== undefined &&
+            !/\bchunked$/i.test(Array.isArray(te) ? te.join(",") : String(te))
+          ) {
+            res.shouldKeepAlive = false;
+          }
           res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+          proxyRes.on("end", () => {
+            if (!req.complete) {
+              finish();
+            }
+          });
           proxyRes.on("error", (err) => {
             if (!res.headersSent) {
               res.writeHead(502, { "Content-Type": "text/plain" });

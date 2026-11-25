@@ -413,11 +413,12 @@ describe("createProxyServer", () => {
       const res = await request(server, {
         host: "myapp.localhost",
         headers: {
-          connection: "close, X-Client-Hop",
+          connection: "close, X-Client-Hop, X-Portless-Hops, Content-Length",
           "keep-alive": "timeout=5",
           "proxy-connection": "keep-alive",
           upgrade: "h2c",
           "x-client-hop": "secret",
+          "content-length": "0",
         },
       });
       expect(res.status).toBe(200);
@@ -428,6 +429,8 @@ describe("createProxyServer", () => {
       expect(received["proxy-connection"]).toBeUndefined();
       expect(received.upgrade).toBeUndefined();
       expect(received["x-client-hop"]).toBeUndefined();
+      expect(received["x-portless-hops"]).toBe("1");
+      expect(received["content-length"]).toBe("0");
     });
 
     it("strips hop-by-hop headers and Connection-listed tokens from plain HTTP responses while preserving transfer-encoding (issue #482)", async () => {
@@ -1240,32 +1243,37 @@ describe("createProxyServer", () => {
         Buffer.alloc(firstChunk),
       ]);
 
-      await new Promise<void>((resolve, reject) => {
-        let data = "";
-        let sentFollowUp = false;
-        const timer = setTimeout(() => reject(new Error("timed out waiting for reused connection")), 2000);
-        client.on("data", (chunk) => {
-          data += chunk.toString("utf8");
-          const matches = data.match(/HTTP\/1\.1 \d{3}/g) || [];
-          if (!sentFollowUp && data.includes("too large")) {
-            sentFollowUp = true;
-            client.write(Buffer.alloc(remaining));
-            client.write("GET / HTTP/1.1\r\nHost: api.localhost\r\n\r\n");
-          }
-          if (matches.length === 2) {
+      try {
+        await new Promise<void>((resolve, reject) => {
+          let data = "";
+          let sentFollowUp = false;
+          const timer = setTimeout(
+            () => reject(new Error("timed out waiting for reused connection")),
+            2000
+          );
+          client.on("data", (chunk) => {
+            data += chunk.toString("utf8");
+            const matches = data.match(/HTTP\/1\.1 \d{3}/g) || [];
+            if (!sentFollowUp && data.includes("too large")) {
+              sentFollowUp = true;
+              client.write(Buffer.alloc(remaining));
+              client.write("GET / HTTP/1.1\r\nHost: api.localhost\r\n\r\n");
+            }
+            if (matches.length === 2) {
+              clearTimeout(timer);
+              statuses.push(...matches);
+              resolve();
+            }
+          });
+          client.once("error", (err) => {
             clearTimeout(timer);
-            statuses.push(...matches);
-            resolve();
-          }
+            reject(err);
+          });
+          client.write(initial);
         });
-        client.once("error", (err) => {
-          clearTimeout(timer);
-          reject(err);
-        });
-        client.write(initial);
-      });
-
-      client.destroy();
+      } finally {
+        client.destroy();
+      }
       expect(statuses).toEqual(["HTTP/1.1 413", "HTTP/1.1 200"]);
     });
   });
