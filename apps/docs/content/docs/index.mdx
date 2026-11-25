@@ -23,7 +23,7 @@ npm install -g portless
 npm install -D portless
 ```
 
-> portless is pre-1.0. When installed per-project, different contributors may run different versions. The state directory format may change between releases, which can require re-running `portless trust`.
+> portless is pre-1.0. Pin the version per project with `npm install -D portless` (locked by your lockfile) or record it in a version manager config such as `.tool-versions` for global installs, so contributors stay on the same release. State directory format changes between releases can require running `portless trust` again.
 
 ## Run your app
 
