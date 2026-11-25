@@ -333,18 +333,73 @@ export function parseHostnames(
   return hostnames;
 }
 
+const DEFAULT_OVERFLOW_UID = 65534;
+
+type AllowedOwnersOptions = {
+  platform?: NodeJS.Platform;
+  uid?: number;
+  env?: NodeJS.ProcessEnv;
+  readFile?: (filePath: string) => string | null;
+};
+
+function readProcText(filePath: string): string | null {
+  try {
+    return fs.readFileSync(filePath, "utf-8");
+  } catch {
+    return null;
+  }
+}
+
 /**
- * UIDs allowed to own a state directory: root, the current user, and, when
- * running as root under sudo, the invoking sudo user.
+ * Inside an unprivileged Linux user namespace, unmapped host UIDs (including
+ * root) appear as the kernel overflow UID. Return that UID only when
+ * `/proc/self/uid_map` is readable and leaves it unmapped, so a real `nobody`
+ * user on a host with a full UID map is never trusted.
  */
-function allowedStateDirOwners(): Set<number> | null {
-  if (process.platform === "win32") return null;
-  const uid = process.getuid?.();
+function unmappedUserNsOverflowUid(readFile: (filePath: string) => string | null): number | null {
+  const uidMap = readFile("/proc/self/uid_map");
+  if (!uidMap) return null;
+
+  const overflowRaw = readFile("/proc/sys/kernel/overflowuid");
+  const parsedOverflow = overflowRaw !== null ? Number.parseInt(overflowRaw.trim(), 10) : NaN;
+  const overflowUid =
+    Number.isInteger(parsedOverflow) && parsedOverflow >= 0 ? parsedOverflow : DEFAULT_OVERFLOW_UID;
+
+  let hasMapping = false;
+  for (const line of uidMap.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    if (parts.length !== 3) continue;
+    const insideStart = Number(parts[0]);
+    const length = Number(parts[2]);
+    if (!Number.isInteger(insideStart) || !Number.isInteger(length) || length <= 0) continue;
+    hasMapping = true;
+    if (overflowUid >= insideStart && overflowUid < insideStart + length) {
+      return null;
+    }
+  }
+
+  return hasMapping ? overflowUid : null;
+}
+
+/**
+ * UIDs allowed to own a state directory: root, the current user, when
+ * running as root under sudo, the invoking sudo user, and the unmapped
+ * overflow UID inside an unprivileged Linux user namespace.
+ */
+export function allowedStateDirOwners(options: AllowedOwnersOptions = {}): Set<number> | null {
+  const platform = options.platform ?? process.platform;
+  if (platform === "win32") return null;
+  const uid = options.uid ?? process.getuid?.();
   if (uid === undefined) return null;
+  const env = options.env ?? process.env;
   const owners = new Set<number>([0, uid]);
   if (uid === 0) {
-    const sudoUid = Number.parseInt(process.env.SUDO_UID ?? "", 10);
+    const sudoUid = Number.parseInt(env.SUDO_UID ?? "", 10);
     if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
+  }
+  if (platform === "linux") {
+    const overflowUid = unmappedUserNsOverflowUid(options.readFile ?? readProcText);
+    if (overflowUid !== null) owners.add(overflowUid);
   }
   return owners;
 }

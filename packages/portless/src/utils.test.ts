@@ -1,6 +1,7 @@
 import net from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
+  allowedStateDirOwners,
   createLoopbackConnection,
   escapeHtml,
   formatUptime,
@@ -597,4 +598,80 @@ describe("createLoopbackConnection", () => {
       }
     }
   );
+});
+
+describe("allowedStateDirOwners", () => {
+  it("allows the unmapped overflow uid inside a Linux user namespace", () => {
+    const owners = allowedStateDirOwners({
+      platform: "linux",
+      uid: 1000,
+      readFile: (p) => {
+        if (p === "/proc/self/uid_map") return "      1000          0          1\n";
+        if (p === "/proc/sys/kernel/overflowuid") return "65534\n";
+        return null;
+      },
+    });
+    expect(owners).toEqual(new Set([0, 1000, 65534]));
+  });
+
+  it("respects a custom /proc/sys/kernel/overflowuid when unmapped", () => {
+    const owners = allowedStateDirOwners({
+      platform: "linux",
+      uid: 1000,
+      readFile: (p) => {
+        if (p === "/proc/self/uid_map") return "      1000       1000          1\n";
+        if (p === "/proc/sys/kernel/overflowuid") return "65535\n";
+        return null;
+      },
+    });
+    expect(owners).toEqual(new Set([0, 1000, 65535]));
+  });
+
+  it("does not allow the overflow uid on a standard Linux host with a full uid_map", () => {
+    const owners = allowedStateDirOwners({
+      platform: "linux",
+      uid: 1000,
+      readFile: (p) => {
+        if (p === "/proc/self/uid_map") return "         0          0 4294967295\n";
+        if (p === "/proc/sys/kernel/overflowuid") return "65534\n";
+        return null;
+      },
+    });
+    expect(owners).toEqual(new Set([0, 1000]));
+  });
+
+  it("does not allow the overflow uid when that uid is explicitly mapped", () => {
+    const owners = allowedStateDirOwners({
+      platform: "linux",
+      uid: 1000,
+      readFile: (p) => {
+        if (p === "/proc/self/uid_map") {
+          return "         0       1000          1\n         1     100000      65536\n";
+        }
+        if (p === "/proc/sys/kernel/overflowuid") return "65534\n";
+        return null;
+      },
+    });
+    expect(owners).toEqual(new Set([0, 1000]));
+  });
+
+  it("fails closed when /proc/self/uid_map is unreadable or empty", () => {
+    const owners = allowedStateDirOwners({
+      platform: "linux",
+      uid: 1000,
+      readFile: () => null,
+    });
+    expect(owners).toEqual(new Set([0, 1000]));
+  });
+
+  it("returns null on win32 and ignores proc files on darwin", () => {
+    expect(allowedStateDirOwners({ platform: "win32", uid: 1000 })).toBeNull();
+    expect(
+      allowedStateDirOwners({
+        platform: "darwin",
+        uid: 501,
+        readFile: () => "1000 0 1\n",
+      })
+    ).toEqual(new Set([0, 501]));
+  });
 });
