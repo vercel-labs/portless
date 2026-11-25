@@ -525,16 +525,6 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         headers: proxyReqHeaders,
         freshConnection: isReplay || undefined,
         onReject: (reason) => {
-          if (res.destroyed || res.headersSent) {
-            if (!res.destroyed) {
-              res.destroy(
-                Object.assign(new Error(`Upstream request rejected: ${reason}`), {
-                  code: reason === "queue_full" ? "ECONNABORTED" : "ETIMEDOUT",
-                })
-              );
-            }
-            return;
-          }
           const requestHost = getRequestHost(req);
           if (reason === "gateway_timeout") {
             const detail = "The target app took too long to respond.";

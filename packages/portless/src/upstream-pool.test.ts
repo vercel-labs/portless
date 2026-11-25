@@ -37,6 +37,64 @@ function listen(server: net.Server, backlog = 511): Promise<number> {
   });
 }
 
+function createPool(): UpstreamPool {
+  const pool = new UpstreamPool();
+  pools.push(pool);
+  return pool;
+}
+
+function createTlsCerts(prefix: string): { cert: Buffer; key: Buffer; ca: Buffer } {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  tempDirs.push(dir);
+  const certs = ensureCerts(dir);
+  return {
+    cert: fs.readFileSync(certs.certPath),
+    key: fs.readFileSync(certs.keyPath),
+    ca: fs.readFileSync(certs.caPath),
+  };
+}
+
+function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}
+
+function trackPeakConnections(server: net.Server): () => number {
+  let active = 0;
+  let peak = 0;
+  server.on("connection", (socket) => {
+    active++;
+    peak = Math.max(peak, active);
+    socket.once("close", () => (active -= 1));
+  });
+  return () => peak;
+}
+
+function streamLargeBody(res: http.ServerResponse, size: number, onBackpressure: () => void): void {
+  let sent = 0;
+  res.writeHead(200, {
+    "content-type": "application/octet-stream",
+    "content-length": String(size),
+  });
+  const chunk = Buffer.alloc(64 * 1024, "a");
+  const writeMore = () => {
+    while (sent < size) {
+      const next = Math.min(chunk.length, size - sent);
+      const ok = res.write(chunk.subarray(0, next));
+      sent += next;
+      if (!ok) {
+        onBackpressure();
+        res.once("drain", writeMore);
+        return;
+      }
+    }
+  };
+  writeMore();
+}
+
 function get(
   port: number,
   requestPath = "/",
@@ -195,18 +253,12 @@ afterEach(async () => {
 
 describe("UpstreamPool", () => {
   it("caps concurrent upstream sockets during a 300-request burst (issue #531)", async () => {
-    let active = 0;
-    let peak = 0;
     const errors: string[] = [];
     const backend = http.createServer((_req, res) => {
       const timer = setTimeout(() => res.end("ok"), 25);
       res.once("close", () => clearTimeout(timer));
     });
-    backend.on("connection", (socket) => {
-      active++;
-      peak = Math.max(peak, active);
-      socket.once("close", () => (active -= 1));
-    });
+    const peakConnections = trackPeakConnections(backend);
     const backendPort = await listen(backend, 128);
     const proxyPort = await listen(proxy(backendPort, (error) => errors.push(error)));
 
@@ -222,7 +274,7 @@ describe("UpstreamPool", () => {
 
     expect(results).toEqual(Array(300).fill({ status: 200, body: "ok" }));
     expect(errors).toEqual([]);
-    expect(peak).toBeLessThanOrEqual(48);
+    expect(peakConnections()).toBeLessThanOrEqual(48);
   }, 30_000);
 
   it("promotes streaming media-type responses out of the request cap", async () => {
@@ -262,8 +314,6 @@ describe("UpstreamPool", () => {
   }, 30_000);
 
   it("keeps finite chunked responses inside the request cap", async () => {
-    let active = 0;
-    let peak = 0;
     const errors: string[] = [];
     const backend = http.createServer((_req, res) => {
       res.writeHead(200, { "content-type": "application/javascript" });
@@ -271,11 +321,7 @@ describe("UpstreamPool", () => {
       const timer = setTimeout(() => res.end("export default 1;"), 25);
       res.once("close", () => clearTimeout(timer));
     });
-    backend.on("connection", (socket) => {
-      active++;
-      peak = Math.max(peak, active);
-      socket.once("close", () => (active -= 1));
-    });
+    const peakConnections = trackPeakConnections(backend);
     const backendPort = await listen(backend, 128);
     const proxyPort = await listen(proxy(backendPort, (error) => errors.push(error)));
 
@@ -291,16 +337,13 @@ describe("UpstreamPool", () => {
 
     expect(results).toEqual(Array(200).fill({ status: 200, body: "// chunk\nexport default 1;" }));
     expect(errors).toEqual([]);
-    expect(peak).toBeLessThanOrEqual(48);
+    expect(peakConnections()).toBeLessThanOrEqual(48);
   }, 30_000);
 
   it("does not let a waiting fresh-connection replay block a normal request when an idle socket is free", async () => {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-pool-test-"));
-    tempDirs.push(dir);
-    const certs = ensureCerts(dir);
-    const backend = https.createServer(
-      { cert: fs.readFileSync(certs.certPath), key: fs.readFileSync(certs.keyPath) },
-      (_req, res) => res.end("ok")
+    const tls = createTlsCerts("portless-pool-test-");
+    const backend = https.createServer({ cert: tls.cert, key: tls.key }, (_req, res) =>
+      res.end("ok")
     );
     const backendPort = await listen(backend);
     let forward = true;
@@ -392,57 +435,24 @@ describe("UpstreamPool", () => {
 
   it("evicts a backpressured non-streaming response after the progress deadline", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const pool = new UpstreamPool();
-    pools.push(pool);
+    const pool = createPool();
     let finiteBackpressure = false;
     let finiteBackendClosed = false;
     let finiteProxyClosed = false;
     let sseBackendClosed = false;
     let sseProxyClosed = false;
     let longPollRes: http.ServerResponse | undefined;
-    let resolveFiniteProxyRes: ((res: http.IncomingMessage) => void) | undefined;
-    let resolveSseProxyRes: ((res: http.IncomingMessage) => void) | undefined;
-    let resolveLongPollHeaders: (() => void) | undefined;
-    const finiteProxyResReady = new Promise<http.IncomingMessage>((resolve) => {
-      resolveFiniteProxyRes = resolve;
-    });
-    const sseProxyResReady = new Promise<http.IncomingMessage>((resolve) => {
-      resolveSseProxyRes = resolve;
-    });
-    const longPollHeadersReady = new Promise<void>((resolve) => {
-      resolveLongPollHeaders = resolve;
-    });
+    const finiteProxyResReady = deferred<http.IncomingMessage>();
+    const sseProxyResReady = deferred<http.IncomingMessage>();
+    const longPollHeadersReady = deferred();
     const backend = http.createServer((req, res) => {
       if (req.url === "/finite") {
-        const size = 32 * 1024 * 1024;
-        let sent = 0;
-        res.once("close", () => {
-          finiteBackendClosed = true;
-        });
-        res.writeHead(200, {
-          "content-type": "application/octet-stream",
-          "content-length": String(size),
-        });
-        const chunk = Buffer.alloc(64 * 1024);
-        const writeMore = () => {
-          while (sent < size) {
-            const next = Math.min(chunk.length, size - sent);
-            const ok = res.write(chunk.subarray(0, next));
-            sent += next;
-            if (!ok) {
-              finiteBackpressure = true;
-              res.once("drain", writeMore);
-              return;
-            }
-          }
-        };
-        writeMore();
+        res.once("close", () => (finiteBackendClosed = true));
+        streamLargeBody(res, 32 * 1024 * 1024, () => (finiteBackpressure = true));
         return;
       }
       if (req.url === "/sse") {
-        res.once("close", () => {
-          sseBackendClosed = true;
-        });
+        res.once("close", () => (sseBackendClosed = true));
         res.writeHead(200, { "content-type": "text/event-stream" });
         res.flushHeaders();
         return;
@@ -456,10 +466,7 @@ describe("UpstreamPool", () => {
       res.end("ok");
     });
     const backendPort = await listen(backend);
-    const route: RouteInfo = {
-      hostname: "app.localhost",
-      port: backendPort,
-    };
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
     const gateway = http.createServer((req, res) => {
       pool.dispatch(
         route,
@@ -468,20 +475,14 @@ describe("UpstreamPool", () => {
         (upstream) => {
           upstream.once("response", (proxyRes) => {
             if (req.url === "/finite") {
-              resolveFiniteProxyRes?.(proxyRes);
-              proxyRes.once("close", () => {
-                finiteProxyClosed = true;
-              });
+              finiteProxyResReady.resolve(proxyRes);
+              proxyRes.once("close", () => (finiteProxyClosed = true));
             }
             if (req.url === "/sse") {
-              resolveSseProxyRes?.(proxyRes);
-              proxyRes.once("close", () => {
-                sseProxyClosed = true;
-              });
+              sseProxyResReady.resolve(proxyRes);
+              proxyRes.once("close", () => (sseProxyClosed = true));
             }
-            if (req.url === "/long-poll") {
-              resolveLongPollHeaders?.();
-            }
+            if (req.url === "/long-poll") longPollHeadersReady.resolve();
             res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
             res.flushHeaders();
             proxyRes.pipe(res);
@@ -497,9 +498,9 @@ describe("UpstreamPool", () => {
       openPausedResponse(gatewayPort, "/finite"),
       openPausedResponse(gatewayPort, "/sse"),
     ]);
-    await longPollHeadersReady;
-    const finiteProxyRes = await finiteProxyResReady;
-    const sseProxyRes = await sseProxyResReady;
+    await longPollHeadersReady.promise;
+    const finiteProxyRes = await finiteProxyResReady.promise;
+    const sseProxyRes = await sseProxyResReady.promise;
     expect(finiteClient.isPaused()).toBe(true);
     expect(sseClient.isPaused()).toBe(true);
     await waitFor(
@@ -526,37 +527,29 @@ describe("UpstreamPool", () => {
 
   it("caps a single non-loopback peer below the shared backend limit", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const pool = new UpstreamPool();
-    pools.push(pool);
+    const pool = createPool();
     let received = 0;
     const held: http.ServerResponse[] = [];
-    let resolveFirstWave: (() => void) | undefined;
-    const firstWave = new Promise<void>((resolve) => {
-      resolveFirstWave = resolve;
-    });
+    const firstWave = deferred();
     const backend = http.createServer((_req, res) => {
       received++;
       if (received <= 16) {
         held.push(res);
-        if (received === 16) resolveFirstWave?.();
+        if (received === 16) firstWave.resolve();
         return;
       }
       res.end("ok");
     });
     const backendPort = await listen(backend);
-    const route: RouteInfo = {
-      hostname: "app.localhost",
-      port: backendPort,
-    };
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
     const samePeer = Array.from({ length: 20 }, (_, index) => {
       const downstream = new FakeServerResponse(
         index < 10 ? "192.168.1.50" : "::ffff:192.168.1.50",
         index % 2 === 1
       );
-      const done = dispatchAndPipe(pool, route, downstream, `/same-peer/${index}`);
-      return { downstream, done };
+      return { downstream, done: dispatchAndPipe(pool, route, downstream, `/same-peer/${index}`) };
     });
-    await firstWave;
+    await firstWave.promise;
     expect(received).toBe(16);
     const otherPeer = new FakeServerResponse("192.168.1.51");
     const loopback = new FakeServerResponse("127.0.0.1");
@@ -848,29 +841,23 @@ describe("UpstreamPool", () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let received = 0;
     const held: http.ServerResponse[] = [];
-    let resolveFirstWave: () => void = () => {};
-    const firstWave = new Promise<void>((resolve) => {
-      resolveFirstWave = resolve;
-    });
+    const firstWave = deferred();
     const backend = http.createServer((_req, res) => {
       received++;
       held.push(res);
-      if (received === 48) resolveFirstWave();
+      if (received === 48) firstWave.resolve();
     });
     const backendPort = await listen(backend);
     const server = proxy(backendPort);
-    let resolveQueued: () => void = () => {};
-    const queuedArrived = new Promise<void>((resolve) => {
-      resolveQueued = resolve;
-    });
+    const queuedArrived = deferred();
     server.on("request", (req) => {
-      if (req.url === "/queued") resolveQueued();
+      if (req.url === "/queued") queuedArrived.resolve();
     });
     const proxyPort = await listen(server);
     const initial = Promise.all(Array.from({ length: 48 }, () => response(get(proxyPort))));
-    await firstWave;
+    await firstWave.promise;
     const queued = response(get(proxyPort, "/queued"));
-    await queuedArrived;
+    await queuedArrived.promise;
     expect(received).toBe(48);
     await vi.advanceTimersByTimeAsync(30_000);
     const rejected = await queued;
@@ -883,38 +870,13 @@ describe("UpstreamPool", () => {
 
   it("resets HTTP/2 streams with an error on stalled readers, body-idle timeouts, and shutdown of queued requests", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-h2-abort-"));
-    tempDirs.push(dir);
-    const certs = ensureCerts(dir);
-    const tls = {
-      cert: fs.readFileSync(certs.certPath),
-      key: fs.readFileSync(certs.keyPath),
-      ca: fs.readFileSync(certs.caPath),
-    };
+    const tls = createTlsCerts("portless-h2-abort-");
     const held: http.ServerResponse[] = [];
     let stalledBackpressure = false;
     let bodyIdleHeadersSent = false;
     const backend = http.createServer((req, res) => {
       if (req.url === "/stalled") {
-        const size = 64 * 1024 * 1024;
-        let sent = 0;
-        res.writeHead(200, {
-          "content-type": "application/octet-stream",
-          "content-length": String(size),
-        });
-        const chunk = Buffer.alloc(64 * 1024, "a");
-        const writeMore = () => {
-          while (sent < size) {
-            const next = Math.min(chunk.length, size - sent);
-            if (!res.write(chunk.subarray(0, next))) {
-              stalledBackpressure = true;
-              res.once("drain", writeMore);
-              return;
-            }
-            sent += next;
-          }
-        };
-        writeMore();
+        streamLargeBody(res, 64 * 1024 * 1024, () => (stalledBackpressure = true));
         return;
       }
       if (req.url === "/body-idle") {
@@ -922,9 +884,7 @@ describe("UpstreamPool", () => {
           "content-type": "application/octet-stream",
           "content-length": "1048576",
         });
-        res.write("partial", () => {
-          bodyIdleHeadersSent = true;
-        });
+        res.write("partial", () => (bodyIdleHeadersSent = true));
         return;
       }
       held.push(res);
