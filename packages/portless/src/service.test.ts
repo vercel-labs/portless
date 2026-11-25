@@ -15,8 +15,11 @@ vi.mock("node:fs", async (importOriginal) => {
     ...mod,
     chmodSync: vi.fn(),
     existsSync: vi.fn(mod.existsSync),
+    lstatSync: vi.fn(mod.lstatSync),
     mkdirSync: vi.fn(),
     readFileSync: vi.fn(mod.readFileSync),
+    readlinkSync: vi.fn(mod.readlinkSync),
+    realpathSync: vi.fn(mod.realpathSync),
     rmSync: vi.fn(),
     statSync: vi.fn(mod.statSync),
     writeFileSync: vi.fn(),
@@ -56,9 +59,19 @@ vi.mock("./cli-utils.js", async (importOriginal) => {
   };
 });
 
-const { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } =
-  await import("node:fs");
+const {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} = await import("node:fs");
 const { isMdnsSupported } = await import("./mdns.js");
+const { ensureCerts } = await import("./certs.js");
 const { ensureStateDir } = await import("./utils.js");
 const { discoverState, isProxyRunning } = await import("./cli-utils.js");
 const actualCliUtils = await vi.importActual<typeof import("./cli-utils.js")>("./cli-utils.js");
@@ -80,6 +93,119 @@ function setGetuid(uid: number): void {
   });
 }
 
+function setExecPath(value: string): () => void {
+  const original = Object.getOwnPropertyDescriptor(process, "execPath")!;
+  Object.defineProperty(process, "execPath", { configurable: true, value });
+  return () => Object.defineProperty(process, "execPath", original);
+}
+
+function setLinuxUser(): string {
+  setPlatform("linux");
+  setGetuid(1000);
+  vi.stubEnv("HOME", "/home/alice");
+  vi.stubEnv("USERPROFILE", "/home/alice");
+  vi.stubEnv("SUDO_USER", "alice");
+  vi.stubEnv("SUDO_UID", "1000");
+  return "/home/alice";
+}
+
+type MockRootControlledPath = {
+  kind: "dir" | "file" | "symlink";
+  uid?: number;
+  mode?: number;
+  target?: string;
+  realpath?: string;
+};
+
+const trustedUnixPaths: Record<string, MockRootControlledPath> = {
+  "/": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/usr": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/usr/local": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/usr/local/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/usr/local/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+  "/usr/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/usr/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+  "/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+  "/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+};
+
+function mockRootControlledPaths(
+  entries: Record<string, MockRootControlledPath>,
+  nodeExists: string[] = []
+): void {
+  const normalizedEntries = new Map(
+    Object.entries(entries).map(
+      ([entryPath, entry]) => [path.posix.resolve(entryPath), entry] as const
+    )
+  );
+  const nodeLookup = new Set(nodeExists.map((entry) => path.posix.resolve(entry)));
+
+  const makeStat = (entry: MockRootControlledPath) =>
+    ({
+      uid: entry.uid ?? 0,
+      mode:
+        entry.mode ??
+        (entry.kind === "dir" ? 0o40755 : entry.kind === "file" ? 0o100755 : 0o120777),
+      isDirectory: () => entry.kind === "dir",
+      isFile: () => entry.kind === "file",
+      isSymbolicLink: () => entry.kind === "symlink",
+    }) as never;
+
+  vi.mocked(lstatSync).mockImplementation((file) => {
+    const resolved = path.posix.resolve(String(file));
+    if (resolved === "/") {
+      return makeStat(normalizedEntries.get("/") ?? { kind: "dir", uid: 0, mode: 0o40755 });
+    }
+    const entry = normalizedEntries.get(resolved);
+    if (entry === undefined) {
+      throw new Error(`ENOENT: ${file}`);
+    }
+    return makeStat(entry);
+  });
+
+  vi.mocked(readlinkSync).mockImplementation((file) => {
+    const entry = normalizedEntries.get(path.posix.resolve(String(file)));
+    if (entry === undefined || entry.kind !== "symlink" || entry.target === undefined) {
+      throw new Error(`EINVAL: ${file}`);
+    }
+    return entry.target;
+  });
+
+  vi.mocked(realpathSync).mockImplementation((file) => {
+    const resolved = path.posix.resolve(String(file));
+    if (nodeLookup.has(resolved)) {
+      return resolved;
+    }
+    const entry = normalizedEntries.get(resolved);
+    if (entry === undefined) {
+      throw new Error(`ENOENT: ${file}`);
+    }
+    if (entry.kind === "symlink") {
+      return (
+        entry.realpath ?? path.posix.resolve(path.posix.dirname(resolved), entry.target ?? ".")
+      );
+    }
+    return entry.realpath ?? resolved;
+  });
+
+  vi.mocked(existsSync).mockImplementation((file) =>
+    nodeLookup.has(path.posix.resolve(String(file)))
+  );
+}
+
+function mockTrustedUnixPaths(
+  entries: Record<string, MockRootControlledPath> = {},
+  nodeExists: string[] = []
+): void {
+  mockRootControlledPaths(
+    {
+      ...trustedUnixPaths,
+      ...entries,
+    },
+    nodeExists
+  );
+}
+
 afterEach(() => {
   Object.defineProperty(process, "platform", {
     configurable: true,
@@ -90,9 +216,13 @@ afterEach(() => {
     value: originalGetuid,
   });
   vi.mocked(existsSync).mockRestore();
+  vi.mocked(lstatSync).mockRestore();
   vi.mocked(mkdirSync).mockRestore();
   vi.mocked(ensureStateDir).mockClear();
+  vi.mocked(ensureCerts).mockClear();
   vi.mocked(readFileSync).mockRestore();
+  vi.mocked(readlinkSync).mockRestore();
+  vi.mocked(realpathSync).mockRestore();
   vi.mocked(rmSync).mockRestore();
   vi.mocked(statSync).mockRestore();
   vi.mocked(writeFileSync).mockRestore();
@@ -101,10 +231,13 @@ afterEach(() => {
   vi.mocked(discoverState).mockImplementation(actualCliUtils.discoverState);
   vi.mocked(isProxyRunning).mockReset();
   vi.mocked(isProxyRunning).mockImplementation(actualCliUtils.isProxyRunning);
+  vi.unstubAllEnvs();
 });
 
 describe("buildServiceSpec", () => {
   it("builds a macOS LaunchDaemon for the HTTPS proxy", () => {
+    mockTrustedUnixPaths();
+
     const spec = buildServiceSpec({
       platform: "darwin",
       nodePath: "/usr/local/bin/node",
@@ -112,6 +245,7 @@ describe("buildServiceSpec", () => {
       userHome: "/Users/alice",
       uid: "501",
       gid: "20",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
     });
 
     expect(spec.platform).toBe("darwin");
@@ -139,18 +273,29 @@ describe("buildServiceSpec", () => {
   });
 
   it("builds a Linux systemd unit for the HTTPS proxy", () => {
+    mockTrustedUnixPaths(
+      {
+        "/opt": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/opt/node": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/opt/node/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/opt/node/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+      },
+      ["/usr/local/bin/node"]
+    );
+
     const spec = buildServiceSpec({
       platform: "linux",
-      nodePath: "/usr/bin/node",
+      nodePath: "/opt/node/bin/node",
       entryScript: "/usr/lib/node_modules/portless/dist/cli.js",
       userHome: "/home/alice",
       uid: "1000",
       gid: "1000",
-      pathEnv: "/home/alice/.local/bin:/usr/local/bin:/bin",
+      pathEnv: "/usr/local/bin:/bin",
     });
 
     expect(spec.platform).toBe("linux");
     if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("system");
     expect(spec.unitPath).toBe("/etc/systemd/system/portless.service");
     expect(spec.execStart).toEqual([
       "/usr/bin/env",
@@ -167,11 +312,100 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain("Description=Portless HTTPS proxy");
     expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
-    expect(spec.unit).toContain('Environment=PATH="/home/alice/.local/bin:/usr/local/bin:/bin:/usr/bin"');
+    expect(spec.unit).toContain('Environment=PATH="/opt/node/bin:/usr/local/bin:/bin"');
     expect(spec.unit).toContain(
       'ExecStart="/usr/bin/env" "node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
     expect(spec.unit).toContain("WantedBy=multi-user.target");
+    const unitSection = spec.unit.split("[Service]")[0];
+    expect(unitSection).toContain("After=network-online.target");
+    expect(unitSection).toContain("Wants=network-online.target");
+    expect(unitSection).toContain("StartLimitIntervalSec=60");
+    expect(unitSection).toContain("StartLimitBurst=5");
+  });
+
+  it("builds a Linux user unit when Node is installed under the user's home", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/home/alice/.nvm/versions/node/v22/bin/node",
+      entryScript: "/home/alice/portless/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      pathEnv: "/usr/bin:/bin",
+      installConfig: { extraEnv: { SUDO_UID: "1000", SUDO_GID: "1000" } },
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("user");
+    expect(spec.unitPath).toBe("/home/alice/.config/systemd/user/portless.service");
+    expect(spec.unit).toContain("WantedBy=default.target");
+    expect(spec.unit).not.toContain("network-online.target");
+    expect(spec.unit).not.toContain("SUDO_UID");
+    expect(spec.unit).not.toContain("SUDO_GID");
+    expect(spec.unit).toContain('Environment=HOME="/home/alice"');
+    expect(spec.unit).toContain(
+      'Environment=PATH="/usr/bin:/bin:/home/alice/.nvm/versions/node/v22/bin"'
+    );
+    const unitSection = spec.unit.split("[Service]")[0];
+    expect(unitSection).toContain("StartLimitIntervalSec=60");
+    expect(unitSection).toContain("StartLimitBurst=5");
+  });
+
+  it("treats dot-prefixed names under the home directory as contained", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/home/alice/..runtime/bin/node",
+      entryScript: "/fake/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("user");
+  });
+
+  it("recognizes Node under a symlinked home directory", () => {
+    vi.mocked(realpathSync).mockImplementation((value) => {
+      if (value === "/home/alice") return "/var/home/alice";
+      if (value === "/var/home/alice/bin/node") return "/var/home/alice/bin/node";
+      throw new Error("missing path");
+    });
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/var/home/alice/bin/node",
+      entryScript: "/fake/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("user");
+  });
+
+  it.each([
+    { nodePath: "/home/alice2/bin/node", userHome: "/home/alice", uid: "1000" },
+    { nodePath: "/home/alice/bin/node", userHome: "/home/alice", uid: "0" },
+    { nodePath: "/home/alice/bin/node", userHome: "/home/alice", username: "root" },
+    { nodePath: "/root/bin/node", userHome: "/root", uid: "1000" },
+  ])("uses a system unit for a sibling or root context: %o", (context) => {
+    mockTrustedUnixPaths();
+
+    const spec = buildServiceSpec({
+      platform: "linux",
+      entryScript: "/usr/lib/portless/cli.js",
+      pathEnv: "/usr/local/bin:/bin",
+      ...context,
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("system");
+    expect(spec.unitPath).toBe("/etc/systemd/system/portless.service");
+    expect(spec.unit).toContain("WantedBy=multi-user.target");
+    const unitSection = spec.unit.split("[Service]")[0];
+    expect(unitSection).toContain("StartLimitIntervalSec=60");
+    expect(unitSection).toContain("StartLimitBurst=5");
   });
 
   it("builds a Windows startup task for the HTTPS proxy", () => {
@@ -180,6 +414,7 @@ describe("buildServiceSpec", () => {
       nodePath: "C:\\Program Files\\nodejs\\node.exe",
       entryScript: "C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\portless\\dist\\cli.js",
       userHome: "C:\\Users\\Alice",
+      pathEnv: "C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\nodejs;C:\\Tools\\100%Done",
     });
 
     expect(spec.platform).toBe("win32");
@@ -205,7 +440,11 @@ describe("buildServiceSpec", () => {
     );
     expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\Alice\\.portless");
     expect(spec.script).toContain(
-      'node "C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\portless\\dist\\cli.js" "proxy" "start"'
+      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\nodejs"'
+    );
+    expect(spec.script).not.toContain("C:\\Tools\\100%%Done");
+    expect(spec.script).toContain(
+      '"C:\\Program Files\\nodejs\\node.exe" "C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\portless\\dist\\cli.js" "proxy" "start"'
     );
     expect(spec.script).toContain("proxy");
     expect(spec.script).toContain("--port");
@@ -214,22 +453,36 @@ describe("buildServiceSpec", () => {
     expect(spec.script).toContain("--skip-trust");
   });
 
-  it("preserves PATH in the Windows startup script", () => {
+  it("restricts PATH in the Windows startup script to trusted system directories", () => {
     const spec = buildServiceSpec({
       platform: "win32",
-      nodePath: "C:\\nodejs\\node.exe",
+      nodePath: "C:\\Program Files\\nodejs\\node.exe",
       entryScript: "C:\\cli.js",
       userHome: "C:\\Users\\Alice",
-      pathEnv: "C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%Done",
+      pathEnv:
+        "C:\\Windows\\System32;C:\\Windows\\Temp;C:\\Users\\Alice\\bin;C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\100%Tools;C:\\Tools\\100%Done;C:\\Program Files\\..\\Users\\Alice",
     });
 
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
     expect(spec.script).toContain(
-      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%%Done;C:\\nodejs"'
+      'set "PATH=C:\\Windows\\System32;C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\100%%Tools"'
     );
+    expect(spec.script).not.toContain("C:\\Windows\\Temp");
+    expect(spec.script).not.toContain("C:\\Users\\Alice\\bin");
+    expect(spec.script).not.toContain("C:\\Tools");
   });
 
   it("appends the install-time Node directory after existing macOS PATH entries", () => {
+    mockTrustedUnixPaths({
+      "/opt": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/opt/homebrew": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/opt/homebrew/Cellar": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/opt/homebrew/Cellar/node": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/opt/homebrew/Cellar/node/22.1.0": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/opt/homebrew/Cellar/node/22.1.0/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/opt/homebrew/Cellar/node/22.1.0/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+    });
+
     const spec = buildServiceSpec({
       platform: "darwin",
       nodePath: "/opt/homebrew/Cellar/node/22.1.0/bin/node",
@@ -240,8 +493,187 @@ describe("buildServiceSpec", () => {
 
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
     expect(spec.plist).toContain(
-      "<key>PATH</key>\n    <string>/Users/alice/.local/share/mise/shims:/usr/bin:/bin:/opt/homebrew/Cellar/node/22.1.0/bin</string>"
+      "<key>PATH</key>\n    <string>/usr/bin:/bin:/opt/homebrew/Cellar/node/22.1.0/bin</string>"
     );
+  });
+
+  it.each(["darwin", "linux"] as const)(
+    "rejects dot dot segments in privileged Unix PATH entries for a %s root service",
+    (platform) => {
+      mockTrustedUnixPaths({
+        "/usr/opt": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/usr/opt/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+      });
+      const spec = buildServiceSpec({
+        platform,
+        nodePath: "/usr/bin/node",
+        entryScript: "/fake/cli.js",
+        userHome: "/home/alice",
+        pathEnv: "/usr/local/../opt/bin",
+      });
+
+      if (spec.platform === "win32") throw new Error("Expected Unix service spec");
+      const serviceFile = spec.platform === "darwin" ? spec.plist : spec.unit;
+      expect(serviceFile).not.toContain("/usr/local/../opt/bin");
+      expect(serviceFile).not.toContain("/usr/opt/bin");
+    }
+  );
+
+  it.each([
+    ["a writable root", { "/": { kind: "dir" as const, uid: 0, mode: 0o40777 } }],
+    ["a non-root ancestor", { "/usr": { kind: "dir" as const, uid: 1000, mode: 0o40755 } }],
+  ])(
+    "falls back to the absolute node path when %s is untrusted",
+    (_label: string, overrides: Record<string, MockRootControlledPath>) => {
+      mockTrustedUnixPaths(overrides);
+
+      const spec = buildServiceSpec({
+        platform: "darwin",
+        nodePath: "/usr/local/bin/node",
+        entryScript: "/usr/local/lib/portless/cli.js",
+        userHome: "/Users/alice",
+        pathEnv: "/usr/local/bin:/usr/bin:/bin",
+      });
+
+      if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+      expect(spec.programArguments).toEqual([
+        "/usr/local/bin/node",
+        "/usr/local/lib/portless/cli.js",
+        "proxy",
+        "start",
+        "--foreground",
+        "--port",
+        "443",
+        "--https",
+        "--skip-trust",
+      ]);
+    }
+  );
+
+  it("falls back to the absolute node path when a trusted symlink resolves through an untrusted ancestor", () => {
+    mockTrustedUnixPaths({
+      "/usr/local/bin/node": { kind: "symlink", uid: 0, target: "/tmp/root/node" },
+      "/tmp": { kind: "dir", uid: 1000, mode: 0o40755 },
+      "/tmp/root": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/tmp/root/node": { kind: "file", uid: 0, mode: 0o100755 },
+    });
+
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/local/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.programArguments.slice(0, 2)).toEqual([
+      "/usr/local/bin/node",
+      "/usr/local/lib/portless/cli.js",
+    ]);
+  });
+
+  it("falls back to the absolute node path when a symlink loops", () => {
+    mockTrustedUnixPaths({
+      "/usr/local/bin/node": { kind: "symlink", uid: 0, target: "/usr/local/bin/node" },
+    });
+
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/local/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.programArguments.slice(0, 2)).toEqual([
+      "/usr/local/bin/node",
+      "/usr/local/lib/portless/cli.js",
+    ]);
+  });
+
+  it("traverses a root-owned relative symlink with dot dot one segment at a time", () => {
+    mockTrustedUnixPaths({
+      "/usr/bin/node": { kind: "symlink", uid: 0, target: "../lib/node/bin/node" },
+      "/usr/lib": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/usr/lib/node": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/usr/lib/node/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/usr/lib/node/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+    });
+
+    const trusted = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/usr/bin:/bin",
+    });
+
+    if (trusted.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(trusted.programArguments.slice(0, 2)).toEqual(["/usr/bin/env", "node"]);
+
+    mockTrustedUnixPaths({
+      "/usr/bin/node": { kind: "symlink", uid: 0, target: "../lib/node/bin/node" },
+      "/usr/lib": { kind: "dir", uid: 1000, mode: 0o40755 },
+      "/usr/lib/node": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/usr/lib/node/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+      "/usr/lib/node/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+    });
+
+    const untrusted = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/usr/bin:/bin",
+    });
+
+    if (untrusted.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(untrusted.programArguments.slice(0, 2)).toEqual([
+      "/usr/bin/node",
+      "/usr/local/lib/portless/cli.js",
+    ]);
+  });
+
+  it("prepends the install-time Node directory when an earlier PATH Node differs", () => {
+    mockTrustedUnixPaths(
+      {
+        "/opt": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/opt/node": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/opt/node/bin": { kind: "dir", uid: 0, mode: 0o40755 },
+        "/opt/node/bin/node": { kind: "file", uid: 0, mode: 0o100755 },
+      },
+      ["/usr/bin/node"]
+    );
+
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/opt/node/bin/node",
+      entryScript: "/usr/lib/portless/cli.js",
+      userHome: "/home/alice",
+      uid: "1000",
+      gid: "1000",
+      pathEnv: "/usr/bin:/bin",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.execStart.slice(0, 2)).toEqual(["/usr/bin/env", "node"]);
+    expect(spec.unit).toContain('Environment=PATH="/opt/node/bin:/usr/bin:/bin"');
+  });
+
+  it("keeps world-writable PATH entries for a Linux user service", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/home/alice/bin/node",
+      entryScript: "/fake/cli.js",
+      userHome: "/home/alice",
+      pathEnv: ".:/tmp:/usr/bin",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.unit).toContain('Environment=PATH="/tmp:/usr/bin:/home/alice/bin"');
   });
 
   it("deduplicates an existing install-time Node directory in Linux PATH", () => {
@@ -255,23 +687,11 @@ describe("buildServiceSpec", () => {
     });
 
     if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.scope).toBe("user");
     expect(spec.unit).toContain(
       'Environment=PATH="/home/alice/.nvm/versions/node/v22/bin/:/usr/bin"'
     );
     expect(spec.unit.match(/^Environment=PATH=/gm)).toHaveLength(1);
-  });
-
-  it("deduplicates Windows PATH entries without changing their priority", () => {
-    const spec = buildServiceSpec({
-      platform: "win32",
-      nodePath: "C:\\nodejs\\node.exe",
-      entryScript: "C:\\cli.js",
-      userHome: "C:\\Users\\Alice",
-      pathEnv: "C:\\NodeJS\\;C:/nodejs;C:\\Windows\\System32;C:\\WINDOWS\\SYSTEM32\\",
-    });
-
-    if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
-    expect(spec.script).toContain('set "PATH=C:\\NodeJS\\;C:\\Windows\\System32"');
   });
 
   it("escapes percent signs in Windows batch env values", () => {
@@ -280,14 +700,20 @@ describe("buildServiceSpec", () => {
       nodePath: "C:\\nodejs\\node.exe",
       entryScript: "C:\\cli.js",
       userHome: "C:\\Users\\100%Done",
+      pathEnv: "C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\100%Done",
     });
 
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
     expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\100%%Done\\.portless");
+    expect(spec.script).toContain(
+      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Program Files\\100%%Done"'
+    );
     expect(spec.script).not.toMatch(/(?<!%)%(?!%)/);
   });
 
   it("uses unconditional KeepAlive in the macOS plist", () => {
+    mockTrustedUnixPaths();
+
     const spec = buildServiceSpec({
       platform: "darwin",
       nodePath: "/usr/local/bin/node",
@@ -295,6 +721,7 @@ describe("buildServiceSpec", () => {
       userHome: "/Users/bob",
       uid: "501",
       gid: "20",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
     });
 
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
@@ -303,6 +730,8 @@ describe("buildServiceSpec", () => {
   });
 
   it("persists LAN and wildcard settings in a macOS LaunchDaemon", () => {
+    mockTrustedUnixPaths();
+
     const spec = buildServiceSpec({
       platform: "darwin",
       nodePath: "/usr/local/bin/node",
@@ -310,6 +739,7 @@ describe("buildServiceSpec", () => {
       userHome: "/Users/alice",
       uid: "501",
       gid: "20",
+      pathEnv: "/usr/local/bin:/usr/bin:/bin",
       installConfig: {
         proxyPort: 8443,
         lanMode: true,
@@ -539,7 +969,9 @@ describe("tryUninstallService", () => {
 
   it("returns removed: false when runner throws", () => {
     setPlatform("linux");
-    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(existsSync).mockImplementation(
+      (file) => file === "/etc/systemd/system/portless.service"
+    );
     const runner = () => {
       throw new Error("spawn failed");
     };
@@ -552,7 +984,9 @@ describe("tryUninstallService", () => {
 
   it("marks installed services that need elevation", () => {
     setPlatform("linux");
-    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(existsSync).mockImplementation(
+      (file) => file === "/etc/systemd/system/portless.service"
+    );
     vi.mocked(rmSync).mockImplementation(() => {
       const err = new Error("EACCES: permission denied") as NodeJS.ErrnoException;
       err.code = "EACCES";
@@ -569,7 +1003,9 @@ describe("tryUninstallService", () => {
 
   it("marks systemctl's interactive authentication failure as needing elevation", () => {
     setPlatform("linux");
-    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(existsSync).mockImplementation(
+      (file) => file === "/etc/systemd/system/portless.service"
+    );
     const runner = vi.fn(() => ({
       status: 1,
       stdout: "",
@@ -588,7 +1024,9 @@ describe("tryUninstallService", () => {
   it("does not claim elevation when the removal runs as root", () => {
     setPlatform("linux");
     setGetuid(0);
-    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(existsSync).mockImplementation(
+      (file) => file === "/etc/systemd/system/portless.service"
+    );
     const runner = vi.fn(() => ({
       status: 1,
       stdout: "",
@@ -603,7 +1041,9 @@ describe("tryUninstallService", () => {
 
   it("does not claim elevation when the service manager is missing", () => {
     setPlatform("linux");
-    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(existsSync).mockImplementation(
+      (file) => file === "/etc/systemd/system/portless.service"
+    );
     const runner = vi.fn(() => {
       const err = new Error("spawn systemctl ENOENT") as NodeJS.ErrnoException;
       err.code = "ENOENT";
@@ -614,6 +1054,162 @@ describe("tryUninstallService", () => {
 
     expect(result.removed).toBe(false);
     expect(result.needsElevation).toBe(false);
+  });
+
+  it("finds and removes a user unit when Node is installed system-wide", () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+        removed: true,
+        installed: true,
+      });
+      expect(runner).toHaveBeenCalledWith("systemctl", [
+        "--user",
+        "disable",
+        "--now",
+        "portless.service",
+      ]);
+      expect(runner).toHaveBeenCalledWith("systemctl", ["--user", "daemon-reload"]);
+      expect(rmSync).toHaveBeenCalledWith(userUnit, { force: true });
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("finds a system unit when Node has moved under the user's home", () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    vi.mocked(existsSync).mockImplementation(
+      (file) => file === "/etc/systemd/system/portless.service"
+    );
+    const runner = vi.fn(() => ({ status: 1, stdout: "", stderr: "Access denied" }));
+
+    try {
+      expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+        removed: false,
+        installed: true,
+        error: "Access denied",
+        needsElevation: true,
+      });
+      expect(runner).toHaveBeenCalledWith("systemctl", ["disable", "--now", "portless.service"]);
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("removes the user unit first and requests elevation for a system unit", () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    const systemUnit = "/etc/systemd/system/portless.service";
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit || file === systemUnit);
+    const runner = vi.fn((_: string, args: string[]) =>
+      args[0] === "--user"
+        ? { status: 0, stdout: "", stderr: "" }
+        : { status: 1, stdout: "", stderr: "Access denied" }
+    );
+
+    try {
+      expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+        removed: false,
+        installed: true,
+        error: "Access denied",
+        needsElevation: true,
+      });
+      expect(runner.mock.calls).toEqual([
+        ["systemctl", ["--user", "disable", "--now", "portless.service"]],
+        ["systemctl", ["--user", "daemon-reload"]],
+        ["systemctl", ["disable", "--now", "portless.service"]],
+      ]);
+      expect(rmSync).toHaveBeenCalledTimes(1);
+      expect(rmSync).toHaveBeenCalledWith(userUnit, { force: true });
+    } finally {
+      restoreExecPath();
+    }
+  });
+
+  it("refuses to remove a user unit as root", () => {
+    const home = setLinuxUser();
+    setGetuid(0);
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+        removed: false,
+        installed: true,
+        error:
+          "The installed service is a systemd user service. Re-run `portless service uninstall` without sudo.",
+        needsElevation: false,
+      });
+      expect(runner).not.toHaveBeenCalled();
+      expect(rmSync).not.toHaveBeenCalled();
+    } finally {
+      restoreExecPath();
+    }
+  });
+
+  it("removes the system unit first for sudo uninstall when both scopes exist", () => {
+    const home = setLinuxUser();
+    setGetuid(0);
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    const systemUnit = "/etc/systemd/system/portless.service";
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit || file === systemUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      expect(tryUninstallService("/fake/cli.js", runner)).toMatchObject({
+        removed: false,
+        installed: true,
+        error: expect.stringContaining("without sudo"),
+        needsElevation: false,
+      });
+      expect(runner.mock.calls).toEqual([
+        ["systemctl", ["disable", "--now", "portless.service"]],
+        ["systemctl", ["daemon-reload"]],
+      ]);
+      expect(rmSync).toHaveBeenCalledTimes(1);
+      expect(rmSync).toHaveBeenCalledWith(systemUnit, { force: true });
+    } finally {
+      restoreExecPath();
+    }
+  });
+
+  it("does not request elevation when removing a user unit fails", () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    const runner = vi.fn(() => ({ status: 1, stdout: "", stderr: "Access denied" }));
+
+    try {
+      expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+        removed: false,
+        installed: true,
+        error: "Access denied",
+        needsElevation: false,
+      });
+      expect(runner).toHaveBeenCalledWith("systemctl", [
+        "--user",
+        "disable",
+        "--now",
+        "portless.service",
+      ]);
+      expect(rmSync).not.toHaveBeenCalled();
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("reports a failed launchctl bootout instead of claiming removal", () => {
@@ -682,6 +1278,13 @@ describe("handleService", () => {
     expect(output).toContain("service install");
     expect(output).toContain("service uninstall");
     expect(output).toContain("service status");
+    expect(output).toContain("Linux user services resolve node from PATH at startup");
+    expect(output).toContain("Windows SYSTEM tasks always use the explicit Node path");
+    expect(output).toContain("systemctl --user");
+    expect(output).toContain("SELinux enforcing mode");
+    expect(output).toContain("loginctl enable-linger <user>");
+    expect(output).toContain("unprivileged port access or --port 1024");
+    expect(output).toContain("StartLimitIntervalSec=60, StartLimitBurst=5");
   });
 
   it("throws a usage error for an unknown subcommand", async () => {
@@ -1001,6 +1604,182 @@ describe("handleService", () => {
     expect(createCalls.every(([, args]) => args.includes("/XML"))).toBe(true);
   });
 
+  it("installs a user unit without sudo when Node is under the user's home", async () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/versions/node/v22/bin/node"));
+    const userDir = path.posix.join(home, ".config/systemd/user");
+    const systemUnit = "/etc/systemd/system/portless.service";
+    vi.mocked(existsSync).mockImplementation((file) => file === systemUnit);
+    const runner = vi.fn((_: string, _args: string[]) => ({ status: 0, stdout: "", stderr: "" }));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await handleService(["service", "install", "--port", "8443"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      });
+
+      expect(runner.mock.calls.some(([command]) => command === "sudo")).toBe(false);
+      expect(mkdirSync).toHaveBeenCalledWith(userDir, { recursive: true });
+      expect(writeFileSync).toHaveBeenCalledWith(
+        path.posix.join(userDir, "portless.service"),
+        expect.stringContaining("WantedBy=default.target")
+      );
+      expect(runner).toHaveBeenCalledWith("systemctl", [
+        "--user",
+        "disable",
+        "--now",
+        "portless.service",
+      ]);
+      expect(runner).toHaveBeenCalledWith("systemctl", ["--user", "daemon-reload"]);
+      expect(runner).toHaveBeenCalledWith("systemctl", ["--user", "enable", "portless.service"]);
+      expect(runner).toHaveBeenCalledWith("systemctl", ["--user", "restart", "portless.service"]);
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`Remove it with \`sudo portless service uninstall\``)
+      );
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(systemUnit));
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining("loginctl enable-linger alice"));
+    } finally {
+      warnSpy.mockRestore();
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("uses XDG_CONFIG_HOME for Linux user install, status, and cleanup", async () => {
+    const home = setLinuxUser();
+    vi.stubEnv("SUDO_USER", "");
+    vi.stubEnv("XDG_CONFIG_HOME", "/home/alice/custom-config");
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    const userUnit = "/home/alice/custom-config/systemd/user/portless.service";
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    vi.mocked(readFileSync).mockReturnValue("");
+    vi.mocked(isProxyRunning).mockResolvedValue(false);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      await handleService(["service", "install", "--port", "8443"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      });
+      expect(writeFileSync).toHaveBeenCalledWith(
+        userUnit,
+        expect.stringContaining("WantedBy=default.target")
+      );
+      await handleService(["service", "status"], { entryScript: "/fake/cli.js", runner });
+      expect(logSpy.mock.calls.flat().join(" ")).toContain(`Service entry: ${userUnit}`);
+      await handleService(["service", "uninstall"], { entryScript: "/fake/cli.js", runner });
+      expect(rmSync).toHaveBeenCalledWith(userUnit, { force: true });
+      expect(tryUninstallService("/fake/cli.js", runner)).toEqual({
+        removed: true,
+        installed: true,
+      });
+      expect(rmSync).toHaveBeenCalledWith(userUnit, { force: true });
+    } finally {
+      restoreExecPath();
+    }
+  });
+
+  it.each([
+    { xdgConfigHome: "relative/config", sudoUser: "" },
+    { xdgConfigHome: "/root/config", sudoUser: "alice" },
+  ])("ignores invalid or elevated XDG_CONFIG_HOME: %o", async ({ xdgConfigHome, sudoUser }) => {
+    const home = setLinuxUser();
+    vi.stubEnv("SUDO_USER", sudoUser);
+    vi.stubEnv("XDG_CONFIG_HOME", xdgConfigHome);
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    vi.mocked(existsSync).mockReturnValue(false);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      await handleService(["service", "install", "--port", "8443"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      });
+      expect(writeFileSync).toHaveBeenCalledWith(
+        "/home/alice/.config/systemd/user/portless.service",
+        expect.any(String)
+      );
+    } finally {
+      restoreExecPath();
+    }
+  });
+
+  it("rejects a user service that cannot bind its configured port before side effects", async () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    vi.mocked(existsSync).mockReturnValue(false);
+    vi.mocked(readFileSync).mockImplementation((file) =>
+      file === "/proc/sys/net/ipv4/ip_unprivileged_port_start" ? "1024" : ""
+    );
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      await expect(
+        handleService(["service", "install", "--port", "443"], {
+          entryScript: "/fake/cli.js",
+          runner,
+        })
+      ).rejects.toThrow(
+        /Cannot install a systemd user service on port 443:[\s\S]*ip_unprivileged_port_start=443/
+      );
+      expect(runner).not.toHaveBeenCalled();
+      expect(ensureStateDir).not.toHaveBeenCalled();
+      expect(ensureCerts).not.toHaveBeenCalled();
+      expect(writeFileSync).not.toHaveBeenCalled();
+    } finally {
+      restoreExecPath();
+    }
+  });
+
+  it("rejects a sudo install of a user service before writing files", async () => {
+    const home = setLinuxUser();
+    setGetuid(0);
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      await expect(
+        handleService(["service", "install"], { entryScript: "/fake/cli.js", runner })
+      ).rejects.toThrow(
+        `Node is installed under ${home}, which uses a systemd user service. Re-run \`portless service install\` without sudo.`
+      );
+      expect(runner).not.toHaveBeenCalled();
+      expect(writeFileSync).not.toHaveBeenCalled();
+      expect(mkdirSync).not.toHaveBeenCalled();
+      expect(ensureStateDir).not.toHaveBeenCalled();
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("warns about an existing user unit when installing a system unit", async () => {
+    const home = setLinuxUser();
+    setGetuid(0);
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await handleService(["service", "install", "--port", "8443"], {
+        entryScript: "/fake/cli.js",
+        runner,
+      });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(userUnit));
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("`portless service uninstall` (without sudo)")
+      );
+      expect(runner).toHaveBeenCalledWith("systemctl", ["restart", "portless.service"]);
+    } finally {
+      warnSpy.mockRestore();
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("stops an existing proxy before restarting the Linux service", async () => {
     setPlatform("linux");
     setGetuid(0);
@@ -1204,12 +1983,188 @@ describe("handleService", () => {
     expect(writeFileSync).not.toHaveBeenCalled();
   });
 
+  it("finds a user unit for status when Node is installed system-wide", async () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const installedSpec = buildServiceSpec({
+      platform: "linux",
+      nodePath: path.posix.join(home, ".nvm/bin/node"),
+      entryScript: "/fake/cli.js",
+      userHome: home,
+      installConfig: { proxyPort: 8443, useHttps: false },
+    });
+    if (installedSpec.platform !== "linux") throw new Error("Expected Linux service spec");
+    vi.mocked(existsSync).mockImplementation((file) => file === installedSpec.unitPath);
+    vi.mocked(readFileSync).mockImplementation((file) =>
+      file === installedSpec.unitPath ? installedSpec.unit : ""
+    );
+    vi.mocked(isProxyRunning).mockResolvedValue(false);
+    const runner = vi.fn(() => ({ status: 0, stdout: "active\n", stderr: "" }));
+
+    try {
+      await handleService(["service", "status"], { entryScript: "/fake/cli.js", runner });
+      expect(runner).toHaveBeenCalledWith("systemctl", [
+        "--user",
+        "is-enabled",
+        "portless.service",
+      ]);
+      expect(runner).toHaveBeenCalledWith("systemctl", ["--user", "is-active", "portless.service"]);
+      const output = logSpy.mock.calls.map((call: unknown[]) => call.join(" ")).join("\n");
+      expect(output).toContain("Proxy on 8443");
+      expect(output).toContain("HTTPS: no");
+      expect(output).toContain(`Service entry: ${installedSpec.unitPath}`);
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    { nodePath: "/usr/bin/node", expectedScope: "system" },
+    { nodePath: "/home/alice/.nvm/bin/node", expectedScope: "user" },
+  ])(
+    "prefers the $expectedScope unit when both Linux units exist",
+    async ({ nodePath, expectedScope }) => {
+      const home = setLinuxUser();
+      const restoreExecPath = setExecPath(nodePath);
+      const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+      const systemUnit = "/etc/systemd/system/portless.service";
+      vi.mocked(existsSync).mockImplementation((file) => file === userUnit || file === systemUnit);
+      vi.mocked(readFileSync).mockReturnValue("");
+      vi.mocked(isProxyRunning).mockResolvedValue(false);
+      const runner = vi.fn(() => ({ status: 0, stdout: "active\n", stderr: "" }));
+
+      try {
+        await handleService(["service", "status"], { entryScript: "/fake/cli.js", runner });
+        const output = logSpy.mock.calls.map((call: unknown[]) => call.join(" ")).join("\n");
+        expect(output).toContain(
+          `Service entry: ${expectedScope === "user" ? userUnit : systemUnit}`
+        );
+        expect(runner).toHaveBeenCalledWith(
+          "systemctl",
+          expectedScope === "user"
+            ? ["--user", "is-active", "portless.service"]
+            : ["is-active", "portless.service"]
+        );
+      } finally {
+        restoreExecPath();
+        vi.unstubAllEnvs();
+      }
+    }
+  );
+
+  it("uninstalls an existing user unit when Node is installed system-wide", async () => {
+    const home = setLinuxUser();
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    const runner = vi.fn((_: string, _args: string[]) => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      await handleService(["service", "uninstall"], { entryScript: "/fake/cli.js", runner });
+      expect(runner.mock.calls.some(([command]) => command === "sudo")).toBe(false);
+      expect(runner).toHaveBeenCalledWith("systemctl", [
+        "--user",
+        "disable",
+        "--now",
+        "portless.service",
+      ]);
+      expect(runner).toHaveBeenCalledWith("systemctl", ["--user", "daemon-reload"]);
+      expect(rmSync).toHaveBeenCalledWith(userUnit, { force: true });
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it.each([
+    { uid: 1000, nodePath: "/home/alice/.nvm/bin/node", remaining: "system" },
+    { uid: 0, nodePath: "/usr/bin/node", remaining: "user" },
+  ])("warns how to remove the remaining $remaining unit", async ({ uid, nodePath, remaining }) => {
+    const home = setLinuxUser();
+    setGetuid(uid);
+    const restoreExecPath = setExecPath(nodePath);
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    const systemUnit = "/etc/systemd/system/portless.service";
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit || file === systemUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await handleService(["service", "uninstall"], { entryScript: "/fake/cli.js", runner });
+      const expected =
+        remaining === "system"
+          ? "`sudo portless service uninstall`"
+          : "`portless service uninstall` (without sudo)";
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(expected));
+      expect(rmSync).toHaveBeenCalledWith(remaining === "system" ? userUnit : systemUnit, {
+        force: true,
+      });
+    } finally {
+      warnSpy.mockRestore();
+      restoreExecPath();
+    }
+  });
+
+  it("removes the system unit and keeps the home Node user unit for a sudo uninstall", async () => {
+    const home = setLinuxUser();
+    setGetuid(0);
+    const restoreExecPath = setExecPath(path.posix.join(home, ".nvm/bin/node"));
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    const systemUnit = "/etc/systemd/system/portless.service";
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit || file === systemUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+
+    try {
+      await handleService(["service", "uninstall"], { entryScript: "/fake/cli.js", runner });
+      expect(runner.mock.calls).toEqual([
+        ["systemctl", ["disable", "--now", "portless.service"]],
+        ["systemctl", ["daemon-reload"]],
+      ]);
+      expect(rmSync).toHaveBeenCalledTimes(1);
+      expect(rmSync).toHaveBeenCalledWith(systemUnit, { force: true });
+      expect(rmSync).not.toHaveBeenCalledWith(userUnit, { force: true });
+      expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining(userUnit));
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining("`portless service uninstall` (without sudo)")
+      );
+    } finally {
+      warnSpy.mockRestore();
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("rejects a sudo uninstall of an installed user unit", async () => {
+    const home = setLinuxUser();
+    setGetuid(0);
+    const restoreExecPath = setExecPath("/usr/bin/node");
+    const userUnit = path.posix.join(home, ".config/systemd/user/portless.service");
+    vi.mocked(existsSync).mockImplementation((file) => file === userUnit);
+    const runner = vi.fn(() => ({ status: 0, stdout: "", stderr: "" }));
+
+    try {
+      await expect(
+        handleService(["service", "uninstall"], { entryScript: "/fake/cli.js", runner })
+      ).rejects.toThrow(
+        "The installed service is a systemd user service. Re-run `portless service uninstall` without sudo."
+      );
+      expect(runner).not.toHaveBeenCalled();
+      expect(rmSync).not.toHaveBeenCalled();
+    } finally {
+      restoreExecPath();
+      vi.unstubAllEnvs();
+    }
+  });
+
   it("prints installed service config from a Linux unit", async () => {
     setPlatform("linux");
     setGetuid(0);
+    mockTrustedUnixPaths({}, ["/usr/bin/node"]);
     const installedSpec = buildServiceSpec({
       platform: "linux",
-      nodePath: process.execPath,
+      nodePath: "/usr/bin/node",
       entryScript: "/fake/cli.js",
       userHome: "/home/alice",
       installConfig: {
