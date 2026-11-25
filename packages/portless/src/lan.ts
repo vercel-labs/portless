@@ -91,6 +91,7 @@ function uuidFrom(seed: string): string {
 
 export function buildMobileConfig(ca: DeviceCA): string {
   const name = escapeHtml(ca.name);
+  const id = createHash("sha256").update(ca.fingerprint).digest("hex").slice(0, 12);
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -102,14 +103,14 @@ export function buildMobileConfig(ca: DeviceCA): string {
       <key>PayloadContent</key><data>${ca.der.toString("base64")}</data>
       <key>PayloadDescription</key><string>Trusts HTTPS from the portless proxy on a developer's machine.</string>
       <key>PayloadDisplayName</key><string>${name}</string>
-      <key>PayloadIdentifier</key><string>sh.portless.ca.certificate</string>
+      <key>PayloadIdentifier</key><string>sh.portless.ca.${id}.certificate</string>
       <key>PayloadType</key><string>com.apple.security.root</string>
       <key>PayloadUUID</key><string>${uuidFrom(`certificate:${ca.fingerprint}`)}</string>
       <key>PayloadVersion</key><integer>1</integer>
     </dict>
   </array>
   <key>PayloadDisplayName</key><string>${name}</string>
-  <key>PayloadIdentifier</key><string>sh.portless.ca</string>
+  <key>PayloadIdentifier</key><string>sh.portless.ca.${id}</string>
   <key>PayloadType</key><string>Configuration</string>
   <key>PayloadUUID</key><string>${uuidFrom(`profile:${ca.fingerprint}`)}</string>
   <key>PayloadVersion</key><integer>1</integer>
