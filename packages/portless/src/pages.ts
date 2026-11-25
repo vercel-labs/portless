@@ -1,18 +1,20 @@
 import { GEIST_SANS_400, GEIST_SANS_500, GEIST_MONO_400, GEIST_PIXEL } from "./fonts.js";
+import type { ProxyPageContext, RouteInfo } from "./types.js";
+import { escapeHtml, formatUptime, formatUrl } from "./utils.js";
 
-export const ARROW_SVG =
+const ARROW_SVG =
   '<svg width="16" height="16" viewBox="0 0 16 16" fill="none"><path d="M6.5 3.5L11 8l-4.5 4.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>';
 
 /** Route count above which the 404 page offers a hostname filter. */
-export const FILTER_THRESHOLD = 5;
+const FILTER_THRESHOLD = 5;
 
 // Revealed by the filter script; stay hidden when scripting is unavailable.
-export const FILTER_CONTROLS =
+const FILTER_CONTROLS =
   '<div class="filter" hidden><input type="search" placeholder="Filter apps" autocomplete="off" aria-label="Filter apps by hostname"><button type="button" aria-pressed="false">Newest first</button></div>';
-export const FILTER_NO_MATCH = '<p class="empty" role="status" hidden>No apps match.</p>';
+const FILTER_NO_MATCH = '<p class="empty" role="status" hidden>No apps match.</p>';
 
 /** Static inline script for the hostname filter. Interpolates no request or route data. */
-export const FILTER_SCRIPT = `(function () {
+const FILTER_SCRIPT = `(function () {
   var bar = document.querySelector(".filter");
   var input = bar.querySelector("input");
   var list = document.querySelector(".card");
@@ -312,8 +314,119 @@ const PAGE_STYLES = `
   }
 `;
 
-export function renderPage(status: number, statusText: string, body: string): string {
-  return renderBrandedPage(`${status} - ${statusText}`, String(status), statusText, body);
+function appendRequestPath(baseUrl: string, path: string): string {
+  return path.startsWith("/") && path !== "/" ? `${baseUrl}${path}` : baseUrl;
+}
+
+function renderRoutesSection(
+  routes: readonly RouteInfo[],
+  options: { proxyPort: number; tls: boolean; path?: string }
+): string {
+  const { proxyPort, tls, path } = options;
+  if (routes.length === 0) return '<p class="empty">No apps running.</p>';
+
+  const now = Date.now();
+  const filterable = routes.length > FILTER_THRESHOLD;
+  const items = routes
+    .map((route) => {
+      const baseUrl = formatUrl(route.hostname, proxyPort, tls);
+      const url = escapeHtml(path === undefined ? baseUrl : appendRequestPath(baseUrl, path));
+      const age = formatUptime(route.registeredAt, now);
+      const label = route.pid === 0 ? "alias" : age && `up ${age}`;
+      const uptimeHtml = label ? `<span class="uptime">${label}</span>` : "";
+      return `<li><a href="${url}" class="card-link"><span class="name">${escapeHtml(route.hostname)}</span><span class="meta">${uptimeHtml}<code class="port">${route.upstream?.tls ? "https" : "http"}://127.0.0.1:${escapeHtml(String(route.port))}</code><span class="arrow">${ARROW_SVG}</span></span></a></li>`;
+    })
+    .join("");
+  return `<div class="section"><p class="label">Active apps</p>${filterable ? FILTER_CONTROLS : ""}<ul class="card">${items}</ul>${filterable ? FILTER_NO_MATCH : ""}</div>${filterable ? `<script>${FILTER_SCRIPT}</script>` : ""}`;
+}
+
+function stripTldSuffix(hostname: string, tlds: readonly string[]): string {
+  const normalizedHost = hostname.toLowerCase();
+  const matchedSuffix = tlds
+    .map((tld) => `.${tld}`)
+    .filter(
+      (suffix) => suffix.length < hostname.length && normalizedHost.endsWith(suffix.toLowerCase())
+    )
+    .sort((a, b) => b.length - a.length)[0];
+  return matchedSuffix ? hostname.slice(0, -matchedSuffix.length) : hostname;
+}
+
+function renderTerminal(command: string): string {
+  return `<div class="section"><div class="terminal"><span class="prompt">$ </span>${escapeHtml(command)}</div></div>`;
+}
+
+const ERROR_STATUS_TEXT = {
+  404: "Not Found",
+  421: "Misdirected Request",
+  502: "Bad Gateway",
+  503: "Service Unavailable",
+  504: "Gateway Timeout",
+  508: "Loop Detected",
+};
+
+/** Render a built-in HTML page for the given proxy page context. */
+export function renderPage(context: ProxyPageContext): string {
+  const { status, host, path, routes, proxyPort, tls, tlds, message, hops } = context;
+  const primaryTld = tlds[0] ?? "localhost";
+  switch (status) {
+    case 200: {
+      const protocolLabel = tls ? "HTTPS" : "HTTP";
+      const tldDisplay = (tlds.length > 0 ? tlds : ["localhost"]).map((t) => `.${t}`).join(", ");
+      const routeCountText =
+        routes.length === 0
+          ? "No active routes"
+          : routes.length === 1
+            ? "1 active route"
+            : `${routes.length} active routes`;
+      const terminal = routes.length === 0 ? renderTerminal("portless myapp your-command") : "";
+      return renderBrandedPage(
+        "portless",
+        "portless",
+        "Dashboard",
+        `<div class="content"><p class="desc">${protocolLabel} on port ${proxyPort} &middot; TLD: ${escapeHtml(tldDisplay)} &middot; ${routeCountText}</p>${renderRoutesSection(routes, { proxyPort, tls })}${terminal}</div>`
+      );
+    }
+    case 404:
+      return renderErrorPage(
+        status,
+        `<p class="desc">No app registered for <strong>${escapeHtml(host)}</strong></p>${renderRoutesSection(routes, { proxyPort, tls, path })}${renderTerminal(`portless ${stripTldSuffix(host, tlds)} your-command`)}`
+      );
+    case 508:
+      return renderErrorPage(
+        status,
+        `<p class="desc">This request has passed through portless ${hops ?? 0} times. This usually means a dev server (Vite, webpack, etc.) is proxying requests back through portless without rewriting the Host header.</p><div class="section"><p class="label">Fix: add changeOrigin to your proxy config</p><pre class="terminal">proxy: {
+  "/api": {
+    target: "${tls ? "https" : "http"}://&lt;backend&gt;.${escapeHtml(primaryTld)}${tls ? "" : ":&lt;port&gt;"}",
+    changeOrigin: true,
+  },
+}</pre></div>`
+      );
+    case 421:
+      return renderMessagePage(
+        status,
+        message ?? `DNS sent ${host} to this computer. This is not the real site.`
+      );
+    case 502:
+      return renderMessagePage(status, message ?? "The target app may not be running.");
+    case 503:
+      return renderMessagePage(status, message ?? "The target app is temporarily unavailable.");
+    case 504:
+      return renderMessagePage(status, message ?? "The target app took too long to respond.");
+  }
+}
+
+function renderMessagePage(status: 421 | 502 | 503 | 504, message: string): string {
+  return renderErrorPage(status, `<p class="desc">${escapeHtml(message)}</p>`);
+}
+
+function renderErrorPage(status: keyof typeof ERROR_STATUS_TEXT, body: string): string {
+  const statusText = ERROR_STATUS_TEXT[status];
+  return renderBrandedPage(
+    `${status} - ${statusText}`,
+    String(status),
+    statusText,
+    `<div class="content">${body}</div>`
+  );
 }
 
 /** Render a branded page. Escape text arguments before passing them. */
