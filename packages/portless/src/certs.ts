@@ -865,8 +865,10 @@ function isDirectory(dirPath: string): boolean {
 
 function linuxNSSDatabase(): string | undefined {
   const home = resolveUserHome();
+  const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
   const candidates = [
     path.join(home, ".pki", "nssdb"),
+    ...(xdgDataHome ? [path.join(xdgDataHome, "pki", "nssdb")] : []),
     path.join(home, ".local", "share", "pki", "nssdb"),
   ];
   return candidates.find(isDirectory);
@@ -970,14 +972,26 @@ function installLinuxNSSStore(
   return inspectLinuxNSSStore(caCertPath, envPath);
 }
 
+const PORTLESS_NSS_NICKNAME = new RegExp(`^${CA_COMMON_NAME} [0-9A-Fa-f]{64}$`);
+
 function removeLinuxNSSStore(caCertPath: string): { removed: boolean; error?: string } {
   const database = linuxNSSDatabase();
   if (!database) return { removed: true };
+  const certutilPath = resolveExecutable("certutil");
+  if (!certutilPath) return { removed: true };
   try {
-    const nickname = nssNickname(caCertPath);
-    const listing = nssCertutil(database, ["-L"]);
-    if (nssTrustFlagsForNickname(listing, nickname) !== undefined) {
-      nssCertutil(database, ["-D", "-n", nickname]);
+    const currentNickname = nssNickname(caCertPath);
+    const listing = nssCertutil(database, ["-L"], undefined, certutilPath);
+    const nicknames = new Set<string>();
+    for (const line of listing.split(/\r?\n/)) {
+      const match = NSS_TRUST_LINE.exec(line.trim());
+      const name = match?.[1].trim();
+      if (name && (name === currentNickname || PORTLESS_NSS_NICKNAME.test(name))) {
+        nicknames.add(name);
+      }
+    }
+    for (const nickname of nicknames) {
+      nssCertutil(database, ["-D", "-n", nickname], undefined, certutilPath);
     }
     return { removed: true };
   } catch (error: unknown) {
@@ -1405,7 +1419,7 @@ export function inspectTrust(
           ...(windows.error ? { error: windows.error } : {}),
           hint:
             windows.state === "unavailable"
-              ? "certutil is required to trust the CA in the Windows store from WSL. Install certutil, then run: portless trust"
+              ? "Ensure wslpath and Windows certutil.exe are available from WSL, then run: portless trust"
               : "Run: portless trust",
         };
       }
@@ -1597,7 +1611,7 @@ export function ensureTrust(
         installed = true;
       } else {
         stores = { ...stores, browser: "untrusted" };
-        hint = `Chrome/Chromium uses its own NSS trust store and the CA could not be installed there (${result.error ?? "certutil failed"}). Install certutil (libnss3-tools on Debian/Ubuntu, nss-tools on Fedora/RHEL, nss on Arch, mozilla-nss-tools on openSUSE) and run: portless trust`;
+        hint = `Chrome/Chromium NSS trust update failed (${result.error ?? "certutil failed"}). Fix the NSS database error and run: portless trust`;
       }
     } else if (browser.state === "unavailable") {
       stores = { ...stores, browser: "unavailable" };
@@ -1607,13 +1621,7 @@ export function ensureTrust(
     }
   }
 
-  const allTrusted =
-    stores.system === "trusted" &&
-    (stores.browser === "trusted" || stores.browser === "not-applicable");
-  if (!installed && allTrusted) {
-    return { state: "trusted", stores, ...(hint ? { hint } : {}) };
-  }
-  return { state: "installed", stores, ...(hint ? { hint } : {}) };
+  return { state: installed ? "installed" : "trusted", stores, ...(hint ? { hint } : {}) };
 }
 
 /** Whether a previous CA removal still needs the distro trust cache refresh. */

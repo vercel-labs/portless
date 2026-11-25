@@ -912,9 +912,12 @@ describe("Linux CA trust", () => {
       expect(inspected.stores).toEqual({ system: "trusted", browser: "unavailable" });
 
       const result = ensureTrust(tmpDir, { linux });
-      expect(result.state).toBe("installed");
+      expect(result.state).toBe("trusted");
       expect(result.stores).toEqual({ system: "trusted", browser: "unavailable" });
       expect(result.hint).toMatch(/certutil|libnss3-tools/);
+
+      vi.stubEnv("PATH", "");
+      expect(untrustCA(tmpDir)).toEqual({ removed: true });
     }
   );
 

@@ -2609,6 +2609,12 @@ async function handleTrust(args: string[] = []): Promise<void> {
   const result = ensureTrust(dir);
   if (result.state === "trusted") {
     console.error(colors.green("Local CA is already in the system trust store."));
+    if (
+      (result.stores.browser === "unavailable" || result.stores.browser === "untrusted") &&
+      result.hint
+    ) {
+      console.error(colors.yellow(result.hint));
+    }
     return;
   }
 
@@ -2683,7 +2689,8 @@ async function handleTrust(args: string[] = []): Promise<void> {
 
 /** Trust the CA before an auto-started proxy serves TLS, unless the OS store already trusts it. */
 async function ensureStartupTrust(stateDir: string): Promise<void> {
-  if (inspectTrust(stateDir).state !== "trusted") {
+  const trust = inspectTrust(stateDir);
+  if (trust.stores.system === "untrusted" || trust.stores.browser === "untrusted") {
     await handleTrust();
   }
 }
@@ -4488,7 +4495,6 @@ async function handleProxy(args: string[]): Promise<void> {
         const trust = inspectTrust(stateDir);
         if (trust.state !== "trusted") {
           if (trust.stores.system !== "trusted") {
-            // Installing the CA elevates, which this mode never does.
             console.warn(colors.yellow("The portless CA is not in the system trust store."));
             console.warn(
               colors.yellow(
