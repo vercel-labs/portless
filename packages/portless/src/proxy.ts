@@ -4,12 +4,7 @@ import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions, RouteInfo } from "./types.js";
 import { UpstreamPool } from "./upstream-pool.js";
-import {
-  escapeHtml,
-  formatUptime,
-  formatUrl,
-  parsePort,
-} from "./utils.js";
+import { escapeHtml, formatUptime, formatUrl, parsePort } from "./utils.js";
 import {
   ARROW_SVG,
   FILTER_CONTROLS,

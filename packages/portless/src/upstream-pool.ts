@@ -68,7 +68,13 @@ export class UpstreamPool {
     };
     this.keepAliveAgent.createConnection = (options, callback) => {
       const { upstreamRoute: route, upstreamDial: dialRef } = options as UpstreamOptions;
-      dialRef.cancel = this.dial(this.getBackend(route), route, false, callback!, dialRef.onDialError);
+      dialRef.cancel = this.dial(
+        this.getBackend(route),
+        route,
+        false,
+        callback!,
+        dialRef.onDialError
+      );
       return undefined;
     };
     this.keepAliveAgent.on("free", (_socket, options) => {
@@ -78,7 +84,10 @@ export class UpstreamPool {
   }
 
   private getBackend(route: RouteInfo): BackendEntry {
-    const key = this.keepAliveAgent.getName({ port: route.port, upstreamRoute: route } as UpstreamOptions);
+    const key = this.keepAliveAgent.getName({
+      port: route.port,
+      upstreamRoute: route,
+    } as UpstreamOptions);
     let entry = this.backends.get(key);
     if (!entry) {
       entry = { key, activeRequests: 0, dialing: 0, longLived: 0, waiting: [] };
@@ -152,7 +161,9 @@ export class UpstreamPool {
         return;
       }
       if (error || !socket) {
-        finish(error ?? Object.assign(new Error("Upstream connection failed"), { code: "ECONNRESET" }));
+        finish(
+          error ?? Object.assign(new Error("Upstream connection failed"), { code: "ECONNRESET" })
+        );
         return;
       }
       if (!route.upstream?.tls) {
@@ -279,7 +290,6 @@ export class UpstreamPool {
       proxyReq.once("response", (proxyRes) => {
         hasResponse = true;
         if (isLongLivedResponse(proxyRes, options.method)) promoteToLongLived();
-        proxyRes.once("end", () => process.nextTick(release));
         proxyRes.once("close", release);
       });
       proxyReq.once("error", release);
@@ -307,7 +317,7 @@ export class UpstreamPool {
 
   private drain(entry: BackendEntry): void {
     if (this.closing) return;
-    for (let i = 0; i < entry.waiting.length;) {
+    for (let i = 0; i < entry.waiting.length; ) {
       const item = entry.waiting[i];
       if (!this.canDispatch(entry, item.freshConnection)) {
         i++;

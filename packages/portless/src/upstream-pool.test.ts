@@ -98,9 +98,7 @@ describe("UpstreamPool", () => {
     const backendPort = await listen(backend, 128);
     const proxyPort = await listen(proxy(backendPort, (error) => errors.push(error)));
 
-    const results = await Promise.all(
-      Array.from({ length: 300 }, () => response(get(proxyPort)))
-    );
+    const results = await Promise.all(Array.from({ length: 300 }, () => response(get(proxyPort))));
 
     expect(results).toEqual(Array(300).fill({ status: 200, body: "ok" }));
     expect(errors).toEqual([]);
@@ -126,7 +124,8 @@ describe("UpstreamPool", () => {
           new Promise<void>((resolve, reject) => {
             req.once("error", reject);
             req.once("response", (res) => {
-              if (res.statusCode !== 200) return reject(new Error(`Unexpected status ${res.statusCode}`));
+              if (res.statusCode !== 200)
+                return reject(new Error(`Unexpected status ${res.statusCode}`));
               res.setEncoding("utf8");
               let body = "";
               res.on("data", (chunk: string) => {
