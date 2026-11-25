@@ -5196,6 +5196,308 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("run output and multiple names", () => {
+    let tmpDir: string;
+    let proxy: Awaited<ReturnType<typeof startMockProxy>>;
+
+    beforeEach(async () => {
+      tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-run-features-"));
+      proxy = await startMockProxy(tmpDir);
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(proxy.port));
+    });
+
+    afterEach(async () => {
+      await stopChild(proxy.child);
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    });
+
+    const env = () => ({
+      PORTLESS_STATE_DIR: tmpDir,
+      PORTLESS_HTTPS: "0",
+      PORTLESS_PREFIX: "",
+      PORTLESS: undefined,
+      PORTLESS_QUIET: undefined,
+    });
+
+    it.each([
+      { label: "default", args: ["run", "--name", "app"], quiet: false, quietEnv: undefined },
+      {
+        label: "run flag",
+        args: ["run", "--name", "app", "--quiet"],
+        quiet: true,
+        quietEnv: undefined,
+      },
+      { label: "named flag", args: ["app", "--quiet"], quiet: true, quietEnv: undefined },
+      { label: "leading flag", args: ["--quiet", "app"], quiet: true, quietEnv: undefined },
+      { label: "environment", args: ["run", "--name", "app"], quiet: true, quietEnv: "1" },
+    ])("controls startup output with $label", ({ args, quiet, quietEnv }) => {
+      const result = run([...args, process.execPath, "-e", "console.log('app output')"], {
+        cwd: tmpDir,
+        env: { ...env(), PORTLESS_QUIET: quietEnv },
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("app output");
+      expect(result.stderr).toContain(`-> http://app.localhost:${proxy.port}`);
+      for (const text of ["portless", "Proxy is running", "Using port", "Running: PORT="]) {
+        if (quiet) expect(result.stderr).not.toContain(text);
+        else expect(result.stderr).toContain(text);
+      }
+    });
+
+    it("keeps recovery warnings and alias conflict errors in quiet mode", () => {
+      fs.writeFileSync(path.join(tmpDir, "routes.json"), "{");
+      const recovered = run(
+        ["run", "--quiet", "--name", "app", process.execPath, "-e", "console.log('app output')"],
+        {
+          cwd: tmpDir,
+          env: env(),
+        }
+      );
+      expect(recovered.status, recovered.stderr).toBe(0);
+      expect(recovered.stderr).toContain("Moved corrupted routes file");
+      expect(recovered.stderr).toContain(`-> http://app.localhost:${proxy.port}`);
+      expect(recovered.stdout).toContain("app output");
+
+      fs.writeFileSync(
+        path.join(tmpDir, "routes.json"),
+        JSON.stringify([{ hostname: "app.localhost", port: 4321, pid: 0 }])
+      );
+      const conflict = run(
+        ["app", "--quiet", process.execPath, "-e", "console.log('unexpected')"],
+        {
+          cwd: tmpDir,
+          env: env(),
+        }
+      );
+      expect(conflict.status).toBe(1);
+      expect(conflict.stderr).toContain("static alias");
+      expect(conflict.stdout).not.toContain("unexpected");
+    });
+
+    it("registers distinct repeated names on one port through the worktree template", () => {
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({
+          worktree: { hostnameTemplate: "{worktree}-{name}" },
+        })
+      );
+      const capturePath = path.join(tmpDir, "capture.json");
+      const scriptPath = path.join(tmpDir, "capture.cjs");
+      fs.writeFileSync(
+        scriptPath,
+        [
+          'const fs = require("node:fs");',
+          `const routes = JSON.parse(fs.readFileSync(${JSON.stringify(path.join(tmpDir, "routes.json"))}, "utf8"));`,
+          `fs.writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify({ url: process.env.PORTLESS_URL, routes }));`,
+        ].join("\n")
+      );
+      const result = run(
+        [
+          "run",
+          "--name",
+          "brand-a",
+          "--name",
+          "brand-b",
+          "--name",
+          "brand-a",
+          process.execPath,
+          scriptPath,
+        ],
+        {
+          cwd: tmpDir,
+          env: { ...env(), PORTLESS_PREFIX: "feature" },
+        }
+      );
+      expect(result.status, result.stderr).toBe(0);
+      const capture = JSON.parse(fs.readFileSync(capturePath, "utf8")) as {
+        url: string;
+        routes: Array<{ hostname: string; port: number }>;
+      };
+      expect(capture.url).toBe(`http://feature-brand-a.localhost:${proxy.port}`);
+      expect(capture.routes.map((route) => route.hostname).sort()).toEqual([
+        "feature-brand-a.localhost",
+        "feature-brand-b.localhost",
+      ]);
+      expect(new Set(capture.routes.map((route) => route.port)).size).toBe(1);
+      expect(result.stderr).toContain(`-> http://feature-brand-a.localhost:${proxy.port}`);
+      expect(result.stderr).toContain(`also -> http://feature-brand-b.localhost:${proxy.port}`);
+    });
+  });
+
+  describe("repeated --name validation", () => {
+    it("rejects colliding hostnames before starting the proxy or app", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-name-collision-"));
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "portless.json"),
+          JSON.stringify({
+            worktree: { hostnameTemplate: "{worktree}-app" },
+          })
+        );
+        const result = run(
+          [
+            "run",
+            "--name",
+            "brand-a",
+            "--name",
+            "brand-b",
+            process.execPath,
+            "-e",
+            "console.log('unexpected')",
+          ],
+          {
+            cwd: tmpDir,
+            env: {
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_PREFIX: "feature",
+              PORTLESS_HTTPS: "0",
+              PORTLESS: undefined,
+            },
+          }
+        );
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('both resolve to "feature-app.localhost"');
+        expect(result.stdout).not.toContain("unexpected");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("strips every name in bypass mode", () => {
+      const result = run(
+        [
+          "run",
+          "--name",
+          "brand-a",
+          "--name",
+          "brand-b",
+          process.execPath,
+          "-e",
+          "console.log('app output')",
+        ],
+        {
+          env: { PORTLESS: "0" },
+        }
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout.trim()).toBe("app output");
+    });
+
+    it.each([{ tail: ["--name"] }, { tail: ["--name", "--quiet"] }])(
+      "rejects a repeated name without a value: $tail",
+      ({ tail }) => {
+        const result = run(["run", "--name", "brand-a", ...tail]);
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain("--name requires");
+      }
+    );
+  });
+
+  describe("completion subcommand", () => {
+    it("prints usage without a shell", () => {
+      const result = run(["completion"]);
+      expect(result.status).toBe(0);
+      expect(result.stdout).toContain("portless completion");
+    });
+
+    it.each(["bash", "zsh", "fish"])("generates a %s completion script", (shell) => {
+      const result = run(["completion", shell]);
+      expect(result.status).toBe(0);
+      for (const command of ["run", "get", "mcp", "completion"]) {
+        expect(result.stdout).toMatch(new RegExp(`\\b${command}\\b`));
+      }
+      for (const flag of ["quiet", "no-stdin", "json"]) {
+        expect(result.stdout).toContain(shell === "fish" ? `-l ${flag}` : `--${flag}`);
+      }
+      expect(result.stdout).toContain(
+        shell === "zsh" ? "#compdef portless" : `# ${shell} completion for portless`
+      );
+      const syntax = spawnSync(shell, ["-n"], { input: result.stdout, encoding: "utf8" });
+      if (syntax.error && (syntax.error as NodeJS.ErrnoException).code === "ENOENT") return;
+      expect(syntax.status, syntax.stderr).toBe(0);
+    });
+
+    it("rejects an unknown shell", () => {
+      const result = run(["completion", "pwsh"]);
+      expect(result.status).toBe(2);
+      expect(result.stderr).toContain('Unknown shell "pwsh"');
+    });
+  });
+
+  describe("--no-stdin", () => {
+    it.each([false, true])(
+      "delivers EOF with an open parent stdin in bypass mode %s",
+      async (bypass) => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-no-stdin-"));
+        let proxy: Awaited<ReturnType<typeof startMockProxy>> | undefined;
+        let child: ReturnType<typeof spawn> | undefined;
+        try {
+          if (!bypass) {
+            proxy = await startMockProxy(tmpDir);
+            fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(proxy.port));
+          }
+          child = spawn(
+            process.execPath,
+            [
+              CLI_PATH,
+              "run",
+              "--name",
+              "app",
+              "--no-stdin",
+              process.execPath,
+              "-e",
+              "process.stdin.resume(); process.stdin.on('end', () => console.log('EOF'));",
+            ],
+            {
+              cwd: tmpDir,
+              env: {
+                ...process.env,
+                PORTLESS: bypass ? "0" : undefined,
+                PORTLESS_STATE_DIR: tmpDir,
+                PORTLESS_HTTPS: "0",
+                PORTLESS_PREFIX: "",
+                NO_COLOR: "1",
+                PNPM_SCRIPT_SRC_DIR: undefined,
+                npm_command:
+                  process.env.npm_command === "exec" ? undefined : process.env.npm_command,
+              },
+              stdio: ["pipe", "pipe", "pipe"],
+            }
+          );
+          let stdout = "";
+          let stderr = "";
+          child.stdout?.on("data", (chunk) => {
+            stdout += chunk.toString();
+          });
+          child.stderr?.on("data", (chunk) => {
+            stderr += chunk.toString();
+          });
+          const result = await new Promise<number | null>((resolve, reject) => {
+            const timeout = setTimeout(() => {
+              child?.kill("SIGKILL");
+              reject(new Error("Timed out waiting for EOF"));
+            }, 5000);
+            child!.once("error", (error) => {
+              clearTimeout(timeout);
+              reject(error);
+            });
+            child!.once("close", (code) => {
+              clearTimeout(timeout);
+              resolve(code);
+            });
+          });
+          expect(result, stderr).toBe(0);
+          expect(stdout).toContain("EOF");
+        } finally {
+          if (child && child.exitCode === null && child.signalCode === null) await stopChild(child);
+          if (proxy) await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+  });
+
   describe("get subcommand", () => {
     let tmpDir: string;
 
@@ -5246,6 +5548,30 @@ describe("CLI", { timeout: 15_000 }, () => {
       });
       const noWorktree = run(["get", "backend", "--json", "--no-worktree"], options);
       expect(JSON.parse(noWorktree.stdout).hostname).toBe("backend.localhost");
+    });
+
+    it("includes the port only for an active matching route", () => {
+      const options = { cwd: tmpDir, env: { ...getEnv(), PORTLESS_PREFIX: "" } };
+      const routePath = path.join(tmpDir, "routes.json");
+      fs.writeFileSync(
+        routePath,
+        JSON.stringify([{ hostname: "backend.localhost", port: 4321, pid: process.pid }])
+      );
+      const active = run(["get", "backend", "--json"], options);
+      expect(active.status, active.stderr).toBe(0);
+      expect(JSON.parse(active.stdout)).toEqual({
+        name: "backend",
+        hostname: "backend.localhost",
+        url: expect.stringMatching(/^https?:\/\/backend\.localhost(:\d+)?$/),
+        port: 4321,
+      });
+      fs.writeFileSync(
+        routePath,
+        JSON.stringify([{ hostname: "backend.localhost", port: 4321, pid: 2147483647 }])
+      );
+      const stale = run(["get", "backend", "--json"], options);
+      expect(stale.status, stale.stderr).toBe(0);
+      expect(JSON.parse(stale.stdout)).not.toHaveProperty("port");
     });
 
     it("prints URL for a dotted service name", () => {

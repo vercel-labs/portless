@@ -28,7 +28,7 @@ portless run [--name <name>] [--prefix <label>] [--no-worktree] [cmd] [args...]
 portless <name> [--no-worktree] <cmd> [args...]
 ```
 
-`portless run` infers the project name from config, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Use `--name` to override the inferred name while still applying worktree prefixes. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
+`portless run` infers the project name from config, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Repeat `--name` to serve one dev server on multiple hostnames. Each name gets the worktree prefix or configured `worktree.hostnameTemplate`. The first name sets `PORTLESS_URL` and receives any tunnel. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
 Use `--no-worktree` in bare or `run` mode to skip worktree naming, even when `--prefix` or `PORTLESS_PREFIX` is set. Other launch configuration still applies. `portless <name>` uses the supplied name with no inference or prefixing, with or without `--no-worktree`. Value flags for `portless run` and named apps accept either `--flag value` or `--flag=value`.
 
@@ -36,6 +36,8 @@ Use `--no-worktree` in bare or `run` mode to skip worktree naming, even when `--
 portless run                             # run dev script through proxy
 portless run next dev                    # infer name from project
 portless run --name myapp next dev       # override inferred name
+portless run --name brand-a --name brand-b vite dev
+portless run --no-stdin mix phx.server
 portless myapp next dev                  # explicit name
 portless api pnpm start
 portless docs.myapp next dev
@@ -51,7 +53,7 @@ portless docs.myapp next dev
   <tbody>
     <tr>
       <td>`--name <name>`</td>
-      <td>Override the inferred base name (worktree prefix still applies). Only for `portless run`.</td>
+      <td>Override the inferred base name. Repeat for multiple hostnames. Only for `portless run`.</td>
     </tr>
     <tr>
       <td>`--prefix <label>`</td>
@@ -68,6 +70,14 @@ portless docs.myapp next dev
     <tr>
       <td>`--app-port <number>`</td>
       <td>Use a fixed port for the app instead of auto-assignment. Also configurable via `PORTLESS_APP_PORT` or `portless.json`. A monorepo run refuses `PORTLESS_APP_PORT` when several proxied apps would start; set a per-app `appPort` instead.</td>
+    </tr>
+    <tr>
+      <td>`--quiet`</td>
+      <td>Hide the banner, proxy running status, name, hostname, prefix, assigned port, and `Running:` line. App URLs, warnings, errors, proxy startup output, and monorepo URL tables remain visible. Also configurable with `PORTLESS_QUIET=1`.</td>
+    </tr>
+    <tr>
+      <td>`--no-stdin`</td>
+      <td>Ignore stdin for the spawned app, useful for interactive stdin handlers such as Elixir, Phoenix, or Erlang.</td>
     </tr>
     <tr>
       <td>`--force`</td>
@@ -104,7 +114,7 @@ If a wrapped command self-daemonizes, exiting while its server keeps listening o
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners such as Turborepo and CI scripts fail early with a clear message.
 
-`run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
+`run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `completion`, and `mcp` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
 
 ### Share on Tailscale
 
@@ -167,7 +177,7 @@ Print the URL for a service. Useful for wiring services together in scripts or e
 BACKEND_URL=$(portless get backend)
 ```
 
-Use `portless get <name> --json` to print the input name, hostname, and URL as JSON.
+Use `portless get <name> --json` to print the input name, hostname, and URL as JSON. The output includes `port` when an active route matches the resolved hostname.
 
 Worktree config is read from the current directory, including workspace root defaults, not from the named service's package; `cd` into a package to use its per-app options. Use `--no-worktree` to skip config loading and all worktree naming, including `PORTLESS_PREFIX`. Without it, an invalid config in the current directory or workspace fails instead of printing a guessed URL.
 
@@ -512,6 +522,16 @@ PORTLESS=0 pnpm dev
 ```
 
 Runs the command directly without the proxy. Commands such as `portless get` and `portless list` still run normally.
+
+## Shell completion
+
+`portless completion <bash|zsh|fish>` prints a shell completion script. Add the command for your shell to its startup configuration, or install the fish completion file:
+
+```bash
+source <(portless completion bash)
+eval "$(portless completion zsh)"
+portless completion fish > ~/.config/fish/completions/portless.fish
+```
 
 ## Info
 

@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
-      "markdownBodySha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
+      "mdxSha256": "f9bf3aa0e3f738b5c230ee9556bca1304710e409102c151e3c261aa5934d0581",
+      "markdownBodySha256": "f9bf3aa0e3f738b5c230ee9556bca1304710e409102c151e3c261aa5934d0581",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",
@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "153f9828b2967df338f3c13ce3d20632d848da6b2db5b2976eb84e2ac6f1d895",
-      "markdownBodySha256": "153f9828b2967df338f3c13ce3d20632d848da6b2db5b2976eb84e2ac6f1d895",
+      "mdxSha256": "15873fc1a3b4f681f61d223bce6ee73ba4c334e93b02b4362e3f7bb5a12e9297",
+      "markdownBodySha256": "15873fc1a3b4f681f61d223bce6ee73ba4c334e93b02b4362e3f7bb5a12e9297",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -83,6 +83,7 @@
         [2, "Hosts", "hosts"],
         [2, "MCP server", "mcp-server"],
         [2, "Bypass portless", "bypass-portless"],
+        [2, "Shell completion", "shell-completion"],
         [2, "Info", "info"],
         [2, "Exit codes", "exit-codes"]
       ]
@@ -114,8 +115,8 @@
       "title": "Configuration | portless",
       "markdownTitle": "Configuration",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "310a35e08f35ba77fca44b3bf386610147de7e7958f1b2edb31a27dca1a0f30a",
-      "markdownBodySha256": "310a35e08f35ba77fca44b3bf386610147de7e7958f1b2edb31a27dca1a0f30a",
+      "mdxSha256": "668cd39474e3360d8a32431dbe899014e771e25990d9499251b75daa025059dc",
+      "markdownBodySha256": "668cd39474e3360d8a32431dbe899014e771e25990d9499251b75daa025059dc",
       "ssr": [
         "Bare portless works out of the box.",
         "PORTLESS_SYNC_HOSTS",

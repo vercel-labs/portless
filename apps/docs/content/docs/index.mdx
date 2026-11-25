@@ -34,7 +34,7 @@ portless
 # -> runs "dev" script, https://<project>.localhost
 ```
 
-The app name is inferred from `package.json`, git root, or directory name. Use a `portless.json` to override (e.g. `{ "name": "myapp" }` for `https://myapp.localhost`).
+The app name is inferred from `package.json`, git root, or directory name. Use a `portless.json` to override (e.g. `{ "name": "myapp" }` for `https://myapp.localhost`). `--quiet` or `PORTLESS_QUIET=1` hides startup status lines, including the banner, proxy running status, name, hostname, prefix, assigned port, and `Running:` line. App URLs, warnings, errors, proxy startup output, and monorepo URL tables remain visible. Use `--no-stdin` when the wrapped command has its own stdin handler.
 
 You can also run with an explicit command:
 
@@ -59,7 +59,7 @@ Your scripts stay clean:
 }
 ```
 
-Then run `portless` or `portless run` to go through the proxy.
+Then run `portless` or `portless run` to go through the proxy. Use `portless get <name> --json` when a script needs the name, hostname, and URL. The output includes `port` when an active route matches the resolved hostname. `portless completion <bash|zsh|fish>` prints a shell completion script.
 
 You can also use portless directly in scripts:
 
@@ -97,7 +97,7 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 Put `portless run` in `package.json` to apply these naming rules in each checkout.
 
-Use `--name` to override the inferred base name while keeping the worktree prefix:
+Repeat `--name` to serve one dev server on multiple hostnames. Each name gets the worktree prefix or configured `worktree.hostnameTemplate`, and the first name sets `PORTLESS_URL` and receives any tunnel. Use `--name` to override the inferred base name while keeping the worktree prefix:
 
 ```bash
 portless run --name myapp next dev   # -> https://fix-ui.myapp.localhost

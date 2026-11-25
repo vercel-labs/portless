@@ -91,7 +91,7 @@ Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `wor
 
 ### Worktree hostnames
 
-In a linked worktree, `worktree.prefix` selects the label: `last-segment` (default) uses the last `/` segment of the branch, and `branch` keeps the whole branch, so `team-a/login` becomes `team-a-login`. `portless run --prefix` or `PORTLESS_PREFIX` sets the label directly, overrides `worktree.prefix`, and works outside a worktree; `""` removes the label.
+In a linked worktree, `worktree.prefix` selects the label: `last-segment` (default) uses the last `/` segment of the branch, and `branch` keeps the whole branch, so `team-a/login` becomes `team-a-login`. `portless run --prefix` or `PORTLESS_PREFIX` sets the label directly, overrides `worktree.prefix`, and works outside a worktree; `""` removes the label. Repeat `--name` to serve one dev server on multiple hostnames; each name gets the same worktree prefix or `worktree.hostnameTemplate`, and the first sets `PORTLESS_URL` and receives any tunnel.
 
 When a label exists, portless chooses the hostname layout in this order:
 
@@ -228,6 +228,14 @@ For the worktree label: `--no-worktree` > CLI `--prefix` flag (`portless run`) >
       <td>`PORTLESS_APP_PORT`</td>
       <td>Use a fixed port for the app (skip auto-assignment)</td>
       <td>random 4000 to 4999</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_QUIET`</td>
+      <td>
+        Set to `1` to hide startup status lines, as with `--quiet`. App URLs, warnings, errors,
+        proxy startup output, and monorepo URL tables remain visible.
+      </td>
+      <td>`0`</td>
     </tr>
     <tr>
       <td>`PORTLESS_PREFIX`</td>

@@ -20,7 +20,8 @@ const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 async function call(profiles: string[], method: string, params?: unknown) {
   const server = createServer(profiles);
   const res = await server.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }));
-  return res as {
+  expect(res).not.toBeNull();
+  return JSON.parse(res!) as {
     result: {
       tools: typeof TOOLS;
       content: { text: string }[];
@@ -199,8 +200,10 @@ describe("tools/call validation", () => {
     expect(unknown.error?.code).toBe(-32602);
 
     const malformed = await createServer(["core"]).handleLine("not json");
-    expect(malformed?.id).toBeNull();
-    expect((malformed?.error as { code: number } | undefined)?.code).toBe(-32700);
+    expect(malformed).not.toBeNull();
+    const parsed = JSON.parse(malformed!);
+    expect(parsed.id).toBeNull();
+    expect(parsed.error.code).toBe(-32700);
   });
 
   it("returns an error result when the child cannot spawn", async () => {
@@ -242,6 +245,58 @@ describe("initialize and tools/list", () => {
   });
 });
 
+describe("JSON-RPC batches", () => {
+  const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  const notification = { jsonrpc: "2.0", method: "notifications/initialized" };
+
+  it("answers requests in order", async () => {
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([ping, list]));
+    expect(reply).not.toBeNull();
+    const responses = JSON.parse(reply!);
+    expect(responses.map((response: { id: number }) => response.id)).toEqual([1, 2]);
+    expect(responses[0].result).toEqual({});
+    expect(responses[1].result.tools.map((tool: ToolDef) => tool.name)).toContain("get");
+  });
+
+  it("wraps a single response in an array", async () => {
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([ping]));
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+  });
+
+  it("omits notifications from responses", async () => {
+    const reply = await createServer(["core"]).handleLine(
+      JSON.stringify([notification, ping, notification])
+    );
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+  });
+
+  it("returns null for a notification-only batch", async () => {
+    expect(await createServer(["core"]).handleLine(JSON.stringify([notification]))).toBeNull();
+  });
+
+  it("rejects an empty batch with one error object", async () => {
+    const reply = await createServer(["core"]).handleLine("[]");
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid Request" },
+    });
+  });
+
+  it("reports invalid entries and answers following requests", async () => {
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([null, ping]));
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual([
+      { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } },
+      { jsonrpc: "2.0", id: 1, result: {} },
+    ]);
+  });
+});
+
 describe("toToolResult", () => {
   it("appends stderr, flags non-zero exit, and fills empty output", () => {
     const ok = toToolResult({ exitCode: 0, stdout: "hi\n", stderr: "" });
@@ -264,6 +319,7 @@ const OMITTED_COMMANDS: Record<string, string> = {
   portless: "zero-arg and named mode run foreground dev servers",
   "portless run": "runs a foreground dev server",
   "portless compose up": "runs Docker Compose, often in the foreground",
+  "portless completion": "generates shell setup scripts",
   "portless mcp": "the MCP server itself",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",
@@ -350,6 +406,43 @@ describe("CLI coverage", () => {
 });
 
 describe("portless mcp end to end", () => {
+  it("preserves batch and single response framing over stdio", () => {
+    const lines = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } },
+      [
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        { jsonrpc: "2.0", id: 3, method: "tools/list" },
+      ],
+      { jsonrpc: "2.0", id: 4, method: "ping" },
+    ];
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PORTLESS: "0",
+      NO_COLOR: "1",
+    };
+    delete env.PNPM_SCRIPT_SRC_DIR;
+    if (env.npm_command === "exec") delete env.npm_command;
+    const out = spawnSync(process.execPath, [CLI_PATH, "mcp"], {
+      input: lines.map((line) => JSON.stringify(line)).join("\n") + "\n",
+      encoding: "utf-8",
+      timeout: 10_000,
+      env,
+    });
+    expect(out.status).toBe(0);
+    const responses = out.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(responses).toHaveLength(3);
+    expect(responses[0].id).toBe(1);
+    expect(responses[0].result.protocolVersion).toBe("2025-03-26");
+    expect(responses[1]).toHaveLength(2);
+    expect(responses[1][0]).toEqual({ jsonrpc: "2.0", id: 2, result: {} });
+    expect(responses[1][1].id).toBe(3);
+    expect(responses[1][1].result.tools.map((tool: ToolDef) => tool.name)).toContain("get");
+    expect(responses[2]).toEqual({ jsonrpc: "2.0", id: 4, result: {} });
+  });
+
   it("answers over stdio and matches the CLI output", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-mcp-"));
     const env: Record<string, string | undefined> = {

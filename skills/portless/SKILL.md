@@ -64,6 +64,8 @@ portless -- --inspect  # -> runs "dev --inspect"
 pnpm dev        # -> works without portless, plain "next dev"
 ```
 
+Repeat `--name` on `portless run` to serve one dev server on multiple hostnames: `portless run --name brand-a --name brand-b vite dev`. Each name gets the worktree prefix or configured `worktree.hostnameTemplate`. The first name sets `PORTLESS_URL` and receives any tunnel.
+
 Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command. In Turbo mode only the root script is checked, and Turbo passes the arguments to each package script unchanged.
 
 Use an optional `portless.json` to override defaults (name, script, port). In each project directory, portless checks `portless.json`, `.config/portless.json`, and the `package.json` `"portless"` key in that order. Only a missing standalone file advances to the next source; an invalid or unreadable file fails. `apps` paths are relative to the project directory even when the config is in `.config`:
@@ -228,6 +230,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | Variable                | Description                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------ |
 | `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
+| `PORTLESS_QUIET`        | Set to `1` to hide startup status lines (same as `--quiet`)                    |
 | `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
 | `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
 | `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
@@ -244,7 +247,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
 | `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
 
-portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
+portless writes its own status lines to stderr, so stdout carries only your app's output. `--quiet` or `PORTLESS_QUIET=1` hides the banner, proxy running status, name, hostname, prefix, assigned port, and `Running:` line while leaving app URLs, warnings, errors, proxy startup output, and monorepo URL tables visible. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
 ### HTTP/2 + HTTPS
 
@@ -358,7 +361,7 @@ On Linux with Node under your home directory (nvm, fnm, volta, or mise), `portle
 Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
 
 | Command                                           | Description                                                                         |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------- | ------ | ------------------------------- |
 | `portless`                                        | Run dev script through proxy                                                        |
 | `portless`                                        | From monorepo root: run all workspace packages                                      |
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)                                   |
@@ -371,7 +374,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)                           |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)                                  |
 | `portless get <name> --no-worktree`               | Print URL without worktree config or naming                                         |
-| `portless get <name> --json`                      | Print name, hostname, and URL as JSON                                               |
+| `portless get <name> --json`                      | Print name, hostname, URL, and active route port as JSON                            |
 | `portless list`                                   | Show active routes and uptime                                                       |
 | `portless list --json`                            | Print routes as JSON                                                                |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites                           |
@@ -408,6 +411,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                                     |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                                             |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment                             |
+| `portless <name> --no-stdin <cmd>`                | Ignore stdin for the spawned app, useful for Elixir, Phoenix, or Erlang             |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)                                   |
 | `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                                         |
 | `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                                                    |
@@ -418,6 +422,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless --help` / `-h`                          | Show commands and common app options                                                |
 | `portless proxy --help`                           | Show proxy startup options                                                          |
 | `portless <command> --help` / `-h`                | Print command help without running it                                               |
+| `portless completion <bash                        | zsh                                                                                 | fish>` | Print a shell completion script |
 | `portless --version` / `-v`                       | Show version                                                                        |
 
 `portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
@@ -426,7 +431,17 @@ App ports referenced by stale Tailscale Serve or Funnel records stay reserved, e
 
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
-**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `completion`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## Shell completion
+
+`portless completion <bash|zsh|fish>` prints a shell completion script. Add the command for your shell to its startup configuration, or install the fish completion file:
+
+```bash
+source <(portless completion bash)
+eval "$(portless completion zsh)"
+portless completion fish > ~/.config/fish/completions/portless.fish
+```
 
 ## MCP server
 

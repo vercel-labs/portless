@@ -45,7 +45,10 @@ portless myapp next dev
 
 - The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)). `portless trust` is safe to run again: it exits without prompting when the CA is already trusted, and on Linux it also updates existing Chrome/Chromium NSS databases when `certutil` is installed.
 - `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, `--no-worktree` to skip worktree naming, or [configure the hostname layout](https://portless.sh/configuration#worktree-hostnames). Named launches keep their supplied hostname.
+- Repeat `--name` to serve one dev server on multiple hostnames: `portless run --name brand-a --name brand-b vite dev`. Each name gets the worktree prefix or `worktree.hostnameTemplate`; the first sets `PORTLESS_URL` and receives any tunnel.
 - A name with dots is a subdomain: `portless api.myapp pnpm start` serves `https://api.myapp.localhost`.
+- Use `--quiet` or `PORTLESS_QUIET=1` to hide startup status lines, including the banner, proxy running status, name, hostname, prefix, assigned port, and `Running:` line. App URLs, warnings, errors, proxy startup output, and monorepo URL tables remain visible.
+- Use `portless run --no-stdin mix phx.server` to detach stdin from the app when a runtime such as Elixir, Phoenix, or Erlang has an interactive stdin handler.
 - `PORTLESS=0 pnpm dev` runs the command directly, without the proxy. Commands such as `portless get` and `portless list` still run normally.
 
 The full walkthrough is in [Getting started](https://portless.sh).
@@ -118,7 +121,15 @@ The server does not start dev servers. Agents run `portless run <cmd>` in a shel
 
 ## Commands
 
-Run `portless --help` for the command list and common app options. Use `portless proxy --help` for proxy options, or `portless <command> --help` for command details. `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js. Usage errors, such as an unknown flag, a missing argument, or a command that needs `--yes` without a terminal, exit with code `2`; other failures exit with `1`. Wrapped commands (`run`, named apps, and `compose`) keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`. Use `portless list --json` or `portless get <name> --json` for JSON output.
+`portless completion <bash|zsh|fish>` prints a shell completion script. Add the command for your shell to its startup configuration, or install the fish completion file:
+
+```bash
+source <(portless completion bash)
+eval "$(portless completion zsh)"
+portless completion fish > ~/.config/fish/completions/portless.fish
+```
+
+Run `portless --help` for the command list and common app options. Use `portless proxy --help` for proxy options, or `portless <command> --help` for command details. `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js. Usage errors, such as an unknown flag, a missing argument, or a command that needs `--yes` without a terminal, exit with code `2`; other failures exit with `1`. Wrapped commands (`run`, named apps, and `compose`) keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`. Use `portless list --json` or `portless get <name> --json` for JSON output. The latter includes `port` when an active route matches the resolved hostname, alongside `name`, `hostname`, and `url`.
 
 | Group                | Commands                                                                              | Docs                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
