@@ -6751,11 +6751,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       { args: ["--netbird-pin", "1234"], key: "PORTLESS_NETBIRD_PIN", value: "1234" },
       { args: ["--netbird-groups", "dev,ops"], key: "PORTLESS_NETBIRD_GROUPS", value: "dev,ops" },
     ])("passes $args to the child in each flag position", ({ args, key, value }) => {
-      const child = [
-        process.execPath,
-        "-e",
-        `process.stdout.write(process.env[${JSON.stringify(key)}] ?? "")`,
-      ];
+      const child = [process.execPath, "-e", `console.log(process.env.${key})`];
       for (const command of [
         [...args, "myapp", ...child],
         ["myapp", ...args, ...child],
@@ -6763,7 +6759,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       ]) {
         const result = run(command, { env: { PORTLESS: "0", [key]: undefined } });
         expect(result.status, result.stderr).toBe(0);
-        expect(result.stdout).toBe(value);
+        expect(result.stdout.trim()).toBe(value);
       }
     });
 
