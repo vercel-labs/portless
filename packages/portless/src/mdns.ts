@@ -195,23 +195,34 @@ function findMatchingPublisherPids(
   output: string,
   platform: NodeJS.Platform,
   fqdns: Set<string>,
-  excludePids: Set<number>
+  excludePids: Set<number>,
+  owner: { pid: number; uid: number | undefined; port: number; ip?: string }
 ): number[] {
   const matches: number[] = [];
   for (const line of output.split("\n")) {
     const parts = line.trim().split(/\s+/);
     const pidText = parts.shift() ?? "";
+    const ppidText = parts.shift() ?? "";
+    const uidText = parts.shift() ?? "";
     const pid = Number(pidText);
+    const ppid = Number(ppidText);
+    const uid = Number(uidText);
     if (
       !/^\d+$/.test(pidText) ||
+      !/^\d+$/.test(ppidText) ||
+      !/^\d+$/.test(uidText) ||
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
-      pid === process.pid ||
+      pid === owner.pid ||
       excludePids.has(pid)
     )
       continue;
+    if (owner.uid !== undefined && uid !== owner.uid) continue;
+    if (ppid !== owner.pid && ppid !== 1) continue;
     const command = path.basename(parts[0] ?? "");
+    const portText = String(owner.port);
     for (const fqdn of fqdns) {
+      const darwinIp = parts[7] ?? "";
       const darwinMatch =
         platform === "darwin" &&
         command === "dns-sd" &&
@@ -220,9 +231,11 @@ function findMatchingPublisherPids(
         parts[2] === serviceName(fqdn) &&
         parts[3] === "_http._tcp" &&
         parts[4] === "local" &&
-        /^\d+$/.test(parts[5]) &&
+        parts[5] === portText &&
         parts[6] === fqdn &&
-        isIP(parts[7]) !== 0;
+        isIP(darwinIp) !== 0 &&
+        (owner.ip === undefined || darwinIp === owner.ip);
+      const linuxIp = parts.length === 5 ? (parts[4] ?? "") : (parts[3] ?? "");
       const linuxMatch =
         platform === "linux" &&
         command === "avahi-publish-address" &&
@@ -230,8 +243,9 @@ function findMatchingPublisherPids(
           parts[1] === "-f" &&
           parts[2] === "-R" &&
           parts[3] === fqdn &&
-          isIP(parts[4]) !== 0) ||
-          (parts.length === 4 && parts[1] === "-R" && parts[2] === fqdn && isIP(parts[3]) !== 0));
+          isIP(linuxIp) !== 0) ||
+          (parts.length === 4 && parts[1] === "-R" && parts[2] === fqdn && isIP(linuxIp) !== 0)) &&
+        (owner.ip === undefined || linuxIp === owner.ip);
       if (darwinMatch || linuxMatch) {
         matches.push(pid);
         break;
@@ -265,7 +279,9 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
   const listProcesses =
     options.listProcesses ??
     (() =>
-      spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8", timeout: 1000 }).stdout ?? "");
+      spawnSync("ps", ["-eo", "pid=,ppid=,uid=,args="], { encoding: "utf8", timeout: 1000 })
+        .stdout ?? "");
+  const currentUid = process.getuid?.();
   const killPid = options.killPid ?? ((pid, signal) => process.kill(pid, signal));
   const stopGraceMs = options.stopGraceMs ?? MDNS_STOP_GRACE_MS;
   const stopKillWaitMs = options.stopKillWaitMs ?? MDNS_KILL_WAIT_MS;
@@ -289,12 +305,18 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
         pub.state === "publishing" && pub.child.pid !== undefined ? [pub.child.pid] : []
       )
     );
-  const matchingPids = (hostnames: string[]) =>
+  const matchingPids = (hostnames: string[], port: number, ip?: string) =>
     findMatchingPublisherPids(
       listProcesses(),
       platform,
       new Set(hostnames.map(fqdnFor)),
-      trackedPids()
+      trackedPids(),
+      {
+        pid: process.pid,
+        uid: currentUid,
+        port,
+        ip,
+      }
     );
   const signalPid = (pid: number, signal: NodeJS.Signals | 0): boolean => {
     try {
@@ -331,7 +353,7 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
           exited = waitForExit(pub.child, stopKillWaitMs);
           signalChild(pub.child, "SIGKILL");
           if (!(await exited)) {
-            for (const pid of matchingPids([hostname])) signalPid(pid, "SIGKILL");
+            for (const pid of matchingPids([hostname], pub.port, pub.ip)) signalPid(pid, "SIGKILL");
           }
         }
       })
@@ -343,8 +365,8 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
     return done;
   };
 
-  const sweepOrphans = async (hostnames: string[]) => {
-    const pids = matchingPids(hostnames);
+  const sweepOrphans = async (hostnames: string[], port: number) => {
+    const pids = matchingPids(hostnames, port);
     if (pids.length === 0) return;
     for (const pid of pids) signalPid(pid, "SIGTERM");
     const deadline = Date.now() + stopGraceMs;
@@ -433,7 +455,7 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
           return cur?.state !== "publishing" || cur.ip !== ip || cur.port !== target.port;
         });
         if (toSpawn.length > 0) {
-          await sweepOrphans(toSpawn);
+          await sweepOrphans(toSpawn, target.port);
           if (dirty) continue;
           for (const hostname of toSpawn)
             spawnPublication(hostname, target.port, ip, target.onError);

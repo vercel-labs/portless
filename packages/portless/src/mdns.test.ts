@@ -175,8 +175,9 @@ describe("createMdnsController", () => {
     ["darwin", "/usr/bin/dns-sd -P one _http._tcp local 443 one.local 192.168.1.1"],
     ["linux", "/usr/bin/avahi-publish-address -f -R one.local 192.168.1.1"],
   ] as const)(
-    "sweeps matching %s orphans without touching active or unrelated processes",
+    "sweeps matching %s orphans without touching active, sibling-owned, or unrelated processes",
     async (platform, command) => {
+      const uid = process.getuid?.() ?? 0;
       const { children, spawnProcess } = publishers();
       const killPid = vi.fn((_pid: number, signal: NodeJS.Signals | 0) => {
         if (signal === 0) throw Object.assign(new Error("gone"), { code: "ESRCH" });
@@ -190,11 +191,20 @@ describe("createMdnsController", () => {
         killPid,
       });
       await controller.reconcile("192.168.1.1", ["one"]);
-      output = `${children[0].pid} ${command}\n20001 ${command}\n20002 ${command} extra\n${process.pid} ${command}`;
+      output = [
+        `${children[0].pid} ${process.pid} ${uid} ${command}`,
+        `20001 1 ${uid} ${command}`,
+        `20002 1 ${uid} ${command} extra`,
+        `20003 99999 ${uid} ${command}`,
+        `20004 1 ${uid + 1} ${command}`,
+        `${process.pid} 1 ${uid} ${command}`,
+      ].join("\n");
       await controller.reconcile("192.168.1.1", ["one", "one.local"]);
       expect(killPid).toHaveBeenCalledWith(20001, "SIGTERM");
       expect(killPid).not.toHaveBeenCalledWith(children[0].pid, expect.anything());
       expect(killPid).not.toHaveBeenCalledWith(20002, expect.anything());
+      expect(killPid).not.toHaveBeenCalledWith(20003, expect.anything());
+      expect(killPid).not.toHaveBeenCalledWith(20004, expect.anything());
       expect(killPid).not.toHaveBeenCalledWith(process.pid, expect.anything());
       expect(listProcesses).toHaveBeenCalledTimes(2);
     }
@@ -202,6 +212,7 @@ describe("createMdnsController", () => {
 
   it("escalates an orphan that survives the grace period before publishing", async () => {
     vi.useFakeTimers();
+    const uid = process.getuid?.() ?? 0;
     const { commands, spawnProcess } = publishers();
     const killPid = vi.fn();
     const controller = createMdnsController({
@@ -209,7 +220,7 @@ describe("createMdnsController", () => {
       spawn: spawnProcess,
       killPid,
       stopGraceMs: 50,
-      listProcesses: () => "20001 avahi-publish-address -f -R one.local 192.168.1.1",
+      listProcesses: () => `20001 1 ${uid} avahi-publish-address -f -R one.local 192.168.1.1`,
     });
     const start = controller.reconcile("192.168.1.1", ["one"]);
     await vi.advanceTimersByTimeAsync(49);
@@ -224,6 +235,7 @@ describe("createMdnsController", () => {
 
   it("kills matching publishers when a stopped child never confirms exit", async () => {
     vi.useFakeTimers();
+    const uid = process.getuid?.() ?? 0;
     const { children, spawnProcess } = publishers(true);
     const killPid = vi.fn();
     const controller = createMdnsController({
@@ -234,7 +246,11 @@ describe("createMdnsController", () => {
       stopKillWaitMs: 20,
       listProcesses: () =>
         children.length
-          ? `20001 avahi-publish-address -R one.local 192.168.1.1\n20002 avahi-publish-address -R other.local 192.168.1.1`
+          ? [
+              `20001 ${process.pid} ${uid} avahi-publish-address -R one.local 192.168.1.1`,
+              `20002 ${process.pid} ${uid} avahi-publish-address -R other.local 192.168.1.1`,
+              `20003 ${process.pid} ${uid} avahi-publish-address -R one.local 192.168.1.2`,
+            ].join("\n")
           : "",
     });
     await controller.reconcile("192.168.1.1", ["one"]);
@@ -248,6 +264,7 @@ describe("createMdnsController", () => {
     expect(children[0].signals).toEqual(["SIGTERM", "SIGKILL"]);
     expect(killPid).toHaveBeenCalledWith(20001, "SIGKILL");
     expect(killPid).not.toHaveBeenCalledWith(20002, expect.anything());
+    expect(killPid).not.toHaveBeenCalledWith(20003, expect.anything());
   });
 
   it("coalesces overlapping reconciliations to the latest desired state", async () => {

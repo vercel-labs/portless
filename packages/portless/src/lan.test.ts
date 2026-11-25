@@ -58,8 +58,12 @@ describe("renderTerminalQr", () => {
   const size = encode(url, { border: 2 }).size;
 
   it("draws two module rows per line, one cell per module, black on white", () => {
-    const lines = renderTerminalQr(url, true).split("\n");
+    const rendered = renderTerminalQr(url, true);
+    const lines = rendered.split("\n");
     expect(lines).toHaveLength(Math.ceil(size / 2));
+    expect(rendered).toContain("\x1b[40m ");
+    expect(rendered).toContain("\x1b[107m ");
+    expect(rendered).toContain("\x1b[30;107m");
     for (const line of lines) {
       expect(stripVTControlCharacters(line)).toHaveLength(size);
       expect(line).not.toContain("\u2588");
@@ -80,8 +84,13 @@ describe("readDeviceCA", () => {
     expect(ca.der.equals(cert.raw)).toBe(true);
     const certOnlyDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-cert-only-"));
     try {
-      fs.writeFileSync(path.join(certOnlyDir, "ca.pem"), ca.pem);
-      expect(readDeviceCA(certOnlyDir)).toEqual(ca);
+      fs.writeFileSync(
+        path.join(certOnlyDir, "ca.pem"),
+        `${ca.pem}\n-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----\n`
+      );
+      const parsed = readDeviceCA(certOnlyDir);
+      expect(parsed).toEqual(ca);
+      expect(parsed.pem).not.toContain("PRIVATE KEY");
     } finally {
       fs.rmSync(certOnlyDir, { recursive: true, force: true });
     }
@@ -166,6 +175,25 @@ describe("createDeviceTrustHandler", () => {
     [`/${TOKEN}/`, "POST", 405],
   ])("answers %s %s with %i", async (pathname, method, status) => {
     expect((await fetch(`${origin}${pathname}`, { method })).status).toBe(status);
+  });
+
+  it("returns 400 for a malformed request URL instead of throwing", () => {
+    const handler = createDeviceTrustHandler(ca, TOKEN);
+    let status = 0;
+    let body = "";
+    const req = { method: "GET", url: "http://[", headers: {} } as http.IncomingMessage;
+    const res = {
+      writeHead(code: number) {
+        status = code;
+        return this;
+      },
+      end(chunk?: string) {
+        body = chunk ?? "";
+      },
+    } as unknown as http.ServerResponse;
+    handler(req, res);
+    expect(status).toBe(400);
+    expect(body).toBe("Bad request");
   });
 
   it("returns the allowed methods for unsupported requests", async () => {

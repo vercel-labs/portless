@@ -46,10 +46,10 @@ const FILES = {
 } as const;
 
 export function readDeviceCA(stateDir: string): DeviceCA {
-  const pem = fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8");
-  const cert = new X509Certificate(pem);
+  const raw = fs.readFileSync(path.join(stateDir, "ca.pem"), "utf-8");
+  const cert = new X509Certificate(raw);
   const name = /CN=([^,\n]+)/.exec(cert.subject)?.[1] ?? "portless Local CA";
-  return { name, pem, der: cert.raw, fingerprint: cert.fingerprint256 };
+  return { name, pem: cert.toString(), der: cert.raw, fingerprint: cert.fingerprint256 };
 }
 
 export function detectDevicePlatform(userAgent: string | undefined): DevicePlatform {
@@ -172,7 +172,13 @@ export function createDeviceTrustHandler(
 ): (req: IncomingMessage, res: ServerResponse) => void {
   const base = `/${token}/`;
   return (req, res) => {
-    const pathname = new URL(req.url ?? "/", "http://device").pathname;
+    let pathname: string;
+    try {
+      pathname = new URL(req.url ?? "/", "http://device").pathname;
+    } catch {
+      res.writeHead(400, { "Content-Type": "text/plain" }).end("Bad request");
+      return;
+    }
     const file = pathname.startsWith(base) ? pathname.slice(base.length) : null;
     const userAgent = req.headers["user-agent"];
     const send = (type: string, body: string | Buffer, download?: string) => {
