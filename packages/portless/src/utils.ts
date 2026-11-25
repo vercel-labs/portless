@@ -3,6 +3,13 @@ import net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 
+/** Return whether a socket peer address is on loopback (127.0.0.0/8 or ::1). */
+export function isLoopbackPeer(address: string | undefined): boolean {
+  if (!address) return false;
+  const bare = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
+  return bare === "::1" || bare.startsWith("127.");
+}
+
 type UserHomeOptions = {
   platform?: NodeJS.Platform;
   env?: NodeJS.ProcessEnv;

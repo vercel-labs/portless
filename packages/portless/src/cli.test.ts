@@ -7474,8 +7474,14 @@ describe("CLI", { timeout: 15_000 }, () => {
             })
           );
           const workspaceFile = path.join(root, "pnpm-workspace.yaml");
-          if (pnpm) fs.writeFileSync(workspaceFile, "packages:\n  - packages/*\n");
-          else fs.rmSync(workspaceFile, { force: true });
+          if (pnpm) {
+            fs.writeFileSync(
+              workspaceFile,
+              "packages:\n  - packages/*\nverifyDepsBeforeRun: false\n"
+            );
+          } else {
+            fs.rmSync(workspaceFile, { force: true });
+          }
         };
 
         try {
