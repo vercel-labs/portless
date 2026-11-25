@@ -36,18 +36,14 @@ export const PORTLESS_HEADER = "X-Portless";
  */
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-/**
- * HTTP/1.1 hop-by-hop headers that are forbidden in HTTP/2 responses.
- * These must be stripped when proxying an HTTP/1.1 backend response
- * back to an HTTP/2 client.
- */
-const HOP_BY_HOP_HEADERS = new Set([
+const HOP_BY_HOP_HEADERS = [
   "connection",
   "keep-alive",
   "proxy-connection",
-  "transfer-encoding",
+  "trailer",
   "upgrade",
-]);
+] as const;
+const PROTECTED_HEADERS = new Set(["content-length", "host"]);
 
 // HTTP/2 multiplexes a whole cold page load onto one client connection, so
 // without a limit the proxy dials the backend once per request at the same
@@ -67,13 +63,46 @@ function isTlsError(error: NodeJS.ErrnoException): boolean {
 
 const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+type HttpProtocol = "http1.0" | "http1.1" | "http2";
+
+/** Determine the HTTP protocol version spoken by an incoming client request. */
+function getClientProtocol(req: http.IncomingMessage, h2Stream: unknown): HttpProtocol {
+  if (h2Stream || req.httpVersionMajor >= 2) return "http2";
+  if (req.httpVersionMajor === 1 && req.httpVersionMinor >= 1) return "http1.1";
+  return "http1.0";
+}
+
 /**
- * Client hop-by-hop headers dropped before forwarding a plain request.
- * Forwarding `Connection: keep-alive` leaves the backend socket open after
- * the response with no error listener, so a backend restart crashes the
- * proxy. `transfer-encoding` stays: it frames the streamed request body.
+ * Strip HTTP hop-by-hop headers (RFC 9110 section 7.6.1), including Trailer
+ * and any header names listed in Connection. Keeps transfer-encoding only on
+ * HTTP/1.1 hops; HTTP/1.0 and HTTP/2 forbid it.
  */
-const REQUEST_HOP_BY_HOP_HEADERS = ["connection", "keep-alive", "proxy-connection", "upgrade"];
+function stripHopByHop(headers: http.OutgoingHttpHeaders, protocol: HttpProtocol): void {
+  const keepTransferEncoding = protocol === "http1.1";
+  const connection = headers.connection;
+  if (connection !== undefined) {
+    const values = Array.isArray(connection) ? connection : [String(connection)];
+    for (const value of values) {
+      for (const token of value.split(",")) {
+        const name = token.trim().toLowerCase();
+        if (
+          name &&
+          Object.hasOwn(headers, name) &&
+          !PROTECTED_HEADERS.has(name) &&
+          (name !== "transfer-encoding" || !keepTransferEncoding)
+        ) {
+          delete headers[name];
+        }
+      }
+    }
+  }
+  for (const header of HOP_BY_HOP_HEADERS) {
+    delete headers[header];
+  }
+  if (!keepTransferEncoding) {
+    delete headers["transfer-encoding"];
+  }
+}
 
 /**
  * Get the effective host value from a request.
@@ -204,20 +233,21 @@ function buildUpstreamHeaders(
   req: http.IncomingMessage,
   route: RouteInfo,
   hops: number,
-  stripHopByHop: boolean
+  stripHopByHopHeaders: boolean
 ): http.OutgoingHttpHeaders {
-  const headers: http.OutgoingHttpHeaders = {
-    ...req.headers,
-    ...buildForwardedHeaders(req, isEncrypted(req)),
-    [PORTLESS_HOPS_HEADER]: String(hops + 1),
-  };
+  const headers: http.OutgoingHttpHeaders = { ...req.headers };
   for (const key of Object.keys(headers)) {
     if (key.startsWith(":")) delete headers[key];
   }
-  if (stripHopByHop) {
-    for (const key of REQUEST_HOP_BY_HOP_HEADERS) delete headers[key];
+  if (stripHopByHopHeaders) {
+    stripHopByHop(headers, "http1.1");
+  } else {
+    delete headers.trailer;
   }
-  headers.host = route.upstream?.host ?? headers.host ?? getRequestHost(req);
+  Object.assign(headers, buildForwardedHeaders(req, isEncrypted(req)), {
+    [PORTLESS_HOPS_HEADER]: String(hops + 1),
+    host: route.upstream?.host ?? headers.host ?? getRequestHost(req),
+  });
   return headers;
 }
 
@@ -678,12 +708,20 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         (proxyRes) => {
           const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
           rewriteUpstreamLocation(responseHeaders, route, req);
-          if (reqTls) {
-            for (const h of HOP_BY_HOP_HEADERS) {
-              delete responseHeaders[h];
-            }
+          stripHopByHop(responseHeaders, getClientProtocol(req, h2Stream));
+          const te = responseHeaders["transfer-encoding"];
+          if (
+            te !== undefined &&
+            !/\bchunked$/i.test(Array.isArray(te) ? te.join(",") : String(te))
+          ) {
+            res.shouldKeepAlive = false;
           }
           res.writeHead(proxyRes.statusCode || 502, responseHeaders);
+          proxyRes.on("end", () => {
+            if (!req.complete) {
+              finish();
+            }
+          });
           proxyRes.on("error", (err) => {
             if (!res.headersSent) {
               res.writeHead(502, { "Content-Type": "text/plain" });
@@ -699,12 +737,28 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         }
       );
 
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        res.off("close", finish);
+        connection.cancel?.();
+        req.unpipe(proxyReq);
+        req.resume();
+        if (!proxyReq.destroyed) {
+          proxyReq.destroy();
+        }
+      };
+
       proxyReq.on("error", (err) => {
-        if (res.destroyed || h2Stream?.destroyed || h2Stream?.closed) return;
+        if (finished || res.destroyed || h2Stream?.destroyed || h2Stream?.closed) {
+          finish();
+          return;
+        }
         const errWithCode = err as NodeJS.ErrnoException;
         // The backend closed a pooled socket as it was reused: replay once
         // instead of returning a 502.
-        if (
+        const shouldReplay =
           !isReplay &&
           proxyReq.reusedSocket &&
           errWithCode.code === "ECONNRESET" &&
@@ -712,14 +766,12 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
           REPLAYABLE_METHODS.has(req.method || "") &&
           // The first attempt consumed the body, so only bodiless requests replay.
           !proxyReqHeaders["transfer-encoding"] &&
-          !Number(req.headers["content-length"])
-        ) {
-          req.unpipe(proxyReq);
+          !Number(req.headers["content-length"]);
+        finish();
+        if (shouldReplay) {
           handleRequest(req, res, true);
           return;
         }
-        req.unpipe(proxyReq);
-        req.resume();
         if (errWithCode.code !== "ABORT_ERR") {
           onError(`Proxy error for ${getRequestHost(req)}: ${formatProxyError(err)}`);
         }
@@ -740,19 +792,9 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       });
 
       // Abort the outgoing request if the client disconnects
-      res.on("close", () => {
-        connection.cancel?.();
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
-        }
-      });
+      res.on("close", finish);
 
-      req.on("error", () => {
-        connection.cancel?.();
-        if (!proxyReq.destroyed) {
-          proxyReq.destroy();
-        }
-      });
+      req.on("error", finish);
 
       if (isReplay) {
         proxyReq.end();
@@ -997,9 +1039,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         return;
       }
       const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
-      for (const h of HOP_BY_HOP_HEADERS) {
-        delete responseHeaders[h];
-      }
+      stripHopByHop(responseHeaders, "http2");
       // The Accept answers the key this proxy synthesized, not anything the
       // h2 client sent; RFC 8441 has no equivalent handshake header.
       delete responseHeaders["sec-websocket-accept"];
@@ -1029,9 +1069,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       // client sees the rejection instead of a hung handshake.
       const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
       rewriteUpstreamLocation(responseHeaders, route, compatReq);
-      for (const h of HOP_BY_HOP_HEADERS) {
-        delete responseHeaders[h];
-      }
+      stripHopByHop(responseHeaders, "http2");
       res.writeHead(proxyRes.statusCode || 502, responseHeaders);
       proxyRes.on("error", (err) => req.stream.destroy(err));
       proxyRes.pipe(res);

@@ -23,7 +23,7 @@ portless runs a local reverse proxy and gives each dev server a name. Your app l
 npm install -g portless
 ```
 
-To pin the version per project, install it as a dev dependency with `npm install -D portless`. portless is pre-1.0, so contributors may run different versions, and a change to the state directory format between releases can require running `portless trust` again.
+To pin the version per project, install it with `npm install -D portless`, or see [Install on portless.sh](https://portless.sh#install) for the pre-1.0 note.
 
 ## Quick start
 
@@ -44,7 +44,7 @@ portless myapp next dev
 ```
 
 - The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)).
-- `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, or [configure the label style and hostname template](https://portless.sh/configuration#worktree-hostnames).
+- `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, `--no-worktree` to skip worktree naming, or [configure the hostname layout](https://portless.sh/configuration#worktree-hostnames). Named launches keep their supplied hostname.
 - A name with dots is a subdomain: `portless api.myapp pnpm start` serves `https://api.myapp.localhost`.
 - `PORTLESS=0 pnpm dev` runs the command directly, without the proxy. Commands such as `portless get` and `portless list` still run normally.
 
@@ -98,7 +98,7 @@ An optional `portless.json` sets the name and script. In a monorepo, one file at
 }
 ```
 
-A `"portless"` key in `package.json` works too. Fields, precedence, Turborepo setup, and environment variables are in [Configuration](https://portless.sh/configuration).
+In each project directory, portless reads `portless.json`, then `.config/portless.json`, then the `package.json` `"portless"` key, using the first available config. `apps` paths remain relative to the project directory even when the config is in `.config`. Fields, precedence, Turborepo setup, and environment variables are in [Configuration](https://portless.sh/configuration).
 
 ## For AI agents
 
@@ -157,6 +157,14 @@ pnpm format
 ```
 
 [AGENTS.md](AGENTS.md) lists the files to update with each change and the release process.
+
+## Community tools
+
+These companion tools are maintained independently by their authors, not by Vercel.
+
+- [portless-manager](https://github.com/SiyeolBaek/portless-manager): SwiftBar menu bar companion for macOS
+- [portless-studio](https://github.com/keven-bardales/portless-studio): standalone local dashboard for active routes
+- [PortlessBar](https://github.com/akshitkrnagpal/portlessbar): native macOS menu bar companion for active routes
 
 ## Documentation
 
