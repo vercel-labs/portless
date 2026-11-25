@@ -154,7 +154,7 @@ export function renderDeviceTrustPage(
 <div class="section">
 <p class="label">Fingerprint (SHA-256)</p>
 <p class="terminal">${escapeHtml(ca.fingerprint).replaceAll(":", ":<wbr>")}</p>
-<p class="hint">Check that it matches the one in the terminal.</p>
+<p class="hint">Compare the fingerprint in the terminal with the downloaded certificate details before trusting it.</p>
 </div>
 <div class="section">
 <p class="label">Install</p>
