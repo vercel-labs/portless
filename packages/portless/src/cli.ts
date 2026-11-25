@@ -35,6 +35,7 @@ import {
   isCATrustRefreshPending,
   untrustCA,
 } from "./certs.js";
+import { getPlatformCapabilities, SUPPORTED_PLATFORMS } from "./capabilities.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
   generateHostsSyncToken,
@@ -927,6 +928,9 @@ function startProxyServer(
   if (lanIp && !mdnsSupport.supported) {
     const reason = mdnsSupport.reason ?? "mDNS publishing is not supported on this platform.";
     console.warn(chalk.yellow(`LAN mode disabled: ${reason}`));
+    if (mdnsSupport.hint) {
+      console.warn(chalk.yellow(mdnsSupport.hint));
+    }
   }
 
   // Create empty routes file if it doesn't exist
@@ -2558,6 +2562,14 @@ Generates the local CA first if it does not exist yet. Browsers and other
 clients then accept portless HTTPS certificates. The OS may ask for
 authorization or sudo.
 
+When the CA is already trusted, the command exits without prompting, so setup
+scripts can run it safely on every start.
+
+On Linux, Chrome and Chromium also read a per-user NSS database at
+~/.pki/nssdb or ~/.local/share/pki/nssdb, which needs certutil to update. On
+NixOS and other declarative systems, run portless with --no-tls or add the CA
+to your system configuration instead.
+
 On macOS and Linux, the state directory and each parent directory must be
 owned by you or root and not writable by group or others. A sticky parent
 such as /tmp is allowed. Otherwise trust exits with the reason.
@@ -3705,6 +3717,15 @@ async function handleDoctor(args: string[]): Promise<void> {
     add("fail", `Node.js ${process.versions.node} is unsupported.`, "Install Node.js 24 or newer.");
   }
 
+  const caps = getPlatformCapabilities();
+  if (!caps.supported) {
+    add(
+      "warn",
+      `Platform ${process.platform} is outside the supported OS list (${SUPPORTED_PLATFORMS.join(", ")}).`,
+      "Use --no-tls or configure CA trust manually."
+    );
+  }
+
   if (stateExists) {
     try {
       const stat = fs.statSync(state.dir);
@@ -3915,7 +3936,11 @@ async function handleDoctor(args: string[]): Promise<void> {
     } else if (mdns.supported) {
       add("ok", "mDNS publishing support is available for LAN mode.");
     } else {
-      add("fail", `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`);
+      add(
+        "fail",
+        `LAN mode is enabled but mDNS publishing is unavailable: ${mdns.reason}`,
+        mdns.hint
+      );
     }
     if (state.lanIp) {
       add("ok", `LAN IP is recorded: ${state.lanIp}`);

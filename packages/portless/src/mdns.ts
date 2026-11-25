@@ -1,15 +1,9 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 
+import { getPlatformCapabilities, type MdnsPublisherSpec } from "./capabilities.js";
 import { getLocalNetworkIp } from "./lan-ip.js";
 
 export { getLocalNetworkIp };
-
-type MdnsPublisher = {
-  command: string;
-  probeArgs: string[];
-  missingReason: string;
-  buildArgs: (fqdn: string, name: string, port: number, ip: string) => string[];
-};
 
 type LanIpMonitorOptions = {
   initialIp: string | null;
@@ -30,35 +24,9 @@ const publications = new Map<string, Publication>();
 /** Polling interval (ms) for refreshing the auto-detected LAN IP. */
 export const LAN_IP_POLL_INTERVAL_MS = 5000;
 
-function getMdnsPublisher(): MdnsPublisher | null {
-  if (process.platform === "darwin") {
-    return {
-      command: "dns-sd",
-      probeArgs: ["-h"],
-      missingReason: "dns-sd not found",
-      buildArgs: (fqdn, name, port, ip) => [
-        "-P",
-        name,
-        "_http._tcp",
-        "local",
-        port.toString(),
-        fqdn,
-        ip,
-      ],
-    };
-  }
-
-  if (process.platform === "linux") {
-    return {
-      command: "avahi-publish-address",
-      probeArgs: ["--help"],
-      missingReason:
-        "avahi-publish-address not found. Install avahi-utils: sudo apt install avahi-utils",
-      buildArgs: (fqdn, _name, _port, ip) => ["-f", "-R", fqdn, ip],
-    };
-  }
-
-  return null;
+function getMdnsPublisher(): MdnsPublisherSpec | null {
+  const caps = getPlatformCapabilities();
+  return caps.lanMdns.supported ? caps.lanMdns.publisher : null;
 }
 
 function hasCommand(command: string, probeArgs: string[]): boolean {
@@ -114,12 +82,17 @@ export function startLanIpMonitor(options: LanIpMonitorOptions): { stop: () => v
 /**
  * Check if mDNS publishing is supported on the current platform.
  */
-export function isMdnsSupported(): { supported: boolean; reason?: string } {
-  const publisher = getMdnsPublisher();
-  if (!publisher) {
-    return { supported: false, reason: "mDNS publishing is not supported on this platform" };
+export function isMdnsSupported(): { supported: boolean; reason?: string; hint?: string } {
+  const caps = getPlatformCapabilities();
+  if (!caps.lanMdns.supported) {
+    return {
+      supported: false,
+      reason: caps.lanMdns.reason,
+      ...(caps.lanMdns.hint ? { hint: caps.lanMdns.hint } : {}),
+    };
   }
 
+  const publisher = caps.lanMdns.publisher;
   if (!hasCommand(publisher.command, publisher.probeArgs)) {
     return { supported: false, reason: publisher.missingReason };
   }

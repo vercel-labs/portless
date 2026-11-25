@@ -17,6 +17,7 @@ import {
   untrustWindowsCA,
   wslWindowsCAStoreOptions,
 } from "./windows-ca.js";
+import { getPlatformCapabilities } from "./capabilities.js";
 
 /** How long the CA certificate is valid (10 years, in days). */
 const CA_VALIDITY_DAYS = 3650;
@@ -1427,6 +1428,16 @@ export function inspectTrust(
     };
   }
 
+  const caps = getPlatformCapabilities();
+  if (!caps.trust.supported) {
+    return {
+      state: "unavailable",
+      stores: { system: "unavailable", browser: "not-applicable" },
+      error: caps.trust.reason,
+      hint: caps.trust.hint,
+    };
+  }
+
   return {
     state: "unavailable",
     stores: { system: "unavailable", browser: "not-applicable" },
@@ -1524,6 +1535,15 @@ export function ensureTrust(
           );
         }
       } else {
+        const trust = getPlatformCapabilities().trust;
+        if (!trust.supported) {
+          return {
+            state: "unavailable",
+            stores: { system: "unavailable", browser: "not-applicable" },
+            error: trust.reason,
+            hint: trust.hint,
+          };
+        }
         return {
           state: "unavailable",
           stores,
