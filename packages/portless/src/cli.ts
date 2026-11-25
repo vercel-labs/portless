@@ -997,10 +997,12 @@ function startProxyServer(
               ) {
                 reloadRoutes();
               }
-              return cachedRoutes.map((route) => route.hostname);
+              return cachedRoutes
+                .filter((route) => store.isRouteOwnerAlive(route))
+                .map((route) => route.hostname);
             } catch {
               reloadRoutes();
-              return cachedRoutes.map((route) => route.hostname);
+              return [];
             }
           },
           allowWildcards: strict === false,

@@ -140,20 +140,24 @@ function tryIgnore(fn: () => void): void {
 }
 
 function writeHostsFileAtomic(content: string): void {
+  let targetPath = HOSTS_PATH;
+  tryIgnore(() => {
+    targetPath = fs.realpathSync(HOSTS_PATH);
+  });
   const tempPath = path.join(
-    path.dirname(HOSTS_PATH),
+    path.dirname(targetPath),
     `.portless-hosts.${process.pid}.${crypto.randomBytes(6).toString("hex")}.tmp`
   );
   let mode = 0o644;
   tryIgnore(() => {
-    mode = fs.statSync(HOSTS_PATH).mode & 0o777;
+    mode = fs.statSync(targetPath).mode & 0o777;
   });
   try {
     fs.writeFileSync(tempPath, content, { mode, flag: "wx" });
     tryIgnore(() => {
       fs.chmodSync(tempPath, mode);
     });
-    fs.renameSync(tempPath, HOSTS_PATH);
+    fs.renameSync(tempPath, targetPath);
   } catch (error) {
     tryIgnore(() => {
       fs.rmSync(tempPath, { force: true });

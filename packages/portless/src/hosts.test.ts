@@ -11,6 +11,7 @@ vi.mock("node:fs", async (importOriginal) => {
     rmSync: vi.fn(),
     statSync: vi.fn(),
     chmodSync: vi.fn(),
+    realpathSync: vi.fn((filePath: string) => filePath),
   };
 });
 
@@ -26,7 +27,7 @@ import {
   syncHostsFile,
 } from "./hosts.js";
 
-const { readFileSync, writeFileSync, renameSync, rmSync, statSync, chmodSync } =
+const { readFileSync, writeFileSync, renameSync, rmSync, statSync, chmodSync, realpathSync } =
   await import("node:fs");
 
 beforeEach(() => {
@@ -36,6 +37,10 @@ beforeEach(() => {
   vi.mocked(rmSync).mockReset();
   vi.mocked(statSync).mockReset();
   vi.mocked(chmodSync).mockReset();
+  vi.mocked(realpathSync).mockReset();
+  vi.mocked(realpathSync).mockImplementation(
+    ((filePath: string) => filePath) as typeof realpathSync
+  );
 });
 
 // ---------------------------------------------------------------------------

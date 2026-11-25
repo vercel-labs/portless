@@ -537,12 +537,22 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
       extPath,
     ]);
   } catch (error) {
-    fs.rmSync(serverCertPath, { force: true });
-    fs.rmSync(serverKeyPath, { force: true });
+    for (const file of [serverCertPath, serverKeyPath]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        continue;
+      }
+    }
     throw error;
   } finally {
-    fs.rmSync(csrPath, { force: true });
-    fs.rmSync(extPath, { force: true });
+    for (const file of [csrPath, extPath]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        continue;
+      }
+    }
   }
 
   fs.chmodSync(serverKeyPath, 0o600);
@@ -1250,14 +1260,14 @@ async function generateHostCertAsync(
     fixOwnership(keyPath, certPath, srlPath);
   } catch (error) {
     await Promise.all([
-      fs.promises.rm(certPath, { force: true }),
-      fs.promises.rm(keyPath, { force: true }),
+      fs.promises.rm(certPath, { force: true }).catch(() => undefined),
+      fs.promises.rm(keyPath, { force: true }).catch(() => undefined),
     ]);
     throw error;
   } finally {
     await Promise.all([
-      fs.promises.rm(csrPath, { force: true }),
-      fs.promises.rm(extPath, { force: true }),
+      fs.promises.rm(csrPath, { force: true }).catch(() => undefined),
+      fs.promises.rm(extPath, { force: true }).catch(() => undefined),
     ]);
   }
 
