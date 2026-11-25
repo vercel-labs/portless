@@ -273,6 +273,35 @@ describe("resolveWorktreeNaming", () => {
     expect(resolveWorktreeNaming({ cwd: tmpDir, config: { prefix: "branch" } })).toBeNull();
   });
 
+  it("uses the worktree directory name with the directory prefix style", () => {
+    const wtDir = path.join(tmpDir, "Review_Login");
+    fs.mkdirSync(path.join(wtDir, "src"), { recursive: true });
+    for (const branch of ["feature/auth", "main"]) {
+      setupWorktree(wtDir, branch);
+      expect(
+        resolveWorktreeNaming({ cwd: path.join(wtDir, "src"), config: { prefix: "directory" } })
+      ).toMatchObject({ prefix: "review-login", source: "git worktree directory" });
+    }
+    fs.writeFileSync(
+      path.join(tmpDir, "fake-bare.git", "worktrees", "wt", "HEAD"),
+      "abc123def456\n"
+    );
+    expect(resolveWorktreeNaming({ cwd: wtDir, config: { prefix: "directory" } })).toMatchObject({
+      prefix: "review-login",
+      source: "git worktree directory",
+    });
+    vi.stubEnv("PORTLESS_PREFIX", "other");
+    expect(resolveWorktreeNaming({ cwd: wtDir, config: { prefix: "directory" } })).toMatchObject({
+      prefix: "other",
+      source: "PORTLESS_PREFIX",
+    });
+  });
+
+  it("returns null for a main checkout with the directory prefix style", () => {
+    fs.mkdirSync(path.join(tmpDir, ".git"));
+    expect(resolveWorktreeNaming({ cwd: tmpDir, config: { prefix: "directory" } })).toBeNull();
+  });
+
   it("returns null when no .git found at all", () => {
     const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
@@ -464,6 +493,29 @@ describe("resolveWorktreeNaming (git CLI path)", { timeout: 15_000 }, () => {
 
     const result = resolveWorktreeNaming({ cwd: wtDir });
     expect(result).toMatchObject({ prefix: "main", source: "git branch" });
+  });
+
+  it("keeps the worktree directory name across branch switches with the directory prefix style", () => {
+    const repo = path.join(tmpDir, "repo");
+    initRepoWithCommit(repo);
+
+    runGit(repo, ["branch", "feature/auth"]);
+    const wtDir = path.join(tmpDir, "review");
+    runGit(repo, ["worktree", "add", wtDir, "feature/auth"]);
+    const config = { prefix: "directory" as const };
+    const expected = { prefix: "review", source: "git worktree directory" };
+
+    expect(resolveWorktreeNaming({ cwd: wtDir })).toMatchObject({ prefix: "auth" });
+    expect(resolveWorktreeNaming({ cwd: wtDir, config })).toMatchObject(expected);
+
+    runGit(wtDir, ["checkout", "--detach"]);
+    expect(resolveWorktreeNaming({ cwd: wtDir })).toBeNull();
+    expect(resolveWorktreeNaming({ cwd: wtDir, config })).toMatchObject(expected);
+
+    runGit(wtDir, ["checkout", "-b", "feature/other"]);
+    expect(resolveWorktreeNaming({ cwd: wtDir, config })).toMatchObject(expected);
+
+    expect(resolveWorktreeNaming({ cwd: repo, config })).toBeNull();
   });
 
   it("truncates prefix when branch name exceeds 63 characters", () => {

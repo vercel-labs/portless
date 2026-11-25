@@ -213,6 +213,24 @@ function branchToPrefix(branch: string, style: WorktreePrefixStyle): string | nu
   return sanitizeForHostname(label) || null;
 }
 
+/**
+ * Pick the worktree label for a style. The `directory` style uses the name of
+ * the worktree root, so the label stays the same across branch switches, on a
+ * detached HEAD, and on a default branch.
+ */
+function worktreeLabel(
+  style: WorktreePrefixStyle,
+  worktreeRoot: string,
+  readBranch: () => string | null
+): WorktreePrefix | null {
+  if (style === "directory") {
+    const prefix = sanitizeForHostname(path.basename(worktreeRoot));
+    return prefix ? { prefix, source: "git worktree directory" } : null;
+  }
+  const prefix = branchToPrefix(readBranch() ?? "", style);
+  return prefix ? { prefix, source: "git branch" } : null;
+}
+
 /** Resolve the worktree prefix and hostname layout for a directory. */
 export function resolveWorktreeNaming({
   cwd = process.cwd(),
@@ -257,7 +275,7 @@ function detectWorktreeViaCli(
   try {
     const output = execFileSync(
       "git",
-      ["rev-parse", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"],
+      ["rev-parse", "--git-dir", "--git-common-dir", "--show-toplevel", "--abbrev-ref", "HEAD"],
       {
         cwd,
         encoding: "utf-8",
@@ -266,12 +284,11 @@ function detectWorktreeViaCli(
         windowsHide: true,
       }
     ).trim();
-    const [gitDir, gitCommonDir, branch] = output.split(/\r?\n/);
-    if (!gitDir || !gitCommonDir || !branch) return undefined;
+    const [gitDir, gitCommonDir, toplevel, branch] = output.split(/\r?\n/);
+    if (!gitDir || !gitCommonDir || !toplevel || !branch) return undefined;
     if (path.resolve(cwd, gitDir) === path.resolve(cwd, gitCommonDir)) return null;
 
-    const prefix = branchToPrefix(branch, style);
-    return prefix ? { prefix, source: "git branch" } : null;
+    return worktreeLabel(style, toplevel, () => branch);
   } catch {
     return undefined;
   }
@@ -280,7 +297,7 @@ function detectWorktreeViaCli(
 /**
  * Fallback worktree detection when git CLI is unavailable. Walks up from
  * `startDir` looking for a `.git` file (worktrees have a file, not a
- * directory) and reads the branch name from the gitdir's HEAD file.
+ * directory) and reads the label from the worktree root or its HEAD file.
  */
 function detectWorktreeViaFilesystem(
   startDir: string,
@@ -305,12 +322,7 @@ function detectWorktreeViaFilesystem(
         // Submodules point to /modules/ instead.
         if (!gitdir.match(/[/\\]worktrees[/\\][^/\\]+$/)) return null;
 
-        // Read the branch name from the worktree's HEAD file
-        const branch = readBranchFromHead(path.resolve(dir, gitdir));
-        const prefix = branchToPrefix(branch ?? "", style);
-        if (!prefix) return null;
-
-        return { prefix, source: "git branch" };
+        return worktreeLabel(style, dir, () => readBranchFromHead(path.resolve(dir, gitdir)));
       }
     } catch {
       // No .git here; keep walking
