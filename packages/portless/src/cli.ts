@@ -49,7 +49,6 @@ import {
   formatUrl,
   isErrnoException,
   isProcessAlive as isPidAlive,
-  parseHostname,
   parseHostnames,
   parsePort,
   stripTld,
@@ -1825,7 +1824,7 @@ async function runApp(
   initialStore: RouteStore,
   proxyPort: number,
   stateDir: string,
-  name: string | (WorktreeHostnameInput & { nameSource: string; childPrefix?: string }),
+  name: WorktreeHostnameInput & { nameSource?: string; childPrefix?: string },
   commandArgs: string[],
   tls: boolean,
   tlds: string[],
@@ -1941,7 +1940,7 @@ async function runApp(
   } else {
     console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
-  if (typeof name !== "string") {
+  if (name.nameSource !== undefined) {
     console.error(chalk.gray(`  Name "${name.baseName}" (from ${name.nameSource})`));
     if (name.naming) {
       console.error(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
@@ -2172,9 +2171,7 @@ async function runApp(
   spawnCommand(commandArgs, {
     env: {
       ...process.env,
-      ...(typeof name !== "string" && name.childPrefix !== undefined
-        ? { PORTLESS_PREFIX: name.childPrefix }
-        : {}),
+      ...(name.childPrefix !== undefined ? { PORTLESS_PREFIX: name.childPrefix } : {}),
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
       PORTLESS_URL: finalUrl,
@@ -5473,8 +5470,8 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     }
   }
 
-  const safeName = composeHostname(parsed.name, null);
-  parseHostname(safeName, DEFAULT_TLD);
+  const nameInput = { baseName: parsed.name, naming: null };
+  buildHostnames(nameInput, [DEFAULT_TLD]);
 
   const { dir, port, tls, tlds, lanMode, lanIp } = await discoverState();
   const store = new RouteStore(dir, {
@@ -5484,7 +5481,7 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     store,
     port,
     dir,
-    safeName,
+    nameInput,
     parsed.commandArgs,
     tls,
     tlds,

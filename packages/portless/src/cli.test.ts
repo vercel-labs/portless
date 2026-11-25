@@ -6141,6 +6141,28 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(capture.args).toEqual(["run", "dev", "--no-worktree"]);
     });
 
+    it("named uppercase long hostname matches get --no-worktree", async () => {
+      const name = "A".repeat(80);
+      const hash = createHash("sha256").update(name.toLowerCase()).digest("hex").slice(0, 6);
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: ["--name", name, "bun", "run", "dev"],
+        prefixEnv: "shell",
+        worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+      });
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_URL).toBe(
+        `http://${"a".repeat(56)}-${hash}.localhost:${proxyPort}`
+      );
+      const got = run(["get", name, "--no-worktree"], {
+        cwd: tmpDir,
+        env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0", PORTLESS_PREFIX: "shell" },
+      });
+      expect(got.status).toBe(0);
+      expect(got.stdout.trim()).toBe(capture.env.PORTLESS_URL);
+    });
+
     it.each([
       { cliArgs: ["api.project", "bun", "run", "dev"] },
       { cliArgs: ["api.project", "--no-worktree", "bun", "run", "dev"] },
