@@ -1041,7 +1041,7 @@ function inspectLinuxNSSStore(
   } catch (error: unknown) {
     const detail = error instanceof Error ? error.message : String(error);
     return {
-      state: "untrusted",
+      state: "unavailable",
       hint: `Could not read the Chrome/Chromium NSS database: ${detail}. Run: portless trust`,
     };
   }

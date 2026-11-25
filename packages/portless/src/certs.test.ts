@@ -995,6 +995,26 @@ describe("Linux CA trust", () => {
       }
     }
   );
+
+  it.skipIf(process.platform !== "linux")(
+    "reports browser trust as unavailable when certutil fails to read the NSS database",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      fs.mkdirSync(path.join(homeDir, ".pki", "nssdb"), { recursive: true });
+      const { bundlePath, config } = createTrustConfig();
+      fs.writeFileSync(bundlePath, fs.readFileSync(caPath));
+      writeCommand("certutil", "#!/bin/sh\necho SEC_ERROR_BAD_DATABASE >&2\nexit 1\n");
+      vi.stubEnv("PATH", fakePath());
+
+      const linux = { activeConfig: config, osRelease: "ID=ubuntu\n", envPath: fakePath() };
+      const inspected = inspectTrust(tmpDir, { linux });
+      expect(inspected.stores).toEqual({ system: "trusted", browser: "unavailable" });
+      expect(inspected.hint).toContain("Could not read the Chrome/Chromium NSS database");
+
+      const removed = untrustCA(tmpDir);
+      expect(removed.removed).toBe(false);
+    }
+  );
 });
 
 describe("untrustCA", () => {

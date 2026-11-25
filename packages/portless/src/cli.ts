@@ -2612,11 +2612,14 @@ function cleanupStepLabel(step: CleanupStep): string {
   return "hosts file";
 }
 
-/** Whether CA trust remains installed or cannot be verified removed in a browser NSS store. */
+/** Whether CA trust remains installed or cannot be verified removed in any store. */
 function hasRemainingCATrust(stateDir: string): boolean {
   const { stores } = inspectTrust(stateDir);
   return (
-    stores.system === "trusted" || stores.browser === "trusted" || stores.browser === "unavailable"
+    stores.system === "trusted" ||
+    stores.system === "unavailable" ||
+    stores.browser === "trusted" ||
+    stores.browser === "unavailable"
   );
 }
 
