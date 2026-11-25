@@ -390,13 +390,18 @@ describe("UpstreamPool", () => {
     let finiteProxyClosed = false;
     let sseBackendClosed = false;
     let sseProxyClosed = false;
+    let longPollRes: http.ServerResponse | undefined;
     let resolveFiniteProxyRes: ((res: http.IncomingMessage) => void) | undefined;
     let resolveSseProxyRes: ((res: http.IncomingMessage) => void) | undefined;
+    let resolveLongPollHeaders: (() => void) | undefined;
     const finiteProxyResReady = new Promise<http.IncomingMessage>((resolve) => {
       resolveFiniteProxyRes = resolve;
     });
     const sseProxyResReady = new Promise<http.IncomingMessage>((resolve) => {
       resolveSseProxyRes = resolve;
+    });
+    const longPollHeadersReady = new Promise<void>((resolve) => {
+      resolveLongPollHeaders = resolve;
     });
     const backend = http.createServer((req, res) => {
       if (req.url === "/finite") {
@@ -433,6 +438,12 @@ describe("UpstreamPool", () => {
         res.flushHeaders();
         return;
       }
+      if (req.url === "/long-poll") {
+        longPollRes = res;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.flushHeaders();
+        return;
+      }
       res.end("ok");
     });
     const backendPort = await listen(backend);
@@ -459,6 +470,9 @@ describe("UpstreamPool", () => {
                 sseProxyClosed = true;
               });
             }
+            if (req.url === "/long-poll") {
+              resolveLongPollHeaders?.();
+            }
             res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
             res.flushHeaders();
             proxyRes.pipe(res);
@@ -469,10 +483,12 @@ describe("UpstreamPool", () => {
       );
     });
     const gatewayPort = await listen(gateway);
+    const longPollPromise = response(get(gatewayPort, "/long-poll"));
     const [finiteClient, sseClient] = await Promise.all([
       openPausedResponse(gatewayPort, "/finite"),
       openPausedResponse(gatewayPort, "/sse"),
     ]);
+    await longPollHeadersReady;
     const finiteProxyRes = await finiteProxyResReady;
     const sseProxyRes = await sseProxyResReady;
     expect(finiteClient.isPaused()).toBe(true);
@@ -492,6 +508,8 @@ describe("UpstreamPool", () => {
     expect(sseProxyClosed).toBe(false);
     expect(sseBackendClosed).toBe(false);
     expect(sseProxyRes.destroyed).toBe(false);
+    longPollRes!.end('{"ready":true}');
+    expect(await longPollPromise).toEqual({ status: 200, body: '{"ready":true}' });
     expect(await response(get(gatewayPort, "/followup"))).toEqual({ status: 200, body: "ok" });
     finiteClient.destroy();
     sseClient.destroy();

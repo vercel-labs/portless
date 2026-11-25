@@ -275,16 +275,21 @@ export class UpstreamPool {
       const clearStallTimer = () => {
         clearTimeout(stallTimer);
         stallTimer = undefined;
-        proxyResponse?.removeListener("data", resetStallTimer);
       };
-      const resetStallTimer = () => {
-        clearTimeout(stallTimer);
+      const startStallTimer = () => {
+        if (stallTimer !== undefined || slotPhase !== "active") return;
         stallTimer = setTimeout(() => {
           stallTimer = undefined;
           proxyReq.destroy();
           if (!res.destroyed) res.destroy();
           release();
         }, RESPONSE_STALL_TIMEOUT_MS);
+      };
+      const detachStallListeners = () => {
+        clearStallTimer();
+        proxyResponse?.removeListener("pause", startStallTimer);
+        proxyResponse?.removeListener("resume", clearStallTimer);
+        res.removeListener("drain", clearStallTimer);
       };
       const onClientClose = () => {
         dialRef.cancel?.();
@@ -300,7 +305,7 @@ export class UpstreamPool {
       };
       const release = () => {
         if (slotPhase === "released") return;
-        clearStallTimer();
+        detachStallListeners();
         const prev = slotPhase;
         slotPhase = "released";
         if (prev === "active") releaseActiveSlot();
@@ -311,7 +316,7 @@ export class UpstreamPool {
       };
       const promoteToLongLived = () => {
         if (slotPhase !== "active") return;
-        clearStallTimer();
+        detachStallListeners();
         slotPhase = "longLived";
         releaseActiveSlot();
         entry.longLived++;
@@ -351,12 +356,13 @@ export class UpstreamPool {
         if (isLongLivedResponse(proxyRes)) {
           promoteToLongLived();
         } else {
-          resetStallTimer();
-          proxyRes.once("end", clearStallTimer);
+          proxyRes.once("end", detachStallListeners);
           queueMicrotask(() => {
-            if (slotPhase === "active" && !proxyRes.complete && !proxyRes.destroyed) {
-              proxyRes.on("data", resetStallTimer);
-            }
+            if (slotPhase !== "active" || proxyRes.complete || proxyRes.destroyed) return;
+            proxyRes.on("pause", startStallTimer);
+            proxyRes.on("resume", clearStallTimer);
+            res.on("drain", clearStallTimer);
+            if (proxyRes.isPaused() || res.writableNeedDrain) startStallTimer();
           });
         }
         proxyRes.once("close", release);
