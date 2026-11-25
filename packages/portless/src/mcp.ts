@@ -157,7 +157,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "env",
     "Get sibling env",
-    "Print environment variables for sibling processes such as test runners or scripts outside portless run. Includes NODE_EXTRA_CA_CERTS, PORTLESS_LAN when LAN mode is active, and optional PORTLESS_URL or VAR=name service URLs. URLs use worktree naming; --no-worktree skips it and --json returns JSON.",
+    "Print environment variables for sibling processes such as test runners or scripts outside portless run. Includes NODE_EXTRA_CA_CERTS, PORTLESS_LAN when LAN mode is active, and optional PORTLESS_URL or VAR=name service URLs. URLs use worktree naming; --no-worktree skips it and --json returns JSON. With HTTPS and an existing NODE_EXTRA_CA_CERTS, this may write a cached merged CA bundle.",
     {
       targets: {
         type: "array",
@@ -177,7 +177,7 @@ export const TOOLS: ToolDef[] = [
     },
     [],
     {
-      readOnlyHint: true,
+      readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: false,

@@ -61,7 +61,7 @@ Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/et
 
 To reach an app from another device or share it, use [LAN mode](https://portless.sh/commands#lan-mode) for phones on the same network, or [Tailscale](https://portless.sh/commands#share-on-tailscale), [ngrok](https://portless.sh/commands#share-with-ngrok), or a [Cloudflare quick tunnel](https://portless.sh/commands#share-with-cloudflare) with `--tailscale`, `--ngrok`, or `--cloudflare`. For HTTPS in LAN mode, `portless trust --device` lets a phone install the local CA from a QR code.
 
-With Vite, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so the shared URL loads. Vite treats that variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added during sharing.
+With Vite and Tailscale or Funnel, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so the shared URL loads. This applies to `--tailscale`, `--funnel`, `PORTLESS_TAILSCALE=1`, and `PORTLESS_FUNNEL=1`. Vite treats that variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added during sharing. ngrok and Cloudflare rewrite the upstream `Host` header to the local app hostname, so the local TLD allowlist already covers them.
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 

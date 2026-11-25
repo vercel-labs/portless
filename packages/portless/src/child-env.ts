@@ -61,6 +61,21 @@ export function isValidEnvVarName(name: string): boolean {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(name);
 }
 
+const RESERVED_ENV_VAR_NAMES = new Set([
+  "PORTLESS_URL",
+  "PORTLESS_PREFIX",
+  "PORTLESS_LAN",
+  "PORTLESS_TAILSCALE_URL",
+  "PORTLESS_NGROK_URL",
+  "PORTLESS_CLOUDFLARE_URL",
+  "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
+  "NODE_EXTRA_CA_CERTS",
+]);
+
+export function isReservedEnvVarName(name: string): boolean {
+  return RESERVED_ENV_VAR_NAMES.has(name) || name.startsWith(PEER_URL_ENV_PREFIX);
+}
+
 export function resolveEnvVarNaming(
   overrides?: EnvVarOverrides,
   config?: EnvVarOverrides,
@@ -79,6 +94,9 @@ export function resolveEnvVarNaming(
       throw new ChildEnvError(
         `Invalid environment variable name "${value}" from ${source}. Names must start with a letter or underscore and contain only letters, digits, and underscores.`
       );
+    }
+    if (isReservedEnvVarName(value)) {
+      throw new ChildEnvError(`Environment variable name "${value}" is reserved by portless.`);
     }
     return value;
   }
@@ -126,20 +144,20 @@ export function buildPeerUrlEnv(
   onWarning?: (message: string) => void
 ): ChildEnvMap {
   const env: ChildEnvMap = {};
-  const owners = new Map<string, string>();
+  const owners = new Map<string, PeerApp>();
   for (const peer of peers) {
     if (!/[a-z0-9]/i.test(peer.baseName)) continue;
     const name = peerUrlEnvName(peer.baseName);
     const owner = owners.get(name);
     if (owner !== undefined) {
-      if (owner !== peer.baseName) {
+      if (owner.baseName !== peer.baseName || owner.url !== peer.url) {
         onWarning?.(
-          `Environment variable ${name} is already used by "${owner}"; skipping "${peer.baseName}".`
+          `Environment variable ${name} is already used by "${owner.baseName}" (${owner.url}); skipping "${peer.baseName}" (${peer.url}).`
         );
       }
       continue;
     }
-    owners.set(name, peer.baseName);
+    owners.set(name, peer);
     env[name] = peer.url;
   }
   return env;
@@ -180,33 +198,37 @@ export function resolveExtraCaCerts(
   caPath: string | undefined,
   parentEnv: NodeJS.ProcessEnv = process.env
 ): string | undefined {
-  if (!caPath || !fs.existsSync(caPath)) return undefined;
+  if (!caPath) return undefined;
+  const absCaPath = path.resolve(caPath);
+  if (!fs.existsSync(absCaPath)) return undefined;
   let portlessPem: string;
   try {
-    portlessPem = fs.readFileSync(caPath, "utf-8");
+    portlessPem = fs.readFileSync(absCaPath, "utf-8");
   } catch {
     return undefined;
   }
   if (!portlessPem.trim()) return undefined;
   const existing = parentEnv.NODE_EXTRA_CA_CERTS?.trim();
-  if (!existing || path.resolve(existing) === path.resolve(caPath)) return caPath;
+  if (!existing) return absCaPath;
+  const absExisting = path.resolve(existing);
+  if (absExisting === absCaPath) return absCaPath;
   let existingPem: string;
   try {
-    existingPem = fs.readFileSync(existing, "utf-8");
+    existingPem = fs.readFileSync(absExisting, "utf-8");
   } catch {
-    return caPath;
+    return absCaPath;
   }
-  if (existingPem.includes(portlessPem.trim())) return existing;
+  if (existingPem.includes(portlessPem.trim())) return absExisting;
   let combined = `${existingPem.trimEnd()}\n${portlessPem.trimStart()}`;
   if (!combined.endsWith("\n")) combined += "\n";
   const hash = crypto.createHash("sha256").update(combined).digest("hex").slice(0, 16);
   const filename = `${CA_BUNDLE_PREFIX}${hash}.pem`;
   try {
-    return writeCaBundle(path.dirname(caPath), filename, combined, 0o644);
+    return writeCaBundle(path.dirname(absCaPath), filename, combined, 0o644);
   } catch {
     try {
       const uid = process.getuid?.();
-      const dir = path.join(os.tmpdir(), `portless-ca-${uid ?? "user"}`);
+      const dir = path.resolve(os.tmpdir(), `portless-ca-${uid ?? "user"}`);
       fs.mkdirSync(dir, { mode: 0o700, recursive: true });
       const stat = fs.lstatSync(dir);
       if (
@@ -215,11 +237,11 @@ export function resolveExtraCaCerts(
         (uid !== undefined && stat.uid !== uid) ||
         (stat.mode & 0o077) !== 0
       ) {
-        return caPath;
+        return absCaPath;
       }
       return writeCaBundle(dir, filename, combined, 0o600);
     } catch {
-      return caPath;
+      return absCaPath;
     }
   }
 }
@@ -240,10 +262,7 @@ export function childEnv(entry: ChildEnvEntry, options: ChildEnvOptions = {}): C
   if (entry.host !== undefined) setEnv(env, naming.hostVar, entry.host);
   if (entry.url !== undefined) env.PORTLESS_URL = entry.url;
   if (entry.tlds && entry.tlds.length > 0) {
-    const shareUrl =
-      options.shareUrl ??
-      entry.shareEnv?.PORTLESS_TAILSCALE_URL ??
-      (entry.shareEnv ? Object.values(entry.shareEnv)[0] : undefined);
+    const shareUrl = options.shareUrl ?? entry.shareEnv?.PORTLESS_TAILSCALE_URL;
     env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = formatViteAllowedHosts(entry.tlds, shareUrl);
   }
   if (entry.lan) env.PORTLESS_LAN = "1";

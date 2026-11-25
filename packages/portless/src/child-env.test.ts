@@ -48,7 +48,7 @@ describe("peer URL environment", () => {
     const result = buildPeerUrlEnv(
       [
         { baseName: "my-app", url: "http://first.localhost" },
-        { baseName: "my-app", url: "http://duplicate.localhost" },
+        { baseName: "my-app", url: "http://first.localhost" },
         { baseName: "my.app", url: "http://second.localhost" },
         { baseName: "...", url: "http://empty.localhost" },
       ],
@@ -59,6 +59,23 @@ describe("peer URL environment", () => {
     expect(warn.mock.calls[0][0]).toContain("PORTLESS_URL_MY_APP");
     expect(warn.mock.calls[0][0]).toContain("my-app");
     expect(warn.mock.calls[0][0]).toContain("my.app");
+  });
+
+  it("warns when the same app name has a different URL", () => {
+    const warn = vi.fn<(message: string) => void>();
+    expect(
+      buildPeerUrlEnv(
+        [
+          { baseName: "api", url: "https://first.api.localhost" },
+          { baseName: "api", url: "https://second.api.localhost" },
+        ],
+        warn
+      )
+    ).toEqual({ PORTLESS_URL_API: "https://first.api.localhost" });
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0][0]).toContain("PORTLESS_URL_API");
+    expect(warn.mock.calls[0][0]).toContain("https://first.api.localhost");
+    expect(warn.mock.calls[0][0]).toContain("https://second.api.localhost");
   });
 });
 
@@ -87,6 +104,25 @@ describe("resolveEnvVarNaming", () => {
       resolveEnvVarNaming(undefined, undefined, { PORTLESS_HOST_VAR: "BAD-HOST" })
     ).toThrow(ChildEnvError);
     expect(() => resolveEnvVarNaming(undefined, { portVar: "BAD PORT" }, {})).toThrow(
+      ChildEnvError
+    );
+  });
+
+  it.each([
+    "PORTLESS_URL",
+    "PORTLESS_PREFIX",
+    "PORTLESS_LAN",
+    "PORTLESS_TAILSCALE_URL",
+    "PORTLESS_NGROK_URL",
+    "PORTLESS_CLOUDFLARE_URL",
+    "__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS",
+    "NODE_EXTRA_CA_CERTS",
+    "PORTLESS_URL_API",
+  ])("rejects reserved variable name %s", (name) => {
+    expect(() => resolveEnvVarNaming({ portVar: name }, undefined, {})).toThrow(
+      `Environment variable name "${name}" is reserved by portless.`
+    );
+    expect(() => resolveEnvVarNaming(undefined, undefined, { PORTLESS_HOST_VAR: name })).toThrow(
       ChildEnvError
     );
   });
@@ -130,6 +166,29 @@ describe("resolveExtraCaCerts", () => {
     expect(
       resolveExtraCaCerts(caPath, { NODE_EXTRA_CA_CERTS: path.join(dir, "missing.pem") })
     ).toBe(caPath);
+  });
+
+  it("returns absolute paths when the CA and existing bundle paths are relative", () => {
+    const relativeCa = path.relative(process.cwd(), caPath);
+    const missing = path.relative(process.cwd(), path.join(dir, "missing.pem"));
+    expect(resolveExtraCaCerts(relativeCa, {})).toBe(caPath);
+    expect(resolveExtraCaCerts(relativeCa, { NODE_EXTRA_CA_CERTS: relativeCa })).toBe(caPath);
+    expect(resolveExtraCaCerts(relativeCa, { NODE_EXTRA_CA_CERTS: missing })).toBe(caPath);
+
+    const corporate = path.join(dir, "corporate.pem");
+    fs.writeFileSync(corporate, "CORPORATE CERT\n");
+    const bundle = resolveExtraCaCerts(relativeCa, {
+      NODE_EXTRA_CA_CERTS: path.relative(process.cwd(), corporate),
+    });
+    expect(bundle).toBeDefined();
+    expect(path.isAbsolute(bundle!)).toBe(true);
+    expect(path.dirname(bundle!)).toBe(dir);
+    expect(fs.readFileSync(bundle!, "utf-8")).toBe("CORPORATE CERT\nPORTLESS CERT\n");
+    expect(
+      resolveExtraCaCerts(relativeCa, {
+        NODE_EXTRA_CA_CERTS: path.relative(process.cwd(), bundle!),
+      })
+    ).toBe(bundle);
   });
 
   it("creates a content-addressed bundle and reuses it without creating another", () => {
@@ -178,12 +237,17 @@ describe("childEnv", () => {
       childEnv(entry, { shareUrl: "https://app.ngrok-free.app:1234/path" }).env
         .__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
     ).toBe("app.ngrok-free.app");
-    expect(
-      childEnv({
-        tlds: ["localhost"],
-        shareEnv: { CLOUDFLARE_URL: "https://app.trycloudflare.com/path" },
-      }).env.__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
-    ).toBe("app.trycloudflare.com");
+  });
+
+  it.each([
+    ["PORTLESS_NGROK_URL", "https://app.ngrok-free.app/path"],
+    ["PORTLESS_CLOUDFLARE_URL", "https://app.trycloudflare.com/path"],
+  ])("keeps local Vite hosts with %s", (key, url) => {
+    const shareEnv = { [key]: url };
+    expect(childEnv({ tlds: ["localhost", "test"], shareEnv }).env).toEqual({
+      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: ".localhost,.test",
+      ...shareEnv,
+    });
   });
 
   it("merges peers, named URLs, CA, LAN, and prefix into the child environment", () => {

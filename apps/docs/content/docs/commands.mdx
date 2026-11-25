@@ -133,7 +133,7 @@ portless myapp --tailscale next dev     # -> https://devbox.ts.net
 portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
 ```
 
-With Vite, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This covers `--tailscale`, `--funnel`, `--ngrok`, and `--cloudflare`, along with sharing enabled by environment variables such as `PORTLESS_TAILSCALE=1`. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added.
+With Vite and Tailscale or Funnel, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This applies to `--tailscale`, `--funnel`, `PORTLESS_TAILSCALE=1`, and `PORTLESS_FUNNEL=1`. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added. ngrok and Cloudflare rewrite the upstream `Host` header to the local app hostname, so the local TLD allowlist already covers them.
 
 Use `--funnel` to expose your dev server to the public internet through [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
 

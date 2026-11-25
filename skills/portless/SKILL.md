@@ -325,7 +325,7 @@ Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` 
 
 Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
 
-With Vite, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This covers `--tailscale`, `--funnel`, `--ngrok`, and `--cloudflare`, along with sharing enabled by `PORTLESS_TAILSCALE=1` and the matching environment variables. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added.
+With Vite and Tailscale or Funnel, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This applies to `--tailscale`, `--funnel`, `PORTLESS_TAILSCALE=1`, and `PORTLESS_FUNNEL=1`. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added. ngrok and Cloudflare rewrite the upstream `Host` header to the local app hostname, so the local TLD allowlist already covers them.
 
 ### ngrok sharing
 

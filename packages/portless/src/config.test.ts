@@ -497,6 +497,29 @@ describe("loadConfig validation", () => {
     );
   });
 
+  it("rejects reserved portVar and hostVar names at top level and in apps", () => {
+    const names = [
+      "PORTLESS_URL",
+      "PORTLESS_TAILSCALE_URL",
+      "NODE_EXTRA_CA_CERTS",
+      "PORTLESS_URL_API",
+    ];
+    for (const name of names) {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ hostVar: name }));
+      expect(() => loadConfig(tmpDir), name).toThrow(
+        /"hostVar" in .* must not be a reserved environment variable name/
+      );
+
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ apps: { "apps/web": { portVar: name } } })
+      );
+      expect(() => loadConfig(tmpDir), name).toThrow(
+        /"apps\.apps\/web\.portVar" in .* must not be a reserved environment variable name/
+      );
+    }
+  });
+
   it("warns on unknown top-level keys", () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fs.writeFileSync(

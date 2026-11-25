@@ -8,6 +8,7 @@ import {
   childEnv,
   formatShellExports,
   formatViteAllowedHosts,
+  isReservedEnvVarName,
   isValidEnvVarName,
   resolveEnvVarNaming,
   type EnvVarNaming,
@@ -1984,7 +1985,6 @@ async function runApp(
   const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
   const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
-  // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
   if (lanMode && !process.env.PORTLESS_LAN) {
     process.env.PORTLESS_LAN = "1";
   }
@@ -1996,7 +1996,6 @@ async function runApp(
   for (const run of tunnelRuns) {
     if (run.proc && !run.handled) shareEnv[`${run.t.env}_URL`] = run.proc.url;
   }
-  const shareUrl = tailscaleUrl ?? tunnelRuns.find((run) => run.proc && !run.handled)?.proc?.url;
   const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
   const built = childEnv(
     {
@@ -2008,7 +2007,7 @@ async function runApp(
       lan: lanMode,
       shareEnv,
     },
-    { naming: envVarNaming, shareUrl, caPath }
+    { naming: envVarNaming, shareUrl: tailscaleUrl, caPath }
   );
   console.error(chalk.gray(`Running: ${built.display} ${commandArgs.join(" ")}\n`));
 
@@ -2109,21 +2108,23 @@ const WORKTREE_FLAG_SPEC = { "--no-worktree": "boolean" } as const;
 const ENV_VAR_FLAG_SPEC = { "--port-var": "value", "--host-var": "value" } as const;
 
 function validateEarlyNaming(overrides: EnvVarOverrides, checkDefaultCollision: boolean): void {
+  const portVar = overrides.portVar ?? (process.env.PORTLESS_PORT_VAR || undefined);
+  const hostVar = overrides.hostVar ?? (process.env.PORTLESS_HOST_VAR || undefined);
   const values = [
-    [overrides.portVar, "override"],
-    [overrides.hostVar, "override"],
-    [process.env.PORTLESS_PORT_VAR, "PORTLESS_PORT_VAR"],
-    [process.env.PORTLESS_HOST_VAR, "PORTLESS_HOST_VAR"],
+    [portVar, overrides.portVar !== undefined ? "override" : "PORTLESS_PORT_VAR"],
+    [hostVar, overrides.hostVar !== undefined ? "override" : "PORTLESS_HOST_VAR"],
   ] as const;
   for (const [value, source] of values) {
-    if (value && !isValidEnvVarName(value)) {
+    if (value === undefined) continue;
+    if (!isValidEnvVarName(value)) {
       throw new UsageError(
         `Invalid environment variable name "${value}" from ${source}. Names must start with a letter or underscore and contain only letters, digits, and underscores.`
       );
     }
+    if (isReservedEnvVarName(value)) {
+      throw new UsageError(`Environment variable name "${value}" is reserved by portless.`);
+    }
   }
-  const portVar = overrides.portVar || process.env.PORTLESS_PORT_VAR || undefined;
-  const hostVar = overrides.hostVar || process.env.PORTLESS_HOST_VAR || undefined;
   if (
     (checkDefaultCollision || (portVar && hostVar)) &&
     (portVar ?? "PORT") === (hostVar ?? "HOST")
@@ -4887,6 +4888,7 @@ interface MultiAppEntry extends WorktreeHostnameInput {
   commandArgs: string[];
   appPort?: number;
   proxied: boolean;
+  usesPortless: boolean;
   envVarNaming: EnvVarNaming;
 }
 
@@ -4911,7 +4913,7 @@ function collectPeerApps(
 ): PeerApp[] {
   const peers: PeerApp[] = [];
   for (const app of apps) {
-    if (app.commandArgs[0] === "portless") continue;
+    if (app.usesPortless) continue;
     const url = formatUrls(buildHostnames(app, tlds), proxyPort, tls)[0];
     if (url) peers.push({ baseName: app.baseName, url });
   }
@@ -4963,7 +4965,6 @@ async function spawnProxiedApp(
   settled: Promise<void>;
 }> {
   const name = composeHostname(app.baseName, app.naming);
-  const usesPortless = app.commandArgs[0] === "portless";
 
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -4974,7 +4975,7 @@ async function spawnProxiedApp(
   let displayUrl: string;
   let appPort: number | undefined;
 
-  if (usesPortless) {
+  if (app.usesPortless) {
     env = lanMode ? { ...pkgEnv, PORTLESS_LAN: "1" } : pkgEnv;
     displayUrl = "(managed by portless)";
   } else {
@@ -5239,6 +5240,7 @@ async function handleDefaultMulti(
       commandArgs,
       appPort: envAppPort ?? appOverride.appPort,
       proxied,
+      usesPortless: rawScript[0] === "portless",
       envVarNaming,
     });
   }
@@ -5355,7 +5357,7 @@ async function runWithTurbo(
 ): Promise<void> {
   const store = new RouteStore(stateDir);
   const peers = collectPeerApps(proxiedApps, tlds, proxyPort, tls);
-  const peerWarner = proxiedApps.find((app) => app.commandArgs[0] !== "portless");
+  const peerWarner = proxiedApps.find((app) => !app.usesPortless);
   const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
 
   const manifest: Record<string, ManifestEntry> = {};
@@ -5363,8 +5365,7 @@ async function runWithTurbo(
   const appUrls: { label: string; url: string }[] = [];
 
   for (const app of proxiedApps) {
-    const usesPortless = app.commandArgs[0] === "portless";
-    if (usesPortless) {
+    if (app.usesPortless) {
       appUrls.push({ label: app.label, url: "(managed by portless)" });
       continue;
     }
@@ -5391,6 +5392,15 @@ async function runWithTurbo(
             : undefined,
       }
     ).env;
+  }
+
+  const sharedEnv = childEnv({ lan: lanMode }, { peers, caPath }).env;
+  if (Object.keys(sharedEnv).length > 0) {
+    for (const app of taskApps) {
+      if (!app.usesPortless && !Object.hasOwn(manifest, app.pkg.dir)) {
+        manifest[app.pkg.dir] = sharedEnv;
+      }
+    }
   }
 
   const envPublication = new EnvPublication(stateDir);
@@ -5422,7 +5432,6 @@ async function runWithTurbo(
     ? scriptRunCommand(pm, scriptName, wsRoot, turboPassThrough)
     : packageManagerExec(pm, ["turbo", "run", scriptName, ...turboPassThrough]);
 
-  const sharedEnv = childEnv({ lan: lanMode }, { peers, caPath }).env;
   const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
     stdio: "inherit",
@@ -5490,7 +5499,7 @@ async function runWithDirectSpawn(
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
   const routeSettlements: Promise<void>[] = [];
   const peers = collectPeerApps(proxiedApps, tlds, proxyPort, tls);
-  const peerWarner = proxiedApps.find((app) => app.commandArgs[0] !== "portless");
+  const peerWarner = proxiedApps.find((app) => !app.usesPortless);
 
   for (const app of proxiedApps) {
     const { child, displayUrl, route, settled } = await spawnProxiedApp(
@@ -6344,8 +6353,24 @@ async function main() {
   }
   const command = explicitName || !isCommandName(args[0]) ? undefined : COMMANDS[args[0]];
   const isRunCommand = command === COMMANDS.run;
+  let runHelp = false;
+  if (isRunCommand) {
+    for (let index = 1; index < flagLimit(); ) {
+      if (args[index] === "--help" || args[index] === "-h") {
+        runHelp = true;
+        break;
+      }
+      const next = advancePortlessFlag(index, RUN_FLAG_SPEC);
+      if (next === null) break;
+      index = next;
+    }
+  }
 
-  if ((!command || isRunCommand) && !["--help", "-h", "--version", "-v"].includes(args[0])) {
+  if (
+    (!command || isRunCommand) &&
+    !runHelp &&
+    !["--help", "-h", "--version", "-v"].includes(args[0])
+  ) {
     validateEarlyNaming(envVarOverrides, isPortlessSkipped());
   }
 

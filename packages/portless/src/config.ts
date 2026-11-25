@@ -1,6 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isValidEnvVarName } from "./child-env.js";
+import { isReservedEnvVarName, isValidEnvVarName } from "./child-env.js";
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -526,6 +526,11 @@ function validateEnvVarFields(
     if (typeof value !== "string" || !isValidEnvVarName(value)) {
       throw new ConfigValidationError(
         `"${label(key)}" in ${configPath} must be a valid environment variable name.`
+      );
+    }
+    if (isReservedEnvVarName(value)) {
+      throw new ConfigValidationError(
+        `"${label(key)}" in ${configPath} must not be a reserved environment variable name ("${value}").`
       );
     }
   }

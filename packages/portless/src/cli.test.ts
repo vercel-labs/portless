@@ -7999,7 +7999,11 @@ describe("CLI", { timeout: 15_000 }, () => {
     );
   });
 
-  async function runWorkspaceCapture(turbo: boolean, extraEnv: Record<string, string> = {}) {
+  async function runWorkspaceCapture(
+    turbo: boolean,
+    extraEnv: Record<string, string> = {},
+    options: { task?: boolean; strict?: boolean; selfManaged?: boolean } = {}
+  ) {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-peer-env-"));
     const stateDir = path.join(root, "state");
     fs.mkdirSync(stateDir);
@@ -8027,7 +8031,13 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.mkdirSync(gitdir, { recursive: true });
       fs.writeFileSync(path.join(gitdir, "HEAD"), "ref: refs/heads/feature-x\n");
       fs.writeFileSync(path.join(root, ".git"), `gitdir: ${gitdir}\n`);
-      for (const name of ["web", "api"]) {
+      const names = [
+        "web",
+        "api",
+        ...(options.task ? ["task"] : []),
+        ...(options.selfManaged ? ["managed"] : []),
+      ];
+      for (const name of names) {
         const dir = path.join(root, "packages", name);
         fs.mkdirSync(dir, { recursive: true });
         fs.writeFileSync(
@@ -8035,14 +8045,23 @@ describe("CLI", { timeout: 15_000 }, () => {
           JSON.stringify({
             name,
             version: "0.0.0",
-            scripts: { dev: "node cap.cjs" },
-            portless: { proxy: true },
+            scripts: { dev: name === "managed" ? "portless managed node cap.cjs" : "node cap.cjs" },
+            portless: { proxy: name !== "task" },
           })
         );
         fs.writeFileSync(
           path.join(dir, "cap.cjs"),
           `require("node:fs").writeFileSync(${JSON.stringify(path.join(stateDir, `${name}.json`))}, JSON.stringify(process.env));\n`
         );
+        if (name === "managed") {
+          const bin = path.join(dir, "node_modules", ".bin");
+          fs.mkdirSync(bin, { recursive: true });
+          fs.writeFileSync(
+            path.join(bin, "portless"),
+            `#!/bin/sh\nexec ${JSON.stringify(process.execPath)} cap.cjs\n`,
+            { mode: 0o755 }
+          );
+        }
       }
       if (turbo) {
         fs.writeFileSync(
@@ -8051,21 +8070,36 @@ describe("CLI", { timeout: 15_000 }, () => {
         );
         const bin = path.join(root, "node_modules", ".bin");
         fs.mkdirSync(bin, { recursive: true });
-        fs.writeFileSync(
-          path.join(bin, "turbo"),
-          `#!/bin/sh\n(cd ${JSON.stringify(path.join(root, "packages", "web"))} && ${JSON.stringify(process.execPath)} cap.cjs) || exit $?\n(cd ${JSON.stringify(path.join(root, "packages", "api"))} && ${JSON.stringify(process.execPath)} cap.cjs)\n`,
-          { mode: 0o755 }
-        );
+        const turboScript = options.strict
+          ? [
+              `#!${process.execPath}`,
+              'const fs = require("node:fs");',
+              'const { spawnSync } = require("node:child_process");',
+              "const env = { ...process.env };",
+              'const before = Object.keys(env).filter((key) => key.startsWith("PORTLESS_URL_"));',
+              "for (const key of before) delete env[key];",
+              `fs.writeFileSync(${JSON.stringify(path.join(stateDir, "strict.json"))}, JSON.stringify({ before, after: Object.keys(env).filter((key) => key.startsWith("PORTLESS_URL_")) }));`,
+              `for (const dir of ${JSON.stringify(names.map((name) => path.join(root, "packages", name)))}) {`,
+              '  const child = spawnSync(process.execPath, ["cap.cjs"], { cwd: dir, env, stdio: "inherit" });',
+              "  if (child.error || child.status !== 0) process.exit(child.status || 1);",
+              "}",
+              "",
+            ].join("\n")
+          : `#!/bin/sh\n(cd ${JSON.stringify(path.join(root, "packages", "web"))} && ${JSON.stringify(process.execPath)} cap.cjs) || exit $?\n(cd ${JSON.stringify(path.join(root, "packages", "api"))} && ${JSON.stringify(process.execPath)} cap.cjs)\n`;
+        fs.writeFileSync(path.join(bin, "turbo"), turboScript, { mode: 0o755 });
       }
       const env: Record<string, string | undefined> = { ...process.env };
       for (const key of Object.keys(env)) {
-        if (key.startsWith("npm_") || key.startsWith("PNPM_")) delete env[key];
+        if (key.startsWith("npm_") || key.startsWith("PNPM_") || key.startsWith("PORTLESS_URL_")) {
+          delete env[key];
+        }
       }
       Object.assign(env, {
         PORTLESS_STATE_DIR: stateDir,
         PORTLESS_HTTPS: "0",
         PORTLESS_PREFIX: undefined,
         PORTLESS: undefined,
+        PORTLESS_URL: undefined,
         PORTLESS_APP_PORT: undefined,
         NO_COLOR: "1",
         ...extraEnv,
@@ -8093,14 +8127,20 @@ describe("CLI", { timeout: 15_000 }, () => {
         });
       });
       expect(status, output).toBe(0);
-      const captures = ["web", "api"].map(
+      const captures = names.map(
         (name) =>
           JSON.parse(fs.readFileSync(path.join(stateDir, `${name}.json`), "utf-8")) as Record<
             string,
             string
           >
       );
-      return { captures, proxyPort: proxy.port };
+      const strictEnv = options.strict
+        ? (JSON.parse(fs.readFileSync(path.join(stateDir, "strict.json"), "utf-8")) as {
+            before: string[];
+            after: string[];
+          })
+        : undefined;
+      return { captures, proxyPort: proxy.port, strictEnv };
     } finally {
       if (cli) await stopChild(cli);
       if (proxyChild) await stopChild(proxyChild);
@@ -8156,6 +8196,16 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(running).toContain("APP_PORT=");
         expect(running).toContain("APP_HOST=127.0.0.1");
 
+        fs.rmSync(capturePath);
+        const override = run(
+          ["run", "--name", "customapp", "--port-var", "APP_PORT", "node", scriptPath],
+          { cwd: tmpDir, env: { ...env, PORTLESS_PORT_VAR: "bad-name" } }
+        );
+        expect(override.status, override.stderr).toBe(0);
+        const overrideCapture = JSON.parse(fs.readFileSync(capturePath, "utf-8"));
+        expect(Number(overrideCapture.APP_PORT)).toBeGreaterThan(0);
+        expect(Number(overrideCapture.APP_PORT)).toBeLessThanOrEqual(65535);
+
         fs.writeFileSync(
           path.join(tmpDir, "portless.json"),
           JSON.stringify({ hostVar: "APP_HOST" })
@@ -8173,6 +8223,24 @@ describe("CLI", { timeout: 15_000 }, () => {
         if (proxyChild) await stopChild(proxyChild);
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
+    });
+
+    it("prints run help despite an invalid environment variable name", () => {
+      const result = run(["run", "--help"], { env: { PORTLESS_PORT_VAR: "bad-name" } });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("Usage:");
+      expect(result.stdout).toContain("--port-var");
+    });
+
+    it("rejects the reserved PORTLESS_URL as a port variable", () => {
+      const result = run(
+        ["run", "--name", "myapp", "--port-var", "PORTLESS_URL", "node", "-e", ""],
+        {
+          env: { PORTLESS_PORT_VAR: undefined, PORTLESS_HOST_VAR: undefined },
+        }
+      );
+      expect(result.status, result.stderr).toBe(2);
+      expect(result.stderr).toContain("PORTLESS_URL");
     });
 
     it("rejects invalid or conflicting environment variable names", () => {
@@ -8221,6 +8289,51 @@ describe("CLI", { timeout: 15_000 }, () => {
             `http://feature-x.api.myrepo.localhost:${proxyPort}`
           );
         }
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "provides peer URLs to Turbo task apps after strict environment filtering",
+      async () => {
+        const { captures, proxyPort, strictEnv } = await runWorkspaceCapture(
+          true,
+          {},
+          {
+            task: true,
+            strict: true,
+          }
+        );
+        expect(strictEnv?.before).toEqual(
+          expect.arrayContaining(["PORTLESS_URL_WEB_MYREPO", "PORTLESS_URL_API_MYREPO"])
+        );
+        expect(strictEnv?.after).toEqual([]);
+        const task = captures[2]!;
+        expect(task.PORTLESS_URL_WEB_MYREPO).toBe(
+          `http://feature-x.web.myrepo.localhost:${proxyPort}`
+        );
+        expect(task.PORTLESS_URL_API_MYREPO).toBe(
+          `http://feature-x.api.myrepo.localhost:${proxyPort}`
+        );
+      },
+      30_000
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "excludes self-managed portless scripts from peer URLs",
+      async () => {
+        const { captures, proxyPort } = await runWorkspaceCapture(false, {}, { selfManaged: true });
+        for (const capture of captures.slice(0, 2)) {
+          expect(capture.PORTLESS_URL_MANAGED_MYREPO).toBeUndefined();
+          expect(capture.PORTLESS_URL_WEB_MYREPO).toBe(
+            `http://feature-x.web.myrepo.localhost:${proxyPort}`
+          );
+          expect(capture.PORTLESS_URL_API_MYREPO).toBe(
+            `http://feature-x.api.myrepo.localhost:${proxyPort}`
+          );
+        }
+        expect(captures[2]!.PORTLESS_URL_MANAGED_MYREPO).toBeUndefined();
+        expect(captures[2]!.PORTLESS_URL).toBeUndefined();
       },
       30_000
     );
