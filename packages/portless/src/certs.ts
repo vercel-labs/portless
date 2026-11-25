@@ -11,8 +11,8 @@ import {
   resolveUserHome,
 } from "./utils.js";
 import {
+  inspectWindowsCATrust,
   isWSL,
-  isWindowsCATrusted,
   trustWindowsCA,
   untrustWindowsCA,
   wslWindowsCAStoreOptions,
@@ -80,28 +80,6 @@ function fileExists(filePath: string): boolean {
   }
 }
 
-function caFingerprint(stateDir: string): string | null {
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
-  try {
-    const pem = fs.readFileSync(caCertPath);
-    return crypto.createHash("sha256").update(pem).digest("hex");
-  } catch {
-    return null;
-  }
-}
-
-function readTrustMarker(stateDir: string): string | null {
-  try {
-    const markerPath = path.join(stateDir, CA_TRUST_MARKER);
-    const stat = fs.lstatSync(markerPath);
-    if (!stat.isFile() || stat.isSymbolicLink()) return null;
-    const value = fs.readFileSync(markerPath, "utf-8").trim();
-    return value || null;
-  } catch {
-    return null;
-  }
-}
-
 /**
  * Create or replace a state marker file without following a symlink at the
  * destination, using an exclusive no-follow temp file and atomic rename.
@@ -153,15 +131,6 @@ function clearTrustRefreshPending(stateDir: string): void {
     fs.unlinkSync(path.join(stateDir, CA_TRUST_REFRESH_PENDING));
   } catch {
     // A trust refresh may not be pending; ignore.
-  }
-}
-
-function writeTrustMarker(stateDir: string): void {
-  const fp = caFingerprint(stateDir);
-  if (fp) {
-    const canonicalDir = fs.realpathSync(stateDir);
-    clearTrustRefreshPending(canonicalDir);
-    writeStateMarkerFile(path.join(canonicalDir, CA_TRUST_MARKER), fp + "\n");
   }
 }
 
@@ -320,9 +289,6 @@ function hasDuplicateExtensions(certPath: string): boolean {
   }
 }
 
-/**
- * Run openssl and return stdout. Throws on non-zero exit.
- */
 /**
  * Start a command that creates a private key with a umask that hides the file
  * from other users from the moment it exists. Some openssl builds create key
@@ -646,30 +612,32 @@ export function ensureCerts(stateDir: string): {
   };
 }
 
-/**
- * Check if the portless CA is already installed in the system trust store.
- */
-export function isCATrusted(stateDir: string): boolean {
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
-  if (!fileExists(caCertPath)) return false;
+export type SystemTrustStoreState = "trusted" | "untrusted" | "unavailable";
 
-  if (process.platform === "darwin") {
-    const marker = readTrustMarker(stateDir);
-    if (marker && marker === caFingerprint(stateDir)) return true;
-    return isCATrustedMacOS(caCertPath);
-  } else if (process.platform === "linux") {
-    if (!isCATrustedLinux(stateDir)) return false;
-    if (!isWSL()) return true;
-    try {
-      return isWindowsCATrusted(caCertPath, wslWindowsCAStoreOptions());
-    } catch {
-      return false;
-    }
-  } else if (process.platform === "win32") {
-    return isWindowsCATrusted(caCertPath);
-  }
-  return false;
-}
+export type BrowserTrustStoreState = "trusted" | "untrusted" | "unavailable" | "not-applicable";
+
+export type TrustStores = {
+  system: SystemTrustStoreState;
+  browser: BrowserTrustStoreState;
+};
+
+export type TrustInspectionState = "trusted" | "untrusted" | "unavailable";
+
+export type TrustInspection = {
+  state: TrustInspectionState;
+  stores: TrustStores;
+  hint?: string;
+  error?: string;
+};
+
+export type EnsureTrustState = "trusted" | "installed" | "needs-elevation" | "unavailable";
+
+export type EnsureTrustResult = {
+  state: EnsureTrustState;
+  stores: TrustStores;
+  hint?: string;
+  error?: string;
+};
 
 function isCATrustedMacOS(caCertPath: string): boolean {
   try {
@@ -723,98 +691,330 @@ function loginKeychainPath(): string {
   return path.join(home, "Library", "Keychains", "login.keychain-db");
 }
 
-/**
- * Linux distro CA trust configuration.
- * Each entry maps a distro family to its CA certificate directory and update command.
- */
 export interface LinuxCATrustConfig {
   certDir: string;
   updateCommand: string;
+  bundlePaths?: string[];
 }
 
-export interface LinuxCATrustRemovalOptions {
-  configs?: LinuxCATrustConfig[];
+export interface LinuxCATrustOptions {
   activeConfig?: LinuxCATrustConfig;
   runUpdate?: (command: string) => void;
+  envPath?: string;
+  osRelease?: string;
+}
+
+export interface LinuxCATrustRemovalOptions extends LinuxCATrustOptions {
+  configs?: LinuxCATrustConfig[];
 }
 
 const LINUX_CA_TRUST_CONFIGS: Record<string, LinuxCATrustConfig> = {
   debian: {
     certDir: "/usr/local/share/ca-certificates",
     updateCommand: "update-ca-certificates",
+    bundlePaths: ["/etc/ssl/certs/ca-certificates.crt"],
   },
   arch: {
     certDir: "/etc/ca-certificates/trust-source/anchors",
     updateCommand: "update-ca-trust",
+    bundlePaths: [
+      "/etc/ca-certificates/extracted/tls-ca-bundle.pem",
+      "/etc/ssl/certs/ca-certificates.crt",
+    ],
   },
   fedora: {
     certDir: "/etc/pki/ca-trust/source/anchors",
     updateCommand: "update-ca-trust",
+    bundlePaths: [
+      "/etc/pki/tls/certs/ca-bundle.crt",
+      "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+    ],
   },
   suse: {
     certDir: "/etc/pki/trust/anchors",
     updateCommand: "update-ca-certificates",
+    bundlePaths: ["/var/lib/ca-certificates/ca-bundle.pem", "/etc/ssl/certs/ca-certificates.crt"],
   },
 };
 
+const LINUX_FALLBACK_BUNDLE_PATHS = [
+  "/etc/ssl/certs/ca-certificates.crt",
+  "/etc/pki/tls/certs/ca-bundle.crt",
+  "/etc/ssl/certs/ca-bundle.crt",
+];
+
+function osReleaseValue(osRelease: string, field: string): string {
+  const match = new RegExp(`^${field}=(.*)$`, "m").exec(osRelease);
+  if (!match) return "";
+  return match[1]
+    .trim()
+    .replace(/^["']|["']$/g, "")
+    .toLowerCase();
+}
+
 /**
- * Detect the Linux distro family by reading /etc/os-release.
- * Returns the matching config key, or undefined if unrecognized.
+ * Detect the Linux distro family from /etc/os-release or the provided content.
+ * Returns a config key, "nixos", or undefined when the distro is unrecognized.
  */
-function detectLinuxDistro(): string | undefined {
-  try {
-    const osRelease = fs.readFileSync("/etc/os-release", "utf-8").toLowerCase();
-    // ID_LIKE often lists parent distros (e.g., "ID_LIKE=arch" or "ID_LIKE=debian")
-    if (osRelease.includes("arch")) return "arch";
-    if (osRelease.includes("fedora") || osRelease.includes("rhel") || osRelease.includes("centos"))
-      return "fedora";
-    if (osRelease.includes("suse")) return "suse";
-    if (osRelease.includes("debian") || osRelease.includes("ubuntu")) return "debian";
-  } catch {
-    // /etc/os-release missing
+function detectLinuxDistro(osRelease?: string): string | undefined {
+  let content = osRelease;
+  if (content === undefined) {
+    try {
+      content = fs.readFileSync("/etc/os-release", "utf-8");
+    } catch {
+      content = "";
+    }
   }
 
-  // Fallback: probe for known update commands
+  const ids = `${osReleaseValue(content, "ID")} ${osReleaseValue(content, "ID_LIKE")}`;
+  if (ids.includes("nixos")) return "nixos";
+  if (ids.includes("arch")) return "arch";
+  if (ids.includes("fedora") || ids.includes("rhel") || ids.includes("centos")) return "fedora";
+  if (ids.includes("suse")) return "suse";
+  if (ids.includes("debian") || ids.includes("ubuntu")) return "debian";
+
   for (const [distro, config] of Object.entries(LINUX_CA_TRUST_CONFIGS)) {
-    try {
-      execFileSync("which", [config.updateCommand], { stdio: "pipe", timeout: 5000 });
-      if (fs.existsSync(path.dirname(config.certDir))) return distro;
-    } catch {
-      // Not found, try next
+    if (resolveExecutable(config.updateCommand) && fs.existsSync(path.dirname(config.certDir))) {
+      return distro;
     }
   }
 
   return undefined;
 }
 
+function isExecutableFile(filePath: string): boolean {
+  try {
+    if (!fs.statSync(filePath).isFile()) return false;
+    fs.accessSync(filePath, fs.constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Resolve a command against PATH, also probing sbin when /usr/bin is present. */
+function resolveExecutable(command: string, envPath?: string): string | null {
+  if (path.isAbsolute(command)) {
+    return isExecutableFile(command) ? command : null;
+  }
+  const dirs = (envPath ?? process.env.PATH ?? "").split(path.delimiter).filter(Boolean);
+  const candidates = [...dirs];
+  if (dirs.includes("/usr/bin")) {
+    candidates.push("/usr/sbin", "/sbin");
+  }
+  for (const dir of candidates) {
+    const candidate = path.join(dir, command);
+    if (isExecutableFile(candidate)) return candidate;
+  }
+  return null;
+}
+
 /**
  * Get the CA trust config for the current Linux distro.
  * Falls back to Debian layout if detection fails.
  */
-function getLinuxCATrustConfig(): LinuxCATrustConfig {
-  const distro = detectLinuxDistro();
-  return LINUX_CA_TRUST_CONFIGS[distro ?? "debian"];
+function getLinuxCATrustConfig(osRelease?: string): LinuxCATrustConfig {
+  const distro = detectLinuxDistro(osRelease);
+  return (distro ? LINUX_CA_TRUST_CONFIGS[distro] : undefined) ?? LINUX_CA_TRUST_CONFIGS.debian;
 }
 
 /**
- * Check if the CA is trusted on Linux.
- * Supports Debian/Ubuntu, Arch, Fedora/RHEL, and openSUSE.
+ * Verify the CA against the distro's compiled trust bundle with openssl.
+ * A copied anchor alone does not prove the bundle was refreshed.
  */
+function verifyLinuxTrustBundle(caCertPath: string, config: LinuxCATrustConfig): boolean {
+  const bundlePath = (config.bundlePaths ?? LINUX_FALLBACK_BUNDLE_PATHS).find(fileExists);
+  if (!bundlePath) return false;
+  try {
+    openssl(["verify", "-no-CApath", "-CAfile", bundlePath, caCertPath]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Check whether the Linux system trust bundle trusts the CA. */
 function isCATrustedLinux(
   stateDir: string,
   config: LinuxCATrustConfig = getLinuxCATrustConfig()
 ): boolean {
-  const systemCertPath = path.join(config.certDir, "portless-ca.crt");
-  if (!fileExists(systemCertPath)) return false;
+  if (isCATrustRefreshPending(stateDir)) return false;
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  if (!fileExists(caCertPath)) return false;
+  return verifyLinuxTrustBundle(caCertPath, config);
+}
 
-  // Compare our CA with the installed one
+function linuxTrustSourceMatches(config: LinuxCATrustConfig, caCertPath: string): boolean {
+  const dest = path.join(config.certDir, "portless-ca.crt");
   try {
-    const ours = fs.readFileSync(path.join(stateDir, CA_CERT_FILE), "utf-8").trim();
-    const installed = fs.readFileSync(systemCertPath, "utf-8").trim();
-    return ours === installed;
+    if (!fileExists(dest)) return false;
+    return fs.readFileSync(dest, "utf-8").trim() === fs.readFileSync(caCertPath, "utf-8").trim();
   } catch {
     return false;
   }
+}
+
+function isDirectory(dirPath: string): boolean {
+  try {
+    return fs.statSync(dirPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+function linuxNSSDatabase(): string | undefined {
+  const home = resolveUserHome();
+  const candidates = [
+    path.join(home, ".pki", "nssdb"),
+    path.join(home, ".local", "share", "pki", "nssdb"),
+  ];
+  return candidates.find(isDirectory);
+}
+
+function nssInstallHint(database?: string): string {
+  const where = database ? ` in ${database}` : "";
+  return `Chrome/Chromium reads NSS trust from a user database${where} and needs certutil to update it. Install libnss3-tools (Debian/Ubuntu), nss-tools (Fedora/RHEL), nss (Arch), or mozilla-nss-tools (openSUSE).`;
+}
+
+function nssNickname(caCertPath: string): string {
+  const certificate = new crypto.X509Certificate(fs.readFileSync(caCertPath));
+  return `${CA_COMMON_NAME} ${certificate.fingerprint256.replace(/:/g, "")}`;
+}
+
+function nssCertutil(
+  database: string,
+  args: string[],
+  input?: string,
+  certutilPath = "certutil"
+): string {
+  const options = { encoding: "utf-8" as const, stdio: "pipe" as const, timeout: 15_000, input };
+  const sudoUser = process.env.SUDO_USER;
+  if (process.getuid?.() === 0 && sudoUser && sudoUser !== "root") {
+    return execFileSync(
+      "sudo",
+      ["-u", sudoUser, "--", certutilPath, "-d", `sql:${database}`, ...args],
+      options
+    );
+  }
+  return execFileSync(certutilPath, ["-d", `sql:${database}`, ...args], options);
+}
+
+const NSS_TRUST_LINE = /^(.*?)\s+([^\s,]*,[^\s,]*,[^\s,]*)$/;
+
+function nssTrustFlagsForNickname(listing: string, nickname: string): string | undefined {
+  for (const line of listing.split(/\r?\n/)) {
+    const match = NSS_TRUST_LINE.exec(line.trim());
+    if (match?.[1].trim() === nickname) return match[2];
+  }
+  return undefined;
+}
+
+/** Inspect whether Chrome/Chromium trusts the CA through its user NSS database. */
+function inspectLinuxNSSStore(
+  caCertPath: string,
+  envPath?: string
+): { state: BrowserTrustStoreState; hint?: string } {
+  const database = linuxNSSDatabase();
+  if (!database) return { state: "not-applicable" };
+  const certutilPath = resolveExecutable("certutil", envPath);
+  if (!certutilPath) {
+    return { state: "unavailable", hint: nssInstallHint(database) };
+  }
+
+  try {
+    const nickname = nssNickname(caCertPath);
+    const listing = nssCertutil(database, ["-L"], undefined, certutilPath);
+    const flags = nssTrustFlagsForNickname(listing, nickname);
+    if (!flags?.split(",")[0].includes("C")) {
+      return { state: "untrusted", hint: "Run: portless trust" };
+    }
+    const pem = nssCertutil(database, ["-L", "-n", nickname, "-a"], undefined, certutilPath);
+    const expected = new crypto.X509Certificate(fs.readFileSync(caCertPath)).fingerprint256;
+    if (new crypto.X509Certificate(pem).fingerprint256 === expected) {
+      return { state: "trusted" };
+    }
+  } catch (error: unknown) {
+    const detail = error instanceof Error ? error.message : String(error);
+    return {
+      state: "untrusted",
+      hint: `Could not read the Chrome/Chromium NSS database: ${detail}. Run: portless trust`,
+    };
+  }
+  return { state: "untrusted", hint: "Run: portless trust" };
+}
+
+function installLinuxNSSStore(
+  caCertPath: string,
+  envPath?: string
+): { state: BrowserTrustStoreState; error?: string } {
+  const database = linuxNSSDatabase();
+  if (!database) return { state: "not-applicable" };
+  const certutilPath = resolveExecutable("certutil", envPath);
+  if (!certutilPath) {
+    return { state: "unavailable", error: nssInstallHint(database) };
+  }
+  try {
+    nssCertutil(
+      database,
+      ["-A", "-n", nssNickname(caCertPath), "-t", "C,,"],
+      fs.readFileSync(caCertPath, "utf-8"),
+      certutilPath
+    );
+  } catch (error: unknown) {
+    return {
+      state: "untrusted",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+  return inspectLinuxNSSStore(caCertPath, envPath);
+}
+
+function removeLinuxNSSStore(caCertPath: string): { removed: boolean; error?: string } {
+  const database = linuxNSSDatabase();
+  if (!database) return { removed: true };
+  try {
+    const nickname = nssNickname(caCertPath);
+    const listing = nssCertutil(database, ["-L"]);
+    if (nssTrustFlagsForNickname(listing, nickname) !== undefined) {
+      nssCertutil(database, ["-D", "-n", nickname]);
+    }
+    return { removed: true };
+  } catch (error: unknown) {
+    return { removed: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function trustCALinux(
+  stateDir: string,
+  config: LinuxCATrustConfig,
+  updateCommand: string,
+  runUpdate: (command: string) => void
+): void {
+  if (isCATrustedLinux(stateDir, config)) return;
+
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  const dest = path.join(config.certDir, "portless-ca.crt");
+  const pendingPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
+  const wasPending = hasRegularTrustRefreshPending(pendingPath);
+
+  if (!fs.existsSync(config.certDir)) {
+    fs.mkdirSync(config.certDir, { recursive: true });
+  }
+  if (!wasPending) writeStateMarkerFile(pendingPath, "1\n");
+  try {
+    fs.copyFileSync(caCertPath, dest);
+  } catch (error: unknown) {
+    if (!wasPending) clearTrustRefreshPending(stateDir);
+    throw error;
+  }
+
+  runUpdate(updateCommand);
+  if (!verifyLinuxTrustBundle(caCertPath, config)) {
+    throw new Error(
+      `After running ${updateCommand}, the compiled CA bundle does not trust the portless CA. Run: sudo portless trust`
+    );
+  }
+  clearTrustRefreshPending(stateDir);
 }
 
 // ---------------------------------------------------------------------------
@@ -1085,105 +1285,315 @@ export function createSNICallback(
   };
 }
 
+function trustStateFromStores(stores: TrustStores): TrustInspectionState {
+  if (stores.system === "unavailable" || stores.browser === "unavailable") return "unavailable";
+  if (stores.browser === "untrusted") return "untrusted";
+  return stores.system;
+}
+
+function trustErrorDetail(err: unknown): string {
+  const stderr = (err as { stderr?: Buffer | string } | undefined)?.stderr;
+  if (stderr) {
+    const text = stderr.toString().trim();
+    if (text) return text;
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
+function addCATrustedMacOS(caCertPath: string): void {
+  const isRoot = (process.getuid?.() ?? -1) === 0;
+  if (isRoot) {
+    execFileSync(
+      "security",
+      [
+        "add-trusted-cert",
+        "-d",
+        "-r",
+        "trustRoot",
+        "-p",
+        "ssl",
+        "-k",
+        "/Library/Keychains/System.keychain",
+        caCertPath,
+      ],
+      { stdio: "pipe", timeout: MACOS_SECURITY_ROOT_TIMEOUT_MS }
+    );
+    return;
+  }
+  const keychain = loginKeychainPath();
+  execFileSync(
+    "security",
+    ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, caCertPath],
+    { stdio: "pipe", timeout: MACOS_SECURITY_AUTH_TIMEOUT_MS }
+  );
+}
+
 /**
- * Add the portless CA to the system trust store.
+ * Inspect the OS and browser trust stores for the portless CA.
  *
- * On macOS, adds to the login keychain (no sudo required; the OS shows a
- * GUI authorization prompt to confirm). On Linux, copies to the distro-specific
- * CA directory and runs the appropriate update command (requires sudo). WSL
- * also adds the CA to the Windows current-user Root store.
- *
- * Supported Linux distros: Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, openSUSE.
+ * On Linux the system store is the compiled CA bundle, and Chrome/Chromium
+ * uses a separate user NSS database.
  */
-export function trustCA(configuredStateDir: string): { trusted: boolean; error?: string } {
+export function inspectTrust(
+  stateDir: string,
+  options?: { linux?: LinuxCATrustOptions }
+): TrustInspection {
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  if (!fileExists(caCertPath)) {
+    return {
+      state: "untrusted",
+      stores: { system: "untrusted", browser: "not-applicable" },
+      error: "CA certificate not found. Run portless trust to generate it.",
+      hint: "Run: portless trust",
+    };
+  }
+
+  if (process.platform === "darwin") {
+    const trusted = isCATrustedMacOS(caCertPath);
+    return {
+      state: trusted ? "trusted" : "untrusted",
+      stores: { system: trusted ? "trusted" : "untrusted", browser: "not-applicable" },
+      ...(trusted ? {} : { hint: "Run: portless trust" }),
+    };
+  }
+
+  if (process.platform === "linux") {
+    const linux = options?.linux;
+    const config = linux?.activeConfig ?? getLinuxCATrustConfig(linux?.osRelease);
+    const browser = inspectLinuxNSSStore(caCertPath, linux?.envPath);
+
+    if (!isCATrustedLinux(stateDir, config)) {
+      const nixos = detectLinuxDistro(linux?.osRelease) === "nixos";
+      const updateTool = linux?.runUpdate
+        ? config.updateCommand
+        : resolveExecutable(config.updateCommand, linux?.envPath);
+      if (!updateTool) {
+        const hint = nixos
+          ? `NixOS manages system certificates declaratively and does not provide update-ca-certificates. Add \`security.pki.certificateFiles = [ "${caCertPath}" ];\` to your NixOS configuration and rebuild, or run portless with --no-tls.`
+          : `Install your distribution's CA certificates package so ${config.updateCommand} is available (or on NixOS, add "${caCertPath}" to security.pki.certificateFiles), or run portless with --no-tls.`;
+        return {
+          state: "unavailable",
+          stores: { system: "unavailable", browser: browser.state },
+          error: nixos
+            ? `NixOS does not provide ${config.updateCommand} to refresh the system trust store.`
+            : `Trust store update tool "${config.updateCommand}" was not found.`,
+          hint,
+        };
+      }
+      return {
+        state: "untrusted",
+        stores: { system: "untrusted", browser: browser.state },
+        hint: "Run: portless trust",
+      };
+    }
+
+    if (isWSL()) {
+      let windows: ReturnType<typeof inspectWindowsCATrust>;
+      try {
+        windows = inspectWindowsCATrust(caCertPath, wslWindowsCAStoreOptions());
+      } catch (error: unknown) {
+        windows = {
+          state: "unavailable",
+          error: error instanceof Error ? error.message : String(error),
+        };
+      }
+      if (windows.state !== "trusted") {
+        return {
+          state: windows.state,
+          stores: { system: windows.state, browser: browser.state },
+          ...(windows.error ? { error: windows.error } : {}),
+          hint:
+            windows.state === "unavailable"
+              ? "certutil is required to trust the CA in the Windows store from WSL. Install certutil, then run: portless trust"
+              : "Run: portless trust",
+        };
+      }
+    }
+
+    return {
+      state: trustStateFromStores({ system: "trusted", browser: browser.state }),
+      stores: { system: "trusted", browser: browser.state },
+      ...(browser.hint ? { hint: browser.hint } : {}),
+    };
+  }
+
+  if (process.platform === "win32") {
+    const windows = inspectWindowsCATrust(caCertPath);
+    return {
+      state: windows.state,
+      stores: { system: windows.state, browser: "not-applicable" },
+      ...(windows.error ? { error: windows.error } : {}),
+      ...(windows.state === "trusted" ? {} : { hint: "Run: portless trust" }),
+    };
+  }
+
+  return {
+    state: "unavailable",
+    stores: { system: "unavailable", browser: "not-applicable" },
+    error: `Unsupported platform: ${process.platform}`,
+  };
+}
+
+/**
+ * Install the portless CA into the trust stores that need it.
+ *
+ * Reports `needs-elevation` when the OS refused the change for the current
+ * user, so the caller can suggest running with sudo.
+ */
+export function ensureTrust(
+  configuredStateDir: string,
+  options?: { linux?: LinuxCATrustOptions }
+): EnsureTrustResult {
   if (!fileExists(path.join(configuredStateDir, CA_CERT_FILE))) {
     return {
-      trusted: false,
+      state: "unavailable",
+      stores: { system: "unavailable", browser: "not-applicable" },
       error: "CA certificate not found. Run portless trust to generate it.",
+      hint: "Run: portless trust",
     };
   }
   const unsafe = explainUnsafeStateDir(configuredStateDir);
   if (unsafe) {
     return {
-      trusted: false,
+      state: "unavailable",
+      stores: { system: "untrusted", browser: "not-applicable" },
       error: `Refusing to trust the CA in ${configuredStateDir}: ${unsafe}`,
     };
   }
+
   const stateDir = fs.realpathSync(configuredStateDir);
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  const initial = inspectTrust(stateDir, options);
+  if (initial.state === "trusted") {
+    return { state: "trusted", stores: initial.stores };
+  }
+  if (initial.stores.system === "unavailable") {
+    return {
+      state: "unavailable",
+      stores: initial.stores,
+      ...(initial.error ? { error: initial.error } : {}),
+      ...(initial.hint ? { hint: initial.hint } : {}),
+    };
+  }
 
-  try {
-    if (process.platform === "darwin") {
-      const isRoot = (process.getuid?.() ?? -1) === 0;
-      if (isRoot) {
-        execFileSync(
-          "security",
-          [
-            "add-trusted-cert",
-            "-d",
-            "-r",
-            "trustRoot",
-            "-p",
-            "ssl",
-            "-k",
-            "/Library/Keychains/System.keychain",
-            caCertPath,
-          ],
-          { stdio: "pipe", timeout: MACOS_SECURITY_ROOT_TIMEOUT_MS }
-        );
+  const linux = options?.linux;
+  let stores = { ...initial.stores };
+  let hint: string | undefined;
+  let installed = false;
+
+  if (stores.system === "untrusted") {
+    try {
+      if (process.platform === "darwin") {
+        addCATrustedMacOS(caCertPath);
+        if (!isCATrustedMacOS(caCertPath)) {
+          return {
+            state: "unavailable",
+            stores: { ...stores, system: "untrusted" },
+            error:
+              "The macOS security command finished but the CA is still not trusted. Run: sudo portless trust",
+          };
+        }
+      } else if (process.platform === "linux") {
+        const config = linux?.activeConfig ?? getLinuxCATrustConfig(linux?.osRelease);
+        const resolvedCommand = linux?.runUpdate
+          ? null
+          : resolveExecutable(config.updateCommand, linux?.envPath);
+        const updateCommand = resolvedCommand ?? config.updateCommand;
+        const runUpdate =
+          linux?.runUpdate ??
+          ((command: string) => {
+            execFileSync(command, [], { stdio: "pipe", timeout: 30_000 });
+          });
+        trustCALinux(stateDir, config, updateCommand, runUpdate);
+        if (isWSL()) {
+          const windowsOptions = wslWindowsCAStoreOptions();
+          trustWindowsCA(caCertPath, windowsOptions);
+          const windows = inspectWindowsCATrust(caCertPath, windowsOptions);
+          if (windows.state !== "trusted") {
+            throw new Error(
+              windows.error ?? "certutil did not add the portless CA to the Windows Root store"
+            );
+          }
+        }
+      } else if (process.platform === "win32") {
+        trustWindowsCA(caCertPath);
+        const windows = inspectWindowsCATrust(caCertPath);
+        if (windows.state !== "trusted") {
+          throw new Error(
+            windows.error ?? "certutil did not add the portless CA to the Windows Root store"
+          );
+        }
       } else {
-        const keychain = loginKeychainPath();
-        execFileSync(
-          "security",
-          ["add-trusted-cert", "-r", "trustRoot", "-p", "ssl", "-k", keychain, caCertPath],
-          { stdio: "pipe", timeout: MACOS_SECURITY_AUTH_TIMEOUT_MS }
-        );
+        return {
+          state: "unavailable",
+          stores,
+          error: `Unsupported platform: ${process.platform}`,
+        };
       }
-      writeTrustMarker(stateDir);
-      return { trusted: true };
-    } else if (process.platform === "linux") {
-      const config = getLinuxCATrustConfig();
-      if (!fs.existsSync(config.certDir)) {
-        fs.mkdirSync(config.certDir, { recursive: true });
+      stores = { ...stores, system: "trusted" };
+      installed = true;
+    } catch (err: unknown) {
+      const detail = trustErrorDetail(err);
+      const code = (err as NodeJS.ErrnoException | undefined)?.code;
+      const timedOut = code === "ETIMEDOUT" || detail.includes("ETIMEDOUT");
+      const denied =
+        code === "EACCES" ||
+        code === "EPERM" ||
+        /permission denied|eacces|authorization|not permitted/i.test(detail);
+
+      if (timedOut) {
+        return {
+          state: "unavailable",
+          stores: { ...stores, system: "untrusted" },
+          error: detail,
+          hint:
+            process.platform === "darwin"
+              ? "The macOS security command timed out. Restart Keychain Access (or run: sudo killall securityd), then run: portless trust"
+              : "The trust command timed out. Try: portless trust",
+        };
       }
-      const dest = path.join(config.certDir, "portless-ca.crt");
-      fs.copyFileSync(caCertPath, dest);
-      execFileSync(config.updateCommand, [], { stdio: "pipe", timeout: 30_000 });
-      if (isWSL()) {
-        trustWindowsCA(caCertPath, wslWindowsCAStoreOptions());
+      if (denied && process.platform !== "win32" && (process.getuid?.() ?? -1) !== 0) {
+        return {
+          state: "needs-elevation",
+          stores,
+          error: detail,
+          hint: "Run: sudo portless trust",
+        };
       }
-      writeTrustMarker(stateDir);
-      return { trusted: true };
-    } else if (process.platform === "win32") {
-      trustWindowsCA(caCertPath);
-      writeTrustMarker(stateDir);
-      return { trusted: true };
-    }
-    return { trusted: false, error: `Unsupported platform: ${process.platform}` };
-  } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : String(err);
-    if (message.includes("ETIMEDOUT")) {
-      const hint =
-        process.platform === "darwin"
-          ? "The macOS security command timed out. This can happen when the " +
-            "Keychain Services daemon is unresponsive or a system authorization " +
-            "dialog was not dismissed in time. Try restarting Keychain Access " +
-            "(or run: sudo killall securityd) and then: portless trust"
-          : "The trust command timed out. Try: portless trust";
-      return { trusted: false, error: hint };
-    }
-    if (
-      message.includes("authorization") ||
-      message.includes("permission") ||
-      message.includes("EACCES")
-    ) {
       return {
-        trusted: false,
-        error: "Permission denied. Try: portless trust",
+        state: "unavailable",
+        stores: { ...stores, system: "untrusted" },
+        error: detail,
       };
     }
-    return { trusted: false, error: message };
   }
+
+  if (process.platform === "linux" && stores.system === "trusted") {
+    const browser = inspectLinuxNSSStore(caCertPath, linux?.envPath);
+    if (browser.state === "untrusted") {
+      const result = installLinuxNSSStore(caCertPath, linux?.envPath);
+      if (result.state === "trusted") {
+        stores = { ...stores, browser: "trusted" };
+        installed = true;
+      } else {
+        stores = { ...stores, browser: "untrusted" };
+        hint = `Chrome/Chromium uses its own NSS trust store and the CA could not be installed there (${result.error ?? "certutil failed"}). Install certutil (libnss3-tools on Debian/Ubuntu, nss-tools on Fedora/RHEL, nss on Arch, mozilla-nss-tools on openSUSE) and run: portless trust`;
+      }
+    } else if (browser.state === "unavailable") {
+      stores = { ...stores, browser: "unavailable" };
+      hint = browser.hint ?? nssInstallHint();
+    } else {
+      stores = { ...stores, browser: browser.state };
+    }
+  }
+
+  const allTrusted =
+    stores.system === "trusted" &&
+    (stores.browser === "trusted" || stores.browser === "not-applicable");
+  if (!installed && allTrusted) {
+    return { state: "trusted", stores, ...(hint ? { hint } : {}) };
+  }
+  return { state: "installed", stores, ...(hint ? { hint } : {}) };
 }
 
 /** Whether a previous CA removal still needs the distro trust cache refresh. */
@@ -1196,9 +1606,16 @@ export function isCATrustRefreshPending(stateDir: string): boolean {
  * No-op when the CA is not trusted or ca.pem is missing in stateDir.
  */
 export function untrustCA(stateDir: string): { removed: boolean; error?: string } {
+  let canonicalStateDir = stateDir;
+  try {
+    canonicalStateDir = fs.realpathSync(stateDir);
+  } catch {
+    canonicalStateDir = stateDir;
+  }
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
   if (!fileExists(caCertPath)) {
-    clearTrustMarker(stateDir);
+    clearTrustMarker(canonicalStateDir);
+    if (canonicalStateDir !== stateDir) clearTrustMarker(stateDir);
     return { removed: true };
   }
 
@@ -1209,12 +1626,23 @@ export function untrustCA(stateDir: string): { removed: boolean; error?: string 
       result = untrustCAMacOS(caCertPath);
     } else if (process.platform === "linux") {
       result = runningInWSL ? untrustCAWSL(stateDir, caCertPath) : untrustCALinux(stateDir);
+      const nss = removeLinuxNSSStore(caCertPath);
+      if (!nss.removed) {
+        const combined = [result.error, nss.error].filter(Boolean).join("; ");
+        result = {
+          removed: false,
+          error: combined || "Could not remove the portless CA from the Chrome NSS store",
+        };
+      }
     } else if (process.platform === "win32") {
       result = untrustWindowsCA(caCertPath);
     } else {
       result = { removed: false, error: `Unsupported platform: ${process.platform}` };
     }
-    if (result.removed) clearTrustMarker(stateDir);
+    if (result.removed) {
+      clearTrustMarker(canonicalStateDir);
+      if (canonicalStateDir !== stateDir) clearTrustMarker(stateDir);
+    }
     return result;
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
@@ -1248,32 +1676,9 @@ function untrustCAMacOS(caCertPath: string): { removed: boolean; error?: string 
     }
   }
 
-  return isCATrustedMacOSAfterAttempt(caCertPath)
+  return isCATrustedMacOS(caCertPath)
     ? { removed: false, error: errors.join("; ") || "Could not remove CA from keychain (try sudo)" }
     : { removed: true };
-}
-
-/** Re-run verify-cert without throwing; returns true if still trusted for SSL. */
-function isCATrustedMacOSAfterAttempt(caCertPath: string): boolean {
-  try {
-    const isRoot = (process.getuid?.() ?? -1) === 0;
-    const sudoUser = process.env.SUDO_USER;
-    if (isRoot && sudoUser) {
-      execFileSync(
-        "sudo",
-        ["-u", sudoUser, "security", "verify-cert", "-c", caCertPath, "-L", "-p", "ssl"],
-        { stdio: "pipe", timeout: MACOS_SECURITY_TIMEOUT_MS }
-      );
-    } else {
-      execFileSync("security", ["verify-cert", "-c", caCertPath, "-L", "-p", "ssl"], {
-        stdio: "pipe",
-        timeout: MACOS_SECURITY_TIMEOUT_MS,
-      });
-    }
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 export function untrustCALinux(
@@ -1290,7 +1695,7 @@ export function untrustCALinux(
   const pendingRefreshPath = path.join(stateDir, CA_TRUST_REFRESH_PENDING);
   let refreshNeeded = hasRegularTrustRefreshPending(pendingRefreshPath);
   const configs = options.configs ?? Object.values(LINUX_CA_TRUST_CONFIGS);
-  const activeConfig = options.activeConfig ?? getLinuxCATrustConfig();
+  const activeConfig = options.activeConfig ?? getLinuxCATrustConfig(options.osRelease);
   const runUpdate =
     options.runUpdate ??
     ((command: string) => {
@@ -1329,7 +1734,12 @@ export function untrustCALinux(
     }
   }
 
-  if (errors.length > 0 || isCATrustedLinux(stateDir, activeConfig)) {
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  const sourceStillInstalled = configs.some((config) =>
+    linuxTrustSourceMatches(config, caCertPath)
+  );
+
+  if (errors.length > 0 || isCATrustedLinux(stateDir, activeConfig) || sourceStillInstalled) {
     return {
       removed: false,
       error:

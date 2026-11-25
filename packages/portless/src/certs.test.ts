@@ -8,10 +8,11 @@ import { execFileSync } from "node:child_process";
 import {
   createSNICallback,
   ensureCerts,
-  isCATrusted,
+  ensureTrust,
+  inspectTrust,
+  isCATrustRefreshPending,
   opensslSupportsNotBefore,
   sanitizeHostForFilename,
-  trustCA,
   untrustCA,
   untrustCALinux,
 } from "./certs.js";
@@ -626,7 +627,7 @@ describe("createSNICallback", () => {
   });
 });
 
-describe("isCATrusted", () => {
+describe("inspectTrust", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -637,27 +638,27 @@ describe("isCATrusted", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns false when CA does not exist", () => {
-    expect(isCATrusted(tmpDir)).toBe(false);
+  it("reports untrusted when the CA does not exist", () => {
+    expect(inspectTrust(tmpDir).state).toBe("untrusted");
   });
 
-  it("returns false for an empty directory", () => {
-    expect(isCATrusted(path.join(tmpDir, "nonexistent"))).toBe(false);
+  it("reports untrusted for an empty directory", () => {
+    expect(inspectTrust(path.join(tmpDir, "nonexistent")).state).toBe("untrusted");
   });
 
-  it.skipIf(process.platform !== "linux")(
-    "checks the Linux trust store even when the trust marker matches",
+  it.skipIf(process.platform === "win32")(
+    "ignores a matching trust marker when the OS does not trust the CA",
     () => {
       ensureCerts(tmpDir);
       const pem = fs.readFileSync(path.join(tmpDir, "ca.pem"));
       const fingerprint = crypto.createHash("sha256").update(pem).digest("hex");
       fs.writeFileSync(path.join(tmpDir, "ca.trusted"), `${fingerprint}\n`);
-      expect(isCATrusted(tmpDir)).toBe(false);
+      expect(inspectTrust(tmpDir).state).toBe("untrusted");
     }
   );
 });
 
-describe("trustCA", () => {
+describe("ensureTrust", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -665,14 +666,14 @@ describe("trustCA", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("returns error when CA cert is missing", () => {
-    const result = trustCA(tmpDir);
-    expect(result.trusted).toBe(false);
+  it("returns unavailable when the CA certificate is missing", () => {
+    const result = ensureTrust(tmpDir);
+    expect(result.state).toBe("unavailable");
     expect(result.error).toContain("CA certificate not found");
-    expect(result.error).toContain("portless trust");
   });
 
   it.skipIf(process.platform === "win32")(
@@ -680,20 +681,18 @@ describe("trustCA", () => {
     () => {
       ensureCerts(tmpDir);
       fs.chmodSync(tmpDir, 0o777);
-      const result = trustCA(tmpDir);
-      expect(result.trusted).toBe(false);
+      const result = ensureTrust(tmpDir);
+      expect(result.state).toBe("unavailable");
       expect(result.error).toContain("other users can write to it");
       expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
     }
   );
 
   it.skipIf(process.platform !== "darwin")(
-    "returns actionable error when security command fails (#228)",
+    "returns an actionable error when the security command fails (#228)",
     () => {
-      // Generate real certs so trustCA reaches the security command
       ensureCerts(tmpDir);
 
-      // Create a fake security binary that always fails
       const fakeBinDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-fake-sec-"));
       const fakePath = path.join(fakeBinDir, "security");
       fs.writeFileSync(fakePath, "#!/bin/sh\nexit 1\n");
@@ -702,15 +701,252 @@ describe("trustCA", () => {
       const origPath = process.env.PATH;
       try {
         process.env.PATH = `${fakeBinDir}:${origPath}`;
-        const result = trustCA(tmpDir);
-        expect(result.trusted).toBe(false);
+        const result = ensureTrust(tmpDir);
+        expect(result.state).toBe("unavailable");
         expect(result.error).toBeDefined();
-        // Should include the actual error, not just a raw internal message
         expect(result.error!.length).toBeGreaterThan(10);
       } finally {
         process.env.PATH = origPath;
         fs.rmSync(fakeBinDir, { recursive: true, force: true });
       }
+    }
+  );
+});
+
+describe("Linux CA trust", () => {
+  let tmpDir: string;
+  let homeDir: string;
+  let binDir: string;
+  let originalPath: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-linux-trust-test-"));
+    homeDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-linux-home-"));
+    binDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-linux-bin-"));
+    originalPath = process.env.PATH ?? "";
+    vi.stubEnv("HOME", homeDir);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+    fs.rmSync(homeDir, { recursive: true, force: true });
+    fs.rmSync(binDir, { recursive: true, force: true });
+  });
+
+  function fakePath(): string {
+    return `${binDir}${path.delimiter}${originalPath}`;
+  }
+
+  function writeCommand(name: string, contents: string): void {
+    const filePath = path.join(binDir, name);
+    fs.writeFileSync(filePath, contents);
+    fs.chmodSync(filePath, 0o755);
+  }
+
+  function createTrustConfig(updateCommand = "update-ca-certificates") {
+    const certDir = path.join(tmpDir, "linux-trust");
+    const bundlePath = path.join(tmpDir, "ca-certificates.crt");
+    fs.mkdirSync(certDir, { recursive: true });
+    fs.writeFileSync(bundlePath, "");
+    return {
+      certDir,
+      bundlePath,
+      config: { certDir, updateCommand, bundlePaths: [bundlePath] },
+    };
+  }
+
+  function installFakeCertutil(): void {
+    writeCommand(
+      "certutil",
+      [
+        "#!/bin/sh",
+        'db=""',
+        'nick=""',
+        'trust=""',
+        'action=""',
+        "while [ $# -gt 0 ]; do",
+        '  case "$1" in',
+        '    -d) db="${2#sql:}"; shift 2 ;;',
+        '    -n) nick="$2"; shift 2 ;;',
+        '    -t) trust="$2"; shift 2 ;;',
+        '    -A|-D|-L) action="$1"; shift ;;',
+        "    *) shift ;;",
+        "  esac",
+        "done",
+        'store="$db/.stub-nss-store"',
+        'case "$action" in',
+        "  -A)",
+        '    mkdir -p "$db"',
+        '    cat > "$store.pem"',
+        '    printf "%s\\n" "$trust" > "$store.trust"',
+        '    printf "%s\\n" "$nick" > "$store.nick"',
+        "    ;;",
+        "  -D)",
+        '    rm -f "$store.pem" "$store.trust" "$store.nick"',
+        "    ;;",
+        "  -L)",
+        '    if [ -n "$nick" ]; then',
+        '      [ -f "$store.pem" ] || exit 1',
+        '      [ "$(cat "$store.nick")" = "$nick" ] || exit 1',
+        '      cat "$store.pem"',
+        '    elif [ -f "$store.pem" ]; then',
+        '      printf "%s   %s\\n" "$(cat "$store.nick")" "$(cat "$store.trust")"',
+        "    fi",
+        "    ;;",
+        "  *) exit 1 ;;",
+        "esac",
+      ].join("\n")
+    );
+  }
+
+  it.skipIf(process.platform !== "linux")(
+    "does not trust a copied source certificate without the compiled bundle (#267)",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      const { certDir, config } = createTrustConfig();
+      fs.copyFileSync(caPath, path.join(certDir, "portless-ca.crt"));
+      writeCommand("update-ca-certificates", "#!/bin/sh\nexit 0\n");
+
+      const result = inspectTrust(tmpDir, {
+        linux: { activeConfig: config, osRelease: "ID=ubuntu\n", envPath: fakePath() },
+      });
+
+      expect(result.state).toBe("untrusted");
+      expect(result.stores.system).toBe("untrusted");
+      expect(isCATrustRefreshPending(tmpDir)).toBe(false);
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "keeps reporting untrusted after a failed trust update (#267)",
+    () => {
+      ensureCerts(tmpDir);
+      const { config } = createTrustConfig();
+      writeCommand("update-ca-certificates", "#!/bin/sh\nexit 1\n");
+      const runUpdate = vi.fn<(command: string) => void>(() => {
+        throw new Error("update-ca-certificates failed");
+      });
+      const linux = {
+        activeConfig: config,
+        runUpdate,
+        osRelease: "ID=ubuntu\n",
+        envPath: fakePath(),
+      };
+
+      const result = ensureTrust(tmpDir, { linux });
+
+      expect(["unavailable", "needs-elevation"]).toContain(result.state);
+      expect(result.stores.system).not.toBe("trusted");
+      expect(isCATrustRefreshPending(tmpDir)).toBe(true);
+      expect(inspectTrust(tmpDir, { linux }).state).toBe("untrusted");
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "installs trust once and reports trusted on later runs (#526)",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      const { bundlePath, config } = createTrustConfig();
+      writeCommand("update-ca-certificates", "#!/bin/sh\nexit 0\n");
+      const runUpdate = vi.fn<(command: string) => void>(() => {
+        fs.copyFileSync(caPath, bundlePath);
+      });
+      const linux = {
+        activeConfig: config,
+        runUpdate,
+        osRelease: "ID=ubuntu\n",
+        envPath: fakePath(),
+      };
+
+      const first = ensureTrust(tmpDir, { linux });
+      expect(first.state).toBe("installed");
+      expect(first.stores.system).toBe("trusted");
+      expect(isCATrustRefreshPending(tmpDir)).toBe(false);
+
+      const second = ensureTrust(tmpDir, { linux });
+      expect(second.state).toBe("trusted");
+      expect(second.stores.system).toBe("trusted");
+      expect(runUpdate).toHaveBeenCalledTimes(1);
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "reports NixOS as unavailable with a certificateFiles hint (#336)",
+    () => {
+      ensureCerts(tmpDir);
+      const result = inspectTrust(tmpDir, {
+        linux: { osRelease: "ID=nixos\nNAME=NixOS\n", envPath: "" },
+      });
+      expect(result.state).toBe("unavailable");
+      expect(result.stores.system).toBe("unavailable");
+      expect(result.hint).toContain("security.pki.certificateFiles");
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "reports a missing trust tool without copying the CA (#336)",
+    () => {
+      ensureCerts(tmpDir);
+      const { certDir, config } = createTrustConfig();
+      const result = ensureTrust(tmpDir, {
+        linux: { activeConfig: config, osRelease: "ID=ubuntu\n", envPath: "" },
+      });
+      expect(result.state).toBe("unavailable");
+      expect(result.stores.system).toBe("unavailable");
+      expect(result.hint).toContain("update-ca-certificates");
+      expect(fs.existsSync(path.join(certDir, "portless-ca.crt"))).toBe(false);
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "keeps system trust and hints about certutil when it is missing (#412)",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      fs.mkdirSync(path.join(homeDir, ".pki", "nssdb"), { recursive: true });
+      const { bundlePath, config } = createTrustConfig();
+      fs.writeFileSync(bundlePath, fs.readFileSync(caPath));
+      const linux = { activeConfig: config, osRelease: "ID=ubuntu\n", envPath: "" };
+
+      const inspected = inspectTrust(tmpDir, { linux });
+      expect(inspected.stores).toEqual({ system: "trusted", browser: "unavailable" });
+
+      const result = ensureTrust(tmpDir, { linux });
+      expect(result.state).toBe("installed");
+      expect(result.stores).toEqual({ system: "trusted", browser: "unavailable" });
+      expect(result.hint).toMatch(/certutil|libnss3-tools/);
+    }
+  );
+
+  it.skipIf(process.platform !== "linux")(
+    "registers the CA in the Chrome NSS database and removes it again (#412)",
+    () => {
+      const { caPath } = ensureCerts(tmpDir);
+      const nssdb = path.join(homeDir, ".pki", "nssdb");
+      fs.mkdirSync(nssdb, { recursive: true });
+      const { bundlePath, config } = createTrustConfig();
+      fs.writeFileSync(bundlePath, fs.readFileSync(caPath));
+      writeCommand("update-ca-certificates", "#!/bin/sh\nexit 0\n");
+      installFakeCertutil();
+      vi.stubEnv("PATH", fakePath());
+      const linux = {
+        activeConfig: config,
+        osRelease: "ID=ubuntu\n",
+        envPath: fakePath(),
+      };
+
+      const first = ensureTrust(tmpDir, { linux });
+      expect(first.state).toBe("installed");
+      expect(first.stores).toEqual({ system: "trusted", browser: "trusted" });
+      const storedCa = fs.readFileSync(path.join(nssdb, ".stub-nss-store.pem"), "utf-8");
+      expect(storedCa.trim()).toBe(fs.readFileSync(caPath, "utf-8").trim());
+
+      const second = ensureTrust(tmpDir, { linux });
+      expect(second.state).toBe("trusted");
+      expect(second.stores).toEqual({ system: "trusted", browser: "trusted" });
+
+      expect(untrustCA(tmpDir)).toEqual({ removed: true });
+      expect(fs.existsSync(path.join(nssdb, ".stub-nss-store.pem"))).toBe(false);
     }
   );
 });

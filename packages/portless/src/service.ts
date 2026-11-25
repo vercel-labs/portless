@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { isIP } from "node:net";
 import { spawnSync } from "node:child_process";
-import { ensureCerts, isCATrusted, trustCA } from "./certs.js";
+import { ensureCerts, ensureTrust } from "./certs.js";
 import {
   buildProxyStartConfig,
   DEFAULT_TLD,
@@ -1086,12 +1086,18 @@ function prepareTrust(stateDir: string): void {
       `Failed to generate certificates in ${stateDir}. Ensure OpenSSL is installed.\n${detail}`
     );
   }
-  if (isCATrusted(stateDir)) return;
+  const trustResult = ensureTrust(stateDir);
+  if (trustResult.state === "trusted") return;
 
-  console.log(colors.gray("Trusting portless CA for service startup..."));
-  const trustResult = trustCA(stateDir);
-  if (trustResult.trusted) {
+  if (trustResult.state === "installed") {
     console.log(colors.green("CA added to the system trust store."));
+    if (
+      (trustResult.stores.browser === "unavailable" ||
+        trustResult.stores.browser === "untrusted") &&
+      trustResult.hint
+    ) {
+      console.warn(colors.yellow(trustResult.hint));
+    }
     return;
   }
 
@@ -1099,7 +1105,9 @@ function prepareTrust(stateDir: string): void {
   if (trustResult.error) {
     console.warn(colors.gray(trustResult.error));
   }
-  console.warn(colors.yellow("Run `portless trust` if browsers show certificate warnings."));
+  console.warn(
+    colors.yellow(trustResult.hint ?? "Run `portless trust` if browsers show certificate warnings.")
+  );
 }
 
 function ensureServiceConfigSupported(config: ServiceInstallConfig): void {

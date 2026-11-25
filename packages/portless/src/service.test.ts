@@ -30,8 +30,10 @@ vi.mock("./certs.js", () => ({
     caPath: "/fake/ca.pem",
     caGenerated: false,
   })),
-  isCATrusted: vi.fn(() => true),
-  trustCA: vi.fn(() => ({ trusted: true })),
+  ensureTrust: vi.fn(() => ({
+    state: "trusted",
+    stores: { system: "trusted", browser: "not-applicable" },
+  })),
 }));
 
 vi.mock("./utils.js", async (importOriginal) => {
