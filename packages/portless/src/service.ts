@@ -23,8 +23,6 @@ const SYSTEMD_SERVICE = "portless.service";
 const WINDOWS_TASK_NAME = "Portless Proxy";
 const INTERNAL_ELEVATED_ENV = "PORTLESS_INTERNAL_SERVICE_ELEVATED";
 const SERVICE_ENV_KEYS = new Set(["PORTLESS_SYNC_HOSTS"]);
-const FIXED_UNIX_SYSTEM_DIRS = ["/usr/bin", "/bin", "/usr/sbin", "/sbin"];
-const ROOT_PATH_CHECKED_BINARIES = ["node", "openssl"];
 
 type SupportedPlatform = "darwin" | "linux" | "win32";
 type LinuxServiceScope = "system" | "user";
@@ -62,7 +60,6 @@ type UserContext = {
 
 type ServiceContext = {
   platform: SupportedPlatform;
-  linuxScope?: LinuxServiceScope;
   nodePath: string;
   entryScript: string;
   stateDir: string;
@@ -460,6 +457,26 @@ function resolveUserContext(platform: SupportedPlatform): UserContext {
   };
 }
 
+function buildProxyCommand(entryScript: string, serviceConfig: ServiceInstallConfig): string[] {
+  const proxyConfig = buildProxyStartConfig({
+    useHttps: serviceConfig.useHttps,
+    customCertPath: serviceConfig.customCertPath,
+    customKeyPath: serviceConfig.customKeyPath,
+    lanMode: serviceConfig.lanMode,
+    lanIp: serviceConfig.lanIp,
+    lanIpExplicit: serviceConfig.lanIpExplicit,
+    tld: serviceConfig.tld,
+    tlds: serviceConfig.tlds,
+    useWildcard: serviceConfig.useWildcard,
+    unprivileged: serviceConfig.unprivileged,
+    foreground: true,
+    includePort: true,
+    proxyPort: serviceConfig.proxyPort,
+    skipTrust: true,
+  });
+  return [entryScript, "proxy", "start", ...proxyConfig.args];
+}
+
 function realPathOrNull(value: string): string | null {
   try {
     return fs.realpathSync(value);
@@ -515,8 +532,7 @@ function findInstalledLinuxScopes(
   userHome: string,
   xdgConfigHome?: string
 ): LinuxServiceScope[] {
-  const other = preferred === "user" ? "system" : "user";
-  const scopes: LinuxServiceScope[] = [preferred, other];
+  const scopes: LinuxServiceScope[] = [preferred, preferred === "user" ? "system" : "user"];
   return scopes.filter((scope) => fs.existsSync(linuxUnitPath(scope, userHome, xdgConfigHome)));
 }
 
@@ -528,181 +544,34 @@ function warnAboutLinuxUnit(scope: LinuxServiceScope, unitPath: string): void {
   console.warn(colors.yellow(message));
 }
 
-function buildProxyCommand(entryScript: string, serviceConfig: ServiceInstallConfig): string[] {
-  const proxyConfig = buildProxyStartConfig({
-    useHttps: serviceConfig.useHttps,
-    customCertPath: serviceConfig.customCertPath,
-    customKeyPath: serviceConfig.customKeyPath,
-    lanMode: serviceConfig.lanMode,
-    lanIp: serviceConfig.lanIp,
-    lanIpExplicit: serviceConfig.lanIpExplicit,
-    tld: serviceConfig.tld,
-    tlds: serviceConfig.tlds,
-    useWildcard: serviceConfig.useWildcard,
-    unprivileged: serviceConfig.unprivileged,
-    foreground: true,
-    includePort: true,
-    proxyPort: serviceConfig.proxyPort,
-    skipTrust: true,
-  });
-  return [entryScript, "proxy", "start", ...proxyConfig.args];
-}
-
-function isRootControlledPosixPath(targetPath: string, kind: "dir" | "file"): boolean {
-  if (!path.posix.isAbsolute(targetPath) || targetPath.split("/").includes("..")) return false;
-  try {
-    const root = fs.lstatSync("/");
-    if (!root.isDirectory() || root.uid !== 0 || (root.mode & 0o022) !== 0) return false;
-
-    let pending = path.posix.resolve(targetPath).split("/").filter(Boolean);
-    let current = "/";
-    let hops = 0;
-    while (pending.length > 0) {
-      const segment = pending.shift()!;
-      if (segment === ".") continue;
-      if (segment === "..") {
-        current = path.posix.dirname(current);
-        continue;
-      }
-      const next = path.posix.join(current, segment);
-      const stat = fs.lstatSync(next);
-      if (stat.isSymbolicLink()) {
-        if (++hops > 40 || stat.uid !== 0) return false;
-        const rawTarget = fs.readlinkSync(next);
-        if (rawTarget.startsWith("/")) {
-          pending = [...rawTarget.split("/").filter(Boolean), ...pending];
-          current = "/";
-        } else {
-          pending = [...rawTarget.split("/").filter(Boolean), ...pending];
-        }
-      } else {
-        if (stat.uid !== 0 || (stat.mode & 0o022) !== 0) return false;
-        const isDirectory = pending.length > 0 || kind === "dir";
-        if (isDirectory ? !stat.isDirectory() : !stat.isFile()) return false;
-        current = next;
-      }
-    }
-    return current !== "/" || kind === "dir";
-  } catch {
-    return false;
-  }
-}
-
-function isTrustedWindowsSystemDir(entry: string): boolean {
-  if (!entry || !path.win32.isAbsolute(entry) || entry.split(/[\\/]/).includes("..")) {
-    return false;
-  }
-  const systemDrive = /^[a-z]:$/i.test(process.env.SystemDrive ?? "")
-    ? process.env.SystemDrive!.toLowerCase()
-    : "c:";
-  const normalized = path.win32.resolve(entry).replace(/\\+$/, "").toLowerCase();
-  if (
-    normalized === `${systemDrive}\\windows` ||
-    normalized === `${systemDrive}\\windows\\system32` ||
-    normalized === `${systemDrive}\\windows\\syswow64`
-  ) {
-    return true;
-  }
-  const programRoots = [`${systemDrive}\\program files`, `${systemDrive}\\program files (x86)`];
-  return programRoots.some((root) => {
-    const relative = path.win32.relative(root, normalized);
-    return (
-      relative !== "" &&
-      relative !== ".." &&
-      !relative.startsWith("..\\") &&
-      !path.win32.isAbsolute(relative)
-    );
-  });
-}
-
-type ServiceLaunch = { command: string[]; pathEnv: string };
-
-function resolveServiceLaunch(ctx: ServiceContext): ServiceLaunch {
-  const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
-  if (ctx.platform === "win32") {
-    const entries: string[] = [];
-    const seen = new Set<string>();
-    for (const entry of ctx.pathEnv.split(";")) {
-      if (!isTrustedWindowsSystemDir(entry)) continue;
-      const key = path.win32.resolve(entry).replace(/\\+$/, "").toLowerCase();
-      if (seen.has(key)) continue;
-      seen.add(key);
-      entries.push(entry);
-    }
-    return { command: [ctx.nodePath, ...proxyCommand], pathEnv: entries.join(";") };
-  }
-  const normalizeEntry = (entry: string): string =>
+function userServicePathEnv(ctx: ServiceContext): string {
+  const normalize = (entry: string): string =>
     entry.replace(/\/+$/, "") || path.posix.parse(entry).root;
-  const canonical = (value: string): string => realPathOrNull(value) ?? path.posix.resolve(value);
-  if (ctx.platform === "linux" && ctx.linuxScope === "user") {
-    const nodeDir = path.posix.isAbsolute(ctx.nodePath) ? path.posix.dirname(ctx.nodePath) : "";
-    const entries: string[] = [];
-    const seen = new Set<string>();
-    for (const entry of ctx.pathEnv.split(":")) {
-      if (!entry || !path.posix.isAbsolute(entry)) continue;
-      const key = normalizeEntry(entry);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      entries.push(entry);
-    }
-    if (nodeDir && !seen.has(normalizeEntry(nodeDir))) {
-      const firstPathNode = entries
-        .map((dir) => path.posix.join(dir, "node"))
-        .find((candidate) => fs.existsSync(candidate));
-      if (firstPathNode && canonical(firstPathNode) !== canonical(ctx.nodePath)) {
-        entries.unshift(nodeDir);
-      } else {
-        entries.push(nodeDir);
-      }
-    }
-    return { command: ["/usr/bin/env", "node", ...proxyCommand], pathEnv: entries.join(":") };
+  const entries: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of ctx.pathEnv.split(":")) {
+    if (!entry || !path.posix.isAbsolute(entry)) continue;
+    const key = normalize(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
   }
-  const isSafeRootSystemDir = (entry: string): boolean => {
-    if (!isRootControlledPosixPath(entry, "dir")) return false;
-    for (const name of ROOT_PATH_CHECKED_BINARIES) {
-      const candidate = path.posix.join(entry, name);
-      try {
-        const stat = fs.lstatSync(candidate, { throwIfNoEntry: false });
-        if (stat !== undefined && !isRootControlledPosixPath(candidate, "file")) return false;
-      } catch (err) {
-        const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
-        if (code !== "ENOENT" && code !== "ENOTDIR") return false;
-      }
-    }
-    return true;
-  };
   const nodeDir = path.posix.isAbsolute(ctx.nodePath) ? path.posix.dirname(ctx.nodePath) : "";
-  if (ctx.platform === "darwin") {
-    const canResolveNodeFromPath =
-      (nodeDir === "/usr/bin" || nodeDir === "/bin") &&
-      isSafeRootSystemDir(nodeDir) &&
-      isRootControlledPosixPath(ctx.nodePath, "file");
-    const command = canResolveNodeFromPath
-      ? ["/usr/bin/env", "node", ...proxyCommand]
-      : [ctx.nodePath, ...proxyCommand];
-    return { command, pathEnv: "" };
-  }
-  const entries = FIXED_UNIX_SYSTEM_DIRS.filter(isSafeRootSystemDir);
-  const canResolveNodeFromPath =
-    entries.includes(nodeDir) && isRootControlledPosixPath(ctx.nodePath, "file");
-  if (canResolveNodeFromPath) {
-    const nodeIndex = entries.indexOf(nodeDir);
-    const shadowed = entries.slice(0, nodeIndex).some((dir) => {
-      const candidate = path.posix.join(dir, "node");
-      return fs.existsSync(candidate) && canonical(candidate) !== canonical(ctx.nodePath);
-    });
-    if (shadowed) {
-      entries.splice(nodeIndex, 1);
+  if (nodeDir && !seen.has(normalize(nodeDir))) {
+    const firstNode = entries
+      .map((dir) => path.posix.join(dir, "node"))
+      .find((candidate) => fs.existsSync(candidate));
+    const canonical = (value: string): string => realPathOrNull(value) ?? path.posix.resolve(value);
+    if (firstNode && canonical(firstNode) !== canonical(ctx.nodePath)) {
       entries.unshift(nodeDir);
+    } else {
+      entries.push(nodeDir);
     }
   }
-  const command = canResolveNodeFromPath
-    ? ["/usr/bin/env", "node", ...proxyCommand]
-    : [ctx.nodePath, ...proxyCommand];
-  return { command, pathEnv: entries.join(":") };
+  return entries.join(":");
 }
 
-function buildServiceEnv(ctx: ServiceContext, pathEnv: string): Record<string, string> {
+function buildServiceEnv(ctx: ServiceContext, scope?: LinuxServiceScope): Record<string, string> {
   const env: Record<string, string> = {
     PORTLESS_STATE_DIR: ctx.stateDir,
     PORTLESS_PORT: ctx.config.proxyPort.toString(),
@@ -725,9 +594,10 @@ function buildServiceEnv(ctx: ServiceContext, pathEnv: string): Record<string, s
 
   if (ctx.platform === "win32") {
     env.USERPROFILE = ctx.user.home;
+    env.PATH = ctx.pathEnv;
   } else {
     env.HOME = ctx.user.home;
-    if (ctx.platform === "linux" && ctx.linuxScope === "user") {
+    if (ctx.platform === "linux" && scope === "user") {
       delete env.SUDO_UID;
       delete env.SUDO_GID;
     } else {
@@ -735,7 +605,6 @@ function buildServiceEnv(ctx: ServiceContext, pathEnv: string): Record<string, s
       if (ctx.user.gid) env.SUDO_GID = ctx.user.gid;
     }
   }
-  if (pathEnv.length > 0) env.PATH = pathEnv;
 
   return env;
 }
@@ -746,15 +615,15 @@ function defaultStateDir(platform: SupportedPlatform, userHome: string): string 
     : path.posix.join(userHome, ".portless");
 }
 
-function buildLaunchdPlist(ctx: ServiceContext, launch: ServiceLaunch): string {
-  const env = buildServiceEnv(ctx, launch.pathEnv);
+function buildLaunchdPlist(ctx: ServiceContext, programArguments: string[]): string {
+  const env = buildServiceEnv(ctx);
   const envEntries = Object.entries(env)
     .map(
       ([key, value]) => `    <key>${xmlEscape(key)}</key>
     <string>${xmlEscape(value)}</string>`
     )
     .join("\n");
-  const args = launch.command.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n");
+  const args = programArguments.map((arg) => `    <string>${xmlEscape(arg)}</string>`).join("\n");
 
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -783,15 +652,19 @@ ${envEntries}
 `;
 }
 
-function buildSystemdUnit(ctx: ServiceContext, launch: ServiceLaunch): string {
-  const env = buildServiceEnv(ctx, launch.pathEnv);
+function buildSystemdUnit(
+  ctx: ServiceContext,
+  scope: LinuxServiceScope,
+  execStart: string[]
+): string {
+  const env = buildServiceEnv(ctx, scope);
   const envLines = Object.entries(env)
     .map(([key, value]) => `Environment=${key}=${systemdEscape(value)}`)
     .join("\n");
-
+  const pathEnv = scope === "user" ? userServicePathEnv(ctx) : ctx.pathEnv;
   const networkTargets =
-    ctx.linuxScope === "system" ? "After=network-online.target\nWants=network-online.target\n" : "";
-  const wantedBy = ctx.linuxScope === "user" ? "default.target" : "multi-user.target";
+    scope === "system" ? "After=network-online.target\nWants=network-online.target\n" : "";
+  const wantedBy = scope === "user" ? "default.target" : "multi-user.target";
 
   return `[Unit]
 Description=Portless HTTPS proxy
@@ -801,7 +674,8 @@ StartLimitBurst=5
 [Service]
 Type=simple
 ${envLines}
-ExecStart=${launch.command.map(systemdEscape).join(" ")}
+Environment=PATH=${systemdEscape(pathEnv)}
+ExecStart=${execStart.map(systemdEscape).join(" ")}
 Restart=on-failure
 RestartSec=2
 KillSignal=SIGTERM
@@ -812,13 +686,12 @@ WantedBy=${wantedBy}
 `;
 }
 
-function buildWindowsScript(ctx: ServiceContext, launch: ServiceLaunch): string {
-  const env = buildServiceEnv(ctx, launch.pathEnv);
+function buildWindowsScript(ctx: ServiceContext, command: string[]): string {
+  const env = buildServiceEnv(ctx);
   const setEnv = Object.entries(env)
     .map(([key, value]) => `set "${key}=${value.replace(/"/g, "").replace(/%/g, "%%")}"`)
     .join("\r\n");
-  const head = launch.command[0] === "node" ? "node" : windowsQuote(launch.command[0]);
-  const proxyCommand = [head, ...launch.command.slice(1).map(windowsQuote)].join(" ");
+  const proxyCommand = [windowsQuote(ctx.nodePath), ...command.map(windowsQuote)].join(" ");
   return `@echo off\r\n${setEnv}\r\n${proxyCommand}\r\n`;
 }
 
@@ -865,7 +738,7 @@ function buildWindowsTaskXml(scriptPath: string): string {
 `;
 }
 
-type BuildServiceSpecOptions = {
+export function buildServiceSpec(options: {
   platform: SupportedPlatform;
   nodePath: string;
   entryScript: string;
@@ -873,20 +746,12 @@ type BuildServiceSpecOptions = {
   uid?: string;
   gid?: string;
   username?: string;
+  xdgConfigHome?: string;
   stateDir?: string;
   pathEnv?: string;
   programData?: string;
   installConfig?: Partial<ServiceInstallConfig>;
-};
-
-export function buildServiceSpec(options: BuildServiceSpecOptions): ServiceSpec {
-  return buildServiceSpecForUser(options);
-}
-
-function buildServiceSpecForUser(
-  options: BuildServiceSpecOptions,
-  xdgConfigHome?: string
-): ServiceSpec {
+}): ServiceSpec {
   const installConfig: ServiceInstallConfig = {
     ...DEFAULT_SERVICE_CONFIG,
     ...options.installConfig,
@@ -917,52 +782,54 @@ function buildServiceSpecForUser(
       uid: options.uid,
       gid: options.gid,
       username: options.username,
-      xdgConfigHome,
+      xdgConfigHome: options.xdgConfigHome,
     },
     pathEnv: options.pathEnv || "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
     programData: options.programData || "C:\\ProgramData",
     config: normalizedConfig,
   };
+  const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
+
+  if (ctx.platform === "darwin") {
+    const programArguments = [ctx.nodePath, ...proxyCommand];
+    return {
+      platform: "darwin",
+      label: SERVICE_LABEL,
+      plistPath: `/Library/LaunchDaemons/${SERVICE_LABEL}.plist`,
+      plist: buildLaunchdPlist(ctx, programArguments),
+      stateDir: ctx.stateDir,
+      config: ctx.config,
+      programArguments,
+    };
+  }
+
   if (ctx.platform === "linux") {
-    ctx.linuxScope = selectLinuxServiceScope({
+    const scope = selectLinuxServiceScope({
       nodePath: ctx.nodePath,
       userHome: ctx.user.home,
       uid: ctx.user.uid,
       username: ctx.user.username,
     });
-  }
-  const launch = resolveServiceLaunch(ctx);
-
-  if (ctx.platform === "darwin") {
-    return {
-      platform: "darwin",
-      label: SERVICE_LABEL,
-      plistPath: `/Library/LaunchDaemons/${SERVICE_LABEL}.plist`,
-      plist: buildLaunchdPlist(ctx, launch),
-      stateDir: ctx.stateDir,
-      config: ctx.config,
-      programArguments: launch.command,
-    };
-  }
-
-  if (ctx.platform === "linux") {
-    const scope = ctx.linuxScope!;
+    const execStart =
+      scope === "user"
+        ? ["/usr/bin/env", "node", ...proxyCommand]
+        : [ctx.nodePath, ...proxyCommand];
     return {
       platform: "linux",
       scope,
       serviceName: SYSTEMD_SERVICE,
       unitPath: linuxUnitPath(scope, ctx.user.home, ctx.user.xdgConfigHome),
-      unit: buildSystemdUnit(ctx, launch),
+      unit: buildSystemdUnit(ctx, scope, execStart),
       stateDir: ctx.stateDir,
       config: ctx.config,
-      execStart: launch.command,
+      execStart,
     };
   }
 
   const scriptDir = path.win32.join(ctx.programData, "portless", "service");
   const scriptPath = path.win32.join(scriptDir, "portless-service.cmd");
   const taskXmlPath = path.win32.join(scriptDir, "portless-task.xml");
-  const script = buildWindowsScript(ctx, launch);
+  const script = buildWindowsScript(ctx, proxyCommand);
   const taskXml = buildWindowsTaskXml(scriptPath);
   return {
     platform: "win32",
@@ -1014,22 +881,20 @@ function currentServiceSpec(
     stateDir,
     extraEnv: collectServiceExtraEnv(process.env),
   };
-  return buildServiceSpecForUser(
-    {
-      platform: process.platform,
-      nodePath: process.execPath,
-      entryScript,
-      userHome: user.home,
-      uid: user.uid,
-      gid: user.gid,
-      username: user.username,
-      stateDir,
-      pathEnv: process.env.PATH,
-      programData: process.env.ProgramData,
-      installConfig: config,
-    },
-    user.xdgConfigHome
-  );
+  return buildServiceSpec({
+    platform: process.platform,
+    nodePath: process.execPath,
+    entryScript,
+    userHome: user.home,
+    uid: user.uid,
+    gid: user.gid,
+    username: user.username,
+    stateDir,
+    pathEnv: process.env.PATH,
+    programData: process.env.ProgramData,
+    installConfig: config,
+    xdgConfigHome: user.xdgConfigHome,
+  });
 }
 
 type InstalledServiceSnapshot = {
@@ -1287,7 +1152,11 @@ function runRemovalStep(runner: CommandRunner, command: string, args: string[]):
   }
 }
 
-/** Whether a failed service removal should be retried with sudo. */
+/**
+ * Whether a failed service removal should be retried with sudo. A systemd user
+ * unit is owned by the user, so it never needs elevation. Windows has no sudo
+ * retry, and a missing command is a real failure.
+ */
 function removalNeedsElevation(err: unknown, linuxScope?: LinuxServiceScope): boolean {
   if (process.platform === "win32" || linuxScope === "user") return false;
   if ((process.getuid?.() ?? -1) === 0) return false;
@@ -1379,12 +1248,12 @@ async function installService(
   const installConfig = normalizeServiceInstallPaths(parseServiceInstallConfig(args));
   ensureServiceConfigSupported(installConfig);
   const spec = currentServiceSpec(entryScript, installConfig);
-  if (spec.platform === "linux" && spec.scope === "user" && (process.getuid?.() ?? -1) === 0) {
-    throw new Error(
-      `Node is installed under ${resolveUserContext("linux").home}, which uses a systemd user service. Re-run \`portless service install\` without sudo.`
-    );
-  }
   if (spec.platform === "linux" && spec.scope === "user") {
+    if ((process.getuid?.() ?? -1) === 0) {
+      throw new Error(
+        `Node is installed under ${resolveUserContext("linux").home}, which uses a systemd user service. Re-run \`portless service install\` without sudo.`
+      );
+    }
     const bindCheck = canBindWithoutRoot(spec.config.proxyPort);
     if (!bindCheck.ok) {
       throw new Error(
@@ -1392,8 +1261,7 @@ async function installService(
           `Run \`sudo sysctl -w net.ipv4.ip_unprivileged_port_start=${spec.config.proxyPort}\` to allow user services to bind port ${spec.config.proxyPort}, or re-run with \`--port 8443\` (or another port 1024 or higher).`
       );
     }
-  }
-  if (spec.platform === "darwin" || (spec.platform === "linux" && spec.scope === "system")) {
+  } else {
     requireUnixElevation([entryScript, ...args], runner);
   }
   prepareServiceState(spec.stateDir);
@@ -1413,11 +1281,9 @@ async function installService(
     runRequired(runner, "launchctl", ["kickstart", "-k", `system/${spec.label}`]);
   } else if (spec.platform === "linux") {
     const user = resolveUserContext("linux");
-    const otherScope = spec.scope === "user" ? "system" : "user";
-    const otherUnitPath = linuxUnitPath(otherScope, user.home, user.xdgConfigHome);
-    if (fs.existsSync(otherUnitPath)) {
-      warnAboutLinuxUnit(otherScope, otherUnitPath);
-    }
+    const other = spec.scope === "user" ? "system" : "user";
+    const otherUnitPath = linuxUnitPath(other, user.home, user.xdgConfigHome);
+    if (fs.existsSync(otherUnitPath)) warnAboutLinuxUnit(other, otherUnitPath);
     runOptional(
       runner,
       "systemctl",
@@ -1465,10 +1331,10 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
     fs.rmSync(spec.plistPath, { force: true });
   } else if (spec.platform === "linux") {
     const user = resolveUserContext("linux");
-    const preferredScope = (process.getuid?.() ?? -1) === 0 ? "system" : spec.scope;
-    const targetScope =
-      findInstalledLinuxScopes(preferredScope, user.home, user.xdgConfigHome)[0] ?? preferredScope;
-    if (targetScope === "system") {
+    const preferred = (process.getuid?.() ?? -1) === 0 ? "system" : spec.scope;
+    const scope =
+      findInstalledLinuxScopes(preferred, user.home, user.xdgConfigHome)[0] ?? preferred;
+    if (scope === "system") {
       requireUnixElevation([entryScript, "service", "uninstall"], runner);
     } else if ((process.getuid?.() ?? -1) === 0) {
       throw new Error(
@@ -1478,13 +1344,13 @@ async function uninstallService(entryScript: string, runner: CommandRunner): Pro
     runRemovalStep(
       runner,
       "systemctl",
-      systemctlArgs(targetScope, ["disable", "--now", spec.serviceName])
+      systemctlArgs(scope, ["disable", "--now", spec.serviceName])
     );
-    fs.rmSync(linuxUnitPath(targetScope, user.home, user.xdgConfigHome), { force: true });
-    runOptional(runner, "systemctl", systemctlArgs(targetScope, ["daemon-reload"]));
-    const otherScope = targetScope === "user" ? "system" : "user";
-    const otherUnitPath = linuxUnitPath(otherScope, user.home, user.xdgConfigHome);
-    if (fs.existsSync(otherUnitPath)) warnAboutLinuxUnit(otherScope, otherUnitPath);
+    fs.rmSync(linuxUnitPath(scope, user.home, user.xdgConfigHome), { force: true });
+    runOptional(runner, "systemctl", systemctlArgs(scope, ["daemon-reload"]));
+    const other = scope === "user" ? "system" : "user";
+    const otherUnitPath = linuxUnitPath(other, user.home, user.xdgConfigHome);
+    if (fs.existsSync(otherUnitPath)) warnAboutLinuxUnit(other, otherUnitPath);
   } else {
     if (windowsTaskExists(spec.taskName)) {
       runOptional(runner, "schtasks", ["/End", "/TN", spec.taskName]);
@@ -1506,7 +1372,7 @@ export function tryUninstallService(
   runner: CommandRunner = defaultRunner
 ): ServiceUninstallResult {
   let installed = false;
-  let linuxScope: LinuxServiceScope | undefined;
+  let needsElevationScope: LinuxServiceScope | undefined;
   try {
     const spec = currentServiceSpec(entryScript);
 
@@ -1519,12 +1385,13 @@ export function tryUninstallService(
       const user = resolveUserContext("linux");
       const scopes = findInstalledLinuxScopes(spec.scope, user.home, user.xdgConfigHome);
       if (scopes.length === 0) return { removed: false, installed: false };
-      const firstScope = (process.getuid?.() ?? -1) === 0 ? "system" : "user";
-      if (scopes.length > 1 && scopes[0] !== firstScope) scopes.reverse();
-      for (const scope of scopes) {
-        linuxScope = scope;
+      const isRoot = (process.getuid?.() ?? -1) === 0;
+      const ordered: LinuxServiceScope[] = isRoot ? ["system", "user"] : ["user", "system"];
+      for (const scope of ordered) {
+        if (!scopes.includes(scope)) continue;
         installed = true;
-        if (scope === "user" && (process.getuid?.() ?? -1) === 0) {
+        needsElevationScope = scope;
+        if (scope === "user" && isRoot) {
           throw new Error(
             "The installed service is a systemd user service. Re-run `portless service uninstall` without sudo."
           );
@@ -1551,7 +1418,7 @@ export function tryUninstallService(
       removed: false,
       installed,
       error: err instanceof Error ? err.message : String(err),
-      needsElevation: installed && removalNeedsElevation(err, linuxScope),
+      needsElevation: installed && removalNeedsElevation(err, needsElevationScope),
     };
   }
 }
@@ -1563,13 +1430,9 @@ async function getServiceStatus(
   let spec = currentServiceSpec(entryScript);
   if (spec.platform === "linux") {
     const user = resolveUserContext("linux");
-    const targetScope =
+    const scope =
       findInstalledLinuxScopes(spec.scope, user.home, user.xdgConfigHome)[0] ?? spec.scope;
-    spec = {
-      ...spec,
-      scope: targetScope,
-      unitPath: linuxUnitPath(targetScope, user.home, user.xdgConfigHome),
-    };
+    spec = { ...spec, scope, unitPath: linuxUnitPath(scope, user.home, user.xdgConfigHome) };
   }
   const installedConfig = readInstalledServiceConfig(spec) ?? spec.config;
   const proxyRunning = await isProxyRunning(installedConfig.proxyPort, installedConfig.useHttps);
@@ -1675,22 +1538,15 @@ ${colors.bold("Notes:")}
   Value flags accept both --flag <value> and --flag=<value>.
   The service uses the default clean URL mode unless options or PORTLESS_*
   environment variables are provided during install.
-  Linux user services resolve node from PATH at startup. Linux root services
-  use fixed system PATH directories (/usr/bin:/bin:/usr/sbin:/sbin) and resolve
-  node from PATH only when Node is installed there. macOS root services and
-  Windows SYSTEM tasks keep the explicit Node path when Node is outside core
-  system directories.
-  On Linux, Node under a non-root user's home directory, such as with nvm, fnm,
-  volta, or mise, uses a systemd user service (systemctl --user) instead of a
-  root system service to avoid execution being blocked by SELinux enforcing mode.
-  Linux user services start at login. Run loginctl enable-linger <user> to start
-  at boot before login. They require unprivileged port access or --port 1024 or
-  higher. Linux systemd units allow 5 starts per 60 seconds
+  On Linux, Node under a non-root user's home directory (such as nvm, fnm,
+  volta, or mise) uses a systemd user service (systemctl --user) that resolves
+  node from PATH at startup, avoiding SELinux enforcing denials. User services
+  start at login (run loginctl enable-linger <user> to start at boot) and
+  require unprivileged port access or --port 1024 or higher.
+  Linux systemd units allow 5 starts per 60 seconds
   (StartLimitIntervalSec=60, StartLimitBurst=5).
-  macOS and other Linux installs use a root-owned service so port 443 can bind.
-  On macOS and Linux, install exits with the reason when another user owns,
-  can write to, or can redirect the state directory.
-  Windows installs a Task Scheduler startup task that runs as SYSTEM.
+  macOS, Windows, and other Linux installs use a root or SYSTEM service with
+  the install-time Node path so port 443 can bind at boot.
 `);
 }
 
