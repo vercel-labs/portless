@@ -413,10 +413,11 @@ describe("createProxyServer", () => {
       const res = await request(server, {
         host: "myapp.localhost",
         headers: {
-          connection: "close",
+          connection: "close, X-Client-Hop",
           "keep-alive": "timeout=5",
           "proxy-connection": "keep-alive",
           upgrade: "h2c",
+          "x-client-hop": "secret",
         },
       });
       expect(res.status).toBe(200);
@@ -426,6 +427,98 @@ describe("createProxyServer", () => {
       expect(received["keep-alive"]).toBeUndefined();
       expect(received["proxy-connection"]).toBeUndefined();
       expect(received.upgrade).toBeUndefined();
+      expect(received["x-client-hop"]).toBeUndefined();
+    });
+
+    it("strips hop-by-hop headers and Connection-listed tokens from plain HTTP responses while preserving transfer-encoding (issue #482)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, {
+            "Content-Type": "text/plain",
+            Connection: "close, X-Backend-Hop",
+            "X-Backend-Hop": "leak",
+            "Keep-Alive": "timeout=99",
+            "Proxy-Connection": "keep-alive",
+            Upgrade: "h2c",
+            "X-Custom": "preserved",
+          });
+          res.write("chunk1");
+          res.end("chunk2");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "myapp.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.headers.connection).toBe("keep-alive");
+      expect(res.headers["keep-alive"]).not.toBe("timeout=99");
+      expect(res.headers["proxy-connection"]).toBeUndefined();
+      expect(res.headers.upgrade).toBeUndefined();
+      expect(res.headers["x-backend-hop"]).toBeUndefined();
+      expect(res.headers["transfer-encoding"]).toBe("chunked");
+      expect(res.headers["x-custom"]).toBe("preserved");
+      expect(res.body).toBe("chunk1chunk2");
+    });
+
+    it("reuses the client connection on plain HTTP responses when the backend sends Connection: close (issue #482)", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { Connection: "close" });
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      let clientConnections = 0;
+      server.on("connection", () => {
+        clientConnections += 1;
+      });
+
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+      const agent = new http.Agent({ keepAlive: true, maxSockets: 1 });
+      try {
+        for (let i = 0; i < 2; i++) {
+          const status = await new Promise<number | undefined>((resolve, reject) => {
+            const req = http.request(
+              {
+                hostname: "127.0.0.1",
+                port: addr.port,
+                path: "/",
+                method: "GET",
+                headers: { host: "myapp.localhost", accept: "text/html" },
+                agent,
+              },
+              (res) => {
+                res.resume();
+                res.on("end", () => resolve(res.statusCode));
+              }
+            );
+            req.on("error", reject);
+            req.end();
+          });
+          expect(status).toBe(200);
+        }
+      } finally {
+        agent.destroy();
+      }
+      expect(clientConnections).toBe(1);
     });
 
     it("survives a backend resetting a kept-alive connection (issue #434)", async () => {
@@ -1112,6 +1205,68 @@ describe("createProxyServer", () => {
       });
       client.destroy();
       expect(responses).toBe(2);
+    });
+
+    it("keeps reading the request body after an early response so the connection can be reused", async () => {
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          if (req.method === "POST") {
+            res.writeHead(413, { "Content-Type": "text/plain" });
+            res.end("too large");
+            return;
+          }
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "api.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const statuses: string[] = [];
+      const client = net.createConnection((server.address() as net.AddressInfo).port, "127.0.0.1");
+      const bodySize = 1024 * 1024;
+      const firstChunk = 1024;
+      const remaining = bodySize - firstChunk;
+      const initial = Buffer.concat([
+        Buffer.from(
+          "POST /upload HTTP/1.1\r\nHost: api.localhost\r\nContent-Length: 1048576\r\n\r\n"
+        ),
+        Buffer.alloc(firstChunk),
+      ]);
+
+      await new Promise<void>((resolve, reject) => {
+        let data = "";
+        let sentFollowUp = false;
+        const timer = setTimeout(() => reject(new Error("timed out waiting for reused connection")), 2000);
+        client.on("data", (chunk) => {
+          data += chunk.toString("utf8");
+          const matches = data.match(/HTTP\/1\.1 \d{3}/g) || [];
+          if (!sentFollowUp && data.includes("too large")) {
+            sentFollowUp = true;
+            client.write(Buffer.alloc(remaining));
+            client.write("GET / HTTP/1.1\r\nHost: api.localhost\r\n\r\n");
+          }
+          if (matches.length === 2) {
+            clearTimeout(timer);
+            statuses.push(...matches);
+            resolve();
+          }
+        });
+        client.once("error", (err) => {
+          clearTimeout(timer);
+          reject(err);
+        });
+        client.write(initial);
+      });
+
+      client.destroy();
+      expect(statuses).toEqual(["HTTP/1.1 413", "HTTP/1.1 200"]);
     });
   });
 
@@ -3750,11 +3905,13 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
         // Backend sends hop-by-hop headers that are invalid in HTTP/2
         res.writeHead(200, {
           "Content-Type": "text/plain",
-          Connection: "keep-alive",
+          Connection: "keep-alive, X-Backend-Hop",
           "Keep-Alive": "timeout=5",
+          "X-Backend-Hop": "leak",
           "X-Custom": "preserved",
         });
-        res.end("ok");
+        res.write("ok");
+        res.end();
       })
     );
     await listen(backend);
@@ -3815,6 +3972,8 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(result.status).toBe(200);
     expect(result.headers["connection"]).toBeUndefined();
     expect(result.headers["keep-alive"]).toBeUndefined();
+    expect(result.headers["x-backend-hop"]).toBeUndefined();
+    expect(result.headers["transfer-encoding"]).toBeUndefined();
     expect(result.headers["x-custom"]).toBe("preserved");
     expect(result.body).toBe("ok");
   });
