@@ -103,4 +103,4 @@ If you only need Google OAuth and don't want to change TLDs, you can add `http:/
 NEXTAUTH_URL=http://localhost:3000
 ```
 
-The downside is you lose the portless benefits (named URLs, no port conflicts) for the OAuth callback flow.
+If the callback targets the portless proxy on plain `localhost`, for example `http://localhost:1355/api/auth/callback/google`, it lands on the portless 404 page. Active app links preserve the request path and query string, so you can click the target app to complete the flow.
