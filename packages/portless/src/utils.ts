@@ -382,11 +382,10 @@ function unmappedUserNsOverflowUid(readFile: (filePath: string) => string | null
 }
 
 /**
- * UIDs allowed to own a state directory: root, the current user, when
- * running as root under sudo, the invoking sudo user, and the unmapped
- * overflow UID inside an unprivileged Linux user namespace.
+ * UIDs allowed to own a state directory or symlink: root, the current user,
+ * and, when running as root under sudo, the invoking sudo user.
  */
-export function allowedStateDirOwners(options: AllowedOwnersOptions = {}): Set<number> | null {
+function allowedStateDirOwners(options: AllowedOwnersOptions = {}): Set<number> | null {
   const platform = options.platform ?? process.platform;
   if (platform === "win32") return null;
   const uid = options.uid ?? process.getuid?.();
@@ -397,6 +396,19 @@ export function allowedStateDirOwners(options: AllowedOwnersOptions = {}): Set<n
     const sudoUid = Number.parseInt(env.SUDO_UID ?? "", 10);
     if (Number.isInteger(sudoUid) && sudoUid >= 0) owners.add(sudoUid);
   }
+  return owners;
+}
+
+/**
+ * UIDs allowed to own an ancestor directory in the path walk: the strict state
+ * directory owners, plus the unmapped overflow UID inside an unprivileged Linux
+ * user namespace (where host root-owned paths like `/` and `/home` appear as
+ * the overflow UID).
+ */
+export function allowedAncestorOwners(options: AllowedOwnersOptions = {}): Set<number> | null {
+  const owners = allowedStateDirOwners(options);
+  if (!owners) return null;
+  const platform = options.platform ?? process.platform;
   if (platform === "linux") {
     const overflowUid = unmappedUserNsOverflowUid(options.readFile ?? readProcText);
     if (overflowUid !== null) owners.add(overflowUid);
@@ -449,7 +461,11 @@ function splitAbsolutePath(absolute: string): string[] {
  * could create or retarget: one an allowed user does not own, or one held in
  * a directory that fails findUnsafeDirInChain.
  */
-function resolveTrustedPath(target: string, owners: Set<number>): TrustedPath {
+function resolveTrustedPath(
+  target: string,
+  owners: Set<number>,
+  ancestorOwners: Set<number> = owners
+): TrustedPath {
   const absolute = path.resolve(target);
   const root = path.parse(absolute).root;
   let pending = splitAbsolutePath(absolute);
@@ -470,7 +486,7 @@ function resolveTrustedPath(target: string, owners: Set<number>): TrustedPath {
     }
     hops += 1;
     if (hops > MAX_SYMLINK_HOPS || !owners.has(stat.uid)) return { unsafe: next };
-    const holder = findUnsafeDirInChain(current, owners);
+    const holder = findUnsafeDirInChain(current, ancestorOwners);
     if (holder) return { unsafe: holder };
     let linked: string;
     try {
@@ -488,11 +504,15 @@ function resolveTrustedPath(target: string, owners: Set<number>): TrustedPath {
  * The first ancestor of a state directory that another user could use to swap
  * or redirect the directory, or null when every ancestor is safe.
  */
-function findUnsafeStateDirAncestor(dir: string, owners: Set<number>): string | null {
-  const resolved = resolveTrustedPath(dir, owners);
+function findUnsafeStateDirAncestor(
+  dir: string,
+  owners: Set<number>,
+  ancestorOwners: Set<number>
+): string | null {
+  const resolved = resolveTrustedPath(dir, owners, ancestorOwners);
   if ("unsafe" in resolved) return resolved.unsafe;
   if ("missing" in resolved) return path.dirname(dir);
-  return findUnsafeDirInChain(path.dirname(resolved.path), owners);
+  return findUnsafeDirInChain(path.dirname(resolved.path), ancestorOwners);
 }
 
 /**
@@ -511,9 +531,10 @@ export function findStateDirProblem(dir: string): StateDirProblem | null {
   }
   if (!stat.isDirectory()) return { reason: "not-directory", path: dir };
   const owners = allowedStateDirOwners();
-  if (!owners) return null;
+  const ancestorOwners = allowedAncestorOwners();
+  if (!owners || !ancestorOwners) return null;
   if (!owners.has(stat.uid)) return { reason: "foreign-owner", path: dir };
-  const ancestor = findUnsafeStateDirAncestor(dir, owners);
+  const ancestor = findUnsafeStateDirAncestor(dir, owners, ancestorOwners);
   if (ancestor) return { reason: "unsafe-parent", path: ancestor };
   if ((stat.mode & 0o022) !== 0) return { reason: "writable-by-others", path: dir };
   return null;
@@ -533,9 +554,10 @@ function locateStateDir(dir: string): {
   problem: StateDirProblem | null;
 } {
   const owners = allowedStateDirOwners();
+  const ancestorOwners = allowedAncestorOwners();
   let canonical: string;
-  if (owners) {
-    const resolved = resolveTrustedPath(dir, owners);
+  if (owners && ancestorOwners) {
+    const resolved = resolveTrustedPath(dir, owners, ancestorOwners);
     if ("unsafe" in resolved) {
       return { canonical: null, problem: { reason: "unsafe-link", path: resolved.unsafe } };
     }

@@ -1,7 +1,7 @@
 import net from "node:net";
 import { describe, it, expect, afterEach, vi } from "vitest";
 import {
-  allowedStateDirOwners,
+  allowedAncestorOwners,
   createLoopbackConnection,
   escapeHtml,
   formatUptime,
@@ -600,9 +600,9 @@ describe("createLoopbackConnection", () => {
   );
 });
 
-describe("allowedStateDirOwners", () => {
+describe("allowedAncestorOwners", () => {
   it("allows the unmapped overflow uid inside a Linux user namespace", () => {
-    const owners = allowedStateDirOwners({
+    const owners = allowedAncestorOwners({
       platform: "linux",
       uid: 1000,
       readFile: (p) => {
@@ -615,7 +615,7 @@ describe("allowedStateDirOwners", () => {
   });
 
   it("respects a custom /proc/sys/kernel/overflowuid when unmapped", () => {
-    const owners = allowedStateDirOwners({
+    const owners = allowedAncestorOwners({
       platform: "linux",
       uid: 1000,
       readFile: (p) => {
@@ -628,7 +628,7 @@ describe("allowedStateDirOwners", () => {
   });
 
   it("does not allow the overflow uid on a standard Linux host with a full uid_map", () => {
-    const owners = allowedStateDirOwners({
+    const owners = allowedAncestorOwners({
       platform: "linux",
       uid: 1000,
       readFile: (p) => {
@@ -641,7 +641,7 @@ describe("allowedStateDirOwners", () => {
   });
 
   it("does not allow the overflow uid when that uid is explicitly mapped", () => {
-    const owners = allowedStateDirOwners({
+    const owners = allowedAncestorOwners({
       platform: "linux",
       uid: 1000,
       readFile: (p) => {
@@ -656,7 +656,7 @@ describe("allowedStateDirOwners", () => {
   });
 
   it("fails closed when /proc/self/uid_map is unreadable or empty", () => {
-    const owners = allowedStateDirOwners({
+    const owners = allowedAncestorOwners({
       platform: "linux",
       uid: 1000,
       readFile: () => null,
@@ -665,9 +665,9 @@ describe("allowedStateDirOwners", () => {
   });
 
   it("returns null on win32 and ignores proc files on darwin", () => {
-    expect(allowedStateDirOwners({ platform: "win32", uid: 1000 })).toBeNull();
+    expect(allowedAncestorOwners({ platform: "win32", uid: 1000 })).toBeNull();
     expect(
-      allowedStateDirOwners({
+      allowedAncestorOwners({
         platform: "darwin",
         uid: 501,
         readFile: () => "1000 0 1\n",
