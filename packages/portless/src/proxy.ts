@@ -36,7 +36,13 @@ export const PORTLESS_HEADER = "X-Portless";
  */
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
-const HOP_BY_HOP_HEADERS = ["connection", "keep-alive", "proxy-connection", "upgrade"] as const;
+const HOP_BY_HOP_HEADERS = [
+  "connection",
+  "keep-alive",
+  "proxy-connection",
+  "trailer",
+  "upgrade",
+] as const;
 const PROTECTED_HEADERS = new Set(["content-length", "host"]);
 
 // HTTP/2 multiplexes a whole cold page load onto one client connection, so
@@ -67,9 +73,9 @@ function getClientProtocol(req: http.IncomingMessage, h2Stream: unknown): HttpPr
 }
 
 /**
- * Strip HTTP hop-by-hop headers (RFC 9110 section 7.6.1), including any header
- * names listed in Connection. Keeps transfer-encoding only on HTTP/1.1 hops;
- * HTTP/1.0 and HTTP/2 forbid it.
+ * Strip HTTP hop-by-hop headers (RFC 9110 section 7.6.1), including Trailer
+ * and any header names listed in Connection. Keeps transfer-encoding only on
+ * HTTP/1.1 hops; HTTP/1.0 and HTTP/2 forbid it.
  */
 function stripHopByHop(headers: http.OutgoingHttpHeaders, protocol: HttpProtocol): void {
   const keepTransferEncoding = protocol === "http1.1";
@@ -235,6 +241,8 @@ function buildUpstreamHeaders(
   }
   if (stripHopByHopHeaders) {
     stripHopByHop(headers, "http1.1");
+  } else {
+    delete headers.trailer;
   }
   Object.assign(headers, buildForwardedHeaders(req, isEncrypted(req)), {
     [PORTLESS_HOPS_HEADER]: String(hops + 1),

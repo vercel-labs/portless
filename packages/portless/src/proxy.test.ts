@@ -472,12 +472,14 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("chunk1chunk2");
     });
 
-    it("strips transfer-encoding and omits chunk framing for HTTP/1.0 clients", async () => {
+    it("strips transfer-encoding and trailer and omits chunk framing for HTTP/1.0 clients", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {
-          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.writeHead(200, { "Content-Type": "text/plain", Trailer: "X-Checksum" });
           res.write("chunk1");
-          res.end("chunk2");
+          res.write("chunk2");
+          res.addTrailers({ "X-Checksum": "abc" });
+          res.end();
         })
       );
       await listen(backend);
@@ -506,7 +508,49 @@ describe("createProxyServer", () => {
 
       const [head, body] = raw.split("\r\n\r\n");
       expect(head.toLowerCase()).not.toContain("transfer-encoding:");
+      expect(head.toLowerCase()).not.toContain("trailer:");
       expect(body).toBe("chunk1chunk2");
+
+      const followUp = await request(server, { host: "myapp.localhost" });
+      expect(followUp.status).toBe(200);
+    });
+
+    it("strips client Trailer headers on non-chunked requests without throwing", async () => {
+      let received: http.IncomingHttpHeaders = {};
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          received = req.headers;
+          res.end("ok");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const raw = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(addr.port, "127.0.0.1", () => {
+          socket.write(
+            "GET / HTTP/1.1\r\nHost: myapp.localhost\r\nTrailer: X-Client-Trailer\r\nConnection: close\r\n\r\n"
+          );
+        });
+        let data = "";
+        socket.on("data", (chunk) => {
+          data += chunk.toString("utf8");
+        });
+        socket.on("end", () => resolve(data));
+        socket.on("error", reject);
+      });
+
+      expect(raw).toContain("HTTP/1.1 200 OK");
+      expect(received.trailer).toBeUndefined();
     });
 
     it("reuses the client connection on plain HTTP responses when the backend sends Connection: close (issue #482)", async () => {
@@ -4024,12 +4068,14 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(result.body).toBe("ok");
   });
 
-  it("strips transfer-encoding and omits chunk framing for HTTP/1.0 clients over TLS", async () => {
+  it("strips transfer-encoding and trailer and omits chunk framing for HTTP/1.0 clients over TLS", async () => {
     const backend = trackServer(
       http.createServer((_req, res) => {
-        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.writeHead(200, { "Content-Type": "text/plain", Trailer: "X-Checksum" });
         res.write("chunk1");
-        res.end("chunk2");
+        res.write("chunk2");
+        res.addTrailers({ "X-Checksum": "abc" });
+        res.end();
       })
     );
     await listen(backend);
@@ -4069,6 +4115,7 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
     const [head, body] = raw.split("\r\n\r\n");
     expect(head.toLowerCase()).not.toContain("transfer-encoding:");
+    expect(head.toLowerCase()).not.toContain("trailer:");
     expect(body).toBe("chunk1chunk2");
   });
 
