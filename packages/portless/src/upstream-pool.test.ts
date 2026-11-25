@@ -724,10 +724,25 @@ describe("UpstreamPool", () => {
       held.push(res);
     });
     const backendPort = await listen(backend);
-    const server = proxy(backendPort);
+    const pool = new UpstreamPool();
+    pools.push(pool);
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
     let afterArrived = false;
-    server.on("request", (req) => {
+    const server = http.createServer((req, res) => {
       if (req.url === "/after") afterArrived = true;
+      pool.dispatch(
+        route,
+        { method: req.method, path: req.url, headers: { ...req.headers } },
+        res,
+        (upstream) => {
+          upstream.once("response", (proxyRes) => {
+            res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+            proxyRes.pipe(res);
+          });
+          upstream.once("error", () => {});
+          req.pipe(upstream);
+        }
+      );
     });
     const proxyPort = await listen(server);
     const initial = Promise.all(Array.from({ length: 47 }, () => response(get(proxyPort))));

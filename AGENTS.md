@@ -37,6 +37,10 @@ Use the `technical-writer` skill (`.agents/skills/technical-writer/SKILL.md`) wh
 
 Any change to a CLI command, flag, output, or environment variable must update the MCP tools in `packages/portless/src/mcp.ts` in the same change. `mcp.test.ts` reads `portless --help` and each tool command's `--help`, and fails when a command or flag is neither handled by a tool nor listed as omitted.
 
+## Route table
+
+`RouteStore` in `packages/portless/src/routes.ts` is the only owner of `routes.json` and the route lock. Add new route actions as `RouteStore` methods; `.oxlintrc.json` restricts `isPortFree` imports and `getRoutesPath()` calls outside their allowed files.
+
 ## Releasing
 
 Releases are manual, single-PR affairs. The maintainer controls the changelog voice and format.

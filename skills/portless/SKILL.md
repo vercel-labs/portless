@@ -48,7 +48,7 @@ portless myapp next dev
 # -> https://myapp.localhost
 ```
 
-The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`. Auto-start reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, so the next start uses the flags and environment variables it is given. Explicit env vars take priority.
+The proxy auto-starts when you run an app. You can also start it explicitly with `portless proxy start`. Auto-start reuses the saved port, TLS, TLD, and LAN settings only after the proxy exits unexpectedly. A normal `portless proxy stop` clears them, except an unprivileged proxy keeps unprivileged mode and its HTTPS choice for auto-start and a bare `proxy start`. Explicit flags and env vars take priority.
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting. Task runners like turborepo should pre-start the proxy.
 
@@ -66,7 +66,7 @@ pnpm dev        # -> works without portless, plain "next dev"
 
 Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command. In Turbo mode only the root script is checked, and Turbo passes the arguments to each package script unchanged.
 
-Use an optional `portless.json` to override defaults (name, script, port):
+Use an optional `portless.json` to override defaults (name, script, port). In each project directory, portless checks `portless.json`, `.config/portless.json`, and the `package.json` `"portless"` key in that order. Only a missing standalone file advances to the next source; an invalid or unreadable file fails. `apps` paths are relative to the project directory even when the config is in `.config`:
 
 ```json
 { "name": "myapp" }
@@ -152,7 +152,16 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
-Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"`, and `worktree.hostnameTemplate` to replace the hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash at runtime, and a template applies only when a label exists. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree. `get` reads worktree config from the current directory, not the named service's package, so `cd` into a package to use its per-app options; `get --no-worktree` skips worktree config and naming, and without it an invalid config in the current directory or workspace fails instead of printing a guessed URL. Worktree options inherit from the workspace root into package directories, and a package's own `portless.json` applies in a root multi-app startup; for worktree options, the `package.json` `"portless"` key is used only when the package has no `portless.json`, while `name`, `script`, `appPort`, and `proxy` keep their existing precedence. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` to use the whole branch. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree.
+
+When a label exists, the hostname layout is selected in this order:
+
+1. `worktree.hostnameTemplate` replaces the hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash.
+2. `worktree.flat: true` joins the label and all name labels into one DNS label. For example, `fix-ui` and `api.myapp` become `fix-ui-api-myapp`. The final label is shortened if it exceeds 63 characters.
+3. `worktree.base` inserts the label before a matching DNS suffix. With `"base": "myapp"`, `api.myapp` becomes `api.fix-ui.myapp`. Matching ignores case and respects label boundaries; unrelated names use the default layout.
+4. The default prepends the label, producing `fix-ui.api.myapp`.
+
+`--no-worktree` wins over `--prefix` and `PORTLESS_PREFIX`. In bare and `run` launches, it skips worktree naming but keeps normal launch configuration. Named launches use the supplied hostname unchanged, with or without the flag. `get --no-worktree` skips config loading as well as naming. Without it, `get` reads worktree config from the current directory, including workspace root defaults, not the named service's package; `cd` into a package to use its per-app options. Invalid config fails instead of printing a guessed URL. Worktree options inherit from the workspace root into package directories, and a package's own config applies in a root multi-app startup. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
 
 ### Bypassing portless
 
@@ -174,7 +183,7 @@ period.
 
 Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
 
-With `--unprivileged` (or `PORTLESS_UNPRIVILEGED=1`) the proxy takes a port below 1024 without `sudo`: it binds the wildcard addresses, which macOS allows for non-root processes, and refuses every non-loopback peer itself. It serves plain HTTP on port 80 unless `--https` is given, because installing the CA would be a prompt; with `--https` the CA is generated but not installed, so run `portless trust` once yourself. It never writes the hosts file: automatic hosts sync is off, `PORTLESS_SYNC_HOSTS=1` together with it is refused, and Safari or a custom TLD need `portless hosts sync` run once by you. Linux needs `net.ipv4.ip_unprivileged_port_start` to cover the port; portless checks and prints the sysctl command instead of falling back to another port. The mode is remembered for auto-start and never triggers a sudo prompt, so it suits scripts, agents and managed machines.
+With `--unprivileged` (or `PORTLESS_UNPRIVILEGED=1`) the proxy takes a port below 1024 without `sudo`: it binds the wildcard addresses, which macOS allows for non-root processes, and refuses every non-loopback peer itself. Explicit `--unprivileged` serves plain HTTP on port 80 unless `--https` is also given, because installing the CA would require a prompt. After a stop, auto-start and a bare `proxy start` remember both unprivileged mode and its HTTPS choice. Specifying `--unprivileged` again without `--https` returns to plain HTTP. With `--https` the CA is generated but not installed, so run `portless trust` once yourself. It never writes the hosts file: automatic hosts sync is off, `PORTLESS_SYNC_HOSTS=1` together with it is refused, and Safari or a custom TLD need `portless hosts sync` run once by you. Linux needs `net.ipv4.ip_unprivileged_port_start` to cover the port; portless checks and prints the sysctl command instead of falling back to another port. The mode never triggers a sudo prompt, so it suits scripts, agents and managed machines.
 
 When portless itself returns an error, it sets `X-Portless: 1` and `Vary: Accept`. It returns 404 (`not_found`) for an unknown host, 421 (`misdirected_request`) for a misdirected request, 502 (`bad_gateway`) when the app is unreachable, 503 (`service_unavailable`) when a request waits more than 30 seconds in the per-backend queue or the queue is full at 512 waiting requests, 504 (`gateway_timeout`) when the backend takes more than 120 seconds to send response headers after the request upload finishes, and 508 (`loop_detected`) for a request loop. The body depends on the `Accept` header. Browsers (`text/html`) get an HTML page. curl, `fetch`, and other clients get JSON such as `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`. To distinguish a proxy-generated 503 or 504 from an app response, check for `Vary: Accept` and a JSON body with `upstream` and an `error` of `service_unavailable` or `gateway_timeout`, or a portless HTML error page. Responses from the app itself are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, never get the app list. Over HTTPS with portless's generated certificates, portless refuses to present a certificate for them, so the TLS handshake fails. With a custom `--cert` and `--key`, on a plain HTTP proxy, or over HTTPS when only the `Host` header names such a host, the request gets 421 Misdirected Request.
 
@@ -249,6 +258,8 @@ portless trust                                      # Add CA to trust store late
 
 On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and openSUSE (via `update-ca-certificates` or `update-ca-trust`). On Windows, it uses `certutil` to add the CA to the system trust store. On WSL, it updates both the Linux trust store and the Windows current-user Root store so Windows browsers trust portless HTTPS certificates. Linux containers on a WSL2 host use only the Linux trust store.
 
+If a Vite-based tool such as Storybook connects its HMR socket to the app port instead of the proxy, [configure `server.hmr` (or `server.ws` in Vite 8.1+) from `PORTLESS_URL`](https://portless.sh/https#vite-hmr-connects-to-the-app-port).
+
 ### LAN mode
 
 ```bash
@@ -259,7 +270,7 @@ portless proxy start --lan --ip 192.168.1.42
 
 `--lan` explicitly binds the proxy to the IPv4 and IPv6 unspecified addresses, `0.0.0.0` and `::`, and advertises `<name>.local` hostnames over mDNS so devices on the same Wi-Fi can reach your apps. Portless auto-detects your LAN IP and follows network changes automatically, but you can pin a specific address with `--ip <address>` or the `PORTLESS_LAN_IP` environment variable. Set `PORTLESS_LAN=1` to default to LAN mode every time the proxy starts.
 
-Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpected proxy exit leaves it for auto-start. A normal `portless proxy stop` clears the saved port, TLS, TLD, and LAN settings, so the next start uses its flags and env vars. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
+Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpected proxy exit leaves it for auto-start. A normal `portless proxy stop` clears the saved port, TLS, TLD, and LAN settings, except an unprivileged proxy keeps unprivileged mode and its HTTPS choice for auto-start and a bare `proxy start`. Use `PORTLESS_LAN=0` for one start to switch back to `.localhost` mode. If a proxy is already running with different explicit LAN/TLS/TLD settings, portless warns and asks you to stop it first.
 
 LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling). Linux also needs a running `avahi-daemon`. While it is stopped, `portless doctor` warns and `.local` names are published once it starts.
 
@@ -343,6 +354,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
 | `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
+| `portless run --no-worktree <cmd>`                | Run without worktree naming                                    |
+| `portless --no-worktree`                          | Start configured apps without worktree naming                  |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
 | `portless get <name> --no-worktree`               | Print URL without worktree config or naming                    |
@@ -419,7 +432,7 @@ Optional config file. Portless looks for it in the current directory; `worktree`
 | `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
 | `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
 | `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `worktree` | object  |                            | Worktree label style and hostname template               |
+| `worktree` | object  |                            | Worktree label style and hostname layout                 |
 | `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
@@ -438,7 +451,7 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `wo
 { "portless": { "name": "myapp", "script": "dev:app" } }
 ```
 
-Precedence (closest wins): CLI flags > the package's own config > the root portless.json `apps` entry (when run from the workspace root) > defaults. The package's own config is its portless.json, or its package.json `"portless"` key when the directory has no portless.json.
+Precedence (closest wins): CLI flags > the package's own config > the root config's `apps` entry (when run from the workspace root) > defaults. The package's own config is the first available source in that directory: `portless.json`, `.config/portless.json`, or the `package.json` `"portless"` key.
 
 ## Troubleshooting
 
