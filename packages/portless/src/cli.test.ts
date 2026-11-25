@@ -6053,16 +6053,79 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(status).toBe(0);
       const launched = capture.env.PORTLESS_URL!;
       expect(launched).toContain("tenant.flag-test-app.localhost");
+      expect(capture.env.PORTLESS_PREFIX).toBe("shell");
 
       const got = run(["get", "test-app"], {
         cwd: tmpDir,
         env: {
           PORTLESS_STATE_DIR: tmpDir,
           PORTLESS_HTTPS: "0",
-          PORTLESS_PREFIX: capture.env.PORTLESS_PREFIX,
+          PORTLESS_PREFIX: "flag",
         },
       });
+      expect(got.status).toBe(0);
       expect(got.stdout.trim()).toBe(launched);
+    });
+
+    it("run --no-worktree opts out of both prefix overrides", async () => {
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: ["run", "--no-worktree", "--prefix", "flag", "--script", "dev"],
+        prefixEnv: "shell",
+        worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_URL).toBe(`http://test-app.localhost:${proxyPort}`);
+      expect(capture.env.PORT).toBe("4567");
+      expect(capture.env.PORTLESS_PREFIX).toBe("shell");
+    });
+
+    it("bare --no-worktree suppresses the environment prefix", async () => {
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: ["--no-worktree"],
+        prefixEnv: "shell",
+        worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_URL).toBe(`http://test-app.localhost:${proxyPort}`);
+      expect(capture.env.PORT).toBe("4567");
+    });
+
+    it("keeps child --no-worktree and does not export the run prefix", async () => {
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs: ["run", "--prefix", "flag", "bun", "run", "dev", "--no-worktree"],
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_URL).toBe(`http://flag.test-app.localhost:${proxyPort}`);
+      expect(capture.env.PORTLESS_PREFIX).toBeUndefined();
+      expect(capture.args).toEqual(["run", "dev", "--no-worktree"]);
+    });
+
+    it.each([
+      { cliArgs: ["api.project", "bun", "run", "dev"] },
+      { cliArgs: ["api.project", "--no-worktree", "bun", "run", "dev"] },
+      { cliArgs: ["--no-worktree", "--name", "api.project", "bun", "run", "dev"] },
+    ])("named mode remains literal for $cliArgs", async ({ cliArgs }) => {
+      const { status, proxyPort, capture } = await captureScriptDelegation({
+        pm: "bun",
+        script: "node server.js",
+        cliArgs,
+        prefixEnv: "shell",
+        worktree: { hostnameTemplate: "tenant.{worktree}-{name}" },
+      });
+
+      expect(status).toBe(0);
+      expect(capture.env.PORTLESS_URL).toBe(`http://api.project.localhost:${proxyPort}`);
+      expect(capture.env.PORT).toBe("4567");
+      expect(capture.args).toEqual(["run", "dev"]);
     });
 
     it.skipIf(process.platform === "win32").each([
@@ -6495,9 +6558,9 @@ describe("CLI", { timeout: 15_000 }, () => {
     // a separate limitation of the multi-app spawn path, not the worktree-prefix
     // logic under test here, which is platform-agnostic and covered
     // cross-platform by the detectWorktreePrefix unit tests. Runs on macOS/Linux.
-    it.skipIf(process.platform === "win32")(
-      "applies root and package worktree config to every app hostname",
-      async () => {
+    it.skipIf(process.platform === "win32").each([{ noWorktree: false }, { noWorktree: true }])(
+      "applies worktree naming to every app unless disabled (noWorktree=$noWorktree)",
+      async ({ noWorktree }) => {
         const root = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-wt-"));
         const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-multi-state-"));
         const proxyPort = await getFreePort();
@@ -6570,10 +6633,11 @@ describe("CLI", { timeout: 15_000 }, () => {
           childEnv.PORTLESS_PORT = proxyPort.toString();
           childEnv.PORTLESS_HTTPS = "0";
           childEnv.NO_COLOR = "1";
-          delete childEnv.PORTLESS_PREFIX;
+          if (noWorktree) childEnv.PORTLESS_PREFIX = "shell";
+          else delete childEnv.PORTLESS_PREFIX;
 
           let output = "";
-          cli = spawn(process.execPath, [CLI_PATH], {
+          cli = spawn(process.execPath, [CLI_PATH, ...(noWorktree ? ["--no-worktree"] : [])], {
             cwd: root,
             env: childEnv,
             stdio: ["ignore", "pipe", "pipe"],
@@ -6595,16 +6659,20 @@ describe("CLI", { timeout: 15_000 }, () => {
               `capture incomplete (web=${JSON.stringify(webUrl)}, api=${JSON.stringify(apiUrl)}). CLI output:\n${output}`
             );
           }
-          // web carries the leaf last-segment label, api the root branch label.
-          expect(webUrl).toContain("login.web.myrepo.localhost");
-          expect(apiUrl).toContain("team-a-login.api.myrepo.localhost");
+          expect(webUrl).toBe(
+            `http://${noWorktree ? "web.myrepo" : "login.web.myrepo"}.localhost:${proxyPort}`
+          );
+          expect(apiUrl).toBe(
+            `http://${noWorktree ? "api.myrepo" : "team-a-login.api.myrepo"}.localhost:${proxyPort}`
+          );
 
-          const got = run(["get", "web.myrepo"], {
+          const got = run(["get", "web.myrepo", ...(noWorktree ? ["--no-worktree"] : [])], {
             cwd: path.join(root, "packages", "web"),
             env: {
               PORTLESS_STATE_DIR: stateDir,
               PORTLESS_PORT: proxyPort.toString(),
               PORTLESS_HTTPS: "0",
+              PORTLESS_PREFIX: noWorktree ? "shell" : undefined,
             },
           });
           expect(got.status).toBe(0);

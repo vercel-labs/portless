@@ -7,8 +7,8 @@ import {
   sanitizeForHostname,
   truncateLabel,
   inferProjectName,
-  detectWorktreePrefix,
-  applyWorktreePrefix,
+  resolveWorktreeNaming,
+  composeHostname,
 } from "./auto.js";
 
 // ---------------------------------------------------------------------------
@@ -188,10 +188,10 @@ describe("inferProjectName", () => {
 });
 
 // ---------------------------------------------------------------------------
-// detectWorktreePrefix
+// resolveWorktreeNaming
 // ---------------------------------------------------------------------------
 
-describe("detectWorktreePrefix", () => {
+describe("resolveWorktreeNaming", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -221,25 +221,25 @@ describe("detectWorktreePrefix", () => {
 
   it("returns null for a main checkout (.git directory)", () => {
     fs.mkdirSync(path.join(tmpDir, ".git"));
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
   it("uses branch name as prefix from .git file", () => {
     setupWorktree(tmpDir, "feature-auth");
-    const result = detectWorktreePrefix(tmpDir);
-    expect(result).toEqual({ prefix: "feature-auth", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
+    expect(result).toMatchObject({ prefix: "feature-auth", source: "git branch" });
   });
 
   it("returns null when branch is main", () => {
     setupWorktree(tmpDir, "main");
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
   it("returns null when branch is master", () => {
     setupWorktree(tmpDir, "master");
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
@@ -247,14 +247,14 @@ describe("detectWorktreePrefix", () => {
     const gitdir = path.join(tmpDir, "fake.git", "modules", "my-submodule");
     fs.mkdirSync(gitdir, { recursive: true });
     fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
   it("uses last segment of branch name with slashes", () => {
     setupWorktree(tmpDir, "feature/My_Branch");
-    const result = detectWorktreePrefix(tmpDir);
-    expect(result).toEqual({ prefix: "my-branch", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
+    expect(result).toMatchObject({ prefix: "my-branch", source: "git branch" });
   });
 
   it("keeps the whole branch name with the branch prefix style", () => {
@@ -264,20 +264,23 @@ describe("detectWorktreePrefix", () => {
     ];
     for (const [branch, expected] of cases) {
       setupWorktree(tmpDir, branch);
-      expect(detectWorktreePrefix(tmpDir)!.prefix).toBe("login");
-      expect(detectWorktreePrefix(tmpDir, "branch")).toEqual({
+      expect(resolveWorktreeNaming({ cwd: tmpDir })!.prefix).toBe("login");
+      expect(resolveWorktreeNaming({ cwd: tmpDir, config: { prefix: "branch" } })).toMatchObject({
         prefix: expected,
         source: "git branch",
       });
     }
     vi.stubEnv("PORTLESS_PREFIX", "main");
-    expect(detectWorktreePrefix(tmpDir)).toEqual({ prefix: "main", source: "PORTLESS_PREFIX" });
+    expect(resolveWorktreeNaming({ cwd: tmpDir })).toMatchObject({
+      prefix: "main",
+      source: "PORTLESS_PREFIX",
+    });
     vi.stubEnv("PORTLESS_PREFIX", "");
-    expect(detectWorktreePrefix(tmpDir, "branch")).toBeNull();
+    expect(resolveWorktreeNaming({ cwd: tmpDir, config: { prefix: "branch" } })).toBeNull();
   });
 
   it("returns null when no .git found at all", () => {
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
@@ -285,8 +288,8 @@ describe("detectWorktreePrefix", () => {
     setupWorktree(tmpDir, "deep-feature");
     const subDir = path.join(tmpDir, "src", "lib");
     fs.mkdirSync(subDir, { recursive: true });
-    const result = detectWorktreePrefix(subDir);
-    expect(result).toEqual({ prefix: "deep-feature", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: subDir });
+    expect(result).toMatchObject({ prefix: "deep-feature", source: "git branch" });
   });
 
   it("returns null for detached HEAD", () => {
@@ -295,31 +298,31 @@ describe("detectWorktreePrefix", () => {
     fs.mkdirSync(gitdir, { recursive: true });
     fs.writeFileSync(path.join(gitdir, "HEAD"), "abc123def456\n");
     fs.writeFileSync(path.join(tmpDir, ".git"), `gitdir: ${gitdir}\n`);
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
   it("returns null for .git file with no gitdir line", () => {
     fs.writeFileSync(path.join(tmpDir, ".git"), "something unexpected\n");
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
   it("uses last segment even when it matches a default branch name", () => {
     setupWorktree(tmpDir, "feature/main");
-    const result = detectWorktreePrefix(tmpDir);
-    expect(result).toEqual({ prefix: "main", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
+    expect(result).toMatchObject({ prefix: "main", source: "git branch" });
   });
 
   it("uses last segment for feature/master", () => {
     setupWorktree(tmpDir, "feature/master");
-    const result = detectWorktreePrefix(tmpDir);
-    expect(result).toEqual({ prefix: "master", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
+    expect(result).toMatchObject({ prefix: "master", source: "git branch" });
   });
 
   it("returns null when branch sanitizes to empty", () => {
     setupWorktree(tmpDir, "@@@");
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).toBeNull();
   });
 
@@ -327,7 +330,7 @@ describe("detectWorktreePrefix", () => {
     const longBranch = "ctd-1744-improve-visibility-of-later-and-undated-notifications-in";
     expect(longBranch.length).toBeGreaterThan(63);
     setupWorktree(tmpDir, longBranch);
-    const result = detectWorktreePrefix(tmpDir);
+    const result = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result).not.toBeNull();
     expect(result!.prefix.length).toBeLessThanOrEqual(63);
     expect(result!.source).toBe("git branch");
@@ -336,17 +339,17 @@ describe("detectWorktreePrefix", () => {
   it("produces a deterministic truncated prefix for a long branch name", () => {
     const longBranch = "ctd-1744-improve-visibility-of-later-and-undated-notifications-in";
     setupWorktree(tmpDir, longBranch);
-    const result1 = detectWorktreePrefix(tmpDir);
-    const result2 = detectWorktreePrefix(tmpDir);
+    const result1 = resolveWorktreeNaming({ cwd: tmpDir });
+    const result2 = resolveWorktreeNaming({ cwd: tmpDir });
     expect(result1!.prefix).toBe(result2!.prefix);
   });
 });
 
 // ---------------------------------------------------------------------------
-// detectWorktreePrefix (git CLI path)
+// resolveWorktreeNaming (git CLI path)
 // ---------------------------------------------------------------------------
 
-describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
+describe("resolveWorktreeNaming (git CLI path)", { timeout: 15_000 }, () => {
   let gitInitWorks = true;
   try {
     execFileSync("git", ["--version"], { stdio: "ignore" });
@@ -408,7 +411,7 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     const repo = path.join(tmpDir, "repo");
     initRepoWithCommit(repo);
 
-    const result = detectWorktreePrefix(repo);
+    const result = resolveWorktreeNaming({ cwd: repo });
     expect(result).toBeNull();
   });
 
@@ -420,8 +423,12 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     const wtDir = path.join(tmpDir, "wt-feature-auth");
     runGit(repo, ["worktree", "add", wtDir, "feature-auth"]);
 
-    const result = detectWorktreePrefix(wtDir);
-    expect(result).toEqual({ prefix: "feature-auth", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: wtDir });
+    expect(result).toMatchObject({ prefix: "feature-auth", source: "git branch" });
+    expect(resolveWorktreeNaming({ cwd: wtDir, config: { flat: true } })).toMatchObject({
+      prefix: "feature-auth",
+      source: "git branch",
+    });
   });
 
   it("returns null for the primary checkout on main when worktrees exist", () => {
@@ -432,7 +439,7 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     const wtDir = path.join(tmpDir, "wt-feature-auth");
     runGit(repo, ["worktree", "add", wtDir, "feature-auth"]);
 
-    const result = detectWorktreePrefix(repo);
+    const result = resolveWorktreeNaming({ cwd: repo });
     expect(result).toBeNull();
   });
 
@@ -449,7 +456,7 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     runGit(repo, ["checkout", "-b", "feature-other"]);
 
     // Root worktree on a non-default branch should NOT get a prefix
-    const result = detectWorktreePrefix(repo);
+    const result = resolveWorktreeNaming({ cwd: repo });
     expect(result).toBeNull();
   });
 
@@ -461,8 +468,8 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     const wtDir = path.join(tmpDir, "wt-feature-main");
     runGit(repo, ["worktree", "add", wtDir, "feature/main"]);
 
-    const result = detectWorktreePrefix(wtDir);
-    expect(result).toEqual({ prefix: "main", source: "git branch" });
+    const result = resolveWorktreeNaming({ cwd: wtDir });
+    expect(result).toMatchObject({ prefix: "main", source: "git branch" });
   });
 
   it("truncates prefix when branch name exceeds 63 characters", () => {
@@ -476,42 +483,81 @@ describe("detectWorktreePrefix (git CLI path)", { timeout: 15_000 }, () => {
     const wtDir = path.join(tmpDir, "wt-long");
     runGit(repo, ["worktree", "add", wtDir, longBranch]);
 
-    const result = detectWorktreePrefix(wtDir);
+    const result = resolveWorktreeNaming({ cwd: wtDir });
     expect(result).not.toBeNull();
     expect(result!.prefix.length).toBeLessThanOrEqual(63);
     expect(result!.source).toBe("git branch");
   });
 });
 
-// ---------------------------------------------------------------------------
-// applyWorktreePrefix
-// ---------------------------------------------------------------------------
+describe("composeHostname", () => {
+  function naming(config?: { hostnameTemplate?: string; flat?: boolean; base?: string }) {
+    return resolveWorktreeNaming({ override: "feature-x", config });
+  }
 
-describe("applyWorktreePrefix", () => {
-  it("returns the base name unchanged when not in a worktree", () => {
-    expect(applyWorktreePrefix("web.json-render", null)).toBe("web.json-render");
+  it("prepends the prefix and truncates each label even without naming", () => {
+    expect(composeHostname("web.json-render", naming())).toBe("feature-x.web.json-render");
+    expect(composeHostname("api", naming())).toBe("feature-x.api");
+    const long = "a".repeat(80);
+    expect(composeHostname(`${long}.web`, null)).toBe(`${truncateLabel(long)}.web`);
   });
 
-  it("prepends the worktree prefix as a subdomain (issue #269)", () => {
-    expect(
-      applyWorktreePrefix("web.json-render", { prefix: "feature-x", source: "git branch" })
-    ).toBe("feature-x.web.json-render");
-  });
-
-  it("prefixes a single-label base name too", () => {
-    expect(applyWorktreePrefix("api", { prefix: "feature-x", source: "git branch" })).toBe(
-      "feature-x.api"
+  it("uses the template before other layouts and preserves template lowercasing", () => {
+    const config = { hostnameTemplate: "{worktree}-{name}", flat: true, base: "example" };
+    expect(composeHostname("WEB.example", naming(config))).toBe("feature-x-web.example");
+    const long = resolveWorktreeNaming({ override: "a".repeat(63), config });
+    const web = composeHostname("web", long);
+    expect(web).toHaveLength(63);
+    expect(composeHostname("WEB", long)).toBe(web);
+    expect(composeHostname("api", long)).not.toBe(web);
+    const longName = "b".repeat(80);
+    expect(composeHostname(longName, naming(config))).toBe(
+      truncateLabel(`feature-x-${truncateLabel(longName)}`)
     );
   });
 
-  it("truncates over-long template labels per app and normalizes case", () => {
-    const worktree = { prefix: "a".repeat(63), source: "git branch" };
-    const web = applyWorktreePrefix("web", worktree, "{worktree}-{name}");
-    const api = applyWorktreePrefix("api", worktree, "{worktree}-{name}");
+  it("flattens all labels and hashes the complete untruncated input once", () => {
+    expect(composeHostname("api.project", naming({ flat: true, base: "project" }))).toBe(
+      "feature-x-api-project"
+    );
+    const prefix = "p".repeat(80);
+    const base = `${"a".repeat(70)}.project`;
+    const resolved = resolveWorktreeNaming({ override: prefix, config: { flat: true } });
+    expect(composeHostname(base, resolved)).toBe(
+      truncateLabel(`${prefix}-${base.replaceAll(".", "-")}`)
+    );
+    expect(composeHostname(base.toUpperCase(), resolved)).toBe(composeHostname(base, resolved));
+  });
 
-    expect(web).toHaveLength(63);
-    expect(api).toHaveLength(63);
-    expect(web).not.toBe(api);
-    expect(applyWorktreePrefix("WEB", worktree, "{worktree}-{name}")).toBe(web);
+  it("preserves empty labels for hostname validation when flattening", () => {
+    expect(composeHostname("web..project", naming({ flat: true }))).toBe("feature-x.web..project");
+  });
+
+  it("inserts the prefix before a matching base at label boundaries", () => {
+    const resolved = naming({ base: "Project.Example" });
+    expect(composeHostname("web.project.example", resolved)).toBe("web.feature-x.project.example");
+    expect(composeHostname("PROJECT.EXAMPLE", resolved)).toBe("feature-x.PROJECT.EXAMPLE");
+    expect(composeHostname("notproject.example", resolved)).toBe("feature-x.notproject.example");
+    expect(composeHostname("web.other", resolved)).toBe("feature-x.web.other");
+  });
+});
+
+describe("resolveWorktreeNaming overrides", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("gives explicit overrides precedence over the environment, including disable", () => {
+    vi.stubEnv("PORTLESS_PREFIX", "from-env");
+    expect(resolveWorktreeNaming({ override: "From CLI" })).toMatchObject({
+      prefix: "from-cli",
+      source: "--prefix flag",
+    });
+    expect(resolveWorktreeNaming({ override: null })).toBeNull();
+    expect(resolveWorktreeNaming({ override: "" })).toBeNull();
+    expect(resolveWorktreeNaming()).toMatchObject({
+      prefix: "from-env",
+      source: "PORTLESS_PREFIX",
+    });
+    vi.stubEnv("PORTLESS_PREFIX", "");
+    expect(resolveWorktreeNaming()).toBeNull();
   });
 });
