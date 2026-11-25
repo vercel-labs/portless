@@ -202,6 +202,9 @@ importers:
       typescript:
         specifier: ^7.0.2
         version: 7.0.2
+      uqr:
+        specifier: ^0.1.2
+        version: 0.1.2
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(@opentelemetry/api@1.9.0)(@types/node@24.12.4)(jiti@2.6.1)(lightningcss@1.31.1)(msw@2.12.11(@types/node@24.12.4)(typescript@7.0.2))(sass@1.97.1)(terser@5.46.0)(yaml@2.8.2)
