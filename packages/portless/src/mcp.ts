@@ -155,6 +155,35 @@ export const TOOLS: ToolDef[] = [
     }
   ),
   tool(
+    "env",
+    "Get sibling env",
+    "Print environment variables for sibling processes such as test runners or scripts outside portless run. Includes NODE_EXTRA_CA_CERTS, PORTLESS_LAN when LAN mode is active, and optional PORTLESS_URL or VAR=name service URLs. URLs use worktree naming; --no-worktree skips it and --json returns JSON.",
+    {
+      targets: {
+        type: "array",
+        items: { type: "string" },
+        description:
+          'Optional service name or VAR=name mappings to resolve as URLs (for example ["myapp"] or ["API_URL=api", "WEB_URL=web"]).',
+      },
+      noWorktree: {
+        type: "boolean",
+        description:
+          "Skip config loading and worktree naming, including PORTLESS_PREFIX and git worktree detection.",
+      },
+      json: {
+        type: "boolean",
+        description: "Return environment variables as JSON instead of shell export lines.",
+      },
+    },
+    [],
+    {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    }
+  ),
+  tool(
     "alias_add",
     "Add alias",
     "Register a static route for a service portless does not run, such as a database. The optional upstream accepts https, https://<host>[:<port>], or http://<host>[:<port>]. The alias's positional port always dials loopback; an upstream authority overrides Host and supplies HTTPS SNI for DNS hostnames only, without the port. IP addresses are not sent as SNI. Upstream TLS supports HTTP/1.1 only and disables certificate verification, so it does not authenticate backend identity, including through an SSH tunnel, and does not change client-facing proxy TLS. Restart the proxy daemon after upgrading. Registers it for every configured TLD unless tld selects specific ones. A state directory that another user owns or can write to is refused.",
@@ -314,7 +343,7 @@ export const TOOLS: ToolDef[] = [
 export const PROFILES: Record<string, { description: string; tools: string[] | "all" }> = {
   core: {
     description: "Everyday route lookup and static aliases.",
-    tools: ["list", "get", "alias_add", "alias_remove", "tools_profiles"],
+    tools: ["list", "get", "env", "alias_add", "alias_remove", "tools_profiles"],
   },
   proxy: {
     description: "Start and stop the shared portless proxy.",
@@ -409,11 +438,14 @@ function readPort(
   return value;
 }
 
-function readStringArray(args: Record<string, unknown>, key: "extraArgs" | "tld"): string[] {
+function readStringArray(
+  args: Record<string, unknown>,
+  key: "extraArgs" | "tld" | "targets"
+): string[] {
   const value = args[key];
   if (value === undefined || value === null) return [];
   if (!Array.isArray(value) || (key === "tld" && value.length === 0)) {
-    fail(key === "tld" ? "tld must not be empty" : "extraArgs must be an array");
+    fail(key === "tld" ? "tld must not be empty" : `${key} must be an array`);
   }
   return value.map((item, index) => {
     if (typeof item !== "string") fail(`${key}[${index}] must be a string`);
@@ -456,6 +488,16 @@ export function buildArgv(toolName: string, args: Record<string, unknown>): stri
       if (readBoolean(args, "json") === true) argv.push("--json");
       break;
     }
+    case "env":
+      argv.push("env");
+      for (const target of readStringArray(args, "targets")) {
+        if (target.length === 0) fail("targets must not contain an empty string");
+        if (target.startsWith("-")) fail('targets must not start with "-"');
+        argv.push(target);
+      }
+      if (readBoolean(args, "noWorktree") === true) argv.push("--no-worktree");
+      if (readBoolean(args, "json") === true) argv.push("--json");
+      break;
     case "alias_add": {
       const name = readRequiredName(args, "name");
       const port = readPort(args, "port", true);
@@ -830,6 +872,7 @@ export function printMcpHelp(): void {
       "Common tools:",
       "  list            List active routes (json: true for JSON).",
       "  get             Print an app URL (json: true for JSON).",
+      "  env             Print environment variables for sibling processes.",
       "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
       "",

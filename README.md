@@ -43,10 +43,11 @@ portless myapp next dev
 # -> https://myapp.localhost
 ```
 
-- The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)). `portless trust` is safe to run again: it exits without prompting when the CA is already trusted, and on Linux it also updates existing Chrome/Chromium NSS databases when `certutil` is installed.
+- The proxy starts on the first run. It serves HTTPS with HTTP/2 on port 443, so the first run creates a local certificate authority, adds it to the system trust store, and may ask for `sudo`. Use `--no-tls` for plain HTTP, or `--unprivileged` to skip `sudo` ([Unprivileged mode](https://portless.sh/commands#unprivileged-mode)). `portless trust` is safe to run again: it exits without prompting when the CA is already trusted, and on Linux it also updates existing Chrome/Chromium NSS databases when `certutil` is installed. Child processes get the CA through `NODE_EXTRA_CA_CERTS`; when that variable is already set, portless merges the existing bundle with the portless CA instead of replacing it, so a corporate CA bundle stays trusted alongside local HTTPS routes.
 - `portless run <cmd>` infers the name and detects git worktrees. In a linked worktree, the last `/` segment of the branch becomes a subdomain, so `fix-ui.myapp.localhost` and `myapp.localhost` run side by side. Use `--prefix` or `PORTLESS_PREFIX` to set the label, `--no-worktree` to skip worktree naming, or [configure the hostname layout](https://portless.sh/configuration#worktree-hostnames). Named launches keep their supplied hostname.
 - A name with dots is a subdomain: `portless api.myapp pnpm start` serves `https://api.myapp.localhost`.
 - `PORTLESS=0 pnpm dev` runs the command directly, without the proxy. Commands such as `portless get` and `portless list` still run normally.
+- Sibling processes such as Vitest, Playwright, or a local script can get the proxy's CA trust and LAN settings with `eval "$(portless env)"`. It exports `NODE_EXTRA_CA_CERTS` when the proxy serves HTTPS, plus `PORTLESS_LAN=1` in LAN mode. Add a name to also export `PORTLESS_URL`, or `VAR=name` pairs to resolve service URLs into your own variables, for example `eval "$(portless env APP_URL=web API_URL=api)"`. Use `portless env --json` for JSON output.
 
 The full walkthrough is in [Getting started](https://portless.sh).
 
@@ -54,9 +55,13 @@ The full walkthrough is in [Getting started](https://portless.sh).
 
 Each app gets a random port from 4000 to 4999 through the `PORT` environment variable, and registers a route from its hostname to that port. The proxy forwards `https://<name>.localhost` to the route. Most frameworks read `PORT`. For those that don't, such as Vite, Astro, Angular, Expo, and Wrangler, portless adds the matching port and host flags to the command ([Port assignment](https://portless.sh/configuration#port-assignment)). At a workspace root that uses Turbo, Turbo starts each package script itself, so read `PORT` and `HOST` in the framework config or set `"turbo": false`.
 
+The port and host variable names are `PORT` and `HOST` by default. Change them with `--port-var <name>` and `--host-var <name>` (also accepted in zero-arg and multi-app mode), the `PORTLESS_PORT_VAR` and `PORTLESS_HOST_VAR` environment variables, or `portVar` and `hostVar` in project config. A CLI flag wins over the matching environment variable, which wins over the config field. In a monorepo run, every app also gets `PORTLESS_URL_<APP>` for every proxied app, including itself, and `NODE_EXTRA_CA_CERTS` points at the portless CA merged with any bundle you already set ([Environment variables](https://portless.sh/configuration#environment-variables)).
+
 Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/etc/hosts` in sync for route hostnames, which custom TLDs such as `.test` need. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
 To reach an app from another device or share it, use [LAN mode](https://portless.sh/commands#lan-mode) for phones on the same network, or [Tailscale](https://portless.sh/commands#share-on-tailscale), [ngrok](https://portless.sh/commands#share-with-ngrok), or a [Cloudflare quick tunnel](https://portless.sh/commands#share-with-cloudflare) with `--tailscale`, `--ngrok`, or `--cloudflare`. For HTTPS in LAN mode, `portless trust --device` lets a phone install the local CA from a QR code.
+
+With Vite, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS`, so the shared URL loads. Vite treats that variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added during sharing.
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
@@ -85,6 +90,12 @@ Upstream TLS connects only to an HTTP/1.1 backend on loopback. Portless disables
 certificate verification, so TLS does not authenticate backend identity, even through
 an SSH tunnel. Restart the proxy daemon after upgrading portless.
 
+### Referencing another app
+
+In a monorepo run, whether portless starts the apps directly or through Turbo, every proxied app receives `PORTLESS_URL_<APP>` for every proxied app, including itself. The suffix is the app's base name uppercased with dots and hyphens replaced by underscores, so `api.myrepo` becomes `PORTLESS_URL_API_MYREPO`. The variable name stays the same across git worktrees while the value carries the worktree prefix. If two apps differ only in punctuation, such as `web.api` and `web-api`, the first keeps the variable and portless warns about the second. An app whose dev script invokes `portless` directly registers its own route and gets no variable.
+
+Outside a monorepo run, use `portless get <name>` for a URL, or export it into the variable your code reads with `eval "$(portless env APP_URL=api)"`.
+
 ## Configuration
 
 An optional `portless.json` sets the name and script. In a monorepo, one file at the root covers every workspace package, and `portless` from the root starts all of them:
@@ -108,7 +119,7 @@ Install the portless skill into an agent harness from [skills.sh](https://skills
 npx skills add vercel-labs/portless
 ```
 
-For MCP clients, `portless mcp` starts an MCP server over stdio. The default `core` profile lists routes, looks up URLs, and manages static aliases. `--tools all` adds proxy control and diagnostics:
+For MCP clients, `portless mcp` starts an MCP server over stdio. The default `core` profile lists routes, looks up URLs, prints sibling environment variables, and manages static aliases. `--tools all` adds proxy control and diagnostics:
 
 ```json
 { "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }
@@ -123,6 +134,7 @@ Run `portless --help` for the command list and common app options. Use `portless
 | Group                | Commands                                                                              | Docs                                                                                                                                                          |
 | -------------------- | ------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Run apps             | `portless`, `run`, `<name> <cmd>`, `get`                                              | [Run an app](https://portless.sh/commands#run-an-app), [Get a service URL](https://portless.sh/commands#get-a-service-url)                                    |
+| Sibling processes    | `env`                                                                                 | [Export environment for sibling processes](https://portless.sh/commands#export-environment-for-sibling-processes)                                             |
 | Static routes        | `alias`, `compose up`, `compose down`                                                 | [Alias](https://portless.sh/commands#alias-static-routes), [Docker Compose](https://portless.sh/commands#docker-compose)                                      |
 | Proxy                | `proxy start`, `proxy stop`, `service install`, `service status`, `service uninstall` | [Proxy control](https://portless.sh/commands#proxy-control), [OS startup service](https://portless.sh/commands#os-startup-service)                            |
 | HTTPS and DNS        | `trust`, `hosts sync`, `hosts clean`                                                  | [HTTPS](https://portless.sh/https), [Hosts](https://portless.sh/commands#hosts)                                                                               |

@@ -138,6 +138,12 @@ portless docs.myapp next dev     # https://docs.myapp.localhost
 
 By default, only explicitly registered subdomains are routed (strict mode). Start the proxy with `--wildcard` to allow any subdomain of a registered route to fall back to that app (e.g. `tenant1.myapp.localhost` routes to the `myapp` app). Exact matches always take priority over wildcards. When several registered routes are parents of the host, the most specific one wins (`admin.api.myapp.localhost` routes to `api.myapp`, not `myapp`).
 
+### Referencing another app
+
+In a monorepo run, whether portless starts the apps directly or through Turbo, every proxied app receives `PORTLESS_URL_<APP>` for every proxied app, including itself. The suffix is the app's base name uppercased with dots and hyphens replaced by underscores, so `api.myrepo` becomes `PORTLESS_URL_API_MYREPO`. The variable name stays the same across git worktrees while the value carries the worktree prefix. If two apps differ only in punctuation, such as `web.api` and `web-api`, the first keeps the variable and portless warns about the second. An app whose dev script invokes `portless` directly registers its own route and gets no variable.
+
+Outside a monorepo run, use `portless get <name>`, or export a URL into the variable your code reads with `eval "$(portless env API_URL=api)"`.
+
 ### Git worktrees
 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain prefix so each worktree gets a unique URL:
@@ -229,6 +235,8 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | ----------------------- | ------------------------------------------------------------------------------ |
 | `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
 | `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
+| `PORTLESS_PORT_VAR`     | Rename the app port variable (same as `--port-var`, default: `PORT`)           |
+| `PORTLESS_HOST_VAR`     | Rename the app host variable (same as `--host-var`, default: `HOST`)           |
 | `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
 | `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
 | `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
@@ -246,6 +254,8 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
+Portless also sets variables in the child process. `PORT` and `HOST` carry the assigned port and host, under the names chosen by `--port-var` and `--host-var`, `PORTLESS_PORT_VAR` and `PORTLESS_HOST_VAR`, or the config fields `portVar` and `hostVar`. A CLI flag wins over the matching environment variable, which wins over the config field. `PORTLESS_URL` holds the URL you open in the browser, and a monorepo run adds `PORTLESS_URL_<APP>` for every proxied app, including itself. `NODE_EXTRA_CA_CERTS` points at the portless CA, merged with any bundle already set: portless writes a combined bundle that includes the existing certificates and the portless CA, so an existing corporate CA bundle and local HTTPS routes are both trusted. `portless env` prints the same trust and URL values for sibling processes.
+
 ### HTTP/2 + HTTPS
 
 HTTPS with HTTP/2 is enabled by default (faster page loads for dev servers with many files). WebSockets work over both HTTP/1.1 (Upgrade) and HTTP/2 (RFC 8441 extended CONNECT), so dev server HMR works through the proxy. First run generates a local CA and adds it to the system trust store. After that, no prompts and no browser warnings.
@@ -261,6 +271,8 @@ On Linux, `portless trust` supports Debian/Ubuntu, Arch, Fedora/RHEL/CentOS, and
 `portless trust` skips authorization prompts when the system already trusts the CA. On NixOS or a system without `update-ca-certificates` or `update-ca-trust`, it prints instructions to add `ca.pem` through `security.pki.certificateFiles` or to use `--no-tls`.
 
 On Linux, `portless trust` also updates the invoking user's existing Chrome/Chromium NSS database (`~/.pki/nssdb`, or `~/.local/share/pki/nssdb` on Chromium M146 and later when `~/.pki/nssdb` does not exist). Install NSS `certutil` (`libnss3-tools` on Debian/Ubuntu, `nss-tools` on Fedora/RHEL, `nss` on Arch, or `mozilla-nss-tools` on openSUSE), rerun `portless trust`, and restart the browser. Without `certutil`, system trust still succeeds with a warning and `portless doctor` flags the missing browser trust. `portless clean` removes the CA from the NSS database too.
+
+Portless sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. When the variable is already set, portless merges that bundle with the portless CA instead of replacing it, so an existing corporate CA bundle and local HTTPS routes are both trusted. For a Node.js process you start outside portless, run `eval "$(portless env)"` to export the combined bundle before the process starts; the same command exports `PORTLESS_LAN=1` in LAN mode. Without it, point `NODE_EXTRA_CA_CERTS` at `~/.portless/ca.pem`, or use `--no-tls`.
 
 Embedded macOS WebViews (`WKWebView`) and remote SSH sessions can reject the local CA; use `--no-tls` in those cases.
 
@@ -312,6 +324,8 @@ portless myapp --funnel next dev
 Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
 
 Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
+
+With Vite, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This covers `--tailscale`, `--funnel`, `--ngrok`, and `--cloudflare`, along with sharing enabled by `PORTLESS_TAILSCALE=1` and the matching environment variables. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added.
 
 ### ngrok sharing
 
@@ -372,6 +386,10 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)                                  |
 | `portless get <name> --no-worktree`               | Print URL without worktree config or naming                                         |
 | `portless get <name> --json`                      | Print name, hostname, and URL as JSON                                               |
+| `portless env`                                    | Print shell exports for sibling processes (CA trust, LAN mode)                      |
+| `portless env <name>`                             | Also export `PORTLESS_URL` for a service                                            |
+| `portless env VAR=name [VAR=name...]`             | Resolve service URLs into your own variable names                                   |
+| `portless env --json`                             | Print the same variables as JSON                                                    |
 | `portless list`                                   | Show active routes and uptime                                                       |
 | `portless list --json`                            | Print routes as JSON                                                                |
 | `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites                           |
@@ -408,6 +426,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                                     |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                                             |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment                             |
+| `portless <name> --port-var <name> <cmd>`         | Rename the app port variable (default: `PORT`)                                      |
+| `portless <name> --host-var <name> <cmd>`         | Rename the app host variable (default: `HOST`)                                      |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)                                   |
 | `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                                         |
 | `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                                                    |
@@ -420,17 +440,19 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <command> --help` / `-h`                | Print command help without running it                                               |
 | `portless --version` / `-v`                       | Show version                                                                        |
 
+`--port-var` and `--host-var` also work in zero-arg and multi-app mode. They win over `PORTLESS_PORT_VAR`, `PORTLESS_HOST_VAR`, and the config fields `portVar` and `hostVar`.
+
 `portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
 
 App ports referenced by stale Tailscale Serve or Funnel records stay reserved, even after the dev server stops. Automatic assignment skips them, and fixed-port registration refuses them even with `--force`. Run `portless prune` to clean up stale shares before reusing their ports.
 
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
-**Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `env`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
 
 ## MCP server
 
-`portless mcp [--tools <profiles>]` starts a stdio MCP server. It defaults to `core`, which provides route listing, URL lookup, static alias management, and profile discovery. Add comma-separated `proxy`, `diagnostics`, or `all` profiles as needed. `default` aliases `core`, and `full` aliases `all`. The `tools_profiles` tool lists available profiles. Shared tool arguments are `cwd`, `extraArgs`, and `timeoutMs`; bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. MCP does not run dev servers; start them with `portless run <cmd>` in a shell.
+`portless mcp [--tools <profiles>]` starts a stdio MCP server. It defaults to `core`, which provides route listing, URL lookup, sibling environment exports, static alias management, and profile discovery. Add comma-separated `proxy`, `diagnostics`, or `all` profiles as needed. `default` aliases `core`, and `full` aliases `all`. The `tools_profiles` tool lists available profiles. Shared tool arguments are `cwd`, `extraArgs`, and `timeoutMs`; bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. MCP does not run dev servers; start them with `portless run <cmd>` in a shell.
 
 ```json
 { "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }
@@ -445,12 +467,14 @@ Optional config file. Portless looks for it in the current directory; `worktree`
 | `name`     | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
 | `script`   | string  | `"dev"`                    | Name of a package.json script to run                     |
 | `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
+| `portVar`  | string  | `PORT`                     | Environment variable that carries the app port           |
+| `hostVar`  | string  | `HOST`                     | Environment variable that carries the app host           |
 | `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
 | `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
 | `worktree` | object  |                            | Worktree label style and hostname layout                 |
 | `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `portVar`, `hostVar`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
 
 ### package.json "portless" key
 
@@ -460,13 +484,15 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 { "portless": "myapp" }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `portVar`, `hostVar`, `proxy`, `worktree`):
 
 ```json
 { "portless": { "name": "myapp", "script": "dev:app" } }
 ```
 
 Precedence (closest wins): CLI flags > the package's own config > the root config's `apps` entry (when run from the workspace root) > defaults. The package's own config is the first available source in that directory: `portless.json`, `.config/portless.json`, or the `package.json` `"portless"` key.
+
+For the port and host variable names: `--port-var` and `--host-var` > `PORTLESS_PORT_VAR` and `PORTLESS_HOST_VAR` > package config `portVar` and `hostVar` > `PORT` and `HOST`.
 
 ## Troubleshooting
 
@@ -568,7 +594,7 @@ proxy: {
 }
 ```
 
-Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. If you run a separate Node.js process outside portless, point it at the CA manually: `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
+Portless automatically sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA, and merges an existing value into the same bundle instead of replacing it. If you run a separate Node.js process outside portless, run `eval "$(portless env)"` before it starts, or point `NODE_EXTRA_CA_CERTS` at `~/.portless/ca.pem`. Alternatively, use `--no-tls` for plain HTTP.
 
 ### Tailscale not working
 
