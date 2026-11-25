@@ -5615,6 +5615,36 @@ describe("CLI", { timeout: 15_000 }, () => {
       expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
     });
 
+    it.each([
+      ["elevated", false],
+      ["unprivileged", true],
+    ])(
+      "keeps saved plain HTTP on crash recovery with PORTLESS_UNPRIVILEGED=0 (%s)",
+      (_label, hadUnprivileged) => {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(testPort));
+        if (hadUnprivileged) {
+          fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+        }
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_PORT: undefined,
+          PORTLESS_HTTPS: undefined,
+          PORTLESS_UNPRIVILEGED: "0",
+          PORTLESS_SYNC_HOSTS: "0",
+        };
+        const app = run(
+          ["run", "--name", "myapp", process.execPath, "-e", "console.log('APP_STARTED')"],
+          { cwd: tmpDir, env }
+        );
+        expect(app.status, app.stdout + app.stderr).toBe(0);
+        expect(app.stdout).toContain("APP_STARTED");
+        expect(app.stderr).toContain(`http://myapp.localhost:${testPort}`);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
+        expect(fs.readFileSync(path.join(tmpDir, "proxy.port"), "utf-8")).toBe(String(testPort));
+      }
+    );
+
     it.runIf(process.platform === "darwin")(
       "auto-starts an unprivileged HTTPS proxy without trusting its CA",
       async () => {

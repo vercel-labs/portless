@@ -265,10 +265,31 @@ function defaultProxyConfig(
   };
 }
 
+/**
+ * Decide whether the proxy serves HTTPS from explicit overrides, unprivileged
+ * mode rules, and any persisted TLS marker.
+ */
+function resolveProxyUseHttps(options: {
+  explicit: ProxyConfigExplicitness;
+  useHttps: boolean;
+  unprivileged: boolean;
+  persistedHttps: boolean;
+  recoverCrashedState: boolean;
+}): boolean {
+  if (options.explicit.customCert) return true;
+  if (options.explicit.useHttps) return options.useHttps;
+  if (options.unprivileged) {
+    return options.explicit.unprivileged ? false : options.persistedHttps;
+  }
+  return options.recoverCrashedState ? options.persistedHttps : options.useHttps;
+}
+
 function resolveProxyConfig(options: {
   persistedLanMode: boolean;
   persistedUnprivileged: boolean;
   persistedHttps: boolean;
+  persistedTlds?: string[];
+  recoverCrashedState?: boolean;
   explicit: ProxyConfigExplicitness;
   defaultTlds: string[];
   useHttps: boolean;
@@ -280,22 +301,20 @@ function resolveProxyConfig(options: {
   useWildcard: boolean;
   unprivileged: boolean;
 }): ProxyConfig {
+  const recoverCrashedState = options.recoverCrashedState ?? false;
+  const usePersistedTlds =
+    recoverCrashedState &&
+    options.persistedTlds !== undefined &&
+    !(options.explicit.lanMode && !options.lanMode && options.persistedLanMode);
+  const baseTlds = usePersistedTlds ? options.persistedTlds! : options.defaultTlds;
+
   const config = defaultProxyConfig(
-    options.defaultTlds,
+    baseTlds,
     options.useHttps,
     options.explicit.lanMode ? options.lanMode : options.persistedLanMode
   );
 
-  if (options.explicit.useHttps) {
-    config.useHttps = options.useHttps;
-    if (!options.useHttps) {
-      config.customCertPath = null;
-      config.customKeyPath = null;
-    }
-  }
-
   if (options.explicit.customCert) {
-    config.useHttps = true;
     config.customCertPath = options.customCertPath;
     config.customKeyPath = options.customKeyPath;
   }
@@ -306,7 +325,7 @@ function resolveProxyConfig(options: {
       config.lanIp = null;
       config.lanIpExplicit = false;
       if (!options.explicit.tlds) {
-        config.tlds = normalizeTlds(options.defaultTlds);
+        config.tlds = normalizeTlds(baseTlds);
         config.tld = primaryTld(config.tlds);
       }
     }
@@ -327,19 +346,17 @@ function resolveProxyConfig(options: {
     config.useWildcard = options.useWildcard;
   }
 
-  // Like LAN mode, a stopped unprivileged proxy keeps its mode for the next
-  // start through proxy.unprivileged unless PORTLESS_UNPRIVILEGED overrides it.
   config.unprivileged = options.explicit.unprivileged
     ? options.unprivileged
     : options.persistedUnprivileged;
 
-  // Unprivileged mode promises no prompt of any kind, and trusting a
-  // generated CA is one. So it serves plain HTTP unless HTTPS was asked for,
-  // or a stopped unprivileged proxy already remembered serving it.
-  if (config.unprivileged && !options.explicit.useHttps && !options.explicit.customCert) {
-    config.useHttps =
-      !options.explicit.unprivileged && options.persistedUnprivileged && options.persistedHttps;
-  }
+  config.useHttps = resolveProxyUseHttps({
+    explicit: options.explicit,
+    useHttps: options.useHttps,
+    unprivileged: config.unprivileged,
+    persistedHttps: options.persistedHttps,
+    recoverCrashedState,
+  });
 
   if (!config.lanMode) {
     config.lanIp = null;
@@ -1520,24 +1537,17 @@ interface ProxyDesiredState {
   envTlds: string[];
 }
 
-function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
-  const envTlds = getDefaultTlds();
-  const envTld = primaryTld(envTlds);
-  const explicit: ProxyConfigExplicitness = {
-    useHttps: process.env.PORTLESS_HTTPS !== undefined,
-    customCert: false,
-    lanMode: process.env.PORTLESS_LAN !== undefined,
-    lanIp: process.env.PORTLESS_LAN_IP !== undefined,
-    tlds: process.env.PORTLESS_TLD !== undefined,
-    useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
-    unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
-  };
-  const persistedState = new ProxyState(resolveStateDir());
-  const desiredConfig = resolveProxyConfig({
-    persistedLanMode: lanMode,
-    persistedUnprivileged: persistedState.readUnprivileged(),
-    persistedHttps: persistedState.readTls(),
-    explicit,
+function readEnvProxyOptions(envTlds: string[]) {
+  return {
+    explicit: {
+      useHttps: process.env.PORTLESS_HTTPS !== undefined,
+      customCert: false,
+      lanMode: process.env.PORTLESS_LAN !== undefined,
+      lanIp: process.env.PORTLESS_LAN_IP !== undefined,
+      tlds: process.env.PORTLESS_TLD !== undefined,
+      useWildcard: process.env.PORTLESS_WILDCARD !== undefined,
+      unprivileged: process.env.PORTLESS_UNPRIVILEGED !== undefined,
+    } satisfies ProxyConfigExplicitness,
     defaultTlds: envTlds,
     useHttps: !isHttpsEnvDisabled(),
     customCertPath: null,
@@ -1547,8 +1557,21 @@ function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
     tlds: envTlds,
     useWildcard: isWildcardEnvEnabled(),
     unprivileged: isUnprivilegedEnvEnabled(),
+  };
+}
+
+function resolveProxyDesiredState(lanMode: boolean): ProxyDesiredState {
+  const envTlds = getDefaultTlds();
+  const envTld = primaryTld(envTlds);
+  const envOptions = readEnvProxyOptions(envTlds);
+  const persistedState = new ProxyState(resolveStateDir());
+  const desiredConfig = resolveProxyConfig({
+    ...envOptions,
+    persistedLanMode: lanMode,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedState.readTls(),
   });
-  return { explicit, desiredConfig, envTld, envTlds };
+  return { explicit: envOptions.explicit, desiredConfig, envTld, envTlds };
 }
 
 /**
@@ -1560,41 +1583,30 @@ function resolveProxyStart(desired: ProxyDesiredState): {
   startConfig: ReturnType<typeof resolveProxyConfig>;
   startPort: number | undefined;
 } {
-  const { explicit, desiredConfig } = desired;
   const persistedState = new ProxyState(resolveStateDir());
   const persistedPort = persistedState.readPort();
-  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
-  const startConfig = { ...desiredConfig };
-  let startPort: number | undefined;
-
-  if (persistedPort !== null) {
-    const persistedTls = persistedState.readTls();
-    if (!explicit.useHttps && !explicit.unprivileged && persistedTls !== desiredConfig.useHttps) {
-      startConfig.useHttps = persistedTls;
-    }
-    if (!explicit.tlds) {
-      const persistedTlds = persistedState.readTlds();
-      if (
-        persistedTlds.length !== desiredConfig.tlds.length ||
-        persistedTlds.some((tld, index) => tld !== desiredConfig.tlds[index])
-      ) {
-        startConfig.tlds = persistedTlds;
-        startConfig.tld = primaryTld(persistedTlds);
-      }
-    }
-    const persistedLanMode = persistedState.readLanIp() !== null;
-    if (!explicit.lanMode && persistedLanMode !== desiredConfig.lanMode) {
-      startConfig.lanMode = persistedLanMode;
-    }
-    const persistedUnprivileged = persistedState.readUnprivileged();
-    if (!explicit.unprivileged && persistedUnprivileged !== desiredConfig.unprivileged) {
-      startConfig.unprivileged = persistedUnprivileged;
-    }
-    const envPort = getDefaultPort(startConfig.useHttps);
-    if (!configuredEnvPort && persistedPort !== envPort) {
-      startPort = persistedPort;
-    }
+  if (persistedPort === null) {
+    return { startConfig: { ...desired.desiredConfig }, startPort: undefined };
   }
+
+  const envOptions = readEnvProxyOptions(desired.envTlds);
+  const persistedTls = persistedState.readTls();
+  const startConfig = resolveProxyConfig({
+    ...envOptions,
+    persistedLanMode: persistedState.readLanIp() !== null,
+    persistedUnprivileged: persistedState.readUnprivileged(),
+    persistedHttps: persistedTls,
+    persistedTlds: envOptions.explicit.tlds ? undefined : persistedState.readTlds(),
+    recoverCrashedState: true,
+  });
+
+  const configuredEnvPort = process.env.PORTLESS_PORT?.trim();
+  const envPort = getDefaultPort(startConfig.useHttps);
+  const persistedDefaultPort = getDefaultPort(persistedTls);
+  const startPort =
+    !configuredEnvPort && persistedPort !== envPort && persistedPort !== persistedDefaultPort
+      ? persistedPort
+      : undefined;
 
   return { startConfig, startPort };
 }
