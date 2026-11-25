@@ -4,7 +4,7 @@ type CleanMarkdownState =
   | { kind: "jsx"; depth: number };
 
 function parseOpeningFence(line: string): { marker: "`" | "~"; length: number } | null {
-  const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+  const match = line.replace(/\r$/, "").match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
   if (!match) return null;
   const fence = match[1];
   const rest = match[2];
@@ -14,7 +14,7 @@ function parseOpeningFence(line: string): { marker: "`" | "~"; length: number } 
 }
 
 function isClosingFence(line: string, marker: "`" | "~", length: number): boolean {
-  const match = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+  const match = line.replace(/\r$/, "").match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
   if (!match) return false;
   return match[1][0] === marker && match[1].length >= length;
 }

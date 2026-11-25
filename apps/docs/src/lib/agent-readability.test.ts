@@ -9,7 +9,8 @@ import { markdownForPathname } from "./page-markdown";
 function stripFencedCodeBlocks(markdown: string): string {
   const out: string[] = [];
   let fence: { marker: "`" | "~"; length: number } | null = null;
-  for (const line of markdown.split("\n")) {
+  for (const rawLine of markdown.split("\n")) {
+    const line = rawLine.replace(/\r$/, "");
     if (fence) {
       const close = line.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
       if (close && close[1][0] === fence.marker && close[1].length >= fence.length) {
@@ -38,7 +39,10 @@ describe("docs source", () => {
     }
   });
 
-  test("preserves import and export lines inside fenced code blocks", () => {
+  test.each([
+    ["LF", "\n"],
+    ["CRLF", "\r\n"],
+  ])("preserves import and export lines inside fenced code blocks (%s)", (_label, eol) => {
     const raw = [
       'import { Callout } from "./callout";',
       "export const meta = {};",
@@ -51,7 +55,7 @@ describe("docs source", () => {
       "",
       '<div className="note">hidden</div>',
       "Body text.",
-    ].join("\n");
+    ].join(eol);
 
     expect(mdxToCleanMarkdown(raw)).toBe(
       [
@@ -62,7 +66,7 @@ describe("docs source", () => {
         "```",
         "",
         "Body text.",
-      ].join("\n")
+      ].join(eol)
     );
   });
 
