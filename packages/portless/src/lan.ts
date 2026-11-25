@@ -240,10 +240,13 @@ export async function serveDeviceTrust(stateDir: string): Promise<boolean> {
   const address = server.address();
   if (!address || typeof address === "string") throw new Error("Unable to determine server port");
   const url = `http://${ip}:${address.port}/${token}/`;
-  console.log("Scan this QR code with your device:");
+  console.log("Scan this QR code with your device on a trusted local network:");
   console.log(renderTerminalQr(url, stdoutColor));
   console.log(colors.cyan(url));
   console.log(`SHA-256 ${ca.fingerprint}`);
+  console.log(
+    "Before trusting the downloaded CA, compare this SHA-256 fingerprint against the certificate details in device settings (do not rely on the webpage alone)."
+  );
   console.log("Start the proxy in LAN mode with portless proxy start --lan.");
   console.log("Serving for ten minutes. Press Ctrl+C to stop sooner.");
 

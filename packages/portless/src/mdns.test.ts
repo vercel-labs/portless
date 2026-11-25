@@ -186,6 +186,7 @@ describe("createMdnsController", () => {
       const listProcesses = vi.fn(() => output);
       const controller = createMdnsController({
         platform,
+        uid,
         spawn: spawnProcess,
         listProcesses,
         killPid,
@@ -217,6 +218,7 @@ describe("createMdnsController", () => {
     const killPid = vi.fn();
     const controller = createMdnsController({
       platform: "linux",
+      uid,
       spawn: spawnProcess,
       killPid,
       stopGraceMs: 50,
@@ -240,6 +242,7 @@ describe("createMdnsController", () => {
     const killPid = vi.fn();
     const controller = createMdnsController({
       platform: "linux",
+      uid,
       spawn: spawnProcess,
       killPid,
       stopGraceMs: 20,

@@ -171,6 +171,7 @@ type Publication =
 
 export interface MdnsControllerOptions {
   platform?: NodeJS.Platform;
+  uid?: number;
   spawn?: typeof spawn;
   listProcesses?: () => string;
   killPid?: (pid: number, signal: NodeJS.Signals | 0) => unknown;
@@ -281,7 +282,7 @@ export function createMdnsController(options: MdnsControllerOptions = {}): MdnsC
     (() =>
       spawnSync("ps", ["-eo", "pid=,ppid=,uid=,args="], { encoding: "utf8", timeout: 1000 })
         .stdout ?? "");
-  const currentUid = process.getuid?.();
+  const currentUid = options.uid ?? process.getuid?.();
   const killPid = options.killPid ?? ((pid, signal) => process.kill(pid, signal));
   const stopGraceMs = options.stopGraceMs ?? MDNS_STOP_GRACE_MS;
   const stopKillWaitMs = options.stopKillWaitMs ?? MDNS_KILL_WAIT_MS;
