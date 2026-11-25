@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "46b3441848491160c535ceb4cb32a222f610e822873d04d3c39df0a024a70679",
-      "markdownBodySha256": "46b3441848491160c535ceb4cb32a222f610e822873d04d3c39df0a024a70679",
+      "mdxSha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
+      "markdownBodySha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",
@@ -93,8 +93,8 @@
       "title": "HTTPS | portless",
       "markdownTitle": "HTTPS",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "6b4882f7a57dfc176b7c3501902fde2f4c7d089adcee7b262bbe4b405367c6be",
-      "markdownBodySha256": "6b4882f7a57dfc176b7c3501902fde2f4c7d089adcee7b262bbe4b405367c6be",
+      "mdxSha256": "0ba3ee620fcb19f4120d8f3d908f63f0ad89c078f778a66e5ff7bb45f02f51da",
+      "markdownBodySha256": "0ba3ee620fcb19f4120d8f3d908f63f0ad89c078f778a66e5ff7bb45f02f51da",
       "ssr": [
         "HTTP/2 + TLS is enabled by default for faster dev server page loads.",
         "portless proxy start --cert ./cert.pem --key ./key.pem",
