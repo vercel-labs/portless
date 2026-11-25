@@ -1,5 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { isValidEnvVarName } from "./child-env.js";
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -20,6 +21,8 @@ export interface AppConfig {
   script?: string;
   appPort?: number;
   proxy?: boolean;
+  portVar?: string;
+  hostVar?: string;
   worktree?: WorktreeConfig;
 }
 
@@ -128,6 +131,8 @@ export function resolveAppConfig(
     script: config.script,
     appPort: config.appPort,
     proxy: config.proxy,
+    portVar: config.portVar,
+    hostVar: config.hostVar,
     worktree: config.worktree,
   };
 }
@@ -382,8 +387,26 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
   return err instanceof Error && "code" in err;
 }
 
-const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo", "worktree"]);
-const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree"]);
+const KNOWN_TOP_KEYS = new Set([
+  "name",
+  "script",
+  "appPort",
+  "proxy",
+  "portVar",
+  "hostVar",
+  "apps",
+  "turbo",
+  "worktree",
+]);
+const KNOWN_APP_KEYS = new Set([
+  "name",
+  "script",
+  "appPort",
+  "proxy",
+  "portVar",
+  "hostVar",
+  "worktree",
+]);
 const KNOWN_WORKTREE_KEYS = new Set(["prefix", "hostnameTemplate", "flat", "base"]);
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
@@ -429,6 +452,8 @@ function validateConfig(config: unknown, configPath: string): asserts config is 
       throw new ConfigValidationError(`"turbo" in ${configPath} must be a boolean.`);
     }
   }
+
+  validateEnvVarFields(obj, undefined, configPath);
 
   if (obj.worktree !== undefined) validateWorktreeConfig(obj.worktree, "worktree", configPath);
 
@@ -480,11 +505,35 @@ function validateAppConfig(obj: Record<string, unknown>, prefix: string, configP
     }
   }
 
+  validateEnvVarFields(obj, prefix, configPath);
+
   if (obj.worktree !== undefined) {
     validateWorktreeConfig(obj.worktree, `${prefix}.worktree`, configPath);
   }
 
   warnUnknownKeys(obj, KNOWN_APP_KEYS, configPath, prefix);
+}
+
+function validateEnvVarFields(
+  obj: Record<string, unknown>,
+  prefix: string | undefined,
+  configPath: string
+): void {
+  const label = (key: string) => (prefix ? `${prefix}.${key}` : key);
+  for (const key of ["portVar", "hostVar"] as const) {
+    const value = obj[key];
+    if (value === undefined) continue;
+    if (typeof value !== "string" || !isValidEnvVarName(value)) {
+      throw new ConfigValidationError(
+        `"${label(key)}" in ${configPath} must be a valid environment variable name.`
+      );
+    }
+  }
+  if (obj.portVar !== undefined && obj.portVar === obj.hostVar) {
+    throw new ConfigValidationError(
+      `"${label("portVar")}" and "${label("hostVar")}" in ${configPath} must not use the same name.`
+    );
+  }
 }
 
 function validateWorktreeConfig(value: unknown, prefix: string, configPath: string): void {

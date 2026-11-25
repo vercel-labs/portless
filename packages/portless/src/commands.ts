@@ -2,6 +2,7 @@
 export const COMMAND_NAMES = [
   "run",
   "get",
+  "env",
   "list",
   "alias",
   "compose",
