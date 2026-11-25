@@ -7,6 +7,7 @@ import * as https from "node:https";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as tls from "node:tls";
 import {
   createHttpRedirectServer,
   createProxyServer,
@@ -469,6 +470,43 @@ describe("createProxyServer", () => {
       expect(res.headers["transfer-encoding"]).toBe("chunked");
       expect(res.headers["x-custom"]).toBe("preserved");
       expect(res.body).toBe("chunk1chunk2");
+    });
+
+    it("strips transfer-encoding and omits chunk framing for HTTP/1.0 clients", async () => {
+      const backend = trackServer(
+        http.createServer((_req, res) => {
+          res.writeHead(200, { "Content-Type": "text/plain" });
+          res.write("chunk1");
+          res.end("chunk2");
+        })
+      );
+      await listen(backend);
+      const backendAddr = backend.address();
+      if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: backendAddr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      const addr = server.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+
+      const raw = await new Promise<string>((resolve, reject) => {
+        const socket = net.connect(addr.port, "127.0.0.1", () => {
+          socket.write("GET / HTTP/1.0\r\nHost: myapp.localhost\r\n\r\n");
+        });
+        let data = "";
+        socket.on("data", (chunk) => {
+          data += chunk.toString("utf8");
+        });
+        socket.on("end", () => resolve(data));
+        socket.on("error", reject);
+      });
+
+      const [head, body] = raw.split("\r\n\r\n");
+      expect(head.toLowerCase()).not.toContain("transfer-encoding:");
+      expect(body).toBe("chunk1chunk2");
     });
 
     it("reuses the client connection on plain HTTP responses when the backend sends Connection: close (issue #482)", async () => {
@@ -3984,6 +4022,54 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     expect(result.headers["transfer-encoding"]).toBeUndefined();
     expect(result.headers["x-custom"]).toBe("preserved");
     expect(result.body).toBe("ok");
+  });
+
+  it("strips transfer-encoding and omits chunk framing for HTTP/1.0 clients over TLS", async () => {
+    const backend = trackServer(
+      http.createServer((_req, res) => {
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.write("chunk1");
+        res.end("chunk2");
+      })
+    );
+    await listen(backend);
+    const backendAddr = backend.address();
+    if (!backendAddr || typeof backendAddr === "string") throw new Error("no addr");
+
+    const routes: RouteInfo[] = [{ hostname: "hop.localhost", port: backendAddr.port }];
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+      })
+    );
+    await listen(server);
+    const addr = server.address();
+    if (!addr || typeof addr === "string") throw new Error("no addr");
+
+    const raw = await new Promise<string>((resolve, reject) => {
+      const socket = tls.connect(
+        {
+          host: "127.0.0.1",
+          port: addr.port,
+          rejectUnauthorized: false,
+        },
+        () => {
+          socket.write("GET / HTTP/1.0\r\nHost: hop.localhost\r\n\r\n");
+        }
+      );
+      let data = "";
+      socket.on("data", (chunk) => {
+        data += chunk.toString("utf8");
+      });
+      socket.on("end", () => resolve(data));
+      socket.on("error", reject);
+    });
+
+    const [head, body] = raw.split("\r\n\r\n");
+    expect(head.toLowerCase()).not.toContain("transfer-encoding:");
+    expect(body).toBe("chunk1chunk2");
   });
 
   // streamResetBurst/streamResetRate server options require Node 22.11+;

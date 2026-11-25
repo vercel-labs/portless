@@ -57,16 +57,22 @@ function isTlsError(error: NodeJS.ErrnoException): boolean {
 
 const REPLAYABLE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+type HttpProtocol = "http1.0" | "http1.1" | "http2";
+
+/** Determine the HTTP protocol version spoken by an incoming client request. */
+function getClientProtocol(req: http.IncomingMessage, h2Stream: unknown): HttpProtocol {
+  if (h2Stream || req.httpVersionMajor >= 2) return "http2";
+  if (req.httpVersionMajor === 1 && req.httpVersionMinor >= 1) return "http1.1";
+  return "http1.0";
+}
+
 /**
  * Strip HTTP hop-by-hop headers (RFC 9110 section 7.6.1), including any header
- * names listed in Connection. Keeps transfer-encoding on HTTP/1.1 legs and
- * strips it on HTTP/2 responses.
+ * names listed in Connection. Keeps transfer-encoding only on HTTP/1.1 hops;
+ * HTTP/1.0 and HTTP/2 forbid it.
  */
-function stripHopByHop(
-  headers: http.OutgoingHttpHeaders,
-  options: { direction: "request" | "response"; protocol: "http1" | "http2" }
-): void {
-  const keepTransferEncoding = options.direction === "request" || options.protocol === "http1";
+function stripHopByHop(headers: http.OutgoingHttpHeaders, protocol: HttpProtocol): void {
+  const keepTransferEncoding = protocol === "http1.1";
   const connection = headers.connection;
   if (connection !== undefined) {
     const values = Array.isArray(connection) ? connection : [String(connection)];
@@ -228,7 +234,7 @@ function buildUpstreamHeaders(
     if (key.startsWith(":")) delete headers[key];
   }
   if (stripHopByHopHeaders) {
-    stripHopByHop(headers, { direction: "request", protocol: "http1" });
+    stripHopByHop(headers, "http1.1");
   }
   Object.assign(headers, buildForwardedHeaders(req, isEncrypted(req)), {
     [PORTLESS_HOPS_HEADER]: String(hops + 1),
@@ -694,10 +700,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         (proxyRes) => {
           const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
           rewriteUpstreamLocation(responseHeaders, route, req);
-          stripHopByHop(responseHeaders, {
-            direction: "response",
-            protocol: h2Stream ? "http2" : "http1",
-          });
+          stripHopByHop(responseHeaders, getClientProtocol(req, h2Stream));
           const te = responseHeaders["transfer-encoding"];
           if (
             te !== undefined &&
@@ -1028,7 +1031,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         return;
       }
       const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
-      stripHopByHop(responseHeaders, { direction: "response", protocol: "http2" });
+      stripHopByHop(responseHeaders, "http2");
       // The Accept answers the key this proxy synthesized, not anything the
       // h2 client sent; RFC 8441 has no equivalent handshake header.
       delete responseHeaders["sec-websocket-accept"];
@@ -1058,7 +1061,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       // client sees the rejection instead of a hung handshake.
       const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
       rewriteUpstreamLocation(responseHeaders, route, compatReq);
-      stripHopByHop(responseHeaders, { direction: "response", protocol: "http2" });
+      stripHopByHop(responseHeaders, "http2");
       res.writeHead(proxyRes.statusCode || 502, responseHeaders);
       proxyRes.on("error", (err) => req.stream.destroy(err));
       proxyRes.pipe(res);
