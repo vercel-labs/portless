@@ -9,6 +9,7 @@ import {
 } from "./clean-utils.js";
 import { findStateDirProblem, isCleanableStateDir } from "./utils.js";
 import { LEGACY_SYSTEM_STATE_DIR } from "./cli-utils.js";
+import { PROXY_FILES } from "./proxy-state.js";
 
 vi.mock("node:fs", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:fs")>();
@@ -39,7 +40,7 @@ describe("collectStateDirsForCleanupWithFailures", () => {
     const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "portless-clean-collect-"));
     process.env.PORTLESS_STATE_DIR = tmp;
     const { dirs } = collectStateDirsForCleanupWithFailures();
-    expect(dirs).toContain(path.resolve(tmp));
+    expect(dirs).toContain(fs.realpathSync(tmp));
     fs.rmSync(tmp, { recursive: true, force: true });
   });
 
@@ -250,6 +251,26 @@ describe("removePortlessStateFiles", () => {
     expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(true);
     expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(false);
+  });
+
+  it("cleans and preserves every file in PROXY_FILES", () => {
+    for (const name of PROXY_FILES) fs.writeFileSync(path.join(tmpDir, name), "x");
+    fs.writeFileSync(path.join(tmpDir, "user-notes.txt"), "keep me");
+
+    removePortlessStateFiles(tmpDir);
+
+    for (const name of PROXY_FILES) {
+      expect(fs.existsSync(path.join(tmpDir, name))).toBe(false);
+    }
+    expect(fs.readFileSync(path.join(tmpDir, "user-notes.txt"), "utf-8")).toBe("keep me");
+
+    for (const name of PROXY_FILES) fs.writeFileSync(path.join(tmpDir, name), "x");
+
+    removePortlessStateFiles(tmpDir, { preserveProxyRuntime: true });
+
+    for (const name of PROXY_FILES) {
+      expect(fs.existsSync(path.join(tmpDir, name))).toBe(true);
+    }
   });
 
   it.skipIf(process.platform === "win32")("refuses a symlinked state directory", () => {
