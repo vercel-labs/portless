@@ -23,7 +23,7 @@ portless runs a local reverse proxy and gives each dev server a name. Your app l
 npm install -g portless
 ```
 
-To pin the version per project, install it with `npm install -D portless`, or record the version in `.tool-versions` for global installs. portless is pre-1.0, so a state directory format change between releases can require running `portless trust` again.
+To pin the version per project, install it with `npm install -D portless`, or see [Install](https://portless.sh#install) for pre-1.0 version-pinning notes.
 
 ## Quick start
 
