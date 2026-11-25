@@ -122,6 +122,7 @@ import {
   getProxyBindTargets,
   canBindWithoutRoot,
   isUnprivilegedEnvEnabled,
+  resolveAppPortAllocation,
   getRiskyTldReason,
   injectFrameworkFlags,
   injectPackageScriptFrameworkFlags,
@@ -165,6 +166,7 @@ import {
   ConfigValidationError,
 } from "./config.js";
 import type { AppConfig, LoadedConfig } from "./config.js";
+import type { AppPortAllocation } from "./cli-utils.js";
 import { findWorkspaceRoot, discoverWorkspacePackages } from "./workspace.js";
 import type { WorkspacePackage } from "./workspace.js";
 import { EnvPublication, buildNodeOptions, hasTurboConfig } from "./turbo.js";
@@ -1679,7 +1681,8 @@ async function runApp(
   force: boolean,
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  allocation: AppPortAllocation = resolveAppPortAllocation(null)
 ) {
   let store = initialStore;
   initialStore.recoverCorruptRoutesFile();
@@ -1802,14 +1805,21 @@ async function runApp(
       hostnames,
       pid: process.pid,
       port: desiredPort,
+      pick: { ...allocation, key: hostname },
       force,
     });
     port = registration.port;
     killedPids = registration.killedPids;
     if (desiredPort) {
       console.error(colors.green(`  Using port ${port} (fixed)`));
-    } else {
+    } else if (allocation.strategy === "random") {
       console.error(colors.green(`  Using port ${port}`));
+    } else {
+      console.error(
+        colors.green(
+          `  Using port ${port} (${allocation.strategy} in ${allocation.range[0]}-${allocation.range[1]})`
+        )
+      );
     }
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
@@ -4726,7 +4736,8 @@ async function handleDefaultSingle(
     false,
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
@@ -4740,6 +4751,7 @@ interface MultiAppEntry extends WorktreeHostnameInput {
   label: string;
   commandArgs: string[];
   appPort?: number;
+  allocation: AppPortAllocation;
   proxied: boolean;
 }
 
@@ -4824,7 +4836,14 @@ async function spawnProxiedApp(
 
     hostnames = buildHostnames(app, tlds);
     store.recoverCorruptRoutesFile();
-    appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
+    appPort = (
+      await store.register({
+        hostnames,
+        pid: process.pid,
+        port: app.appPort,
+        pick: { ...app.allocation, key: hostnames[0]! },
+      })
+    ).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     displayUrl = url;
@@ -5065,6 +5084,7 @@ async function handleDefaultMulti(
       label,
       commandArgs,
       appPort: envAppPort ?? appOverride.appPort,
+      allocation: resolveAppPortAllocation(appOverride),
       proxied,
     });
   }
@@ -5194,7 +5214,14 @@ async function runWithTurbo(
 
     const hostnames = buildHostnames(app, tlds);
     store.recoverCorruptRoutesFile();
-    const appPort = (await store.register({ hostnames, pid: process.pid, port: app.appPort })).port;
+    const appPort = (
+      await store.register({
+        hostnames,
+        pid: process.pid,
+        port: app.appPort,
+        pick: { ...app.allocation, key: hostnames[0]! },
+      })
+    ).port;
     const urls = formatUrls(hostnames, proxyPort, tls);
     const url = urls[0]!;
     appUrls.push({ label: app.label, url });
@@ -5457,7 +5484,8 @@ async function handleRunMode(
     parsed.force,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 
@@ -5485,11 +5513,9 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     throw new UsageError("No command provided.", NAMED_USAGE);
   }
 
-  if (!parsed.appPort) {
-    const appConfig = loadAppConfig();
-    if (appConfig?.appPort) {
-      parsed.appPort = appConfig.appPort;
-    }
+  const appConfig = loadAppConfig();
+  if (!parsed.appPort && appConfig?.appPort) {
+    parsed.appPort = appConfig.appPort;
   }
 
   const nameInput = { baseName: parsed.name, naming: null };
@@ -5508,7 +5534,8 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     parsed.force,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveAppPortAllocation(appConfig)
   );
 }
 

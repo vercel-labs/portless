@@ -24,6 +24,9 @@ import {
   getProtocolPort,
   getProxyBindTargets,
   getRiskyTldReason,
+  parseAppPortRange,
+  parseAppPortStrategy,
+  resolveAppPortAllocation,
   isHttpsEnvDisabled,
   isUnprivilegedEnvEnabled,
   injectFrameworkFlags,
@@ -151,6 +154,47 @@ describe("augmentedPath (issue #241)", () => {
     expect(entries[0]).toBe(localBin);
     expect(entries.at(-1)).toBe(nodeDir);
     expect(entries).not.toContain("");
+  });
+});
+
+describe("resolveAppPortAllocation", () => {
+  it("defaults to random over 4000-4999", () => {
+    expect(resolveAppPortAllocation(null, {})).toEqual({
+      strategy: "random",
+      range: [4000, 4999],
+    });
+  });
+
+  it("reads the config", () => {
+    expect(
+      resolveAppPortAllocation({ appPortStrategy: "sequential", appPortRange: [4200, 4999] }, {})
+    ).toEqual({ strategy: "sequential", range: [4200, 4999] });
+  });
+
+  it("lets the environment beat the config", () => {
+    expect(
+      resolveAppPortAllocation(
+        { appPortStrategy: "sequential", appPortRange: [4200, 4999] },
+        { PORTLESS_APP_PORT_STRATEGY: "stable", PORTLESS_APP_PORT_RANGE: "5000-5010" }
+      )
+    ).toEqual({ strategy: "stable", range: [5000, 5010] });
+  });
+
+  it("rejects an unknown strategy or a malformed range", () => {
+    expect(() => resolveAppPortAllocation(null, { PORTLESS_APP_PORT_STRATEGY: "first" })).toThrow(
+      /PORTLESS_APP_PORT_STRATEGY/
+    );
+    expect(() => resolveAppPortAllocation(null, { PORTLESS_APP_PORT_RANGE: "4200" })).toThrow(
+      /PORTLESS_APP_PORT_RANGE/
+    );
+    expect(() => resolveAppPortAllocation(null, { PORTLESS_APP_PORT_RANGE: "5000-4000" })).toThrow(
+      /PORTLESS_APP_PORT_RANGE/
+    );
+  });
+
+  it("accepts case-insensitive strategy names from the environment", () => {
+    expect(parseAppPortStrategy(" Sequential ")).toBe("sequential");
+    expect(parseAppPortRange(" 4200-4999 ")).toEqual([4200, 4999]);
   });
 });
 

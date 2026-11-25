@@ -178,7 +178,7 @@ period.
 ## How It Works
 
 1. `portless proxy start` starts an HTTPS reverse proxy on port 443 as a background daemon. Auto-elevates with sudo on macOS/Linux; falls back to port 1355 if sudo is unavailable. Use `--no-tls` for plain HTTP on port 80. Configurable with `-p` / `--port` or the `PORTLESS_PORT` env var. The proxy also auto-starts when you run an app.
-2. `portless <name> <cmd>` assigns a random free port (4000-4999) via the `PORT` env var and registers the app with the proxy
+2. `portless <name> <cmd>` assigns a free port (random in 4000-4999 by default; `appPortStrategy` can make it `stable` per hostname or `sequential` from the bottom of `appPortRange`) via the `PORT` env var and registers the app with the proxy
 3. The browser hits `https://<name>.localhost`; the proxy forwards to the app's assigned port
 
 Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4 and IPv6 loopback addresses, `127.0.0.1` and `::1`. They do not accept connections through LAN, VPN, or other network interfaces.
@@ -225,24 +225,26 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable                | Description                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
-| `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
-| `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`       | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`          | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`     | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_UNPRIVILEGED` | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)   |
-| `PORTLESS_SYNC_HOSTS`   | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`    | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`       | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`        | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_CLOUDFLARE`   | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
-| `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
-| `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
+| Variable                     | Description                                                                                        |
+| ---------------------------- | -------------------------------------------------------------------------------------------------- |
+| `PORTLESS_PORT`              | Override the default proxy port (default: 443 with HTTPS, 80 without)                              |
+| `PORTLESS_APP_PORT`          | Use a fixed port for the app; several proxied apps need per-app `appPort`                          |
+| `PORTLESS_APP_PORT_STRATEGY` | How to pick an app port: `random` (default), `stable`, or `sequential` (same as `appPortStrategy`) |
+| `PORTLESS_APP_PORT_RANGE`    | Range to pick app ports from, as `min-max` (default `4000-4999`, same as `appPortRange`)           |
+| `PORTLESS_PREFIX`            | Set the worktree prefix (`""` for none, same as `--prefix`)                                        |
+| `PORTLESS_HTTPS`             | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                                    |
+| `PORTLESS_LAN`               | Set to `1` to always enable LAN mode (auto-detects LAN IP)                                         |
+| `PORTLESS_LAN_IP`            | Pin a specific LAN IP for LAN mode                                                                 |
+| `PORTLESS_TLD`               | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com)                     |
+| `PORTLESS_WILDCARD`          | Set to `1` to allow unregistered subdomains to fall back to parent                                 |
+| `PORTLESS_UNPRIVILEGED`      | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)                       |
+| `PORTLESS_SYNC_HOSTS`        | Set to `0` to disable auto-sync of /etc/hosts (on by default)                                      |
+| `PORTLESS_TAILSCALE`         | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)                         |
+| `PORTLESS_FUNNEL`            | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)                        |
+| `PORTLESS_NGROK`             | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                                    |
+| `PORTLESS_CLOUDFLARE`        | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)                          |
+| `PORTLESS_STATE_DIR`         | Override the state directory                                                                       |
+| `PORTLESS=0`                 | Bypass the proxy, run the command directly                                                         |
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
@@ -440,17 +442,19 @@ App ports referenced by stale Tailscale Serve or Funnel records stay reserved, e
 
 Optional config file. Portless looks for it in the current directory; `worktree` options also inherit from the workspace root into package directories.
 
-| Field      | Type    | Default                    | Description                                              |
-| ---------- | ------- | -------------------------- | -------------------------------------------------------- |
-| `name`     | string  | inferred from package.json | Base app name (worktree prefix still applies)            |
-| `script`   | string  | `"dev"`                    | Name of a package.json script to run                     |
-| `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
-| `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
-| `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `worktree` | object  |                            | Worktree label style and hostname layout                 |
-| `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
+| Field             | Type             | Default                    | Description                                                                             |
+| ----------------- | ---------------- | -------------------------- | --------------------------------------------------------------------------------------- |
+| `name`            | string           | inferred from package.json | Base app name (worktree prefix still applies)                                           |
+| `script`          | string           | `"dev"`                    | Name of a package.json script to run                                                    |
+| `appPort`         | number           | auto-assigned              | Fixed port for the child process                                                        |
+| `appPortStrategy` | string           | `"random"`                 | `random`, `stable` (same hostname, same port), or `sequential` (lowest free port first) |
+| `appPortRange`    | [number, number] | `[4000, 4999]`             | Inclusive range the strategy picks from                                                 |
+| `proxy`           | boolean          | auto-detected              | Whether to route through the proxy (`false` for tasks)                                  |
+| `apps`            | object           |                            | Overrides for workspace packages, keyed by relative path                                |
+| `worktree`        | object           |                            | Worktree label style and hostname layout                                                |
+| `turbo`           | boolean          | `true`                     | Set `false` to use direct spawning instead of turborepo                                 |
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`, `appPortStrategy`, `appPortRange`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
 
 ### package.json "portless" key
 
@@ -460,7 +464,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 { "portless": "myapp" }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`, `appPortStrategy`, `appPortRange`):
 
 ```json
 { "portless": { "name": "myapp", "script": "dev:app" } }
