@@ -1,6 +1,5 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { WorktreePrefixStyle } from "./auto.js";
 
 export class ConfigValidationError extends Error {
   constructor(message: string) {
@@ -10,8 +9,10 @@ export class ConfigValidationError extends Error {
 }
 
 export interface WorktreeConfig {
-  prefix?: WorktreePrefixStyle;
+  prefix?: "last-segment" | "branch";
   hostnameTemplate?: string;
+  flat?: boolean;
+  base?: string;
 }
 
 export interface AppConfig {
@@ -30,32 +31,34 @@ export interface PortlessConfig extends AppConfig {
 export interface LoadedConfig {
   config: PortlessConfig;
   configDir: string;
-  source: "portless.json" | "package.json";
+  source: "portless.json" | ".config/portless.json" | "package.json";
 }
 
-const CONFIG_FILENAME = "portless.json";
-
-/**
- * Load portless config from `cwd`. Checks `portless.json` first, then
- * falls back to a `"portless"` key in `package.json`. Does not walk up
- * to parent directories.
- */
+/** Load config from cwd in order: `portless.json`, `.config/portless.json`, then `package.json`'s `portless` key. Does not walk up. */
 export function loadConfig(cwd: string = process.cwd()): LoadedConfig | null {
-  const configPath = path.join(cwd, CONFIG_FILENAME);
-  try {
-    const raw = fs.readFileSync(configPath, "utf-8");
-    const parsed = JSON.parse(raw);
+  for (const source of ["portless.json", ".config/portless.json"] as const) {
+    const configPath = path.join(cwd, source);
+    let raw: string;
+    try {
+      raw = fs.readFileSync(configPath, "utf-8");
+    } catch (err) {
+      if (isErrnoException(err) && (err.code === "ENOENT" || err.code === "ENOTDIR")) continue;
+      throw err;
+    }
+
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch (err) {
+      if (err instanceof SyntaxError) {
+        throw new ConfigValidationError(`Invalid JSON in ${configPath}`);
+      }
+      throw err;
+    }
     validateConfig(parsed, configPath);
-    return { config: parsed, configDir: cwd, source: "portless.json" };
-  } catch (err) {
-    if (isErrnoException(err) && err.code === "ENOENT") {
-      return loadConfigFromPackageJson(cwd);
-    }
-    if (err instanceof SyntaxError) {
-      throw new ConfigValidationError(`Invalid JSON in ${configPath}`);
-    }
-    throw err;
+    return { config: parsed, configDir: cwd, source };
   }
+  return loadConfigFromPackageJson(cwd);
 }
 
 /** Normalize the raw `"portless"` value: a string is shorthand for `{ name }`. */
@@ -81,29 +84,6 @@ function loadConfigFromPackageJson(dir: string): LoadedConfig | null {
     if (isErrnoException(err) && err.code === "ENOENT") return null;
     if (err instanceof SyntaxError) return null;
     throw err;
-  }
-  return null;
-}
-
-/**
- * Load the `"portless"` config from a specific directory's package.json
- * (does not walk up). Returns the AppConfig fields or null.
- */
-export function loadPackagePortlessConfig(dir: string): AppConfig | null {
-  const pkgPath = path.join(dir, "package.json");
-  try {
-    const raw = fs.readFileSync(pkgPath, "utf-8");
-    const pkg = JSON.parse(raw);
-    if (pkg && typeof pkg === "object" && "portless" in pkg) {
-      const config = normalizePortlessValue(pkg.portless);
-      if (config === null) return null;
-      if (typeof config === "object" && !Array.isArray(config)) {
-        validateAppConfig(config as Record<string, unknown>, "portless", pkgPath);
-        return config as AppConfig;
-      }
-    }
-  } catch (err) {
-    if (err instanceof ConfigValidationError) throw err;
   }
   return null;
 }
@@ -404,7 +384,7 @@ function isErrnoException(err: unknown): err is NodeJS.ErrnoException {
 
 const KNOWN_TOP_KEYS = new Set(["name", "script", "appPort", "proxy", "apps", "turbo", "worktree"]);
 const KNOWN_APP_KEYS = new Set(["name", "script", "appPort", "proxy", "worktree"]);
-const KNOWN_WORKTREE_KEYS = new Set(["prefix", "hostnameTemplate"]);
+const KNOWN_WORKTREE_KEYS = new Set(["prefix", "hostnameTemplate", "flat", "base"]);
 
 function validateConfig(config: unknown, configPath: string): asserts config is PortlessConfig {
   if (typeof config !== "object" || config === null || Array.isArray(config)) {
@@ -538,6 +518,23 @@ function validateWorktreeConfig(value: unknown, prefix: string, configPath: stri
         `"${prefix}.hostnameTemplate" in ${configPath} must render to valid hostname labels: "${obj.hostnameTemplate}".`
       );
     }
+  }
+
+  if (obj.flat !== undefined && typeof obj.flat !== "boolean") {
+    throw new ConfigValidationError(`"${prefix}.flat" in ${configPath} must be a boolean.`);
+  }
+
+  if (
+    obj.base !== undefined &&
+    (typeof obj.base !== "string" ||
+      obj.base.length > 253 ||
+      !obj.base
+        .split(".")
+        .every((label) => label.length <= 63 && /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/i.test(label)))
+  ) {
+    throw new ConfigValidationError(
+      `"${prefix}.base" in ${configPath} must be a DNS hostname suffix.`
+    );
   }
 
   warnUnknownKeys(obj, KNOWN_WORKTREE_KEYS, configPath, prefix);
