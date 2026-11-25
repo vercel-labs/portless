@@ -4294,7 +4294,24 @@ describe("CLI", { timeout: 15_000 }, () => {
     });
   });
 
+  describe("trust subcommand", () => {
+    it("documents device trust in help", () => {
+      const { status, stdout } = run(["trust", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("portless trust --device");
+      expect(stdout).toContain("never its key");
+    });
+  });
+
   describe("proxy subcommand", () => {
+    it("documents wildcard behavior in LAN mode", () => {
+      const { status, stdout } = run(["proxy", "--help"]);
+      expect(status).toBe(0);
+      expect(stdout).toContain("Allow unregistered subdomains to fall back to parent (local only)");
+      expect(stdout).toContain("mDNS does not resolve wildcard subdomains");
+      expect(stdout).toContain("local clients; other devices reach explicitly registered routes.");
+    });
+
     it("prints help with --help", () => {
       const { status, stdout } = run(["proxy", "--help"]);
       expect(status).toBe(0);

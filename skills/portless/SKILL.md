@@ -274,6 +274,10 @@ Portless saves LAN mode in `proxy.lan` while the proxy runs, but only an unexpec
 
 LAN mode depends on the system mDNS helpers that portless launches: macOS includes `dns-sd`, while Linux uses `avahi-publish-address` from `avahi-utils` (install via `sudo apt install avahi-utils` or your distro’s tooling). Linux also needs a running `avahi-daemon`. While it is stopped, `portless doctor` warns and `.local` names are published once it starts.
 
+With HTTPS, a device needs the portless CA to load `.local` apps without warnings. `portless trust --device` prints a QR code and the CA's SHA-256 fingerprint, and serves the CA certificate (never its key) over plain HTTP on the LAN address at a random path for ten minutes. The page offers a DER certificate on iOS (verify its SHA-256 fingerprint under Settings > Profile Downloaded > More Details against the terminal, install it, then turn on full trust under General > About > Certificate Trust Settings), on Android (install it from Settings by searching for "CA certificate", then restart Chrome), and PEM elsewhere. It runs in the foreground, so a person has to scan the code.
+
+mDNS does not resolve wildcard subdomains, so `--wildcard` applies only to local clients in LAN mode.
+
 - **Next.js**: add your `.local` hostnames to `allowedDevOrigins`:
 
   ```js
@@ -349,67 +353,68 @@ On Linux, Node under your home directory (for example, with nvm, fnm, volta, or 
 
 Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
 
-| Command                                           | Description                                                    |
-| ------------------------------------------------- | -------------------------------------------------------------- |
-| `portless`                                        | Run dev script through proxy                                   |
-| `portless`                                        | From monorepo root: run all workspace packages                 |
-| `portless --script <name>`                        | Run a specific package.json script (default: dev)              |
-| `portless -- <args...>`                           | Pass arguments to the script run in zero-arg mode              |
-| `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
-| `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
-| `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
-| `portless run --no-worktree <cmd>`                | Run without worktree naming                                    |
-| `portless --no-worktree`                          | Start configured apps without worktree naming                  |
-| `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
-| `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
-| `portless get <name> --no-worktree`               | Print URL without worktree config or naming                    |
-| `portless get <name> --json`                      | Print name, hostname, and URL as JSON                          |
-| `portless list`                                   | Show active routes and uptime                                  |
-| `portless list --json`                            | Print routes as JSON                                           |
-| `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites      |
-| `portless trust`                                  | Add local CA to system trust store (for HTTPS)                 |
-| `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block             |
-| `portless prune`                                  | Remove stale routes and shares; stop matching process groups   |
-| `portless prune --force`                          | Send SIGKILL instead of SIGTERM on a retry                     |
-| `portless proxy start`                            | Start HTTPS proxy as a daemon (port 443, auto-elevates)        |
-| `portless proxy start --no-tls`                   | Start without HTTPS (plain HTTP on port 80)                    |
-| `portless proxy start --lan`                      | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes) |
-| `portless proxy start -p <number>`                | Start the proxy on a custom port                               |
-| `portless proxy start --unprivileged`             | Plain HTTP on port 80 without sudo, nothing installed          |
-| `portless proxy start --tld test`                 | Use .test instead of .localhost                                |
-| `portless proxy start --tld localhost --tld test` | Serve both TLDs from one proxy                                 |
-| `portless proxy start --tld dev.example.com`      | Use a multi-segment TLD for production-parity URLs             |
-| `portless proxy start --foreground`               | Start the proxy in foreground (for debugging)                  |
-| `portless proxy start --wildcard`                 | Allow unregistered subdomains to fall back to parent route     |
-| `portless proxy stop`                             | Stop the proxy                                                 |
-| `portless service install`                        | Start the HTTPS proxy when the OS starts                       |
-| `portless service install --lan`                  | Start the service in LAN mode                                  |
-| `portless service install --wildcard`             | Persist wildcard routing in the startup service                |
-| `portless service status`                         | Show service and proxy status                                  |
-| `portless service uninstall`                      | Remove the startup service                                     |
-| `portless alias <name> <port>`                    | Register a static route (e.g. for Docker containers)           |
-| `portless alias <name> <port> --force`            | Stop the conflicting app and overwrite its route               |
-| `portless alias --remove <name>`                  | Remove PID 0 routes                                            |
-| `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                      |
-| `portless alias <name> <port> --upstream https`   | Use TLS to the loopback backend while preserving Host          |
-| `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected TLDs                          |
-| `portless compose up [args...]`                   | Run a Docker Compose project with a route per service          |
-| `portless compose down [args...]`                 | Stop the compose project and remove its routes                 |
-| `portless.enable` / `.name` / `.ports` labels     | Skip a compose service, rename its route, or pick its ports    |
-| `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                |
-| `portless hosts clean`                            | Remove portless entries from /etc/hosts                        |
-| `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment        |
-| `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)              |
-| `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                    |
-| `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                               |
-| `portless <name> --cloudflare <cmd>`              | Share the app publicly via a Cloudflare quick tunnel           |
-| `portless <name> --force <cmd>`                   | Kill the existing process and take over its route              |
-| `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)      |
-| `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child    |
-| `portless --help` / `-h`                          | Show commands and common app options                           |
-| `portless proxy --help`                           | Show proxy startup options                                     |
-| `portless <command> --help` / `-h`                | Print command help without running it                          |
-| `portless --version` / `-v`                       | Show version                                                   |
+| Command                                           | Description                                                                         |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `portless`                                        | Run dev script through proxy                                                        |
+| `portless`                                        | From monorepo root: run all workspace packages                                      |
+| `portless --script <name>`                        | Run a specific package.json script (default: dev)                                   |
+| `portless -- <args...>`                           | Pass arguments to the script run in zero-arg mode                                   |
+| `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)                            |
+| `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)                         |
+| `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                                             |
+| `portless run --no-worktree <cmd>`                | Run without worktree naming                                                         |
+| `portless --no-worktree`                          | Start configured apps without worktree naming                                       |
+| `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)                           |
+| `portless get <name>`                             | Print URL for a service (for cross-service wiring)                                  |
+| `portless get <name> --no-worktree`               | Print URL without worktree config or naming                                         |
+| `portless get <name> --json`                      | Print name, hostname, and URL as JSON                                               |
+| `portless list`                                   | Show active routes and uptime                                                       |
+| `portless list --json`                            | Print routes as JSON                                                                |
+| `portless doctor`                                 | Check proxy, routes, DNS, CA trust, and LAN prerequisites                           |
+| `portless trust`                                  | Add local CA to system trust store (for HTTPS)                                      |
+| `portless trust --device`                         | Trust the local CA on a phone or other device (QR code)                             |
+| `portless clean`                                  | Remove state, CA trust entry, and /etc/hosts block                                  |
+| `portless prune`                                  | Remove stale routes and shares; stop matching process groups                        |
+| `portless prune --force`                          | Send SIGKILL instead of SIGTERM on a retry                                          |
+| `portless proxy start`                            | Start HTTPS proxy as a daemon (port 443, auto-elevates)                             |
+| `portless proxy start --no-tls`                   | Start without HTTPS (plain HTTP on port 80)                                         |
+| `portless proxy start --lan`                      | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes)                      |
+| `portless proxy start -p <number>`                | Start the proxy on a custom port                                                    |
+| `portless proxy start --unprivileged`             | Plain HTTP on port 80 without sudo, nothing installed                               |
+| `portless proxy start --tld test`                 | Use .test instead of .localhost                                                     |
+| `portless proxy start --tld localhost --tld test` | Serve both TLDs from one proxy                                                      |
+| `portless proxy start --tld dev.example.com`      | Use a multi-segment TLD for production-parity URLs                                  |
+| `portless proxy start --foreground`               | Start the proxy in foreground (for debugging)                                       |
+| `portless proxy start --wildcard`                 | Allow unregistered subdomains to fall back to parent route (local only in LAN mode) |
+| `portless proxy stop`                             | Stop the proxy                                                                      |
+| `portless service install`                        | Start the HTTPS proxy when the OS starts                                            |
+| `portless service install --lan`                  | Start the service in LAN mode                                                       |
+| `portless service install --wildcard`             | Persist wildcard routing in the startup service                                     |
+| `portless service status`                         | Show service and proxy status                                                       |
+| `portless service uninstall`                      | Remove the startup service                                                          |
+| `portless alias <name> <port>`                    | Register a static route (e.g. for Docker containers)                                |
+| `portless alias <name> <port> --force`            | Stop the conflicting app and overwrite its route                                    |
+| `portless alias --remove <name>`                  | Remove PID 0 routes                                                                 |
+| `portless alias <name> <port> --tld test`         | Cover only the configured TLDs you select                                           |
+| `portless alias <name> <port> --upstream https`   | Use TLS to the loopback backend while preserving Host                               |
+| `portless alias --remove <name> --tld test`       | Remove PID 0 routes for selected TLDs                                               |
+| `portless compose up [args...]`                   | Run a Docker Compose project with a route per service                               |
+| `portless compose down [args...]`                 | Stop the compose project and remove its routes                                      |
+| `portless.enable` / `.name` / `.ports` labels     | Skip a compose service, rename its route, or pick its ports                         |
+| `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                                     |
+| `portless hosts clean`                            | Remove portless entries from /etc/hosts                                             |
+| `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment                             |
+| `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)                                   |
+| `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                                         |
+| `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                                                    |
+| `portless <name> --cloudflare <cmd>`              | Share the app publicly via a Cloudflare quick tunnel                                |
+| `portless <name> --force <cmd>`                   | Kill the existing process and take over its route                                   |
+| `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)                           |
+| `portless <name> -- <cmd> [args...]`              | Stop flag parsing; everything after `--` is passed to child                         |
+| `portless --help` / `-h`                          | Show commands and common app options                                                |
+| `portless proxy --help`                           | Show proxy startup options                                                          |
+| `portless <command> --help` / `-h`                | Print command help without running it                                               |
+| `portless --version` / `-v`                       | Show version                                                                        |
 
 `portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
 
