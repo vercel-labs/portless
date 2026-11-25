@@ -645,7 +645,7 @@ export function createServer(profiles: string[]): {
     const hasId = Object.prototype.hasOwnProperty.call(message, "id");
     const method = message.method;
     if (typeof method !== "string") {
-      return hasId ? errorResponse(id, -32600, "Invalid request: missing method") : null;
+      return errorResponse(hasId ? id : null, -32600, "Invalid Request");
     }
     if (!hasId) return null;
 

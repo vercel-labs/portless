@@ -14,6 +14,8 @@ export function isCompletionShell(value: string): value is CompletionShell {
 /** Completion metadata for one top-level command, derived from CLI flag specs. */
 export interface CommandCompletionSpec {
   flags?: readonly string[];
+  valueFlags?: readonly string[];
+  stopsAtPositional?: boolean;
   subcommands?: readonly string[];
   subcommandFlags?: Readonly<Record<string, readonly string[]>>;
 }
@@ -22,6 +24,7 @@ export interface CommandCompletionSpec {
 export interface CompletionSpec {
   commands: readonly CommandName[];
   globalFlags: readonly string[];
+  globalValueFlags: readonly string[];
   byCommand: Readonly<Record<CommandName, CommandCompletionSpec>>;
 }
 
@@ -29,8 +32,13 @@ function uniqueWords(values: readonly string[]): string[] {
   return [...new Set(values)];
 }
 
+function casePattern(values: readonly string[]): string {
+  return uniqueWords(values).join("|");
+}
+
 function generateBash(spec: CompletionSpec): string {
   const topWords = uniqueWords([...spec.commands, ...spec.globalFlags]).join(" ");
+  const globalValPattern = casePattern(spec.globalValueFlags);
   const cases: string[] = [];
 
   for (const command of spec.commands) {
@@ -40,14 +48,28 @@ function generateBash(spec: CompletionSpec): string {
     const subFlags = entry.subcommandFlags ?? {};
 
     cases.push(`    ${command})`);
-    if (subs.length > 0) {
+    if (entry.stopsAtPositional) {
+      const cmdValPattern = casePattern(entry.valueFlags ?? []);
+      cases.push(`      local j=$((cmd_idx + 1))`);
+      cases.push(`      while (( j < COMP_CWORD )); do`);
+      cases.push(`        case "\${COMP_WORDS[j]}" in`);
+      cases.push(`          --) return 0 ;;`);
+      if (cmdValPattern) {
+        cases.push(`          ${cmdValPattern}) j=$((j + 2)); continue ;;`);
+      }
+      cases.push(`          -*) j=$((j + 1)); continue ;;`);
+      cases.push(`          *) return 0 ;;`);
+      cases.push(`        esac`);
+      cases.push(`      done`);
+      cases.push(`      COMPREPLY=( $(compgen -W "${flags.join(" ")}" -- "$cur") )`);
+    } else if (subs.length > 0) {
       const firstLevel = uniqueWords([...subs, ...flags]).join(" ");
-      cases.push(`      if [[ $COMP_CWORD -eq 2 ]]; then`);
+      cases.push(`      if (( COMP_CWORD == cmd_idx + 1 )); then`);
       cases.push(`        COMPREPLY=( $(compgen -W "${firstLevel}" -- "$cur") )`);
       cases.push(`      else`);
       const subFlagEntries = Object.entries(subFlags);
       if (subFlagEntries.length > 0) {
-        cases.push(`        case "\${COMP_WORDS[2]}" in`);
+        cases.push(`        case "\${COMP_WORDS[cmd_idx + 1]}" in`);
         for (const [sub, words] of subFlagEntries) {
           const allSubFlags = uniqueWords([...words, "--help", "-h"]).join(" ");
           cases.push(`          ${sub})`);
@@ -71,16 +93,24 @@ function generateBash(spec: CompletionSpec): string {
   return [
     "# bash completion for portless",
     "_portless_completions() {",
-    "  local cur cmd",
+    "  local cur i=1 cmd='' cmd_idx=0",
     "  COMPREPLY=()",
     '  cur="${COMP_WORDS[COMP_CWORD]}"',
     "",
-    "  if [[ $COMP_CWORD -eq 1 ]]; then",
+    "  while (( i < COMP_CWORD )); do",
+    '    case "${COMP_WORDS[i]}" in',
+    "      --) return 0 ;;",
+    ...(globalValPattern ? [`      ${globalValPattern}) i=$((i + 2)); continue ;;`] : []),
+    "      -*) i=$((i + 1)); continue ;;",
+    '      *) cmd="${COMP_WORDS[i]}"; cmd_idx=$i; break ;;',
+    "    esac",
+    "  done",
+    "",
+    '  if [[ -z "$cmd" ]]; then',
     `    COMPREPLY=( $(compgen -W "${topWords}" -- "$cur") )`,
     "    return 0",
     "  fi",
     "",
-    '  cmd="${COMP_WORDS[1]}"',
     '  case "$cmd" in',
     ...cases,
     "  esac",
@@ -92,6 +122,7 @@ function generateBash(spec: CompletionSpec): string {
 
 function generateZsh(spec: CompletionSpec): string {
   const topWords = uniqueWords([...spec.commands, ...spec.globalFlags]).join(" ");
+  const globalValPattern = casePattern(spec.globalValueFlags);
   const cases: string[] = [];
 
   for (const command of spec.commands) {
@@ -101,14 +132,28 @@ function generateZsh(spec: CompletionSpec): string {
     const subFlags = entry.subcommandFlags ?? {};
 
     cases.push(`    ${command})`);
-    if (subs.length > 0) {
+    if (entry.stopsAtPositional) {
+      const cmdValPattern = casePattern(entry.valueFlags ?? []);
+      cases.push(`      local j=$((cmd_idx + 1))`);
+      cases.push(`      while (( j < CURRENT )); do`);
+      cases.push(`        case "$words[j]" in`);
+      cases.push(`          --) return 0 ;;`);
+      if (cmdValPattern) {
+        cases.push(`          ${cmdValPattern}) (( j += 2 )); continue ;;`);
+      }
+      cases.push(`          -*) (( j += 1 )); continue ;;`);
+      cases.push(`          *) return 0 ;;`);
+      cases.push(`        esac`);
+      cases.push(`      done`);
+      cases.push(`      compadd -- ${flags.join(" ")}`);
+    } else if (subs.length > 0) {
       const firstLevel = uniqueWords([...subs, ...flags]).join(" ");
-      cases.push(`      if (( CURRENT == 3 )); then`);
+      cases.push(`      if (( CURRENT == cmd_idx + 1 )); then`);
       cases.push(`        compadd -- ${firstLevel}`);
       cases.push(`      else`);
       const subFlagEntries = Object.entries(subFlags);
       if (subFlagEntries.length > 0) {
-        cases.push(`        case "$words[3]" in`);
+        cases.push(`        case "$words[cmd_idx + 1]" in`);
         for (const [sub, words] of subFlagEntries) {
           const allSubFlags = uniqueWords([...words, "--help", "-h"]).join(" ");
           cases.push(`          ${sub}) compadd -- ${allSubFlags} ;;`);
@@ -128,12 +173,22 @@ function generateZsh(spec: CompletionSpec): string {
   return [
     "#compdef portless",
     "_portless() {",
-    "  if (( CURRENT == 2 )); then",
+    "  local i=2 cmd='' cmd_idx=0",
+    "  while (( i < CURRENT )); do",
+    '    case "$words[i]" in',
+    "      --) return 0 ;;",
+    ...(globalValPattern ? [`      ${globalValPattern}) (( i += 2 )); continue ;;`] : []),
+    "      -*) (( i += 1 )); continue ;;",
+    '      *) cmd="$words[i]"; cmd_idx=$i; break ;;',
+    "    esac",
+    "  done",
+    "",
+    '  if [[ -z "$cmd" ]]; then',
     `    compadd -- ${topWords}`,
     "    return 0",
     "  fi",
     "",
-    '  case "$words[2]" in',
+    '  case "$cmd" in',
     ...cases,
     "  esac",
     "}",

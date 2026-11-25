@@ -288,9 +288,10 @@ describe("JSON-RPC batches", () => {
   });
 
   it("reports invalid entries and answers following requests", async () => {
-    const reply = await createServer(["core"]).handleLine(JSON.stringify([null, ping]));
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([null, {}, ping]));
     expect(reply).not.toBeNull();
     expect(JSON.parse(reply!)).toEqual([
+      { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } },
       { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } },
       { jsonrpc: "2.0", id: 1, result: {} },
     ]);

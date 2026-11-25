@@ -96,7 +96,6 @@ import {
   resolveWorktreeNaming,
   composeHostname,
   sanitizeForHostname,
-  truncateLabel,
   type WorktreeNaming,
 } from "./auto.js";
 import {
@@ -1724,6 +1723,18 @@ async function ensureProxyRunning(
   return { started: true, state: discovered };
 }
 
+/** Effective TLDs for hostname preflight before the proxy starts or while it is running. */
+async function resolvePreflightTlds(
+  port: number,
+  tls: boolean,
+  tlds: readonly string[],
+  desired: ProxyDesiredState
+): Promise<readonly string[]> {
+  if (await isProxyUp(port, tls)) return tlds;
+  const { startConfig } = resolveProxyStart(desired);
+  return startConfig.lanMode ? ["local"] : startConfig.tlds;
+}
+
 /** Formats stderr progress output for app runs, hiding informational status when quiet. */
 interface RunReporter {
   banner(): void;
@@ -1835,7 +1846,8 @@ async function runApp(
 
   // Validate the hostname before we try to auto-start the proxy.
   const nameInputs = name.baseNames.map((baseName) => ({ baseName, naming: name.naming }));
-  buildAppHostnames(nameInputs, tlds, name.baseNames);
+  const preflightTlds = await resolvePreflightTlds(proxyPort, tls, tlds, desired);
+  buildAppHostnames(nameInputs, preflightTlds, name.baseNames);
 
   const ensureResult = await ensureProxyRunning(proxyPort, tls, desired);
 
@@ -2294,12 +2306,23 @@ const PROXY_START_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   ...LAN_FLAG_SPEC,
 };
 
+function valueFlagNames(spec: Readonly<Record<string, FlagKind>>): string[] {
+  return Object.entries(spec)
+    .filter(([, kind]) => kind !== "boolean")
+    .map(([flag]) => flag);
+}
+
 function buildCompletionSpec(): CompletionSpec {
   return {
     commands: COMMAND_NAMES,
     globalFlags: [...Object.keys(LEADING_FLAG_SPEC), "--name", "--version", "-v"],
+    globalValueFlags: [...valueFlagNames(LEADING_FLAG_SPEC), "--name"],
     byCommand: {
-      run: { flags: Object.keys(RUN_FLAG_SPEC) },
+      run: {
+        flags: Object.keys(RUN_FLAG_SPEC),
+        valueFlags: valueFlagNames(RUN_FLAG_SPEC),
+        stopsAtPositional: true,
+      },
       get: { flags: Object.keys(GET_FLAG_SPEC) },
       list: { flags: Object.keys(LIST_FLAG_SPEC) },
       alias: { flags: Object.keys(ALIAS_FLAG_SPEC) },
@@ -2384,7 +2407,7 @@ ${colors.bold("Options:")}
   --no-worktree          Use the base name without worktree naming; overrides --prefix
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
-  --quiet                Print only app URLs, warnings, and errors (or PORTLESS_QUIET=1)
+  --quiet                Hide startup status lines (keeps URLs, proxy startup, warnings, and errors; or PORTLESS_QUIET=1)
   --no-stdin             Detach stdin from the child process (useful for interactive runtimes)
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
@@ -2578,7 +2601,7 @@ ${colors.bold("Options:")}
   --funnel                      Share the app publicly via Tailscale Funnel
   --ngrok                       Share the app publicly via ngrok
   --cloudflare                  Share the app publicly via a Cloudflare quick tunnel
-  --quiet                       Print only app URLs, warnings, and errors for app commands
+  --quiet                       Hide startup status lines (keeps URLs, proxy startup, warnings, and errors)
   --no-stdin                    Detach stdin from the child process
   --                            Stop flag parsing and pass remaining arguments to the app
 
@@ -5316,11 +5339,7 @@ async function handleDefaultMulti(
     };
     // A running proxy keeps its own TLDs; a stopped one starts with the same
     // persisted/env merge ensureProxyRunning uses, with LAN normalized to .local.
-    let preflightTlds = tlds;
-    if (!(await isProxyUp(port, tls))) {
-      const { startConfig } = resolveProxyStart(multiDesired);
-      preflightTlds = startConfig.lanMode ? ["local"] : startConfig.tlds;
-    }
+    const preflightTlds = await resolvePreflightTlds(port, tls, tlds, multiDesired);
     checkHostnameCollisions(preflightTlds);
 
     const ensureResult = await ensureProxyRunning(port, tls, multiDesired);
@@ -5627,9 +5646,7 @@ async function handleRunMode(
   let nameSource: string;
 
   if (parsed.names.length > 0) {
-    baseNames = [
-      ...new Set(parsed.names.map((name) => name.split(".").map(truncateLabel).join("."))),
-    ];
+    baseNames = [...new Set(parsed.names)];
     nameSource = parsed.names.length === 1 ? "--name flag" : "--name flags";
   } else if (appConfig?.name) {
     baseNames = [appConfig.name];

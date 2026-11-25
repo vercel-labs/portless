@@ -361,7 +361,7 @@ On Linux with Node under your home directory (nvm, fnm, volta, or mise), `portle
 Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcommand, an app flag such as `--cloudflare` or `--script` on a command it does not affect, conflicting flags such as `--https` with `--no-tls`, missing value or argument, extra argument, or a command that needs `--yes` without a terminal). Wrapped commands keep their own exit code. Value flags for `run`, named apps, and `service install` accept either `--flag value` or `--flag=value`.
 
 | Command                                           | Description                                                                         |
-| ------------------------------------------------- | ----------------------------------------------------------------------------------- | ------ | ------------------------------- |
+| ------------------------------------------------- | ----------------------------------------------------------------------------------- |
 | `portless`                                        | Run dev script through proxy                                                        |
 | `portless`                                        | From monorepo root: run all workspace packages                                      |
 | `portless --script <name>`                        | Run a specific package.json script (default: dev)                                   |
@@ -422,7 +422,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless --help` / `-h`                          | Show commands and common app options                                                |
 | `portless proxy --help`                           | Show proxy startup options                                                          |
 | `portless <command> --help` / `-h`                | Print command help without running it                                               |
-| `portless completion <bash                        | zsh                                                                                 | fish>` | Print a shell completion script |
+| `portless completion <shell>`                     | Print a shell completion script (`bash`, `zsh`, or `fish`)                          |
 | `portless --version` / `-v`                       | Show version                                                                        |
 
 `portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
