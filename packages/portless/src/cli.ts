@@ -38,6 +38,15 @@ import {
 import { getPlatformCapabilities, SUPPORTED_PLATFORMS } from "./capabilities.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
 import {
+  describeMdnsDiscovery,
+  getLocalNetworkIp,
+  getMdnsDaemonProblem,
+  isMdnsSupported,
+  reconcileMdns,
+  serveDeviceTrust,
+  startLanIpMonitor,
+} from "./lan.js";
+import {
   generateHostsSyncToken,
   removeHostsSyncToken,
   writeHostsSyncToken,
@@ -142,15 +151,6 @@ import {
   removePortlessStateFiles,
   type CATrustRemovalResult,
 } from "./clean-utils.js";
-import {
-  getLocalNetworkIp,
-  getMdnsDaemonProblem,
-  isMdnsSupported,
-  publish,
-  startLanIpMonitor,
-  unpublish,
-  cleanupAll as cleanupMdns,
-} from "./mdns.js";
 import {
   loadConfig,
   resolveAppConfig,
@@ -852,16 +852,6 @@ function reportHostsSyncHere(
   );
 }
 
-/** Say whether LAN services are discoverable as .local names now, or why not yet. */
-function describeMdnsDiscovery(): string {
-  const mdnsDaemonProblem = getMdnsDaemonProblem();
-  return mdnsDaemonProblem
-    ? chalk.yellow(
-        `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
-      )
-    : chalk.gray("Services are discoverable as <name>.local on your network");
-}
-
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -909,19 +899,10 @@ function startProxyServer(
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
-  const publishCachedRoutes = () => {
-    if (!activeLanIp) return;
-    for (const route of cachedRoutes) {
-      publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-    }
-  };
+  const syncMdns = () => reconcileMdns(activeLanIp, cachedRoutes, proxyPort, onMdnsError);
 
   const updateLanIp = (nextIp: string | null, previousIp = activeLanIp) => {
     if (nextIp === activeLanIp) return;
-
-    if (activeLanIp) {
-      cleanupMdns();
-    }
 
     activeLanIp = nextIp;
     state.setLanIp(activeLanIp);
@@ -934,7 +915,7 @@ function startProxyServer(
       console.log(chalk.green(`LAN mode restored: ${nextIp}`));
     }
 
-    publishCachedRoutes();
+    void syncMdns();
   };
 
   // Bounds proxy.log on repeated reloads. Not a user-facing channel: users are
@@ -961,28 +942,12 @@ function startProxyServer(
 
   const reloadRoutes = () => {
     try {
-      const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadTrustedRoutes();
       routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
-      // Sync mDNS records with current routes
-      if (activeLanIp) {
-        const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
-        for (const route of cachedRoutes) {
-          const previousPort = previousRoutes.get(route.hostname);
-          if (previousPort !== undefined && previousPort !== route.port) {
-            unpublish(route.hostname);
-          }
-          publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-        }
-        for (const hostname of previousRoutes.keys()) {
-          if (!currentRoutes.has(hostname)) {
-            unpublish(hostname);
-          }
-        }
-      }
+      void syncMdns();
     } catch (err) {
       // Keep the last known routes, and say why once instead of on every reload.
       if (!routesReloadWarningShown) {
@@ -1004,9 +969,6 @@ function startProxyServer(
   if (autoSyncHosts) {
     syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
   }
-
-  // Publish mDNS for routes that already exist at startup
-  publishCachedRoutes();
 
   const createServer = () =>
     createProxyServer({
@@ -1121,11 +1083,12 @@ function startProxyServer(
       )
     );
     if (activeLanIp) {
+      void syncMdns();
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
       console.log(describeMdnsDiscovery());
       if (isTls && !customCert) {
-        console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
-        console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
+        console.log(chalk.yellow("For HTTPS on devices, run: portless trust --device"));
+        console.log(chalk.gray(`  CA file: ${path.join(store.dir, "ca.pem")}`));
       }
       if (!lanIpPinned) {
         lanMonitor = startLanIpMonitor({
@@ -1147,7 +1110,7 @@ function startProxyServer(
     exiting = true;
     stopWatchingRoutes();
     if (lanMonitor) lanMonitor.stop();
-    if (activeLanIp) cleanupMdns();
+    const stopMdns = reconcileMdns(null, [], proxyPort);
     closeAuxiliaryServers();
     try {
       fs.unlinkSync(store.pidPath);
@@ -1162,7 +1125,8 @@ function startProxyServer(
     state.reset();
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
-    server.close(() => process.exit(0));
+    const closeServer = new Promise<void>((resolve) => server.close(() => resolve()));
+    void Promise.all([stopMdns, closeServer]).finally(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
     setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
   };
@@ -2398,6 +2362,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless list")}                    Show active routes and uptime
   ${colors.cyan("portless doctor")}                  Check local portless health
   ${colors.cyan("portless trust")}                   Add local CA to system trust store
+  ${colors.cyan("portless trust --device")}          Trust the local CA on a phone or other device (QR code)
   ${colors.cyan("portless clean")}                   Remove portless state and trust entry
   ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
@@ -2482,10 +2447,18 @@ owned by you or root and not writable by group or others. A sticky parent
 such as /tmp is allowed. Otherwise trust exits with the reason.
 
 ${colors.bold("Usage:")}
-  ${colors.cyan("portless trust")}
+  ${colors.cyan("portless trust")}           Trust the CA on this machine
+  ${colors.cyan("portless trust --device")}  Trust the CA on a phone or other device on the same network
 
 ${colors.bold("Options:")}
+  --device               Serve the CA certificate over plain HTTP on the LAN address with a QR code
   --help, -h             Show this help
+
+--device serves the CA certificate (never its key) over plain HTTP on this
+machine's LAN address at a random path for ten minutes. It prints a QR code
+and the certificate's SHA-256 fingerprint. The page offers a DER certificate on
+iOS and Android, and PEM elsewhere, along with remaining steps for each
+platform.
 `);
 }
 
@@ -2499,7 +2472,7 @@ async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
-  parseCommandArgs("trust", args.slice(1), {}, 0);
+  const parsed = parseCommandArgs("trust", args.slice(1), { "--device": "boolean" }, 0);
   const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) ensureStateDir(dir);
   const unsafe = explainUnsafeStateDir(dir);
@@ -2521,6 +2494,10 @@ async function handleTrust(args: string[] = []): Promise<void> {
         colors.blue(`Restart it: portless proxy stop${portFlag} && portless proxy start${portFlag}`)
       );
     }
+  }
+  if (parsed.has("--device")) {
+    if (!(await serveDeviceTrust(dir))) process.exit(1);
+    return;
   }
   const result = ensureTrust(dir);
   if (result.state === "trusted") {
@@ -3940,7 +3917,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless proxy start --tld test")}     Use .test instead of .localhost
   ${colors.cyan("portless proxy start --tld localhost --tld test")}  Serve both TLDs
   ${colors.cyan("portless proxy start --tld dev.example.com")}  Use a multi-segment TLD (production parity)
-  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent
+  ${colors.cyan("portless proxy start --wildcard")}     Allow unregistered subdomains to fall back to parent (local only)
   ${colors.cyan("portless proxy stop")}                 Stop the proxy
 
 ${colors.bold("Stop:")}
@@ -3959,6 +3936,8 @@ ${colors.bold("LAN mode (--lan):")}
   via mDNS (.local domains). Useful for testing on real mobile devices.
   Auto-detects your LAN IP and follows changes automatically, or use
   --ip to pin one.
+  mDNS does not resolve wildcard subdomains, so --wildcard applies only to
+  local clients; other devices reach explicitly registered routes.
 
 ${colors.bold("Unprivileged mode (--unprivileged):")}
   Binds without sudo, installs nothing, and never writes the hosts file.
@@ -4563,6 +4542,9 @@ async function handleProxy(args: string[]): Promise<void> {
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(describeMdnsDiscovery());
+    if (useHttps && !(customCertPath && customKeyPath)) {
+      console.log(chalk.gray("For HTTPS on devices, run: portless trust --device"));
+    }
   }
 }
 

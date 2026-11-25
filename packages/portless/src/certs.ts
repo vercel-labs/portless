@@ -984,36 +984,56 @@ function nssTrustFlagsForNickname(listing: string, nickname: string): string | u
   return undefined;
 }
 
-/** Inspect whether Chrome/Chromium trusts the CA through its user NSS database. */
-function inspectLinuxNSSStore(
-  caCertPath: string,
-  envPath?: string
-): { state: BrowserTrustStoreState; hint?: string } {
+type NSSAccess =
+  | { status: "not-applicable" }
+  | { status: "unavailable"; reason: string; hint: string }
+  | { status: "ready"; database: string; certutilPath: string };
+
+function resolveNSSAccess(envPath?: string): NSSAccess {
   const database = linuxNSSDatabase();
-  if (!database) return { state: "not-applicable" };
+  if (!database) return { status: "not-applicable" };
   if (process.getuid?.() === 0) {
     try {
       resolveRootNSSDrop(database);
     } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
       return {
-        state: "unavailable",
-        hint: `${error instanceof Error ? error.message : String(error)} Run portless trust as your regular user.`,
+        status: "unavailable",
+        reason,
+        hint: `${reason} Run portless trust as your regular user.`,
       };
     }
   }
   const certutilPath = resolveExecutable("certutil", envPath);
   if (!certutilPath) {
-    return { state: "unavailable", hint: nssInstallHint(database) };
+    const hint = nssInstallHint(database);
+    return { status: "unavailable", reason: hint, hint };
   }
+  return { status: "ready", database, certutilPath };
+}
+
+/** Inspect whether Chrome/Chromium trusts the CA through its user NSS database. */
+function inspectLinuxNSSStore(
+  caCertPath: string,
+  envPath?: string
+): { state: BrowserTrustStoreState; hint?: string } {
+  const access = resolveNSSAccess(envPath);
+  if (access.status === "not-applicable") return { state: "not-applicable" };
+  if (access.status === "unavailable") return { state: "unavailable", hint: access.hint };
 
   try {
     const nickname = nssNickname(caCertPath);
-    const listing = nssCertutil(database, ["-L"], undefined, certutilPath);
+    const listing = nssCertutil(access.database, ["-L"], undefined, access.certutilPath);
     const flags = nssTrustFlagsForNickname(listing, nickname);
     if (!flags?.split(",")[0].includes("C")) {
       return { state: "untrusted", hint: "Run: portless trust" };
     }
-    const pem = nssCertutil(database, ["-L", "-n", nickname, "-a"], undefined, certutilPath);
+    const pem = nssCertutil(
+      access.database,
+      ["-L", "-n", nickname, "-a"],
+      undefined,
+      access.certutilPath
+    );
     const expected = new crypto.X509Certificate(fs.readFileSync(caCertPath)).fingerprint256;
     if (new crypto.X509Certificate(pem).fingerprint256 === expected) {
       return { state: "trusted" };
@@ -1032,28 +1052,15 @@ function installLinuxNSSStore(
   caCertPath: string,
   envPath?: string
 ): { state: BrowserTrustStoreState; error?: string } {
-  const database = linuxNSSDatabase();
-  if (!database) return { state: "not-applicable" };
-  if (process.getuid?.() === 0) {
-    try {
-      resolveRootNSSDrop(database);
-    } catch (error: unknown) {
-      return {
-        state: "unavailable",
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
-  }
-  const certutilPath = resolveExecutable("certutil", envPath);
-  if (!certutilPath) {
-    return { state: "unavailable", error: nssInstallHint(database) };
-  }
+  const access = resolveNSSAccess(envPath);
+  if (access.status === "not-applicable") return { state: "not-applicable" };
+  if (access.status === "unavailable") return { state: "unavailable", error: access.reason };
   try {
     nssCertutil(
-      database,
+      access.database,
       ["-A", "-n", nssNickname(caCertPath), "-t", "C,,"],
       fs.readFileSync(caCertPath, "utf-8"),
-      certutilPath
+      access.certutilPath
     );
   } catch (error: unknown) {
     return {
@@ -1067,15 +1074,12 @@ function installLinuxNSSStore(
 const PORTLESS_NSS_NICKNAME = new RegExp(`^${CA_COMMON_NAME} [0-9A-Fa-f]{64}$`);
 
 function removeLinuxNSSStore(caCertPath: string): { removed: boolean; error?: string } {
-  const database = linuxNSSDatabase();
-  if (!database) return { removed: true };
-  const certutilPath = resolveExecutable("certutil");
-  if (!certutilPath) {
-    return { removed: false, error: nssInstallHint(database) };
-  }
+  const access = resolveNSSAccess();
+  if (access.status === "not-applicable") return { removed: true };
+  if (access.status === "unavailable") return { removed: false, error: access.reason };
   try {
     const currentNickname = nssNickname(caCertPath);
-    const listing = nssCertutil(database, ["-L"], undefined, certutilPath);
+    const listing = nssCertutil(access.database, ["-L"], undefined, access.certutilPath);
     const nicknames = new Set<string>();
     for (const line of listing.split(/\r?\n/)) {
       const match = NSS_TRUST_LINE.exec(line.trim());
@@ -1085,7 +1089,7 @@ function removeLinuxNSSStore(caCertPath: string): { removed: boolean; error?: st
       }
     }
     for (const nickname of nicknames) {
-      nssCertutil(database, ["-D", "-n", nickname], undefined, certutilPath);
+      nssCertutil(access.database, ["-D", "-n", nickname], undefined, access.certutilPath);
     }
     return { removed: true };
   } catch (error: unknown) {
@@ -1437,6 +1441,21 @@ function addCATrustedMacOS(caCertPath: string): void {
   );
 }
 
+function unsupportedTrustResult(): {
+  state: "unavailable";
+  stores: TrustStores;
+  error: string;
+  hint?: string;
+} {
+  const { trust } = getPlatformCapabilities();
+  return {
+    state: "unavailable",
+    stores: { system: "unavailable", browser: "not-applicable" },
+    error: trust.supported ? `Unsupported platform: ${process.platform}` : trust.reason,
+    ...(!trust.supported ? { hint: trust.hint } : {}),
+  };
+}
+
 /**
  * Inspect the OS and browser trust stores for the portless CA.
  *
@@ -1536,21 +1555,7 @@ export function inspectTrust(
     };
   }
 
-  const caps = getPlatformCapabilities();
-  if (!caps.trust.supported) {
-    return {
-      state: "unavailable",
-      stores: { system: "unavailable", browser: "not-applicable" },
-      error: caps.trust.reason,
-      hint: caps.trust.hint,
-    };
-  }
-
-  return {
-    state: "unavailable",
-    stores: { system: "unavailable", browser: "not-applicable" },
-    error: `Unsupported platform: ${process.platform}`,
-  };
+  return unsupportedTrustResult();
 }
 
 /**
@@ -1643,20 +1648,7 @@ export function ensureTrust(
           );
         }
       } else {
-        const trust = getPlatformCapabilities().trust;
-        if (!trust.supported) {
-          return {
-            state: "unavailable",
-            stores: { system: "unavailable", browser: "not-applicable" },
-            error: trust.reason,
-            hint: trust.hint,
-          };
-        }
-        return {
-          state: "unavailable",
-          stores,
-          error: `Unsupported platform: ${process.platform}`,
-        };
+        return unsupportedTrustResult();
       }
       stores = { ...stores, system: "trusted" };
       installed = true;

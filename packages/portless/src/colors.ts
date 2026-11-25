@@ -9,6 +9,9 @@ const streamColor = {
   stdout: supportsColor(process.env, !!process.stdout.isTTY),
   stderr: supportsColor(process.env, !!process.stderr.isTTY),
 };
+/** Whether stdout supports ANSI color output. */
+export const stdoutColor = streamColor.stdout;
+
 const enabled = streamColor.stdout || streamColor.stderr;
 
 const COLOR_CODES = new RegExp(String.raw`\x1b\[(?:1|2|22|31|33|39)m`, "g");
