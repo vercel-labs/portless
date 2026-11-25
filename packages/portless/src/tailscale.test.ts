@@ -317,6 +317,7 @@ describe("share", () => {
   it("registers a service and surfaces an approval notice", () => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
     const { runner, calls } = runnerFor(status, {
+      "serve status --json": { stdout: "{}" },
       "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000": {
         stdout: "approval from an admin is required",
       },
@@ -335,9 +336,37 @@ describe("share", () => {
     ]);
   });
 
+  it("rejects a service already configured in tailscale serve status", () => {
+    const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
+    const { runner, calls } = runnerFor(status, {
+      "serve status --json": {
+        stdout: JSON.stringify({
+          Services: {
+            "svc:api": {
+              TCP: { "443": { HTTPS: true } },
+            },
+          },
+        }),
+      },
+    });
+    const claimShare = vi.fn(() => null);
+    expect(() =>
+      share({ kind: "service", serviceName: "api", localPort: 3000, runner, claimShare })
+    ).toThrow("Tailscale service svc:api is already in use");
+    expect(claimShare).not.toHaveBeenCalled();
+    expect(calls).not.toContainEqual([
+      "serve",
+      "--yes",
+      "--service=svc:api",
+      "--https=443",
+      "http://127.0.0.1:3000",
+    ]);
+  });
+
   it("claims a service share before registering it", () => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
     const { runner } = runnerFor(status, {
+      "serve status --json": { stdout: "{}" },
       "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000": {},
     });
     const claimShare = vi.fn(() => null);
@@ -351,7 +380,9 @@ describe("share", () => {
 
   it("rejects a service claim conflict without registering or releasing", () => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
-    const { runner, calls } = runnerFor(status);
+    const { runner, calls } = runnerFor(status, {
+      "serve status --json": { stdout: "{}" },
+    });
     const releaseShare = vi.fn();
     expect(() =>
       share({
@@ -363,13 +394,14 @@ describe("share", () => {
         releaseShare,
       })
     ).toThrow("Tailscale service svc:api is already in use by other.localhost.");
-    expect(calls).toEqual([["version"], ["status", "--json"]]);
+    expect(calls).toEqual([["version"], ["status", "--json"], ["serve", "status", "--json"]]);
     expect(releaseShare).not.toHaveBeenCalled();
   });
 
   it("releases a service claim when registration fails", () => {
     const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
     const { runner } = runnerFor(status, {
+      "serve status --json": { stdout: "{}" },
       "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000": {
         status: 1,
         stderr: "permission denied",

@@ -6863,7 +6863,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             PORTLESS_NGROK: "0",
             PORTLESS_NETBIRD: "0",
             PORTLESS_CLOUDFLARE: "0",
-            PATH: tmpDir,
+            PATH: [tmpDir, process.env.PATH].filter(Boolean).join(path.delimiter),
             ...sharingEnv,
           },
         });

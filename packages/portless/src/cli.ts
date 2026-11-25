@@ -2120,8 +2120,7 @@ async function runApp(
   // still Expo, and reading commandArgs[0] here would see only `bun`.
   const framework = resolveFrameworkBasename(commandArgs);
   const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
-  const requiresAllInterfaces = tunnels.some((t) => t.bindAllInterfaces);
-  const hostBind = isExpoLan ? undefined : requiresAllInterfaces ? "0.0.0.0" : "127.0.0.1";
+  const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
   // Ensure PORTLESS_LAN is propagated to child processes when the proxy
   // was started with --lan separately and discovered from the state marker,
@@ -2131,8 +2130,8 @@ async function runApp(
   }
 
   // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
-  injectPackageScriptFrameworkFlags(commandArgs, port, process.cwd(), hostBind);
-  injectFrameworkFlags(commandArgs, port, hostBind);
+  injectPackageScriptFrameworkFlags(commandArgs, port);
+  injectFrameworkFlags(commandArgs, port);
 
   // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
   // Server Components) trust portless-proxied HTTPS services. Node.js does

@@ -2627,11 +2627,7 @@ function invokesFrameworkServer(frameworkArgs: string[], framework: FrameworkSpe
  * HMR WebSocket to degrade. Outside LAN mode, `--host localhost` keeps the
  * server local.
  */
-export function injectFrameworkFlags(
-  commandArgs: string[],
-  port: number,
-  bindHost = "127.0.0.1"
-): string[] {
+export function injectFrameworkFlags(commandArgs: string[], port: number): string[] {
   const invocation = parseFrameworkInvocation(commandArgs);
   if (!invocation) return [];
   const { basename, framework, frameworkArgs, insertionIndex, separator } = invocation;
@@ -2655,7 +2651,7 @@ export function injectFrameworkFlags(
   if (!hasHostChoice) {
     const isExpoLan = basename === "expo" && isLanEnvEnabled();
     if (!isExpoLan) {
-      flags.push(hostFlag, basename === "expo" ? "localhost" : bindHost);
+      flags.push(hostFlag, basename === "expo" ? "localhost" : "127.0.0.1");
     }
   }
 
@@ -2951,8 +2947,7 @@ export function resolveScriptArgForwarding(
 export function injectPackageScriptFrameworkFlags(
   commandArgs: string[],
   port: number,
-  packageDir: string = process.cwd(),
-  bindHost = "127.0.0.1"
+  packageDir: string = process.cwd()
 ): void {
   const rawScript = resolvePackageScriptTokens(commandArgs, packageDir);
   if (!rawScript) return;
@@ -2966,7 +2961,7 @@ export function injectPackageScriptFrameworkFlags(
   // (and vice versa).
   const userExtras = commandArgs.slice(3).filter((arg) => arg !== "--");
   const probe = [...rawScript, ...userExtras];
-  const forwardedFlags = injectFrameworkFlags(probe, port, bindHost);
+  const forwardedFlags = injectFrameworkFlags(probe, port);
   if (forwardedFlags.length === 0) return;
 
   // npm requires `--` before arguments meant for the package script.

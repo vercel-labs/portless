@@ -76,6 +76,7 @@ interface TailscaleStatusJson {
 interface ServeStatusJson {
   Web?: Record<string, unknown>;
   TCP?: Record<string, unknown>;
+  Services?: Record<string, { Web?: Record<string, unknown>; TCP?: Record<string, unknown> }>;
   Foreground?: Record<string, ServeStatusJson>;
 }
 
@@ -344,6 +345,27 @@ function getUsedServePorts(runner: TailscaleCommandRunner): Set<number> {
   }
 }
 
+function getUsedServeServices(runner: TailscaleCommandRunner): Set<string> {
+  const result = runner(["serve", "status", "--json"]);
+  if (result.error || result.status !== 0) return new Set();
+  try {
+    const config = JSON.parse(result.stdout) as ServeStatusJson;
+    const services = new Set<string>();
+    for (const session of [config, ...Object.values(config.Foreground ?? {})]) {
+      if (!session || typeof session !== "object" || !session.Services) continue;
+      for (const [serviceId, entry] of Object.entries(session.Services)) {
+        if (!entry || typeof entry !== "object") continue;
+        const hasHandlers =
+          Object.keys(entry.Web ?? {}).length > 0 || Object.keys(entry.TCP ?? {}).length > 0;
+        if (hasHandlers) services.add(serviceId.toLowerCase());
+      }
+    }
+    return services;
+  } catch {
+    return new Set();
+  }
+}
+
 function findAvailablePort(used: Set<number>, transport: "https" | "tcp" | "funnel"): number {
   const pool =
     transport === "funnel"
@@ -437,6 +459,11 @@ export function share(options: ShareTailscaleOptions): TailscaleShareResult {
         serviceId: ready.serviceId!,
         serviceName: ready.serviceName!,
       };
+      if (getUsedServeServices(runner).has(record.serviceId.toLowerCase())) {
+        throw new Error(
+          `Tailscale service ${record.serviceId} is already in use. Stop the existing service serve or choose a different service name.`
+        );
+      }
       const conflict = options.claimShare?.(record);
       if (conflict) {
         throw new Error(`Tailscale service ${record.serviceId} is already in use by ${conflict}.`);

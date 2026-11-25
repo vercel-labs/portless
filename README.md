@@ -62,7 +62,7 @@ For Tailscale, `--tailscale-port <port>` or `PORTLESS_TAILSCALE_PORT` pins the s
 
 Use `--ngrok-url <url>` or `PORTLESS_NGROK_URL` to pin a custom or static ngrok URL. Either implies `--ngrok` and passes `--url` to `ngrok http`; `PORTLESS_NGROK` remains a `0`/`1` switch.
 
-NetBird sharing runs `netbird expose` and requires the NetBird CLI installed and connected with `netbird up`. It binds the child server to `0.0.0.0` and sets `PORTLESS_NETBIRD_URL` on the child. Use `PORTLESS_NETBIRD=1` to enable it or `0` to disable it. `--netbird-password <pw>`, `--netbird-pin <code>`, and `--netbird-groups <csv>` each imply `--netbird`; their environment equivalents are `PORTLESS_NETBIRD_PASSWORD`, `PORTLESS_NETBIRD_PIN`, and `PORTLESS_NETBIRD_GROUPS`. Portless records the tunnel PID for cleanup on exit and by `portless prune`.
+NetBird sharing runs `netbird expose` and requires the NetBird CLI installed and connected with `netbird up`. Portless keeps the child server bound to `127.0.0.1`, relays traffic through the local NetBird interface when available, and sets `PORTLESS_NETBIRD_URL` on the child. Use `PORTLESS_NETBIRD=1` to enable it or `0` to disable it. `--netbird-password <pw>`, `--netbird-pin <code>`, and `--netbird-groups <csv>` each imply `--netbird`; their environment equivalents are `PORTLESS_NETBIRD_PASSWORD`, `PORTLESS_NETBIRD_PIN`, and `PORTLESS_NETBIRD_GROUPS`. Portless records the tunnel PID for cleanup on exit and by `portless prune`.
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 

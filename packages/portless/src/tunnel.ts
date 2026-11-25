@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
+import * as net from "node:net";
 import { guardWindowsOrphans } from "./cli-utils.js";
 
 const START_TIMEOUT_MS = 30_000;
@@ -34,6 +35,7 @@ export interface TunnelStartOptions {
   password?: string;
   pin?: string;
   groups?: string[];
+  relayHost?: string;
   onExit?: (code: number | null, signal: NodeJS.Signals | null) => void;
   spawner?: TunnelSpawner;
   timeoutMs?: number;
@@ -65,7 +67,6 @@ export interface ProcessTunnelSpec {
   readonly install: string;
   readonly urlField: "ngrokUrl" | "cloudflareUrl" | "netbirdUrl";
   readonly pidField: "ngrokPid" | "cloudflarePid" | "netbirdPid";
-  readonly bindAllInterfaces?: boolean;
   readonly ensure: (runner?: TunnelCommandRunner) => void;
   readonly start: (localPort: number, options: TunnelStartOptions) => Promise<StartedTunnel>;
   readonly formatHint?: (message: string) => string[] | null;
@@ -413,15 +414,114 @@ const netbird: TunnelProvider = {
     "Timed out waiting for NetBird to print a public URL. Check that NetBird is connected and try again.",
 };
 
+/** Extract the peer's NetBird WireGuard IP from `netbird status --json` output. */
+export function extractNetbirdIp(stdout: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(stdout);
+    if (!parsed || typeof parsed !== "object" || !("netbirdIp" in parsed)) return null;
+    const raw = (parsed as { netbirdIp?: unknown }).netbirdIp;
+    if (typeof raw !== "string") return null;
+    const ip = raw.trim().split("/")[0] ?? "";
+    return net.isIP(ip) !== 0 ? ip : null;
+  } catch {
+    return null;
+  }
+}
+
+function isAllowedRelayPeer(remoteAddress: string | undefined, bindHost: string): boolean {
+  if (!remoteAddress) return false;
+  const normalized = remoteAddress.startsWith("::ffff:") ? remoteAddress.slice(7) : remoteAddress;
+  return normalized === bindHost || normalized === "127.0.0.1" || normalized === "::1";
+}
+
+function createNetbirdLoopbackRelay(
+  bindHost: string,
+  localPort: number
+): Promise<{ port: number; close: () => void } | null> {
+  return new Promise((resolve) => {
+    const sockets = new Set<net.Socket>();
+    const server = net.createServer((client) => {
+      if (!isAllowedRelayPeer(client.remoteAddress, bindHost)) {
+        client.destroy();
+        return;
+      }
+      const upstream = net.connect(localPort, "127.0.0.1");
+      sockets.add(client);
+      sockets.add(upstream);
+      const cleanup = () => {
+        sockets.delete(client);
+        sockets.delete(upstream);
+        client.destroy();
+        upstream.destroy();
+      };
+      client.on("error", cleanup);
+      upstream.on("error", cleanup);
+      client.on("close", cleanup);
+      upstream.on("close", cleanup);
+      client.pipe(upstream);
+      upstream.pipe(client);
+    });
+    server.once("error", () => resolve(null));
+    server.listen(0, bindHost, () => {
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        server.close();
+        resolve(null);
+        return;
+      }
+      resolve({
+        port: address.port,
+        close: () => {
+          for (const socket of sockets) socket.destroy();
+          sockets.clear();
+          try {
+            server.close();
+          } catch {
+            return;
+          }
+        },
+      });
+    });
+  });
+}
+
 export function ensureNetbirdAvailable(runner?: TunnelCommandRunner): void {
   ensureTunnelAvailable(netbird, runner);
 }
 
-export function startNetbird(
+export async function startNetbird(
   localPort: number,
   options: TunnelStartOptions = {}
 ): Promise<StartedTunnel> {
-  return startTunnel(netbird, localPort, options);
+  let relayHost = options.relayHost;
+  if (!relayHost && !options.spawner) {
+    const status = defaultRunner(netbird.binary, netbird.versionArgs);
+    if (!status.error && status.status === 0) {
+      relayHost = extractNetbirdIp(status.stdout) ?? undefined;
+    }
+  }
+  const relay = relayHost ? await createNetbirdLoopbackRelay(relayHost, localPort) : null;
+  const exposePort = relay ? relay.port : localPort;
+  const closeRelay = () => relay?.close();
+  try {
+    const started = await startTunnel(netbird, exposePort, {
+      ...options,
+      onExit: (code, signal) => {
+        closeRelay();
+        options.onExit?.(code, signal);
+      },
+    });
+    if (!relay) return started;
+    const rawKill = started.child.kill.bind(started.child);
+    started.child.kill = (signal?: NodeJS.Signals) => {
+      closeRelay();
+      return rawKill(signal);
+    };
+    return started;
+  } catch (err) {
+    closeRelay();
+    throw err;
+  }
 }
 
 export const PROCESS_TUNNELS: readonly ProcessTunnelSpec[] = [
@@ -462,7 +562,6 @@ export const PROCESS_TUNNELS: readonly ProcessTunnelSpec[] = [
     install: "https://netbird.io/download",
     urlField: "netbirdUrl",
     pidField: "netbirdPid",
-    bindAllInterfaces: true,
     ensure: ensureNetbirdAvailable,
     start: startNetbird,
     formatHint: (message) =>
