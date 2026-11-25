@@ -917,7 +917,9 @@ describe("Linux CA trust", () => {
       expect(result.hint).toMatch(/certutil|libnss3-tools/);
 
       vi.stubEnv("PATH", "");
-      expect(untrustCA(tmpDir)).toEqual({ removed: true });
+      const removal = untrustCA(tmpDir);
+      expect(removal.removed).toBe(false);
+      expect(removal.error).toMatch(/certutil|libnss3-tools/);
     }
   );
 
@@ -948,6 +950,13 @@ describe("Linux CA trust", () => {
       expect(second.state).toBe("trusted");
       expect(second.stores).toEqual({ system: "trusted", browser: "trusted" });
 
+      vi.stubEnv("PATH", "");
+      const blockedRemoval = untrustCA(tmpDir);
+      expect(blockedRemoval.removed).toBe(false);
+      expect(blockedRemoval.error).toMatch(/certutil|libnss3-tools/);
+      expect(fs.existsSync(path.join(nssdb, ".stub-nss-store.pem"))).toBe(true);
+
+      vi.stubEnv("PATH", fakePath());
       expect(untrustCA(tmpDir)).toEqual({ removed: true });
       expect(fs.existsSync(path.join(nssdb, ".stub-nss-store.pem"))).toBe(false);
     }

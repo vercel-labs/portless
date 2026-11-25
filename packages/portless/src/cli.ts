@@ -2727,10 +2727,12 @@ function cleanupStepLabel(step: CleanupStep): string {
   return "hosts file";
 }
 
-/** Whether the local CA is installed in any OS or browser trust store. */
-function hasInstalledCATrust(stateDir: string): boolean {
+/** Whether CA trust remains installed or cannot be verified removed in a browser NSS store. */
+function hasRemainingCATrust(stateDir: string): boolean {
   const { stores } = inspectTrust(stateDir);
-  return stores.system === "trusted" || stores.browser === "trusted";
+  return (
+    stores.system === "trusted" || stores.browser === "trusted" || stores.browser === "unavailable"
+  );
 }
 
 /** Whether CA identity must survive because removal or trust refresh is unfinished. */
@@ -2738,7 +2740,7 @@ function shouldPreserveCAIdentity(stateDir: string, failedCAStateDirs: Set<strin
   return (
     failedCAStateDirs.has(stateDir) ||
     isCATrustRefreshPending(stateDir) ||
-    hasInstalledCATrust(stateDir)
+    hasRemainingCATrust(stateDir)
   );
 }
 
@@ -2998,7 +3000,7 @@ async function handleClean(args: string[]): Promise<void> {
         if (
           canInspectStateDir(stateDir) &&
           !isCATrustRefreshPending(stateDir) &&
-          !hasInstalledCATrust(stateDir)
+          !hasRemainingCATrust(stateDir)
         ) {
           failedCAStateDirs.delete(stateDir);
         }

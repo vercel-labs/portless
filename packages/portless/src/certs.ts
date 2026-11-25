@@ -978,7 +978,9 @@ function removeLinuxNSSStore(caCertPath: string): { removed: boolean; error?: st
   const database = linuxNSSDatabase();
   if (!database) return { removed: true };
   const certutilPath = resolveExecutable("certutil");
-  if (!certutilPath) return { removed: true };
+  if (!certutilPath) {
+    return { removed: false, error: nssInstallHint(database) };
+  }
   try {
     const currentNickname = nssNickname(caCertPath);
     const listing = nssCertutil(database, ["-L"], undefined, certutilPath);
