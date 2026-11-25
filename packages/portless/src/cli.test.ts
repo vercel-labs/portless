@@ -48,7 +48,8 @@ VeuruL5f30jD8PbGa2A91T5e1oaoL5ap6bdl
 /** Run the CLI with the given args and optional env/cwd overrides. */
 function run(args: string[], options?: { env?: Record<string, string | undefined>; cwd?: string }) {
   const env: Record<string, string | undefined> = { ...process.env };
-  delete env.PORTLESS_PREFIX;
+  if (options?.cwd === undefined) env.PORTLESS_PREFIX = "";
+  else delete env.PORTLESS_PREFIX;
   Object.assign(env, options?.env);
   env.NO_COLOR = "1";
   // Vitest runs under pnpm; strip parent-only vars so the CLI child does not look like pnpm dlx / npx.
@@ -5076,6 +5077,7 @@ describe("CLI", { timeout: 15_000 }, () => {
         );
 
         const { status } = run(["run", "--name", "myapp", "node", scriptPath], {
+          cwd: tmpDir,
           env: {
             PORTLESS_STATE_DIR: tmpDir,
             PORTLESS_HTTPS: "0",
@@ -5490,6 +5492,20 @@ describe("CLI", { timeout: 15_000 }, () => {
       fs.rmSync(tmpDir, { recursive: true, force: true });
     });
 
+    it.skipIf(process.platform === "win32")(
+      "refuses to read a symlinked proxy PID when stopping",
+      () => {
+        const target = path.join(tmpDir, "private-data");
+        fs.writeFileSync(target, "sensitive value");
+        fs.symlinkSync(target, path.join(tmpDir, "proxy.pid"));
+        const stop = run(["proxy", "stop"], { cwd: tmpDir, env: proxyEnv() });
+        expect(stop.status).toBe(1);
+        expect(stop.stderr).toContain("Unsafe proxy state file");
+        expect(stop.stderr).not.toContain("sensitive value");
+        expect(fs.readFileSync(target, "utf-8")).toBe("sensitive value");
+      }
+    );
+
     it("starts the proxy and stops it cleanly", () => {
       const start = run(["proxy", "start"], { env: proxyEnv() });
       expect(start.status).toBe(0);
@@ -5516,6 +5532,184 @@ describe("CLI", { timeout: 15_000 }, () => {
       // auto-start reuses it.
       expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
     });
+
+    it("preserves unprivileged HTTPS across restart and honors explicit HTTP", async () => {
+      const env = { ...proxyEnv(), PORTLESS_HTTPS: undefined };
+      const start = run(["proxy", "start", "--unprivileged", "--https"], { env });
+      expect(start.status, start.stdout + start.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const stop = run(["proxy", "stop"], { env });
+      expect(stop.status, stop.stdout + stop.stderr).toBe(0);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+      expect(fs.existsSync(path.join(tmpDir, "proxy.start"))).toBe(false);
+
+      const restart = run(["proxy", "start"], { env });
+      expect(restart.status, restart.stdout + restart.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      const header = await new Promise<string | string[] | undefined>((resolve, reject) => {
+        const req = https.get(
+          { hostname: "127.0.0.1", port: testPort, rejectUnauthorized: false, timeout: 2000 },
+          (res) => {
+            res.resume();
+            resolve(res.headers["x-portless"]);
+          }
+        );
+        req.on("error", reject);
+        req.on("timeout", () => req.destroy(new Error("HTTPS request timed out")));
+      });
+      expect(header).toBe("1");
+      expect(run(["proxy", "stop"], { env }).status).toBe(0);
+
+      const plain = run(["proxy", "start", "--no-tls"], { env });
+      expect(plain.status, plain.stdout + plain.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+    }, 30_000);
+
+    it("refuses a second proxy on another port in the same state directory", async () => {
+      const start = run(["proxy", "start"], { env: proxyEnv() });
+      expect(start.status, start.stdout + start.stderr).toBe(0);
+      const pid = fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8");
+      const otherPort = await getFreePort();
+      const second = run(["proxy", "start", "-p", String(otherPort)], { env: proxyEnv() });
+      expect(second.status).toBe(1);
+      expect(second.stderr).toContain(`A proxy is already running on port ${testPort}`);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.pid"), "utf-8")).toBe(pid);
+      expect(fs.readFileSync(path.join(tmpDir, "proxy.port"), "utf-8")).toBe(String(testPort));
+    });
+
+    it("uses HTTP for an explicit unprivileged restart after remembered HTTPS", async () => {
+      const env = {
+        ...proxyEnv(),
+        PORTLESS_HTTPS: undefined,
+        PORTLESS_UNPRIVILEGED: undefined,
+      };
+      const start = run(["proxy", "start", "--unprivileged", "--https"], { cwd: tmpDir, env });
+      expect(start.status, start.stdout + start.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(run(["proxy", "stop"], { cwd: tmpDir, env }).status).toBe(0);
+
+      const bare = run(["proxy", "start"], { cwd: tmpDir, env });
+      expect(bare.status, bare.stdout + bare.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+      expect(run(["proxy", "stop"], { cwd: tmpDir, env }).status).toBe(0);
+
+      const explicit = run(["proxy", "start", "--unprivileged"], { cwd: tmpDir, env });
+      expect(explicit.status, explicit.stdout + explicit.stderr).toBe(0);
+      await waitForHttpHeader(testPort, "X-Portless", "1");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+      const acceptsHttps = await new Promise<boolean>((resolve) => {
+        const req = https.get(
+          { hostname: "127.0.0.1", port: testPort, rejectUnauthorized: false },
+          (res) => {
+            res.resume();
+            resolve(true);
+          }
+        );
+        req.on("error", () => resolve(false));
+        req.setTimeout(2000, () => req.destroy());
+      });
+      expect(acceptsHttps).toBe(false);
+    }, 30_000);
+
+    it("uses HTTP for an explicit unprivileged auto-start with stale HTTPS state", () => {
+      fs.writeFileSync(path.join(tmpDir, "proxy.tls"), "1");
+      fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+      fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(testPort));
+      const env = {
+        ...proxyEnv(),
+        PORTLESS_HTTPS: undefined,
+        PORTLESS_UNPRIVILEGED: "1",
+        PORTLESS_SYNC_HOSTS: "0",
+      };
+      const app = run(
+        ["run", "--name", "myapp", process.execPath, "-e", "console.log('APP_STARTED')"],
+        { cwd: tmpDir, env }
+      );
+      expect(app.status, app.stdout + app.stderr).toBe(0);
+      expect(app.stdout).toContain("APP_STARTED");
+      expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+    });
+
+    it.each([
+      ["elevated", false],
+      ["unprivileged", true],
+    ])(
+      "keeps saved plain HTTP on crash recovery with PORTLESS_UNPRIVILEGED=0 (%s)",
+      (_label, hadUnprivileged) => {
+        fs.writeFileSync(path.join(tmpDir, "proxy.port"), String(testPort));
+        if (hadUnprivileged) {
+          fs.writeFileSync(path.join(tmpDir, "proxy.unprivileged"), "1");
+        }
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_PORT: undefined,
+          PORTLESS_HTTPS: undefined,
+          PORTLESS_UNPRIVILEGED: "0",
+          PORTLESS_SYNC_HOSTS: "0",
+        };
+        const app = run(
+          ["run", "--name", "myapp", process.execPath, "-e", "console.log('APP_STARTED')"],
+          { cwd: tmpDir, env }
+        );
+        expect(app.status, app.stdout + app.stderr).toBe(0);
+        expect(app.stdout).toContain("APP_STARTED");
+        expect(app.stderr).toContain(`http://myapp.localhost:${testPort}`);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(false);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(false);
+        expect(fs.readFileSync(path.join(tmpDir, "proxy.port"), "utf-8")).toBe(String(testPort));
+      }
+    );
+
+    it.runIf(process.platform === "darwin")(
+      "auto-starts an unprivileged HTTPS proxy without trusting its CA",
+      async () => {
+        const bin = path.join(tmpDir, "bin");
+        const log = path.join(tmpDir, "trust-commands.log");
+        fs.mkdirSync(bin);
+        for (const command of ["security", "sudo"]) {
+          fs.writeFileSync(
+            path.join(bin, command),
+            `#!/bin/sh\nprintf '${command} %s\\n' "$*" >> "$PORTLESS_TEST_TRUST_LOG"\nexit 1\n`,
+            { mode: 0o755 }
+          );
+        }
+        const env = {
+          ...proxyEnv(),
+          PORTLESS_HTTPS: undefined,
+          PORTLESS_UNPRIVILEGED: undefined,
+          PORTLESS_SYNC_HOSTS: "0",
+          PORTLESS_TEST_TRUST_LOG: log,
+          PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+        };
+        const start = run(["proxy", "start", "--unprivileged", "--https"], { cwd: tmpDir, env });
+        expect(start.status, start.stdout + start.stderr).toBe(0);
+        expect(run(["proxy", "stop"], { cwd: tmpDir, env }).status).toBe(0);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.pid"))).toBe(false);
+        expect(fs.readFileSync(log, "utf-8")).toContain("security verify-cert");
+        expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+        fs.writeFileSync(log, "");
+
+        const app = run(
+          ["run", "--name", "myapp", process.execPath, "-e", "console.log('APP_STARTED')"],
+          {
+            cwd: tmpDir,
+            env,
+          }
+        );
+        expect(app.status, app.stdout + app.stderr).toBe(0);
+        expect(app.stderr).toContain("Starting proxy");
+        expect(app.stdout).toContain("APP_STARTED");
+        expect(fs.existsSync(path.join(tmpDir, "proxy.unprivileged"))).toBe(true);
+        expect(fs.existsSync(path.join(tmpDir, "proxy.tls"))).toBe(true);
+        const commands = fs.readFileSync(log, "utf-8");
+        expect(commands).not.toContain("security add-trusted-cert");
+        expect(commands).not.toContain("sudo ");
+        expect(fs.existsSync(path.join(tmpDir, "ca.trusted"))).toBe(false);
+      },
+      30_000
+    );
 
     it("reads unprivileged mode from PORTLESS_UNPRIVILEGED", async () => {
       const start = run(["proxy", "start"], {

@@ -8,12 +8,12 @@ import * as path from "node:path";
 import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
+import { DEFAULT_TLD, ProxyState, parseTldList } from "./proxy-state.js";
 import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
 import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
 import {
   createLoopbackConnection,
   findStateDirProblem,
-  fixOwnership,
   parsePort,
   resolveUserHome,
 } from "./utils.js";
@@ -79,31 +79,6 @@ export const LEGACY_SYSTEM_STATE_DIR = isWindows
 
 /** Per-user state directory. All proxy state lives here regardless of port. */
 export const USER_STATE_DIR = path.join(resolveUserHome(), ".portless");
-
-/** Minimum app port when finding a free port. */
-const MIN_APP_PORT = 4000;
-
-/** Maximum app port when finding a free port. */
-const MAX_APP_PORT = 4999;
-
-/** Number of random port attempts before sequential scan. */
-const RANDOM_PORT_ATTEMPTS = 50;
-
-/**
- * Ports that browsers block for security reasons (WHATWG fetch spec "bad port"
- * list). Frameworks like Next.js also reject these. We skip them when
- * auto-selecting a port so the child process is never handed a port that the
- * browser will refuse to connect to.
- *
- * @see https://fetch.spec.whatwg.org/#port-blocking
- */
-export const BLOCKED_PORTS: ReadonlySet<number> = new Set([
-  0, 1, 7, 9, 11, 13, 15, 17, 19, 20, 21, 22, 23, 25, 37, 42, 43, 53, 69, 77, 79, 87, 95, 101, 102,
-  103, 104, 109, 110, 111, 113, 115, 117, 119, 123, 135, 137, 139, 143, 161, 179, 389, 427, 465,
-  512, 513, 514, 515, 526, 530, 531, 532, 540, 548, 554, 556, 563, 587, 601, 636, 989, 990, 993,
-  995, 1719, 1720, 1723, 2049, 3659, 4045, 4190, 5060, 5061, 6000, 6566, 6665, 6666, 6667, 6668,
-  6669, 6679, 6697, 10080,
-]);
 
 /** TCP connect timeout (ms) when checking if something is listening. */
 const SOCKET_TIMEOUT_MS = 500;
@@ -479,135 +454,13 @@ export function getDefaultPort(tls?: boolean): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Determine the state directory for a given proxy port.
+ * Determine the state directory.
  * Always returns USER_STATE_DIR (~/.portless) unless PORTLESS_STATE_DIR is set.
  */
-export function resolveStateDir(_port?: number): string {
+export function resolveStateDir(): string {
   if (process.env.PORTLESS_STATE_DIR) return process.env.PORTLESS_STATE_DIR;
   return USER_STATE_DIR;
 }
-
-/** Read the proxy port from a given state directory. Returns null if unreadable. */
-export function readPortFromDir(dir: string): number | null {
-  try {
-    const raw = fs.readFileSync(path.join(dir, "proxy.port"), "utf-8").trim();
-    const port = parseInt(raw, 10);
-    return isNaN(port) ? null : port;
-  } catch {
-    return null;
-  }
-}
-
-/** Name of the marker file that indicates the proxy is running with TLS. */
-const TLS_MARKER_FILE = "proxy.tls";
-const CUSTOM_CERT_MARKER_FILE = "proxy.custom-cert";
-
-/** Read the TLS marker from a state directory. */
-export function readTlsMarker(dir: string): boolean {
-  try {
-    return fs.existsSync(path.join(dir, TLS_MARKER_FILE));
-  } catch {
-    return false;
-  }
-}
-
-/** Write or remove the TLS marker in the state directory. */
-export function writeTlsMarker(dir: string, enabled: boolean): void {
-  const markerPath = path.join(dir, TLS_MARKER_FILE);
-  if (enabled) {
-    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
-    fixOwnership(markerPath);
-  } else {
-    try {
-      fs.unlinkSync(markerPath);
-    } catch {
-      // Marker may already be absent; non-fatal
-    }
-  }
-}
-
-/** Name of the marker file that remembers unprivileged mode across proxy restarts. */
-const UNPRIVILEGED_MARKER_FILE = "proxy.unprivileged";
-
-/** Read the unprivileged-mode marker from a state directory. */
-export function readUnprivilegedMarker(dir: string): boolean {
-  try {
-    return fs.existsSync(path.join(dir, UNPRIVILEGED_MARKER_FILE));
-  } catch {
-    return false;
-  }
-}
-
-/** Write or remove the unprivileged-mode marker in the state directory. */
-export function writeUnprivilegedMarker(dir: string, enabled: boolean): void {
-  const markerPath = path.join(dir, UNPRIVILEGED_MARKER_FILE);
-  if (enabled) {
-    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
-    fixOwnership(markerPath);
-  } else {
-    try {
-      fs.unlinkSync(markerPath);
-    } catch {
-      // Marker may already be absent; non-fatal
-    }
-  }
-}
-
-export function readCustomCertMarker(dir: string): boolean {
-  try {
-    return fs.existsSync(path.join(dir, CUSTOM_CERT_MARKER_FILE));
-  } catch {
-    return false;
-  }
-}
-
-export function writeCustomCertMarker(dir: string, enabled: boolean): void {
-  const markerPath = path.join(dir, CUSTOM_CERT_MARKER_FILE);
-  if (enabled) {
-    fs.writeFileSync(markerPath, "1", { mode: 0o644 });
-    fixOwnership(markerPath);
-  } else {
-    try {
-      fs.unlinkSync(markerPath);
-    } catch {
-      // Marker may already be absent; non-fatal
-    }
-  }
-}
-
-/**
- * Name of the marker file that remembers LAN mode across proxy restarts.
- * While the proxy is running, the file stores the last known LAN IP.
- */
-const LAN_MARKER_FILE = "proxy.lan";
-
-/** Read the LAN marker from a state directory. Returns the last known IP or null. */
-export function readLanMarker(dir: string): string | null {
-  try {
-    const raw = fs.readFileSync(path.join(dir, LAN_MARKER_FILE), "utf-8").trim();
-    return raw || null;
-  } catch {
-    return null;
-  }
-}
-
-/** Write or remove the LAN marker in the state directory. */
-export function writeLanMarker(dir: string, ip: string | null): void {
-  const markerPath = path.join(dir, LAN_MARKER_FILE);
-  if (!ip) {
-    try {
-      fs.unlinkSync(markerPath);
-    } catch {
-      // Marker may already be absent; non-fatal
-    }
-  } else {
-    fs.writeFileSync(markerPath, ip, { mode: 0o644 });
-    fixOwnership(markerPath);
-  }
-}
-
-/** Default TLD when PORTLESS_TLD is not set. */
-export const DEFAULT_TLD = "localhost";
 
 /** TLDs that work but have known pitfalls worth warning about. */
 export const RISKY_TLDS = new Map<string, string>([
@@ -646,129 +499,6 @@ export function getRiskyTldReason(tld: string): string | undefined {
     if (tld.endsWith(`.${risky}`)) return RISKY_TLDS.get(risky);
   }
   return undefined;
-}
-
-/**
- * Validate a TLD string. Returns an error message if invalid, or null if OK.
- * Does not check for risky TLDs (those produce warnings, not errors).
- */
-export function validateTld(tld: string): string | null {
-  if (!tld) return "TLD cannot be empty";
-  if (tld.length > 253) {
-    return `Invalid TLD "${tld}": exceeds 253-character DNS limit`;
-  }
-
-  const labelRe = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/;
-  const labels = tld.split(".");
-  for (const label of labels) {
-    if (!label) {
-      return `Invalid TLD "${tld}": labels cannot be empty`;
-    }
-    if (label.length > 63) {
-      return `Invalid TLD "${tld}": label "${label}" exceeds 63-character DNS limit`;
-    }
-    if (!labelRe.test(label)) {
-      return `Invalid TLD "${tld}": labels must contain only lowercase letters, digits, and interior hyphens`;
-    }
-  }
-  return null;
-}
-
-/** Parse a comma separated TLD list and remove duplicates in order. */
-export function parseTldList(value: string, source = "TLD"): string[] {
-  const trimmed = value.trim();
-  if (!trimmed) return [];
-
-  const tlds: string[] = [];
-  const seen = new Set<string>();
-  for (const rawPart of trimmed.split(",")) {
-    const tld = rawPart.trim().toLowerCase();
-    const err = validateTld(tld);
-    if (err) throw new Error(source === "TLD" ? err : `${source}: ${err}`);
-    if (!seen.has(tld)) {
-      seen.add(tld);
-      tlds.push(tld);
-    }
-  }
-  return tlds;
-}
-
-/** Name of the file that stores the proxy's active TLD. */
-const TLD_FILE = "proxy.tld";
-const TLDS_FILE = "proxy.tlds";
-
-function readLegacyTldFromDir(dir: string): string {
-  try {
-    const raw = fs.readFileSync(path.join(dir, TLD_FILE), "utf-8").trim();
-    return raw || DEFAULT_TLD;
-  } catch {
-    return DEFAULT_TLD;
-  }
-}
-
-/** Read all TLDs from a state directory. Returns the default TLD if absent. */
-export function readTldsFromDir(dir: string): string[] {
-  try {
-    const raw = fs.readFileSync(path.join(dir, TLDS_FILE), "utf-8").trim();
-    const parsed = raw.startsWith("[")
-      ? JSON.parse(raw)
-      : raw
-          .split(/\r?\n/)
-          .flatMap((line) => line.split(","))
-          .map((line) => line.trim())
-          .filter(Boolean);
-    if (!Array.isArray(parsed)) return [readLegacyTldFromDir(dir)];
-    // Skip invalid persisted entries individually so one bad TLD (e.g. written
-    // before validation tightened) does not silently reset the whole list.
-    const tlds = parsed.flatMap((value) => {
-      if (typeof value !== "string") return [];
-      try {
-        return parseTldList(value);
-      } catch (err) {
-        console.warn(
-          `Warning: ignoring invalid TLD entry in ${TLDS_FILE}: ${err instanceof Error ? err.message : String(err)}`
-        );
-        return [];
-      }
-    });
-    return tlds.length > 0 ? [...new Set(tlds)] : [DEFAULT_TLD];
-  } catch {
-    return [readLegacyTldFromDir(dir)];
-  }
-}
-
-/** Read the primary TLD from a state directory. Returns DEFAULT_TLD if absent. */
-export function readTldFromDir(dir: string): string {
-  return readTldsFromDir(dir)[0] ?? DEFAULT_TLD;
-}
-
-/** Write or remove the TLD files in the state directory. */
-export function writeTldsFile(dir: string, tlds: readonly string[]): void {
-  const uniqueTlds = [...new Set(tlds)];
-  const tldsPath = path.join(dir, TLDS_FILE);
-  const tldPath = path.join(dir, TLD_FILE);
-
-  if (uniqueTlds.length === 1 && uniqueTlds[0] === DEFAULT_TLD) {
-    try {
-      fs.unlinkSync(tldsPath);
-    } catch {
-      // File may already be absent; non-fatal
-    }
-    try {
-      fs.unlinkSync(tldPath);
-    } catch {
-      // File may already be absent; non-fatal
-    }
-  } else {
-    fs.writeFileSync(tldsPath, uniqueTlds.join("\n") + "\n", { mode: 0o644 });
-    fs.writeFileSync(tldPath, uniqueTlds[0] ?? DEFAULT_TLD, { mode: 0o644 });
-    fixOwnership(tldsPath, tldPath);
-  }
-}
-
-/** Write or remove the primary TLD file in the state directory. */
-export function writeTldFile(dir: string, tld: string): void {
-  writeTldsFile(dir, [tld]);
 }
 
 /**
@@ -832,36 +562,6 @@ export function isLanEnvEnabled(): boolean {
 export function isUnprivilegedEnvEnabled(): boolean {
   const val = process.env.PORTLESS_UNPRIVILEGED;
   return val === "1" || val === "true";
-}
-
-/**
- * Read the last-known proxy configuration from the state directory on disk.
- * Unlike {@link discoverState}, this does not check whether the proxy is
- * actually running. It simply reads whatever state files exist so a
- * subsequent auto-start can reuse the previous settings.
- *
- * Returns null when no prior state is found.
- */
-export function readPersistedProxyState(): {
-  port: number;
-  tls: boolean;
-  tld: string;
-  tlds: string[];
-  lanMode: boolean;
-  unprivileged: boolean;
-} | null {
-  const dir = process.env.PORTLESS_STATE_DIR || USER_STATE_DIR;
-  const port = readPortFromDir(dir);
-  if (port !== null) {
-    const tls = readTlsMarker(dir);
-    const tlds = readTldsFromDir(dir);
-    const tld = tlds[0] ?? DEFAULT_TLD;
-    const lanIp = readLanMarker(dir);
-    const unprivileged = readUnprivilegedMarker(dir);
-    return { port, tls, tld, tlds, lanMode: lanIp !== null, unprivileged };
-  }
-
-  return null;
 }
 
 export function buildProxyStartConfig(options: {
@@ -951,78 +651,59 @@ export async function discoverState(): Promise<{
   // Env var override
   if (process.env.PORTLESS_STATE_DIR) {
     const dir = process.env.PORTLESS_STATE_DIR;
-    const port = readPortFromDir(dir) ?? getDefaultPort();
-    const lanIp = readLanMarker(dir);
-    if ((await isProxyRunning(port)) || (await isPortListening(port))) {
-      const tls = readTlsMarker(dir);
-      const tlds = readTldsFromDir(dir);
-      const tld = tlds[0] ?? DEFAULT_TLD;
-      return {
-        dir,
-        port,
-        tls,
-        tld,
-        tlds,
-        lanMode: lanIp !== null,
-        lanIp,
-      };
-    }
-
-    const tlds = readTldsFromDir(dir);
+    const state = new ProxyState(dir).read();
+    const port = state.port ?? getDefaultPort();
+    const running = (await isProxyRunning(port)) || (await isPortListening(port));
     return {
       dir,
       port,
-      tls: readTlsMarker(dir),
-      tld: tlds[0] ?? DEFAULT_TLD,
-      tlds,
-      lanMode: lanIp !== null,
-      lanIp: null,
+      tls: state.tls,
+      tld: state.tlds[0] ?? DEFAULT_TLD,
+      tlds: state.tlds,
+      lanMode: state.lanIp !== null,
+      lanIp: running ? state.lanIp : null,
     };
   }
 
   // Check user-level state first (~/.portless)
-  const userPort = readPortFromDir(USER_STATE_DIR);
+  const userState = new ProxyState(USER_STATE_DIR);
+  const userPort = userState.readPort();
   if (userPort !== null) {
     // Always use plain HTTP for the liveness check. The TLS-enabled proxy
     // accepts plain HTTP via byte-peeking, so this works for both modes and
     // avoids TLS handshake timeouts that can cause false negatives.
     if (await isProxyRunning(userPort)) {
-      const tls = readTlsMarker(USER_STATE_DIR);
-      const tlds = readTldsFromDir(USER_STATE_DIR);
-      const tld = tlds[0] ?? DEFAULT_TLD;
-      const lanIp = readLanMarker(USER_STATE_DIR);
+      const settings = userState.read();
       return {
         dir: USER_STATE_DIR,
         port: userPort,
-        tls,
-        tld,
-        tlds,
-        lanMode: lanIp !== null,
-        lanIp,
+        tls: settings.tls,
+        tld: settings.tlds[0] ?? DEFAULT_TLD,
+        tlds: settings.tlds,
+        lanMode: settings.lanIp !== null,
+        lanIp: settings.lanIp,
       };
     }
   }
 
   // Check legacy system-level state (/tmp/portless) for proxies started with
   // older versions. Read-only: no root operations are performed on this path.
-  const legacyPort =
+  const legacyState =
     findStateDirProblem(LEGACY_SYSTEM_STATE_DIR) === null
-      ? readPortFromDir(LEGACY_SYSTEM_STATE_DIR)
+      ? new ProxyState(LEGACY_SYSTEM_STATE_DIR)
       : null;
-  if (legacyPort !== null) {
+  const legacyPort = legacyState?.readPort() ?? null;
+  if (legacyState && legacyPort !== null) {
     if (await isProxyRunning(legacyPort)) {
-      const tls = readTlsMarker(LEGACY_SYSTEM_STATE_DIR);
-      const tlds = readTldsFromDir(LEGACY_SYSTEM_STATE_DIR);
-      const tld = tlds[0] ?? DEFAULT_TLD;
-      const lanIp = readLanMarker(LEGACY_SYSTEM_STATE_DIR);
+      const settings = legacyState.read();
       return {
         dir: LEGACY_SYSTEM_STATE_DIR,
         port: legacyPort,
-        tls,
-        tld,
-        tlds,
-        lanMode: lanIp !== null,
-        lanIp,
+        tls: settings.tls,
+        tld: settings.tlds[0] ?? DEFAULT_TLD,
+        tlds: settings.tlds,
+        lanMode: settings.lanIp !== null,
+        lanIp: settings.lanIp,
       };
     }
   }
@@ -1034,35 +715,31 @@ export async function discoverState(): Promise<{
   const probePorts = new Set([443, 80, FALLBACK_PROXY_PORT, configuredPort]);
   for (const port of probePorts) {
     if (await isProxyRunning(port)) {
-      const dir = resolveStateDir(port);
-      const markerTls = readTlsMarker(dir);
+      const dir = resolveStateDir();
+      const state = new ProxyState(dir).read();
       // When the marker is missing, infer TLS from the port:
       // 443 is always HTTPS, 80 is always HTTP.
-      const tls = markerTls || port === getProtocolPort(true);
-      const tlds = readTldsFromDir(dir);
-      const tld = tlds[0] ?? DEFAULT_TLD;
-      const lanIp = readLanMarker(dir);
       return {
         dir,
         port,
-        tls,
-        tld,
-        tlds,
-        lanMode: lanIp !== null,
-        lanIp,
+        tls: state.tls || port === getProtocolPort(true),
+        tld: state.tlds[0] ?? DEFAULT_TLD,
+        tlds: state.tlds,
+        lanMode: state.lanIp !== null,
+        lanIp: state.lanIp,
       };
     }
   }
 
-  const dir = resolveStateDir(configuredPort);
-  const tlds = readTldsFromDir(dir);
+  const dir = resolveStateDir();
+  const state = new ProxyState(dir).read();
   return {
     dir,
     port: configuredPort,
-    tls: readTlsMarker(dir),
-    tld: tlds[0] ?? DEFAULT_TLD,
-    tlds,
-    lanMode: readLanMarker(dir) !== null,
+    tls: state.tls,
+    tld: state.tlds[0] ?? DEFAULT_TLD,
+    tlds: state.tlds,
+    lanMode: state.lanIp !== null,
     lanIp: null,
   };
 }
@@ -1070,68 +747,6 @@ export async function discoverState(): Promise<{
 // ---------------------------------------------------------------------------
 // Port utilities
 // ---------------------------------------------------------------------------
-
-/**
- * Addresses an app port must be free on. A bind on one address does not see a
- * listener on another (on macOS a hostless bind succeeds while 127.0.0.1 or
- * 0.0.0.0 holds the port), and the proxy dials apps on both loopbacks.
- */
-const APP_PORT_PROBE_HOSTS = ["127.0.0.1", "::1", "0.0.0.0", "::"];
-
-/**
- * Find a free port in the given range (default 4000-4999).
- * Tries random ports first for speed, then falls back to sequential scan.
- *
- * Note: There is an inherent TOCTOU race between verifying a port is free
- * and the child process actually binding to it. The random-first strategy
- * minimizes the window.
- */
-export async function findFreePort(
-  minPort = MIN_APP_PORT,
-  maxPort = MAX_APP_PORT
-): Promise<number> {
-  if (minPort > maxPort) {
-    throw new Error(`minPort (${minPort}) must be <= maxPort (${maxPort})`);
-  }
-
-  const isFreeOn = (port: number, host: string): Promise<boolean> => {
-    return new Promise((resolve) => {
-      const server = net.createServer();
-      server.once("error", (err: NodeJS.ErrnoException) => {
-        // A missing address family (IPv4-only or IPv6-only host) cannot hold the port.
-        resolve(err.code === "EADDRNOTAVAIL" || err.code === "EAFNOSUPPORT");
-      });
-      server.listen(port, host, () => {
-        server.close(() => resolve(true));
-      });
-    });
-  };
-
-  // Probe sequentially: a dual-stack `::` bind collides with a concurrent `0.0.0.0` one.
-  const tryPort = async (port: number): Promise<boolean> => {
-    for (const host of APP_PORT_PROBE_HOSTS) {
-      if (!(await isFreeOn(port, host))) return false;
-    }
-    return true;
-  };
-
-  // Try random ports first
-  for (let i = 0; i < RANDOM_PORT_ATTEMPTS; i++) {
-    const port = minPort + Math.floor(Math.random() * (maxPort - minPort + 1));
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
-      return port;
-    }
-  }
-
-  // Fall back to sequential
-  for (let port = minPort; port <= maxPort; port++) {
-    if (!BLOCKED_PORTS.has(port) && (await tryPort(port))) {
-      return port;
-    }
-  }
-
-  throw new Error(`No free port found in range ${minPort}-${maxPort}`);
-}
 
 /**
  * Check if a portless proxy is listening on the given port at 127.0.0.1.
@@ -1222,7 +837,7 @@ function probeHostsSyncAuth(
 export async function triggerHostsSync(
   port: number,
   tls = false,
-  stateDir = resolveStateDir(port)
+  stateDir = resolveStateDir()
 ): Promise<HostsSyncTrigger> {
   const signal = AbortSignal.timeout(HOSTS_SYNC_TRIGGER_TIMEOUT_MS);
   const token = readHostsSyncToken(stateDir);

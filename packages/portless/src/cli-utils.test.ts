@@ -10,8 +10,6 @@ import {
   augmentedPath,
   buildProxyStartConfig,
   canBindWithoutRoot,
-  BLOCKED_PORTS,
-  DEFAULT_TLD,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
   LEGACY_SYSTEM_STATE_DIR,
@@ -20,7 +18,6 @@ import {
   RISKY_TLDS,
   USER_STATE_DIR,
   discoverState,
-  findFreePort,
   getDefaultPort,
   getDefaultTld,
   getDefaultTlds,
@@ -41,23 +38,12 @@ import {
   syncHostsWithWarning,
   listenOnProxyInterface,
   parsePidFromNetstat,
-  parseTldList,
-  readLanMarker,
-  readPersistedProxyState,
-  readUnprivilegedMarker,
-  readTldFromDir,
-  readTldsFromDir,
   resolveStateDir,
-  validateTld,
-  writeLanMarker,
-  writeTldFile,
-  writeTldsFile,
-  writeTlsMarker,
   ownedProcessIds,
   getProcessStartTime,
   stopProcessGroup,
-  writeUnprivilegedMarker,
 } from "./cli-utils.js";
+import { DEFAULT_TLD, ProxyState, parseTldList, validateTld } from "./proxy-state.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
     expect(getProxyBindTargets(false)).toEqual([
@@ -165,74 +151,6 @@ describe("augmentedPath (issue #241)", () => {
     expect(entries[0]).toBe(localBin);
     expect(entries.at(-1)).toBe(nodeDir);
     expect(entries).not.toContain("");
-  });
-});
-
-describe("findFreePort", () => {
-  it.for(["127.0.0.1", "::1", "0.0.0.0", "::"])(
-    "skips a port held on %s (issue #288)",
-    async (host, { skip }) => {
-      const server = net.createServer();
-      const port = await new Promise<number | null>((resolve) => {
-        // Only a missing address family fails here: port 0 is always available.
-        server.once("error", () => resolve(null));
-        server.listen(0, host, () => resolve((server.address() as net.AddressInfo).port));
-      });
-      if (port === null) return skip();
-      try {
-        await expect(findFreePort(port, port)).rejects.toThrow("No free port found");
-      } finally {
-        await new Promise((resolve) => server.close(resolve));
-      }
-    }
-  );
-
-  it("returns a port in the default range", async () => {
-    const port = await findFreePort();
-    expect(port).toBeGreaterThanOrEqual(4000);
-    expect(port).toBeLessThanOrEqual(4999);
-  });
-
-  it("returns a port that is actually bindable", async () => {
-    const port = await findFreePort();
-    const server = net.createServer();
-    await new Promise<void>((resolve, reject) => {
-      server.listen(port, () => resolve());
-      server.on("error", reject);
-    });
-    server.close();
-  });
-
-  it("respects custom port range", async () => {
-    const port = await findFreePort(9000, 9010);
-    expect(port).toBeGreaterThanOrEqual(9000);
-    expect(port).toBeLessThanOrEqual(9010);
-  });
-
-  it("throws when no port is available in a tiny occupied range", async () => {
-    // Occupy a single-port range
-    const server = net.createServer();
-    await new Promise<void>((resolve) => server.listen(9999, () => resolve()));
-    try {
-      await expect(findFreePort(9999, 9999)).rejects.toThrow("No free port found");
-    } finally {
-      server.close();
-    }
-  });
-
-  it("throws when minPort > maxPort", async () => {
-    await expect(findFreePort(5000, 4000)).rejects.toThrow("minPort");
-  });
-
-  it("never returns a blocked port (WHATWG bad ports)", async () => {
-    for (let i = 0; i < 20; i++) {
-      const port = await findFreePort();
-      expect(BLOCKED_PORTS.has(port)).toBe(false);
-    }
-  });
-
-  it("skips a blocked port even when it is the only one in range", async () => {
-    await expect(findFreePort(4045, 4045)).rejects.toThrow("No free port found");
   });
 });
 
@@ -344,13 +262,8 @@ describe("isPortListening", () => {
 });
 
 describe("resolveStateDir", () => {
-  it("returns user dir for all ports", () => {
-    expect(resolveStateDir(80)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(443)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(1023)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(1024)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(8080)).toBe(USER_STATE_DIR);
-    expect(resolveStateDir(3000)).toBe(USER_STATE_DIR);
+  it("returns the user dir", () => {
+    expect(resolveStateDir()).toBe(USER_STATE_DIR);
   });
 
   it.skipIf(process.platform === "win32")(
@@ -367,7 +280,7 @@ describe("resolveStateDir", () => {
 
         const sudoModule = await import("./cli-utils.js");
         expect(sudoModule.USER_STATE_DIR).toBe(path.join(expectedHome, ".portless"));
-        expect(sudoModule.resolveStateDir(443)).toBe(path.join(expectedHome, ".portless"));
+        expect(sudoModule.resolveStateDir()).toBe(path.join(expectedHome, ".portless"));
       } finally {
         if (originalHome === undefined) delete process.env.HOME;
         else process.env.HOME = originalHome;
@@ -2352,7 +2265,7 @@ describe("buildProxyStartConfig", () => {
   });
 });
 
-describe("readLanMarker / writeLanMarker", () => {
+describe("discoverState LAN mode", () => {
   let tmpDir: string;
 
   beforeEach(() => {
@@ -2363,26 +2276,17 @@ describe("readLanMarker / writeLanMarker", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
-  it("writes and reads a LAN IP", () => {
-    writeLanMarker(tmpDir, "192.168.1.42");
-    expect(readLanMarker(tmpDir)).toBe("192.168.1.42");
-  });
-
-  it("removes the file when writing null", () => {
-    writeLanMarker(tmpDir, "192.168.1.42");
-    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(true);
-
-    writeLanMarker(tmpDir, null);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.lan"))).toBe(false);
-    expect(readLanMarker(tmpDir)).toBeNull();
-  });
-
   it("uses the LAN marker to remember LAN mode when the proxy is stopped", async () => {
     const prevStateDir = process.env.PORTLESS_STATE_DIR;
     try {
       fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-      writeTldFile(tmpDir, "local");
-      writeLanMarker(tmpDir, "192.168.1.42");
+      new ProxyState(tmpDir).publish({
+        tls: false,
+        customCert: false,
+        unprivileged: false,
+        lanIp: "192.168.1.42",
+        tlds: ["local"],
+      });
       process.env.PORTLESS_STATE_DIR = tmpDir;
 
       await expect(discoverState()).resolves.toMatchObject({
@@ -2398,66 +2302,6 @@ describe("readLanMarker / writeLanMarker", () => {
       } else {
         process.env.PORTLESS_STATE_DIR = prevStateDir;
       }
-    }
-  });
-});
-
-describe("readTldFromDir / writeTldFile", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tld-test-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("returns DEFAULT_TLD when file does not exist", () => {
-    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
-    expect(readTldsFromDir(tmpDir)).toEqual([DEFAULT_TLD]);
-  });
-
-  it("writes and reads a custom TLD", () => {
-    writeTldFile(tmpDir, "test");
-    expect(readTldFromDir(tmpDir)).toBe("test");
-    expect(readTldsFromDir(tmpDir)).toEqual(["test"]);
-  });
-
-  it("writes and reads multiple TLDs", () => {
-    writeTldsFile(tmpDir, ["localhost", "test"]);
-    expect(readTldFromDir(tmpDir)).toBe("localhost");
-    expect(readTldsFromDir(tmpDir)).toEqual(["localhost", "test"]);
-    expect(fs.readFileSync(path.join(tmpDir, "proxy.tld"), "utf-8")).toBe("localhost");
-  });
-
-  it("removes the file when writing the default TLD", () => {
-    writeTldFile(tmpDir, "test");
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(true);
-
-    writeTldFile(tmpDir, DEFAULT_TLD);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tld"))).toBe(false);
-    expect(fs.existsSync(path.join(tmpDir, "proxy.tlds"))).toBe(false);
-    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
-  });
-
-  it("handles removing the default TLD file when it does not exist", () => {
-    writeTldFile(tmpDir, DEFAULT_TLD);
-    expect(readTldFromDir(tmpDir)).toBe(DEFAULT_TLD);
-  });
-
-  it("skips invalid persisted entries instead of resetting the whole list", () => {
-    const tooLong = "a".repeat(70);
-    fs.writeFileSync(
-      path.join(tmpDir, "proxy.tlds"),
-      JSON.stringify(["test", tooLong, "internal"])
-    );
-    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    try {
-      expect(readTldsFromDir(tmpDir)).toEqual(["test", "internal"]);
-      expect(warn).toHaveBeenCalled();
-    } finally {
-      warn.mockRestore();
     }
   });
 });
@@ -2548,96 +2392,6 @@ describe("validateTld", () => {
       expect(validateTld(tld)).toBeNull();
       expect(RISKY_TLDS.has(tld)).toBe(true);
     }
-  });
-});
-
-describe("readPersistedProxyState", () => {
-  let tmpDir: string;
-  let prevStateDir: string | undefined;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-persist-test-"));
-    prevStateDir = process.env.PORTLESS_STATE_DIR;
-    process.env.PORTLESS_STATE_DIR = tmpDir;
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-    if (prevStateDir === undefined) {
-      delete process.env.PORTLESS_STATE_DIR;
-    } else {
-      process.env.PORTLESS_STATE_DIR = prevStateDir;
-    }
-  });
-
-  it("returns null when no state files exist", () => {
-    expect(readPersistedProxyState()).toBeNull();
-  });
-
-  it("reads port from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.port).toBe(1355);
-  });
-
-  it("reads TLS marker from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
-    writeTlsMarker(tmpDir, true);
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.tls).toBe(true);
-  });
-
-  it("reads TLD from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeTldFile(tmpDir, "test");
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.tld).toBe("test");
-    expect(state!.tlds).toEqual(["test"]);
-  });
-
-  it("reads TLD list from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeTldsFile(tmpDir, ["localhost", "test"]);
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.tld).toBe("localhost");
-    expect(state!.tlds).toEqual(["localhost", "test"]);
-  });
-
-  it("reads LAN mode from persisted state", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeLanMarker(tmpDir, "192.168.1.10");
-    const state = readPersistedProxyState();
-    expect(state).not.toBeNull();
-    expect(state!.lanMode).toBe(true);
-  });
-
-  it("returns full previous config for a custom proxy setup", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    writeTlsMarker(tmpDir, true);
-    writeTldFile(tmpDir, "local");
-    writeLanMarker(tmpDir, "192.168.1.42");
-    const state = readPersistedProxyState();
-    expect(state).toEqual({
-      port: 1355,
-      tls: true,
-      tld: "local",
-      tlds: ["local"],
-      lanMode: true,
-      unprivileged: false,
-    });
-  });
-
-  it("does not infer LAN mode from a custom local TLD", () => {
-    fs.writeFileSync(path.join(tmpDir, "proxy.port"), "1355");
-    fs.writeFileSync(path.join(tmpDir, "proxy.tld"), "local");
-    expect(readPersistedProxyState()).toMatchObject({
-      tlds: ["local"],
-      lanMode: false,
-    });
   });
 });
 
@@ -2973,7 +2727,11 @@ describe.skipIf(process.platform === "win32")("stopProcessGroup", () => {
 
 describe("canBindProxyPort", () => {
   it("returns true for a free unprivileged port", async () => {
-    const port = await findFreePort();
+    const server = net.createServer();
+    const port = await new Promise<number>((resolve) => {
+      server.listen(0, "127.0.0.1", () => resolve((server.address() as net.AddressInfo).port));
+    });
+    await new Promise((resolve) => server.close(resolve));
     await expect(canBindProxyPort(port, getProxyBindTargets(false))).resolves.toBe(true);
   });
 
@@ -3054,40 +2812,5 @@ describe("isUnprivilegedEnvEnabled", () => {
   it("is off when unset", () => {
     vi.stubEnv("PORTLESS_UNPRIVILEGED", undefined);
     expect(isUnprivilegedEnvEnabled()).toBe(false);
-  });
-});
-
-describe("readUnprivilegedMarker / writeUnprivilegedMarker", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-unpriv-marker-"));
-  });
-
-  afterEach(() => {
-    fs.rmSync(tmpDir, { recursive: true, force: true });
-  });
-
-  it("is absent by default", () => {
-    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
-  });
-
-  it("round-trips through write and remove", () => {
-    writeUnprivilegedMarker(tmpDir, true);
-    expect(readUnprivilegedMarker(tmpDir)).toBe(true);
-    writeUnprivilegedMarker(tmpDir, false);
-    expect(readUnprivilegedMarker(tmpDir)).toBe(false);
-  });
-
-  it("is part of the persisted proxy state", () => {
-    vi.stubEnv("PORTLESS_STATE_DIR", tmpDir);
-    try {
-      fs.writeFileSync(path.join(tmpDir, "proxy.port"), "8080");
-      expect(readPersistedProxyState()?.unprivileged).toBe(false);
-      writeUnprivilegedMarker(tmpDir, true);
-      expect(readPersistedProxyState()?.unprivileged).toBe(true);
-    } finally {
-      vi.unstubAllEnvs();
-    }
   });
 });
