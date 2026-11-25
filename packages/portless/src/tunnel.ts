@@ -416,32 +416,102 @@ const netbird: TunnelProvider = {
 
 /** Extract the peer's NetBird WireGuard IP from `netbird status --json` output. */
 export function extractNetbirdIp(stdout: string): string | null {
+  return extractNetbirdInterface(stdout)?.ip ?? null;
+}
+
+function extractNetbirdInterface(
+  stdout: string
+): { ip: string; prefixLength: number | null } | null {
   try {
     const parsed: unknown = JSON.parse(stdout);
     if (!parsed || typeof parsed !== "object" || !("netbirdIp" in parsed)) return null;
     const raw = (parsed as { netbirdIp?: unknown }).netbirdIp;
     if (typeof raw !== "string") return null;
-    const ip = raw.trim().split("/")[0] ?? "";
-    return net.isIP(ip) !== 0 ? ip : null;
+    const [rawIp = "", rawMask] = raw.trim().split("/");
+    const family = net.isIP(rawIp);
+    if (family === 0) return null;
+    const maxBits = family === 4 ? 32 : 128;
+    const parsedMask = rawMask !== undefined && /^\d+$/.test(rawMask) ? Number(rawMask) : null;
+    const prefixLength =
+      parsedMask !== null && parsedMask >= 0 && parsedMask <= maxBits ? parsedMask : null;
+    return { ip: rawIp, prefixLength };
   } catch {
     return null;
   }
 }
 
-function isAllowedRelayPeer(remoteAddress: string | undefined, bindHost: string): boolean {
+function ipv4ToInt(ip: string): number | null {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let value = 0;
+  for (const part of parts) {
+    const num = Number(part);
+    if (!Number.isInteger(num) || num < 0 || num > 255) return null;
+    value = (value << 8) | num;
+  }
+  return value >>> 0;
+}
+
+function ipv6ToBigInt(ip: string): bigint | null {
+  const [head, tail] = ip.split("::");
+  if (ip.split("::").length > 2) return null;
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const missing = 8 - left.length - right.length;
+  if (tail === undefined ? left.length !== 8 : missing < 0) return null;
+  const groups =
+    tail === undefined ? left : [...left, ...Array<string>(missing).fill("0"), ...right];
+  let value = 0n;
+  for (const group of groups) {
+    if (!/^[0-9a-f]{1,4}$/i.test(group)) return null;
+    value = (value << 16n) | BigInt(parseInt(group, 16));
+  }
+  return value;
+}
+
+function isInCidr(candidate: string, base: string, prefixLength: number): boolean {
+  const family = net.isIP(base);
+  if (family === 0 || net.isIP(candidate) !== family) return false;
+  if (prefixLength === 0) return true;
+  if (family === 4) {
+    const a = ipv4ToInt(candidate);
+    const b = ipv4ToInt(base);
+    if (a === null || b === null) return false;
+    const mask = prefixLength === 32 ? 0xffffffff : (~0 << (32 - prefixLength)) >>> 0;
+    return (a & mask) === (b & mask);
+  }
+  const a = ipv6ToBigInt(candidate);
+  const b = ipv6ToBigInt(base);
+  if (a === null || b === null) return false;
+  const shift = BigInt(128 - prefixLength);
+  return a >> shift === b >> shift;
+}
+
+/** Whether a peer source address belongs to loopback or the NetBird overlay subnet. */
+export function isAllowedNetbirdRelayPeer(
+  remoteAddress: string | undefined,
+  bindHost: string,
+  prefixLength: number | null = null
+): boolean {
   if (!remoteAddress) return false;
   const normalized = remoteAddress.startsWith("::ffff:") ? remoteAddress.slice(7) : remoteAddress;
-  return normalized === bindHost || normalized === "127.0.0.1" || normalized === "::1";
+  if (normalized === bindHost || normalized === "127.0.0.1" || normalized === "::1") return true;
+  if (prefixLength !== null && isInCidr(normalized, bindHost, prefixLength)) return true;
+  if (prefixLength === null && isInCidr(bindHost, "100.64.0.0", 10)) {
+    return isInCidr(normalized, "100.64.0.0", 10);
+  }
+  return false;
 }
 
 function createNetbirdLoopbackRelay(
   bindHost: string,
+  prefixLength: number | null,
   localPort: number
 ): Promise<{ port: number; close: () => void } | null> {
   return new Promise((resolve) => {
     const sockets = new Set<net.Socket>();
     const server = net.createServer((client) => {
-      if (!isAllowedRelayPeer(client.remoteAddress, bindHost)) {
+      if (!isAllowedNetbirdRelayPeer(client.remoteAddress, bindHost, prefixLength)) {
         client.destroy();
         return;
       }
@@ -494,13 +564,18 @@ export async function startNetbird(
   options: TunnelStartOptions = {}
 ): Promise<StartedTunnel> {
   let relayHost = options.relayHost;
+  let relayPrefix: number | null = null;
   if (!relayHost && !options.spawner) {
     const status = defaultRunner(netbird.binary, netbird.versionArgs);
     if (!status.error && status.status === 0) {
-      relayHost = extractNetbirdIp(status.stdout) ?? undefined;
+      const iface = extractNetbirdInterface(status.stdout);
+      relayHost = iface?.ip;
+      relayPrefix = iface?.prefixLength ?? null;
     }
   }
-  const relay = relayHost ? await createNetbirdLoopbackRelay(relayHost, localPort) : null;
+  const relay = relayHost
+    ? await createNetbirdLoopbackRelay(relayHost, relayPrefix, localPort)
+    : null;
   const exposePort = relay ? relay.port : localPort;
   const closeRelay = () => relay?.close();
   try {

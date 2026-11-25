@@ -14,6 +14,7 @@ import {
   extractNgrokUrl,
   extractNetbirdIp,
   extractNetbirdUrl,
+  isAllowedNetbirdRelayPeer,
   normalizeNgrokUrl,
   startNgrok,
   startNetbird,
@@ -105,6 +106,15 @@ describe("ngrok", () => {
       expect(extractNetbirdIp(JSON.stringify({ netbirdIp: "100.64.0.5" }))).toBe("100.64.0.5");
       expect(extractNetbirdIp(JSON.stringify({ netbirdIp: "not-an-ip" }))).toBeNull();
       expect(extractNetbirdIp("invalid")).toBeNull();
+    });
+
+    it("allows NetBird WireGuard subnet peers and rejects physical LAN peers", () => {
+      expect(isAllowedNetbirdRelayPeer("100.64.0.1", "100.64.0.5", 16)).toBe(true);
+      expect(isAllowedNetbirdRelayPeer("::ffff:100.64.12.3", "100.64.0.5", 16)).toBe(true);
+      expect(isAllowedNetbirdRelayPeer("100.64.200.1", "100.64.0.5", null)).toBe(true);
+      expect(isAllowedNetbirdRelayPeer("127.0.0.1", "100.64.0.5", 16)).toBe(true);
+      expect(isAllowedNetbirdRelayPeer("192.168.1.50", "100.64.0.5", 16)).toBe(false);
+      expect(isAllowedNetbirdRelayPeer("10.0.0.9", "100.64.0.5", null)).toBe(false);
     });
 
     it("relays traffic from the bound relay port to the loopback backend and closes on kill", async () => {

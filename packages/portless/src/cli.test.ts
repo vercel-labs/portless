@@ -6754,7 +6754,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       const child = [
         process.execPath,
         "-e",
-        `process.stdout.write(process.env[${JSON.stringify(key)}] || "")`,
+        `process.stdout.write(process.env[${JSON.stringify(key)}] ?? "")`,
       ];
       for (const command of [
         [...args, "myapp", ...child],
