@@ -489,69 +489,60 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   const serverCertPath = path.join(stateDir, SERVER_CERT_FILE);
   const csrPath = path.join(stateDir, "server.csr");
   const extPath = path.join(stateDir, "server-ext.cnf");
-
-  // Generate server private key
-  withPrivateFileMode(() =>
-    openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath])
-  );
-
-  // Generate CSR
-  openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
-
-  // Write extension config for SANs
-  const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
-  fs.writeFileSync(
-    extPath,
-    [
-      "authorityKeyIdentifier=keyid,issuer",
-      "basicConstraints=CA:FALSE",
-      "keyUsage=digitalSignature,keyEncipherment",
-      "extendedKeyUsage=serverAuth",
-      `subjectAltName=${sans.join(",")}`,
-    ].join("\n") + "\n"
-  );
-
-  // Sign with CA
-  // Use -CAserial with an explicit path instead of -CAcreateserial.
-  // -CAcreateserial derives the .srl path by stripping the CA cert's file
-  // extension, but some OpenSSL/LibreSSL versions use the *last dot in the
-  // full path*, so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
-  // to write "/Users/ashish.srl" instead of the intended location.
   const srlPath = path.join(stateDir, "ca.srl");
-  if (!fileExists(srlPath)) {
-    fs.writeFileSync(
-      srlPath,
-      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
-    );
-  }
-  openssl([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    serverCertPath,
-    ...backdatedNotBeforeArgs(),
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
 
-  // Clean up temporary files (keep ca.srl for serial number tracking)
-  for (const tmp of [csrPath, extPath]) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // Non-fatal
+  try {
+    withPrivateFileMode(() =>
+      openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath])
+    );
+
+    openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
+
+    const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
+    fs.writeFileSync(
+      extPath,
+      [
+        "authorityKeyIdentifier=keyid,issuer",
+        "basicConstraints=CA:FALSE",
+        "keyUsage=digitalSignature,keyEncipherment",
+        "extendedKeyUsage=serverAuth",
+        `subjectAltName=${sans.join(",")}`,
+      ].join("\n") + "\n"
+    );
+
+    if (!fileExists(srlPath)) {
+      fs.writeFileSync(
+        srlPath,
+        crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+      );
     }
+    openssl([
+      "x509",
+      "-req",
+      "-sha256",
+      "-in",
+      csrPath,
+      "-CA",
+      caCertPath,
+      "-CAkey",
+      caKeyPath,
+      "-CAserial",
+      srlPath,
+      "-out",
+      serverCertPath,
+      ...backdatedNotBeforeArgs(),
+      "-days",
+      SERVER_VALIDITY_DAYS.toString(),
+      "-extfile",
+      extPath,
+    ]);
+  } catch (error) {
+    fs.rmSync(serverCertPath, { force: true });
+    fs.rmSync(serverKeyPath, { force: true });
+    throw error;
+  } finally {
+    fs.rmSync(csrPath, { force: true });
+    fs.rmSync(extPath, { force: true });
   }
 
   fs.chmodSync(serverKeyPath, 0o600);
@@ -1201,72 +1192,70 @@ async function generateHostCertAsync(
   const certPath = path.join(hostDir, `${safeName}.pem`);
   const csrPath = path.join(hostDir, `${safeName}.csr`);
   const extPath = path.join(hostDir, `${safeName}-ext.cnf`);
-
-  // Generate key
-  await withPrivateFileMode(() =>
-    opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
-  );
-
-  // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
-  // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
-  const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
-  // Generate CSR
-  await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
-
-  const sans = [`DNS:${hostname}`];
-  const parts = hostname.split(".");
-  if (parts.length >= 3) {
-    sans.push(`DNS:*.${parts.slice(1).join(".")}`);
-  }
-
-  await fs.promises.writeFile(
-    extPath,
-    [
-      "authorityKeyIdentifier=keyid,issuer",
-      "basicConstraints=CA:FALSE",
-      "keyUsage=digitalSignature,keyEncipherment",
-      "extendedKeyUsage=serverAuth",
-      `subjectAltName=${sans.join(",")}`,
-    ].join("\n") + "\n"
-  );
-
-  // Use -CAserial with an explicit path instead of -CAcreateserial to avoid
-  // incorrect .srl path resolution when $HOME contains a dot (see #152).
   const srlPath = path.join(stateDir, "ca.srl");
-  if (!fs.existsSync(srlPath)) {
-    await fs.promises.writeFile(
-      srlPath,
-      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
-    );
-  }
-  await opensslAsync([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    certPath,
-    ...(await backdatedNotBeforeArgsAsync()),
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
 
-  // Clean up temporary files (keep ca.srl for serial number tracking)
-  for (const tmp of [csrPath, extPath]) {
-    try {
-      await fs.promises.unlink(tmp);
-    } catch {
-      // Non-fatal
+  try {
+    await withPrivateFileMode(() =>
+      opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
+    );
+
+    const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
+    await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
+
+    const sans = [`DNS:${hostname}`];
+    const parts = hostname.split(".");
+    if (parts.length >= 3) {
+      sans.push(`DNS:*.${parts.slice(1).join(".")}`);
     }
+
+    await fs.promises.writeFile(
+      extPath,
+      [
+        "authorityKeyIdentifier=keyid,issuer",
+        "basicConstraints=CA:FALSE",
+        "keyUsage=digitalSignature,keyEncipherment",
+        "extendedKeyUsage=serverAuth",
+        `subjectAltName=${sans.join(",")}`,
+      ].join("\n") + "\n"
+    );
+
+    if (!fs.existsSync(srlPath)) {
+      await fs.promises.writeFile(
+        srlPath,
+        crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+      );
+    }
+    await opensslAsync([
+      "x509",
+      "-req",
+      "-sha256",
+      "-in",
+      csrPath,
+      "-CA",
+      caCertPath,
+      "-CAkey",
+      caKeyPath,
+      "-CAserial",
+      srlPath,
+      "-out",
+      certPath,
+      ...(await backdatedNotBeforeArgsAsync()),
+      "-days",
+      SERVER_VALIDITY_DAYS.toString(),
+      "-extfile",
+      extPath,
+    ]);
+  } catch (error) {
+    await Promise.all([
+      fs.promises.rm(certPath, { force: true }),
+      fs.promises.rm(keyPath, { force: true }),
+    ]);
+    throw error;
+  } finally {
+    await Promise.all([
+      fs.promises.rm(csrPath, { force: true }),
+      fs.promises.rm(extPath, { force: true }),
+    ]);
   }
 
   await fs.promises.chmod(keyPath, 0o600);
@@ -1393,7 +1382,11 @@ export function createSNICallback(
       })
       .catch((err) => {
         pending.delete(servername);
-        cb(err instanceof Error ? err : new Error(String(err)));
+        const error = err instanceof Error ? err : new Error(String(err));
+        console.error(
+          `[portless] Failed to prepare a TLS certificate for ${servername}: ${error.message}`
+        );
+        cb(error);
       });
   };
 }
