@@ -8334,6 +8334,12 @@ describe("CLI", { timeout: 15_000 }, () => {
         }
         expect(captures[2]!.PORTLESS_URL_MANAGED_MYREPO).toBeUndefined();
         expect(captures[2]!.PORTLESS_URL).toBeUndefined();
+        expect(captures[2]!.PORTLESS_URL_WEB_MYREPO).toBe(
+          `http://feature-x.web.myrepo.localhost:${proxyPort}`
+        );
+        expect(captures[2]!.PORTLESS_URL_API_MYREPO).toBe(
+          `http://feature-x.api.myrepo.localhost:${proxyPort}`
+        );
       },
       30_000
     );

@@ -4974,9 +4974,11 @@ async function spawnProxiedApp(
   let hostnames: string[] = [];
   let displayUrl: string;
   let appPort: number | undefined;
+  const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
 
   if (app.usesPortless) {
-    env = lanMode ? { ...pkgEnv, PORTLESS_LAN: "1" } : pkgEnv;
+    const built = childEnv({ lan: lanMode }, { peers, caPath });
+    env = { ...pkgEnv, ...built.env };
     displayUrl = "(managed by portless)";
   } else {
     store = new RouteStore(stateDir, {
@@ -4996,7 +4998,6 @@ async function spawnProxiedApp(
     }
     injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
-    const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
     const built = childEnv(
       { port: appPort, host: "127.0.0.1", url, tlds, lan: lanMode },
       {
@@ -5367,6 +5368,8 @@ async function runWithTurbo(
   for (const app of proxiedApps) {
     if (app.usesPortless) {
       appUrls.push({ label: app.label, url: "(managed by portless)" });
+      const entry = childEnv({ lan: lanMode }, { peers, caPath }).env;
+      if (Object.keys(entry).length > 0) manifest[app.pkg.dir] = entry;
       continue;
     }
 
