@@ -551,6 +551,21 @@ export class RouteStore {
               if (existing.pid !== 0) targets.add(existing.pid);
             }
           }
+          // Background Serve/Funnel forwarding can outlive both the owner and
+          // its child. Keep its backend reserved until the share is cleaned up.
+          if (
+            routes.some(
+              (route) =>
+                route.port === port && route.tailscaleHttpsPort !== undefined && isStaleRoute(route)
+            )
+          ) {
+            if (input.port !== undefined) {
+              throw new Error(
+                `Port ${port} is reserved by a stale Tailscale share. Run: portless prune`
+              );
+            }
+            return { value: undefined, changed: false };
+          }
           if (
             input.port === undefined &&
             routes.some((route) => route.port === port && !isStaleRoute(route))

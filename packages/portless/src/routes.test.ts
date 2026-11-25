@@ -632,6 +632,97 @@ describe("RouteStore", () => {
       expect(store.loadRoutes({ includeStale: true })).toEqual([staleRoute]);
     });
 
+    it.each([
+      { pid: deadPid, retired: undefined, tailscaleFunnel: false },
+      { pid: deadPid, retired: undefined, tailscaleFunnel: true },
+      { pid: process.pid, retired: true as const, tailscaleFunnel: false },
+      { pid: process.pid, retired: true as const, tailscaleFunnel: true },
+    ])("does not auto-allocate a retained Tailscale backend port (%j)", async (metadata) => {
+      store.ensureDir();
+      const shared = { ...staleRoute, ...metadata };
+      writeRoutes([shared]);
+      const random = vi.spyOn(Math, "random").mockReturnValue(0.3105);
+      try {
+        // The first random candidate is the now-idle backend port, 4310.
+        const { port } = await store.register({ hostnames: [shared.hostname], pid: process.pid });
+        expect(port).not.toBe(shared.port);
+        expect(store.loadRoutes()[0].port).toBe(port);
+        expect(store.findStaleRoutes()).toContainEqual({ ...shared, retired: true });
+      } finally {
+        random.mockRestore();
+      }
+    });
+
+    it("does not reuse a retained Tailscale port when the safe range is exhausted", async () => {
+      store.ensureDir();
+      const shared = { ...staleRoute, port: 4000 };
+      const aliases = Array.from({ length: 999 }, (_, i) => ({
+        hostname: `alias-${4001 + i}.localhost`,
+        port: 4001 + i,
+        pid: 0,
+      }));
+      writeRoutes([shared, ...aliases]);
+      const random = vi.spyOn(Math, "random").mockReturnValue(0);
+      try {
+        await expect(
+          store.register({ hostnames: ["private.localhost"], pid: process.pid })
+        ).rejects.toThrow("No free port found");
+        expect(readRaw()).toEqual([shared, ...aliases]);
+      } finally {
+        random.mockRestore();
+      }
+    }, 60_000);
+
+    it.each([false, true])(
+      "rejects a fixed retained Tailscale port with force=%s",
+      async (force) => {
+        store.ensureDir();
+        writeRoutes([staleRoute]);
+        await expect(
+          store.register({
+            hostnames: ["private.localhost"],
+            pid: process.pid,
+            port: staleRoute.port,
+            force,
+          })
+        ).rejects.toThrow("portless prune");
+        expect(store.loadRoutes()).toEqual([]);
+        expect(readRaw()).toEqual([staleRoute]);
+      }
+    );
+
+    it("can reuse a Tailscale backend port after its stale record is removed", async () => {
+      store.ensureDir();
+      writeRoutes([staleRoute]);
+      expect(store.removeStaleRoute(staleRoute.hostname, deadPid)).toBe(true);
+      const random = vi.spyOn(Math, "random").mockReturnValue(0.3105);
+      try {
+        const { port } = await store.register({
+          hostnames: ["private.localhost"],
+          pid: process.pid,
+        });
+        expect(port).toBe(staleRoute.port);
+      } finally {
+        random.mockRestore();
+      }
+    });
+
+    it("can auto-allocate a stale port without Tailscale forwarding", async () => {
+      store.ensureDir();
+      const { tailscaleHttpsPort: _, ...unshared } = staleRoute;
+      writeRoutes([unshared]);
+      const random = vi.spyOn(Math, "random").mockReturnValue(0.3105);
+      try {
+        const { port } = await store.register({
+          hostnames: ["private.localhost"],
+          pid: process.pid,
+        });
+        expect(port).toBe(unshared.port);
+      } finally {
+        random.mockRestore();
+      }
+    });
+
     it("keeps the record through register, update, transfer and remove of other routes", async () => {
       store.ensureDir();
       writeRoutes([staleRoute]);

@@ -414,6 +414,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 
 `portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
 
+App ports referenced by stale Tailscale Serve or Funnel records stay reserved, even after the dev server stops. Automatic assignment skips them, and fixed-port registration refuses them even with `--force`. Run `portless prune` to clean up stale shares before reusing their ports.
+
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
 **Reserved names:** `run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.

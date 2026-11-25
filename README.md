@@ -131,6 +131,8 @@ Run `portless --help` for the command list and common app options. Use `portless
 
 `portless prune` removes stale routes and shares without killing unrelated port holders. A recorded process group that still has a live member keeps its route and shares even after it closes its port; prune records the member that survived and stops it on a retry with `portless prune --force`. A group prune cannot verify is kept and reported, never signaled. A port holder that cannot be proven part of the recorded group is kept and reported, never killed. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows.
 
+App ports referenced by stale Tailscale Serve or Funnel records stay reserved, even after the dev server stops. Automatic assignment skips them, and fixed-port registration refuses them even with `--force`. Run `portless prune` to clean up stale shares before reusing their ports.
+
 Run `portless doctor` first when a URL does not load. It checks the proxy, routes, DNS, and CA trust without changing anything, and prints suggested fixes. Use `portless doctor --json` to print the report as JSON.
 
 `portless clean` previews its cleanup and asks for confirmation. Use `portless clean --yes` (or `-y`) in CI or without a terminal. On macOS and Linux, a failed CA, state-file, or hosts step is retried with sudo for the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code.
