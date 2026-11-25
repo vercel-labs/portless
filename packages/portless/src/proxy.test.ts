@@ -480,6 +480,23 @@ describe("createProxyServer", () => {
       );
     });
 
+    it("preserves bracketed IPv6 hosts and strips trailing dots in 404 suggestions", async () => {
+      const renderPage = vi.fn(() => null);
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT, renderPage })
+      );
+      await listen(server);
+
+      const ipv6 = await request(server, { host: "[::1]:1355" });
+      expect(ipv6.status).toBe(404);
+      expect(ipv6.body).toContain("<strong>[::1]</strong>");
+      expect(renderPage).toHaveBeenLastCalledWith(expect.objectContaining({ host: "[::1]" }));
+
+      const dotted = await request(server, { host: "myapp.localhost." });
+      expect(dotted.status).toBe(404);
+      expect(dotted.body).toContain("portless myapp your-command");
+    });
+
     it("does not invoke the renderer for JSON error and dashboard responses", async () => {
       const renderPage = vi.fn(() => "custom page");
       const server = trackServer(

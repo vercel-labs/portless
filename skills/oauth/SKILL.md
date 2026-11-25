@@ -21,7 +21,7 @@ When portless uses the default `.localhost` TLD, some OAuth providers reject red
 
 Google and Apple are the strictest. Microsoft and GitHub are more lenient with localhost.
 
-For providers that allow plain `localhost`, you can register the proxy's URL, such as `http://localhost:1355/callback`, without changing TLDs. The callback lands on the 404 page, where clicking an active app carries the original path and query string to it.
+If a provider redirects to plain `localhost` on the portless proxy port, such as `http://localhost:1355/callback`, the request lands on the 404 page. Clicking an active app link carries the request path and query string to that app's URL (useful when your app already holds its auth state on its own hostname, though flows that rely on cookies scoped to `localhost` still need a matching origin or a custom TLD).
 
 ## The Fix
 

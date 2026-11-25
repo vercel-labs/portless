@@ -96,6 +96,14 @@ function getRequestHost(req: http.IncomingMessage): string {
   return req.headers.host || "";
 }
 
+function extractHostname(authority: string): string {
+  if (authority.startsWith("[")) {
+    const closeBracket = authority.indexOf("]");
+    return closeBracket === -1 ? authority : authority.slice(0, closeBracket + 1);
+  }
+  return authority.split(":")[0];
+}
+
 /**
  * Detect whether a request arrived over an encrypted (TLS) connection.
  * Works for both native TLS sockets and HTTP/2 streams.
@@ -430,7 +438,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       return;
     }
 
-    const host = rawHost.split(":")[0];
+    const host = extractHostname(rawHost);
 
     if (!host) {
       res.writeHead(400, { "Content-Type": "text/plain" });

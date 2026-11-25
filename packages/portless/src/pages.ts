@@ -341,14 +341,15 @@ function renderRoutesSection(
 }
 
 function stripTldSuffix(hostname: string, tlds: readonly string[]): string {
-  const normalizedHost = hostname.toLowerCase();
+  const trimmed = hostname.endsWith(".") ? hostname.slice(0, -1) : hostname;
+  const normalizedHost = trimmed.toLowerCase();
   const matchedSuffix = tlds
     .map((tld) => `.${tld}`)
     .filter(
-      (suffix) => suffix.length < hostname.length && normalizedHost.endsWith(suffix.toLowerCase())
+      (suffix) => suffix.length < trimmed.length && normalizedHost.endsWith(suffix.toLowerCase())
     )
     .sort((a, b) => b.length - a.length)[0];
-  return matchedSuffix ? hostname.slice(0, -matchedSuffix.length) : hostname;
+  return matchedSuffix ? trimmed.slice(0, -matchedSuffix.length) : trimmed;
 }
 
 function renderTerminal(command: string): string {
