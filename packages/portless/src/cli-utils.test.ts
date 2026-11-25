@@ -42,8 +42,12 @@ import {
   ownedProcessIds,
   getProcessStartTime,
   stopProcessGroup,
+  DEFAULT_IDLE_EXIT_SECONDS,
+  holdProxyLease,
+  resolveIdleExitSeconds,
 } from "./cli-utils.js";
 import { DEFAULT_TLD, ProxyState, parseTldList, validateTld } from "./proxy-state.js";
+import { createProxyServer } from "./proxy.js";
 describe("proxy listener interface", () => {
   it("uses only IPv4 and IPv6 loopback outside LAN mode", () => {
     expect(getProxyBindTargets(false)).toEqual([
@@ -2219,6 +2223,23 @@ describe("buildProxyStartConfig", () => {
     expect(buildProxyStartConfig(base).args).toEqual(["--no-tls"]);
   });
 
+  it("emits --idle-exit with an explicit --idle-exit-after, even for the default", () => {
+    const base = { useHttps: false, lanMode: false, tld: "localhost" };
+    expect(buildProxyStartConfig({ ...base, idleExit: DEFAULT_IDLE_EXIT_SECONDS }).args).toEqual([
+      "--no-tls",
+      "--idle-exit",
+      "--idle-exit-after",
+      "5",
+    ]);
+    expect(buildProxyStartConfig({ ...base, idleExit: 30 }).args).toEqual([
+      "--no-tls",
+      "--idle-exit",
+      "--idle-exit-after",
+      "30",
+    ]);
+    expect(buildProxyStartConfig({ ...base, idleExit: 0 }).args).toEqual(["--no-tls"]);
+  });
+
   it("passes auto-detected LAN IP through an internal flag", () => {
     expect(
       buildProxyStartConfig({
@@ -2812,5 +2833,135 @@ describe("isUnprivilegedEnvEnabled", () => {
   it("is off when unset", () => {
     vi.stubEnv("PORTLESS_UNPRIVILEGED", undefined);
     expect(isUnprivilegedEnvEnabled()).toBe(false);
+  });
+});
+
+describe("resolveIdleExitSeconds", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  const resolve = (
+    options: { flag?: boolean; after?: string; persisted?: number } = {},
+    env: Record<string, string | undefined> = {}
+  ) => {
+    vi.stubEnv("PORTLESS_IDLE_EXIT", env.PORTLESS_IDLE_EXIT);
+    vi.stubEnv("PORTLESS_IDLE_EXIT_AFTER", env.PORTLESS_IDLE_EXIT_AFTER);
+    return resolveIdleExitSeconds({ flag: false, persisted: 0, ...options });
+  };
+
+  it("is off unless asked for", () => {
+    expect(resolve()).toEqual({ seconds: 0, explicit: false });
+  });
+
+  it.each([
+    ["the flag", { flag: true }, {}],
+    ["PORTLESS_IDLE_EXIT=1", {}, { PORTLESS_IDLE_EXIT: "1" }],
+    ["PORTLESS_IDLE_EXIT=true", {}, { PORTLESS_IDLE_EXIT: "true" }],
+  ])("turns on with the default linger from %s", (_name, options, env) => {
+    expect(resolve(options, env)).toEqual({ seconds: DEFAULT_IDLE_EXIT_SECONDS, explicit: true });
+  });
+
+  it("takes the linger from --idle-exit-after over PORTLESS_IDLE_EXIT_AFTER", () => {
+    expect(resolve({ flag: true, after: "20" }, { PORTLESS_IDLE_EXIT_AFTER: "40" }).seconds).toBe(
+      20
+    );
+    expect(resolve({ flag: true }, { PORTLESS_IDLE_EXIT_AFTER: "40" }).seconds).toBe(40);
+  });
+
+  it("keeps a remembered mode and linger when nothing is explicit", () => {
+    expect(resolve({ persisted: 60 })).toEqual({ seconds: 60, explicit: false });
+  });
+
+  it("lets PORTLESS_IDLE_EXIT=0 turn a remembered mode off", () => {
+    expect(resolve({ persisted: 60 }, { PORTLESS_IDLE_EXIT: "0" })).toEqual({
+      seconds: 0,
+      explicit: true,
+    });
+  });
+
+  it("lets the flag win over PORTLESS_IDLE_EXIT=0", () => {
+    expect(resolve({ flag: true }, { PORTLESS_IDLE_EXIT: "0" }).seconds).toBe(
+      DEFAULT_IDLE_EXIT_SECONDS
+    );
+  });
+
+  it("rejects an invalid linger", () => {
+    expect(() => resolve({ flag: true, after: "0" })).toThrow(
+      'Invalid --idle-exit-after value "0"'
+    );
+    expect(() => resolve({ flag: true }, { PORTLESS_IDLE_EXIT_AFTER: "soon" })).toThrow(
+      'Invalid PORTLESS_IDLE_EXIT_AFTER value "soon"'
+    );
+  });
+
+  it("rejects a linger while idle exit is off", () => {
+    expect(() => resolve({ after: "20" })).toThrow(
+      "--idle-exit-after only applies with idle exit on"
+    );
+    expect(() => resolve({}, { PORTLESS_IDLE_EXIT: "0", PORTLESS_IDLE_EXIT_AFTER: "20" })).toThrow(
+      "PORTLESS_IDLE_EXIT_AFTER only applies with idle exit on"
+    );
+  });
+});
+
+describe("holdProxyLease", () => {
+  const servers: http.Server[] = [];
+
+  afterEach(async () => {
+    for (const server of servers) {
+      server.closeAllConnections?.();
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+    servers.length = 0;
+  });
+
+  async function listen(server: http.Server): Promise<number> {
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve()));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("no address");
+    return address.port;
+  }
+
+  it("holds a lease on the proxy without keeping its socket referenced", async () => {
+    const closed = vi.fn();
+    const proxy = createProxyServer({
+      getRoutes: () => [],
+      proxyPort: 1355,
+      onLeaseRequest: (lease) => {
+        lease.on("close", closed);
+        return "held";
+      },
+    }) as http.Server;
+    const port = await listen(proxy);
+    expect(await holdProxyLease(port)).toBe("held");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(closed).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["closing", 503],
+    ["full", 429],
+    ["unsupported", 404],
+  ] as const)("reports %s for status %i", async (expected, status) => {
+    const port = await listen(
+      http.createServer((_req, res) => {
+        res.writeHead(status);
+        res.end("no");
+      })
+    );
+    expect(await holdProxyLease(port)).toBe(expected);
+  });
+
+  it("reports an older proxy that answers 200 without the ack as unsupported", async () => {
+    const port = await listen(http.createServer((_req, res) => res.end("<html>app list</html>")));
+    expect(await holdProxyLease(port)).toBe("unsupported");
+  });
+
+  it("reports unreachable when nothing listens", async () => {
+    const port = await listen(http.createServer());
+    await new Promise<void>((resolve) => servers.pop()!.close(() => resolve()));
+    expect(await holdProxyLease(port)).toBe("unreachable");
   });
 });

@@ -2,7 +2,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { DEFAULT_TLD, PORT_FILE, ProxyState, readProxyStateFile } from "./proxy-state.js";
+import {
+  DEFAULT_TLD,
+  PORT_FILE,
+  PROXY_FILES,
+  ProxyState,
+  readProxyStateFile,
+} from "./proxy-state.js";
 import { fixOwnership } from "./utils.js";
 
 vi.mock("./utils.js", async (importOriginal) => {
@@ -276,5 +282,46 @@ describe("ProxyState", () => {
     });
     state.reset();
     expect(state.read().tls).toBe(false);
+  });
+});
+
+describe("ProxyState idle exit", () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-idle-exit-marker-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("is 0 by default", () => {
+    expect(new ProxyState(tmpDir).readIdleExit()).toBe(0);
+  });
+
+  it("round-trips the linger through write and remove", () => {
+    new ProxyState(tmpDir).setIdleExit(90);
+    expect(fs.readFileSync(path.join(tmpDir, "proxy.idle-exit"), "utf-8")).toBe("90");
+    expect(new ProxyState(tmpDir).readIdleExit()).toBe(90);
+    new ProxyState(tmpDir).setIdleExit(0);
+    expect(fs.existsSync(path.join(tmpDir, "proxy.idle-exit"))).toBe(false);
+    expect(new ProxyState(tmpDir).readIdleExit()).toBe(0);
+  });
+
+  it("is removed by clean with the other proxy files", () => {
+    expect(PROXY_FILES).toContain("proxy.idle-exit");
+  });
+
+  it("survives a reset, so an auto-start keeps idle exit", () => {
+    const state = new ProxyState(tmpDir);
+    state.setIdleExit(30);
+    state.reset();
+    expect(state.readIdleExit()).toBe(30);
+  });
+
+  it("reads an unparseable marker as off", () => {
+    fs.writeFileSync(path.join(tmpDir, "proxy.idle-exit"), "soon");
+    expect(new ProxyState(tmpDir).readIdleExit()).toBe(0);
   });
 });

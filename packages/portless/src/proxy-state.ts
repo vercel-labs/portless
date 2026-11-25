@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
 import { HOSTS_SYNC_AUTH_FILE, HOSTS_SYNC_AUTH_TEMP_FILE } from "./hosts-sync-auth.js";
+import { parseIdleExitSeconds } from "./idle-exit.js";
 import { fixOwnership, isErrnoException } from "./utils.js";
 
 /** Default TLD when PORTLESS_TLD is not set. */
@@ -23,6 +24,7 @@ const UNPRIVILEGED_FILE = "proxy.unprivileged";
 const LAN_FILE = "proxy.lan";
 const TLD_FILE = "proxy.tld";
 const TLDS_FILE = "proxy.tlds";
+const IDLE_EXIT_FILE = "proxy.idle-exit";
 const MAX_STATE_FILE_BYTES = 64 * 1024;
 
 /** Every file name the proxy owns inside a state directory. */
@@ -38,6 +40,7 @@ export const PROXY_FILES: readonly string[] = [
   TLD_FILE,
   TLDS_FILE,
   LAN_FILE,
+  IDLE_EXIT_FILE,
   HOSTS_SYNC_AUTH_FILE,
   HOSTS_SYNC_AUTH_TEMP_FILE,
 ];
@@ -242,6 +245,21 @@ export class ProxyState {
 
   readLanIp(): string | null {
     return readEntry(this.dir, LAN_FILE);
+  }
+
+  /** Idle-exit linger in seconds; 0 when idle exit is off. Survives a stop, so an auto-start keeps the mode. */
+  readIdleExit(): number {
+    const raw = readEntry(this.dir, IDLE_EXIT_FILE);
+    return raw === null ? 0 : (parseIdleExitSeconds(raw) ?? 0);
+  }
+
+  /** Remember the idle-exit linger, or forget it with 0. */
+  setIdleExit(seconds: number): void {
+    if (seconds > 0) {
+      writeEntry(this.dir, IDLE_EXIT_FILE, String(seconds));
+    } else {
+      removeEntry(this.dir, IDLE_EXIT_FILE);
+    }
   }
 
   private readLegacyTld(): string {

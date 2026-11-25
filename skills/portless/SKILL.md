@@ -185,6 +185,8 @@ Outside LAN mode, the proxy and its HTTP redirect listener bind only to the IPv4
 
 With `--unprivileged` (or `PORTLESS_UNPRIVILEGED=1`) the proxy takes a port below 1024 without `sudo`: it binds the wildcard addresses, which macOS allows for non-root processes, and refuses every non-loopback peer itself. Explicit `--unprivileged` serves plain HTTP on port 80 unless `--https` is also given, because installing the CA would require a prompt. After a stop, auto-start and a bare `proxy start` remember both unprivileged mode and its HTTPS choice. Specifying `--unprivileged` again without `--https` returns to plain HTTP. With `--https` the CA is generated but not installed, so run `portless trust` once yourself. It never writes the hosts file: automatic hosts sync is off, `PORTLESS_SYNC_HOSTS=1` together with it is refused, and Safari or a custom TLD need `portless hosts sync` run once by you. Linux needs `net.ipv4.ip_unprivileged_port_start` to cover the port; portless checks and prints the sysctl command instead of falling back to another port. The mode never triggers a sudo prompt, so it suits scripts, agents and managed machines.
 
+With `--idle-exit` (or `PORTLESS_IDLE_EXIT=1`) the proxy stops itself once no app uses it, so a session does not leave a proxy holding its port. Every `portless run`, multi-app run, and `portless compose up` holds an open connection to the proxy while its process lives; the connection closes when the process exits, even on a crash or `kill -9`. Five seconds after the last one closes, the proxy stops like `portless proxy stop`; a run started inside that window keeps it. `--idle-exit-after <seconds>` (or `PORTLESS_IDLE_EXIT_AFTER`) changes the wait. Aliases and routes kept for a self-daemonized server hold the proxy up. A proxy that no app ever connects to stops after 30 seconds, or after the wait if that is longer. The mode is remembered for auto-start, so the next `portless run` starts a proxy that idles out the same way; `PORTLESS_IDLE_EXIT=0` switches it off. `service install` refuses it.
+
 When portless itself returns an error, it sets `X-Portless: 1` and `Vary: Accept`. It returns 404 (`not_found`) for an unknown host, 421 (`misdirected_request`) for a misdirected request, 502 (`bad_gateway`) when the app is unreachable, 503 (`service_unavailable`) when a request waits more than 30 seconds in the per-backend queue or the queue is full at 512 waiting requests, 504 (`gateway_timeout`) when the backend takes more than 120 seconds to send response headers after the request upload finishes, and 508 (`loop_detected`) for a request loop. The body depends on the `Accept` header. Browsers (`text/html`) get an HTML page. curl, `fetch`, and other clients get JSON such as `{"error":"bad_gateway","upstream":"myapp.localhost","message":"..."}`. To distinguish a proxy-generated 503 or 504 from an app response, check for `Vary: Accept` and a JSON body with `upstream` and an `error` of `service_unavailable` or `gateway_timeout`, or a portless HTML error page. Responses from the app itself are forwarded unchanged. Hostnames outside the portless TLDs, for example a site a DNS blocklist points at 127.0.0.1, never get the app list. Over HTTPS with portless's generated certificates, portless refuses to present a certificate for them, so the TLS handshake fails. With a custom `--cert` and `--key`, on a plain HTTP proxy, or over HTTPS when only the `Host` header names such a host, the request gets 421 Misdirected Request.
 
 `.localhost` domains resolve to `127.0.0.1` natively in Chrome, Firefox, and Edge. Safari relies on the system DNS resolver, which may not handle `.localhost` subdomains on all configurations. Run `portless hosts sync` to add entries to `/etc/hosts` if needed.
@@ -225,24 +227,26 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable                | Description                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
-| `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
-| `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`       | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`          | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`     | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_UNPRIVILEGED` | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)   |
-| `PORTLESS_SYNC_HOSTS`   | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`    | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`       | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`        | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_CLOUDFLARE`   | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
-| `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
-| `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
+| Variable                   | Description                                                                       |
+| -------------------------- | --------------------------------------------------------------------------------- |
+| `PORTLESS_PORT`            | Override the default proxy port (default: 443 with HTTPS, 80 without)             |
+| `PORTLESS_APP_PORT`        | Use a fixed port for the app; several proxied apps need per-app `appPort`         |
+| `PORTLESS_PREFIX`          | Set the worktree prefix (`""` for none, same as `--prefix`)                       |
+| `PORTLESS_HTTPS`           | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                   |
+| `PORTLESS_LAN`             | Set to `1` to always enable LAN mode (auto-detects LAN IP)                        |
+| `PORTLESS_LAN_IP`          | Pin a specific LAN IP for LAN mode                                                |
+| `PORTLESS_TLD`             | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com)    |
+| `PORTLESS_WILDCARD`        | Set to `1` to allow unregistered subdomains to fall back to parent                |
+| `PORTLESS_UNPRIVILEGED`    | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)      |
+| `PORTLESS_IDLE_EXIT`       | Set to `1` to stop the proxy after its last app exits (same as `--idle-exit`)     |
+| `PORTLESS_IDLE_EXIT_AFTER` | Seconds to wait after the last app exits, default 5 (same as `--idle-exit-after`) |
+| `PORTLESS_SYNC_HOSTS`      | Set to `0` to disable auto-sync of /etc/hosts (on by default)                     |
+| `PORTLESS_TAILSCALE`       | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)        |
+| `PORTLESS_FUNNEL`          | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)       |
+| `PORTLESS_NGROK`           | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                   |
+| `PORTLESS_CLOUDFLARE`      | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)         |
+| `PORTLESS_STATE_DIR`       | Override the state directory                                                      |
+| `PORTLESS=0`               | Bypass the proxy, run the command directly                                        |
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
@@ -385,6 +389,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless proxy start --lan`                      | Start in LAN mode (mDNS `.local`, auto-follows LAN IP changes)                      |
 | `portless proxy start -p <number>`                | Start the proxy on a custom port                                                    |
 | `portless proxy start --unprivileged`             | Plain HTTP on port 80 without sudo, nothing installed                               |
+| `portless proxy start --idle-exit`                | Stop the proxy 5 seconds after the last app exits                                   |
 | `portless proxy start --tld test`                 | Use .test instead of .localhost                                                     |
 | `portless proxy start --tld localhost --tld test` | Serve both TLDs from one proxy                                                      |
 | `portless proxy start --tld dev.example.com`      | Use a multi-segment TLD for production-parity URLs                                  |
