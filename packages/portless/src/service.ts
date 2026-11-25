@@ -626,9 +626,15 @@ function buildServiceEnv(ctx: ServiceContext, scope?: LinuxServiceScope): Record
     if (winPath) env.PATH = winPath;
   } else {
     env.HOME = ctx.user.home;
-    if (ctx.user.uid) env.SUDO_UID = ctx.user.uid;
-    if (ctx.user.gid) env.SUDO_GID = ctx.user.gid;
-    if (ctx.user.username && ctx.user.username !== "root") env.SUDO_USER = ctx.user.username;
+    if (ctx.platform === "linux" && scope === "user") {
+      delete env.SUDO_UID;
+      delete env.SUDO_GID;
+      delete env.SUDO_USER;
+    } else {
+      if (ctx.user.uid) env.SUDO_UID = ctx.user.uid;
+      if (ctx.user.gid) env.SUDO_GID = ctx.user.gid;
+      if (ctx.user.username && ctx.user.username !== "root") env.SUDO_USER = ctx.user.username;
+    }
   }
 
   return env;
