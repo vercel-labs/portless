@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
-      "markdownBodySha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
+      "mdxSha256": "f0f42fbb05d08954117e383f936fa47c80a9bec2a5a8fbb89596003ac9eb749f",
+      "markdownBodySha256": "f0f42fbb05d08954117e383f936fa47c80a9bec2a5a8fbb89596003ac9eb749f",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",
@@ -59,8 +59,8 @@
       "title": "Commands | portless",
       "markdownTitle": "Commands",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "153f9828b2967df338f3c13ce3d20632d848da6b2db5b2976eb84e2ac6f1d895",
-      "markdownBodySha256": "153f9828b2967df338f3c13ce3d20632d848da6b2db5b2976eb84e2ac6f1d895",
+      "mdxSha256": "0e6692b42b43a596bf5d5ffb5e0d0eb14b309dc50d665a4b43c780a888412655",
+      "markdownBodySha256": "0e6692b42b43a596bf5d5ffb5e0d0eb14b309dc50d665a4b43c780a888412655",
       "ssr": ["portless", "portless doctor", "portless hosts sync"],
       "headings": [
         [1, "Commands", "commands"],
@@ -93,8 +93,8 @@
       "title": "HTTPS | portless",
       "markdownTitle": "HTTPS",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "0ba3ee620fcb19f4120d8f3d908f63f0ad89c078f778a66e5ff7bb45f02f51da",
-      "markdownBodySha256": "0ba3ee620fcb19f4120d8f3d908f63f0ad89c078f778a66e5ff7bb45f02f51da",
+      "mdxSha256": "d0998d3756d1bf183df2188779c558b8bfc7819b457d70f7daf5f2a6a6b7cf2d",
+      "markdownBodySha256": "d0998d3756d1bf183df2188779c558b8bfc7819b457d70f7daf5f2a6a6b7cf2d",
       "ssr": [
         "HTTP/2 + TLS is enabled by default for faster dev server page loads.",
         "portless proxy start --cert ./cert.pem --key ./key.pem",
