@@ -1,8 +1,8 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { isIP } from "node:net";
+import path from "node:path";
 
 import { getLocalNetworkIp } from "./lan-ip.js";
-
-export { getLocalNetworkIp };
 
 type MdnsPublisher = {
   command: string;
@@ -19,19 +19,11 @@ type LanIpMonitorOptions = {
   onError?: (error: unknown) => void;
 };
 
-/** Lifecycle of one hostname's mDNS record. A hostname with no entry is unpublished. */
-type Publication =
-  | { state: "publishing"; child: ChildProcess }
-  | { state: "failed"; error: string };
-
-/** Map of hostname -> mDNS publication. */
-const publications = new Map<string, Publication>();
-
 /** Polling interval (ms) for refreshing the auto-detected LAN IP. */
 export const LAN_IP_POLL_INTERVAL_MS = 5000;
 
-function getMdnsPublisher(): MdnsPublisher | null {
-  if (process.platform === "darwin") {
+function getMdnsPublisher(platform: NodeJS.Platform = process.platform): MdnsPublisher | null {
+  if (platform === "darwin") {
     return {
       command: "dns-sd",
       probeArgs: ["-h"],
@@ -48,7 +40,7 @@ function getMdnsPublisher(): MdnsPublisher | null {
     };
   }
 
-  if (process.platform === "linux") {
+  if (platform === "linux") {
     return {
       command: "avahi-publish-address",
       probeArgs: ["--help"],
@@ -154,85 +146,330 @@ function serviceName(hostname: string): string {
   return hostname.replace(/\.local$/, "");
 }
 
-/**
- * Publish an mDNS record for a hostname.
- *
- * On macOS: spawns `dns-sd -P` which publishes both a DNS-SD service record
- * and an A record mapping the hostname to the given IP.
- *
- * On Linux: spawns `avahi-publish-address` to create an mDNS A record. It
- * waits for avahi-daemon when the daemon is not running yet.
- *
- * The child process stays alive to maintain the record. Call unpublish()
- * or cleanupAll() to remove it. If it exits on its own, onError gets its
- * error (unless it repeats the previous one) and the next publish() retries.
- */
-export function publish(
-  hostname: string,
-  port: number,
-  ip: string,
-  onError?: (msg: string) => void
-): void {
-  const previous = publications.get(hostname);
-  // Don't double-publish
-  if (previous?.state === "publishing") return;
+export const MDNS_STOP_GRACE_MS = 500;
+export const MDNS_KILL_WAIT_MS = 500;
 
-  const fqdn = hostname.endsWith(".local") ? hostname : `${hostname}.local`;
-  const name = serviceName(fqdn);
-  const publisher = getMdnsPublisher();
-  if (!publisher) {
-    return;
+type Publication =
+  | {
+      state: "publishing";
+      ip: string;
+      port: number;
+      fqdn: string;
+      args: string[];
+      child: ChildProcess;
+    }
+  | {
+      state: "stopping";
+      ip: string;
+      port: number;
+      fqdn: string;
+      args: string[];
+      child: ChildProcess;
+      done: Promise<void>;
+    }
+  | { state: "failed"; ip: string; port: number; error: string };
+
+export interface MdnsControllerOptions {
+  platform?: NodeJS.Platform;
+  spawn?: typeof spawn;
+  listProcesses?: () => string;
+  killPid?: (pid: number, signal: NodeJS.Signals | 0) => unknown;
+  stopGraceMs?: number;
+  stopKillWaitMs?: number;
+}
+
+export interface MdnsController {
+  reconcile(
+    ip: string | null,
+    routes: Iterable<string | { hostname: string }>,
+    port?: number,
+    onError?: (msg: string) => void
+  ): Promise<void>;
+}
+
+function fqdnFor(hostname: string): string {
+  return hostname.endsWith(".local") ? hostname : `${hostname}.local`;
+}
+
+function findMatchingPublisherPids(
+  output: string,
+  platform: NodeJS.Platform,
+  fqdns: Set<string>,
+  excludePids: Set<number>
+): number[] {
+  const matches: number[] = [];
+  for (const line of output.split("\n")) {
+    const parts = line.trim().split(/\s+/);
+    const pidText = parts.shift() ?? "";
+    const pid = Number(pidText);
+    if (
+      !/^\d+$/.test(pidText) ||
+      !Number.isSafeInteger(pid) ||
+      pid <= 0 ||
+      pid === process.pid ||
+      excludePids.has(pid)
+    )
+      continue;
+    const command = path.basename(parts[0] ?? "");
+    for (const fqdn of fqdns) {
+      const darwinMatch =
+        platform === "darwin" &&
+        command === "dns-sd" &&
+        parts.length === 8 &&
+        parts[1] === "-P" &&
+        parts[2] === serviceName(fqdn) &&
+        parts[3] === "_http._tcp" &&
+        parts[4] === "local" &&
+        /^\d+$/.test(parts[5]) &&
+        parts[6] === fqdn &&
+        isIP(parts[7]) !== 0;
+      const linuxMatch =
+        platform === "linux" &&
+        command === "avahi-publish-address" &&
+        ((parts.length === 5 &&
+          parts[1] === "-f" &&
+          parts[2] === "-R" &&
+          parts[3] === fqdn &&
+          isIP(parts[4]) !== 0) ||
+          (parts.length === 4 && parts[1] === "-R" && parts[2] === fqdn && isIP(parts[3]) !== 0));
+      if (darwinMatch || linuxMatch) {
+        matches.push(pid);
+        break;
+      }
+    }
   }
+  return matches;
+}
 
-  const child = spawn(publisher.command, publisher.buildArgs(fqdn, name, port, ip), {
-    stdio: ["ignore", "pipe", "pipe"],
-    detached: false,
+function waitForExit(child: ChildProcess, timeoutMs: number): Promise<boolean> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (exited: boolean) => {
+      clearTimeout(timer);
+      child.removeListener("exit", onExit);
+      child.removeListener("close", onExit);
+      resolve(exited);
+    };
+    const onExit = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    child.once("exit", onExit);
+    child.once("close", onExit);
+    if (child.exitCode !== null || child.signalCode !== null) finish(true);
   });
-  let lastLine = "";
-  const keepLastLine = (chunk: string) => {
-    const output = lastLine + chunk;
-    lastLine = output.slice(output.trimEnd().lastIndexOf("\n") + 1);
+}
+
+export function createMdnsController(options: MdnsControllerOptions = {}): MdnsController {
+  const platform = options.platform ?? process.platform;
+  const spawnProcess = options.spawn ?? spawn;
+  const listProcesses =
+    options.listProcesses ??
+    (() =>
+      spawnSync("ps", ["-eo", "pid=,args="], { encoding: "utf8", timeout: 1000 }).stdout ?? "");
+  const killPid = options.killPid ?? ((pid, signal) => process.kill(pid, signal));
+  const stopGraceMs = options.stopGraceMs ?? MDNS_STOP_GRACE_MS;
+  const stopKillWaitMs = options.stopKillWaitMs ?? MDNS_KILL_WAIT_MS;
+  const publications = new Map<string, Publication>();
+  let desired: {
+    ip: string | null;
+    port: number;
+    hostnames: Set<string>;
+    onError?: (msg: string) => void;
+  } = {
+    ip: null,
+    port: 443,
+    hostnames: new Set(),
   };
-  child.stdout?.setEncoding("utf8").on("data", keepLastLine);
-  child.stderr?.setEncoding("utf8").on("data", keepLastLine);
+  let dirty = false;
+  let active: Promise<void> | undefined;
 
-  const fail = (error: string) => {
-    const current = publications.get(hostname);
-    if (current?.state !== "publishing" || current.child !== child) return;
-    publications.set(hostname, { state: "failed", error });
-    if (previous?.error !== error) onError?.(`mDNS publishing for ${hostname} failed: ${error}`);
-  };
-
-  child.on("error", (err) => {
-    fail((err as NodeJS.ErrnoException).code === "ENOENT" ? publisher.missingReason : err.message);
-  });
-
-  child.on("close", (code, signal) => {
-    fail(
-      signal
-        ? `${publisher.command} was stopped by ${signal}`
-        : lastLine.trim() || `${publisher.command} exited with code ${code}`
+  const trackedPids = () =>
+    new Set(
+      [...publications.values()].flatMap((pub) =>
+        pub.state === "publishing" && pub.child.pid !== undefined ? [pub.child.pid] : []
+      )
     );
-  });
+  const matchingPids = (hostnames: string[]) =>
+    findMatchingPublisherPids(
+      listProcesses(),
+      platform,
+      new Set(hostnames.map(fqdnFor)),
+      trackedPids()
+    );
+  const signalPid = (pid: number, signal: NodeJS.Signals | 0): boolean => {
+    try {
+      killPid(pid, signal);
+      return true;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== "ESRCH";
+    }
+  };
+  const signalChild = (child: ChildProcess, signal: NodeJS.Signals) => {
+    try {
+      child.kill(signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+    }
+  };
 
-  publications.set(hostname, { state: "publishing", child });
+  const stopPublication = (hostname: string, pub: Publication): Promise<void> => {
+    if (pub.state === "stopping") return pub.done;
+    if (pub.state === "failed") {
+      publications.delete(hostname);
+      return Promise.resolve();
+    }
+    const stopping: Extract<Publication, { state: "stopping" }> = {
+      ...pub,
+      state: "stopping",
+      done: Promise.resolve(),
+    };
+    const done = Promise.resolve()
+      .then(async () => {
+        let exited = waitForExit(pub.child, stopGraceMs);
+        signalChild(pub.child, "SIGTERM");
+        if (!(await exited)) {
+          exited = waitForExit(pub.child, stopKillWaitMs);
+          signalChild(pub.child, "SIGKILL");
+          if (!(await exited)) {
+            for (const pid of matchingPids([hostname])) signalPid(pid, "SIGKILL");
+          }
+        }
+      })
+      .finally(() => {
+        if (publications.get(hostname) === stopping) publications.delete(hostname);
+      });
+    stopping.done = done;
+    publications.set(hostname, stopping);
+    return done;
+  };
+
+  const sweepOrphans = async (hostnames: string[]) => {
+    const pids = matchingPids(hostnames);
+    if (pids.length === 0) return;
+    for (const pid of pids) signalPid(pid, "SIGTERM");
+    const deadline = Date.now() + stopGraceMs;
+    let alive = pids.filter((pid) => signalPid(pid, 0));
+    while (alive.length > 0 && Date.now() < deadline) {
+      await new Promise<void>((resolve) => {
+        const timer = setTimeout(resolve, Math.min(25, deadline - Date.now()));
+        timer.unref?.();
+      });
+      alive = alive.filter((pid) => signalPid(pid, 0));
+    }
+    for (const pid of alive) signalPid(pid, "SIGKILL");
+  };
+
+  const spawnPublication = (
+    hostname: string,
+    port: number,
+    ip: string,
+    onError?: (msg: string) => void
+  ) => {
+    const previous = publications.get(hostname);
+    const previousError = previous?.state === "failed" ? previous.error : undefined;
+    const fqdn = fqdnFor(hostname);
+    const publisher = getMdnsPublisher(platform);
+    if (!publisher) return;
+    const args = publisher.buildArgs(fqdn, serviceName(fqdn), port, ip);
+    const child = spawnProcess(publisher.command, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: false,
+    });
+    let lastLine = "";
+    const keepLastLine = (chunk: string) => {
+      const output = lastLine + chunk;
+      lastLine = output.slice(output.trimEnd().lastIndexOf("\n") + 1);
+    };
+    child.stdout?.setEncoding("utf8").on("data", keepLastLine);
+    child.stderr?.setEncoding("utf8").on("data", keepLastLine);
+    const fail = (error: string) => {
+      const current = publications.get(hostname);
+      if (current?.state !== "publishing" || current.child !== child) return;
+      publications.set(hostname, { state: "failed", ip, port, error });
+      if (previousError !== error) onError?.(`mDNS publishing for ${hostname} failed: ${error}`);
+    };
+    child.on("error", (err) => {
+      fail(
+        (err as NodeJS.ErrnoException).code === "ENOENT" ? publisher.missingReason : err.message
+      );
+    });
+    child.on("close", (code, signal) => {
+      fail(
+        signal
+          ? `${publisher.command} was stopped by ${signal}`
+          : lastLine.trim() || `${publisher.command} exited with code ${code}`
+      );
+    });
+    publications.set(hostname, { state: "publishing", ip, port, fqdn, args, child });
+  };
+
+  const sync = async () => {
+    try {
+      while (dirty) {
+        dirty = false;
+        const target = desired;
+        const stopPromises: Promise<void>[] = [];
+        for (const [hostname, pub] of [...publications.entries()]) {
+          const wanted = target.ip !== null && target.hostnames.has(hostname);
+          const matchesTarget =
+            wanted &&
+            pub.state === "publishing" &&
+            pub.ip === target.ip &&
+            pub.port === target.port;
+          if (matchesTarget) continue;
+          if (pub.state === "failed") {
+            if (!wanted || pub.ip !== target.ip || pub.port !== target.port)
+              publications.delete(hostname);
+            continue;
+          }
+          stopPromises.push(stopPublication(hostname, pub));
+        }
+        if (stopPromises.length > 0) await Promise.all(stopPromises);
+        if (dirty) continue;
+        if (target.ip === null) continue;
+        const ip = target.ip;
+        const toSpawn = [...target.hostnames].filter((hostname) => {
+          const cur = publications.get(hostname);
+          return cur?.state !== "publishing" || cur.ip !== ip || cur.port !== target.port;
+        });
+        if (toSpawn.length > 0) {
+          await sweepOrphans(toSpawn);
+          if (dirty) continue;
+          for (const hostname of toSpawn)
+            spawnPublication(hostname, target.port, ip, target.onError);
+        }
+      }
+    } finally {
+      active = undefined;
+    }
+  };
+
+  return {
+    reconcile(ip, routes, port = 443, onError) {
+      desired = {
+        ip,
+        port,
+        hostnames: new Set(
+          [...routes].map((route) => (typeof route === "string" ? route : route.hostname))
+        ),
+        onError,
+      };
+      dirty = true;
+      if (!active) {
+        active = Promise.resolve().then(sync);
+      }
+      return active;
+    },
+  };
 }
 
-/**
- * Unpublish a previously published mDNS record by killing its child process.
- */
-export function unpublish(hostname: string): void {
-  const publication = publications.get(hostname);
-  publications.delete(hostname);
-  if (publication?.state === "publishing") publication.child.kill("SIGTERM");
-}
+const defaultController = createMdnsController();
 
-/**
- * Kill all active mDNS publisher processes. Called during proxy shutdown.
- */
-export function cleanupAll(): void {
-  for (const publication of publications.values()) {
-    if (publication.state === "publishing") publication.child.kill("SIGTERM");
-  }
-  publications.clear();
+export function reconcile(
+  ip: string | null,
+  routes: Iterable<string | { hostname: string }>,
+  port = 443,
+  onError?: (msg: string) => void
+): Promise<void> {
+  return defaultController.reconcile(ip, routes, port, onError);
 }

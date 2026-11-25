@@ -6,8 +6,27 @@ import * as path from "node:path";
 import { encode, renderUnicodeCompact } from "uqr";
 import colors, { stdoutColor } from "./colors.js";
 import { getLocalNetworkIp } from "./lan-ip.js";
+import { getMdnsDaemonProblem } from "./mdns.js";
 import { renderBrandedPage } from "./pages.js";
 import { escapeHtml } from "./utils.js";
+
+export { getLocalNetworkIp } from "./lan-ip.js";
+export {
+  getMdnsDaemonProblem,
+  isMdnsSupported,
+  LAN_IP_POLL_INTERVAL_MS,
+  reconcile as reconcileMdns,
+  startLanIpMonitor,
+} from "./mdns.js";
+
+export function describeMdnsDiscovery(): string {
+  const mdnsDaemonProblem = getMdnsDaemonProblem();
+  return mdnsDaemonProblem
+    ? colors.yellow(
+        `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
+      )
+    : colors.gray("Services are discoverable as <name>.local on your network");
+}
 
 export const DEVICE_TRUST_MS = 10 * 60 * 1000;
 
@@ -123,7 +142,11 @@ function steps(platform: DevicePlatform, name: string, base: string): string {
 </ol>`;
 }
 
-export function renderDeviceTrustPage(ca: DeviceCA, platform: DevicePlatform, base: string): string {
+export function renderDeviceTrustPage(
+  ca: DeviceCA,
+  platform: DevicePlatform,
+  base: string
+): string {
   const name = escapeHtml(ca.name);
   base = escapeHtml(base);
   const body = `<div class="content">
@@ -167,7 +190,10 @@ export function createDeviceTrustHandler(
       return;
     }
     if (file === "") {
-      send("text/html; charset=utf-8", renderDeviceTrustPage(ca, detectDevicePlatform(userAgent), base));
+      send(
+        "text/html; charset=utf-8",
+        renderDeviceTrustPage(ca, detectDevicePlatform(userAgent), base)
+      );
     } else if (file === FILES.profile) {
       send("application/x-apple-aspen-config", buildMobileConfig(ca));
     } else if (file === FILES.der) {
@@ -185,14 +211,16 @@ export async function serveDeviceTrust(stateDir: string): Promise<boolean> {
   const ip = await getLocalNetworkIp();
   if (!ip) {
     console.error(colors.red("No LAN address found for a device to reach."));
-    console.error(colors.blue("Connect this machine to the same network as the device and try again."));
+    console.error(
+      colors.blue("Connect this machine to the same network as the device and try again.")
+    );
     return false;
   }
 
   const token = randomBytes(16).toString("base64url");
   const server = http.createServer(
     createDeviceTrustHandler(ca, token, (file, userAgent) => {
-      const agent = (userAgent ?? "unknown device").slice(0, 60).replace(/[\x00-\x1f\x7f]/g, " ");
+      const agent = (userAgent ?? "unknown device").slice(0, 60).replace(/\p{Cc}/gu, " ");
       console.log(`${new Date().toISOString()} ${agent}: ${file || "opened the page"}`);
     })
   );

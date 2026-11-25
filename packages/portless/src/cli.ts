@@ -35,7 +35,15 @@ import {
   untrustCA,
 } from "./certs.js";
 import { createHttpRedirectServer, createProxyServer } from "./proxy.js";
-import { serveDeviceTrust } from "./lan.js";
+import {
+  describeMdnsDiscovery,
+  getLocalNetworkIp,
+  getMdnsDaemonProblem,
+  isMdnsSupported,
+  reconcileMdns,
+  serveDeviceTrust,
+  startLanIpMonitor,
+} from "./lan.js";
 import {
   generateHostsSyncToken,
   removeHostsSyncToken,
@@ -156,15 +164,6 @@ import {
   removePortlessStateFiles,
   type CATrustRemovalResult,
 } from "./clean-utils.js";
-import {
-  getLocalNetworkIp,
-  getMdnsDaemonProblem,
-  isMdnsSupported,
-  publish,
-  startLanIpMonitor,
-  unpublish,
-  cleanupAll as cleanupMdns,
-} from "./mdns.js";
 import {
   loadConfig,
   resolveAppConfig,
@@ -886,16 +885,6 @@ function reportHostsSyncHere(
   );
 }
 
-/** Say whether LAN services are discoverable as .local names now, or why not yet. */
-function describeMdnsDiscovery(): string {
-  const mdnsDaemonProblem = getMdnsDaemonProblem();
-  return mdnsDaemonProblem
-    ? chalk.yellow(
-        `Services will be discoverable as <name>.local once the mDNS daemon is available: ${mdnsDaemonProblem}`
-      )
-    : chalk.gray("Services are discoverable as <name>.local on your network");
-}
-
 // ---------------------------------------------------------------------------
 // Proxy server lifecycle
 // ---------------------------------------------------------------------------
@@ -961,19 +950,10 @@ function startProxyServer(
 
   const onMdnsError = (msg: string) => console.warn(chalk.yellow(msg));
 
-  const publishCachedRoutes = () => {
-    if (!activeLanIp) return;
-    for (const route of cachedRoutes) {
-      publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-    }
-  };
+  const syncMdns = () => reconcileMdns(activeLanIp, cachedRoutes, proxyPort, onMdnsError);
 
   const updateLanIp = (nextIp: string | null, previousIp = activeLanIp) => {
     if (nextIp === activeLanIp) return;
-
-    if (activeLanIp) {
-      cleanupMdns();
-    }
 
     activeLanIp = nextIp;
     writeLanMarker(store.dir, activeLanIp);
@@ -986,7 +966,7 @@ function startProxyServer(
       console.log(chalk.green(`LAN mode restored: ${nextIp}`));
     }
 
-    publishCachedRoutes();
+    void syncMdns();
   };
 
   // Bounds proxy.log on repeated reloads. Not a user-facing channel: users are
@@ -1013,28 +993,12 @@ function startProxyServer(
 
   const reloadRoutes = () => {
     try {
-      const previousRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
       cachedRoutes = store.loadTrustedRoutes();
       routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
       }
-      // Sync mDNS records with current routes
-      if (activeLanIp) {
-        const currentRoutes = new Map(cachedRoutes.map((r) => [r.hostname, r.port]));
-        for (const route of cachedRoutes) {
-          const previousPort = previousRoutes.get(route.hostname);
-          if (previousPort !== undefined && previousPort !== route.port) {
-            unpublish(route.hostname);
-          }
-          publish(route.hostname, proxyPort, activeLanIp, onMdnsError);
-        }
-        for (const hostname of previousRoutes.keys()) {
-          if (!currentRoutes.has(hostname)) {
-            unpublish(hostname);
-          }
-        }
-      }
+      void syncMdns();
     } catch (err) {
       // Keep the last known routes, and say why once instead of on every reload.
       if (!routesReloadWarningShown) {
@@ -1060,9 +1024,6 @@ function startProxyServer(
   if (autoSyncHosts) {
     syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
   }
-
-  // Publish mDNS for routes that already exist at startup
-  publishCachedRoutes();
 
   const createServer = () =>
     createProxyServer({
@@ -1184,11 +1145,12 @@ function startProxyServer(
       )
     );
     if (activeLanIp) {
+      void syncMdns();
       console.log(chalk.green(`LAN mode: ${activeLanIp}`));
       console.log(describeMdnsDiscovery());
       if (isTls && !customCert) {
-        console.log(chalk.yellow("For HTTPS on devices, install the CA certificate:"));
-        console.log(chalk.gray(`  ${path.join(store.dir, "ca.pem")}`));
+        console.log(chalk.yellow("For HTTPS on devices, run: portless trust --device"));
+        console.log(chalk.gray(`  CA file: ${path.join(store.dir, "ca.pem")}`));
       }
       if (!lanIpPinned) {
         lanMonitor = startLanIpMonitor({
@@ -1214,7 +1176,7 @@ function startProxyServer(
     if (watcher) {
       watcher.close();
     }
-    if (activeLanIp) cleanupMdns();
+    const stopMdns = reconcileMdns(null, [], proxyPort);
     closeAuxiliaryServers();
     try {
       fs.unlinkSync(store.pidPath);
@@ -1229,7 +1191,8 @@ function startProxyServer(
     resetProxyMarkers(store);
     removeHostsSyncToken(store.dir);
     if (autoSyncHosts) cleanHostsFile();
-    server.close(() => process.exit(0));
+    const closeServer = new Promise<void>((resolve) => server.close(() => resolve()));
+    void Promise.all([stopMdns, closeServer]).finally(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
     setTimeout(() => process.exit(0), EXIT_TIMEOUT_MS).unref();
   };
@@ -4533,6 +4496,9 @@ async function handleProxy(args: string[]): Promise<void> {
   if (lanMode && lanIp) {
     console.log(chalk.green(`LAN mode active. IP: ${lanIp}`));
     console.log(describeMdnsDiscovery());
+    if (useHttps && !(customCertPath && customKeyPath)) {
+      console.log(chalk.gray("For HTTPS on devices, run: portless trust --device"));
+    }
   }
 }
 

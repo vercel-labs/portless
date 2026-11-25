@@ -97,7 +97,9 @@ describe("buildMobileConfig", () => {
     const uuids = profile.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g);
     expect(new Set(uuids).size).toBe(2);
     const other = buildMobileConfig({ ...ca, fingerprint: "different" });
-    expect(other.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g)).not.toEqual(uuids);
+    expect(
+      other.match(/[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}/g)
+    ).not.toEqual(uuids);
   });
 
   it("escapes the CA name", () => {
@@ -174,7 +176,9 @@ describe("createDeviceTrustHandler", () => {
 
   it("reports successful requests with the file and user agent", async () => {
     const served: [string, string | undefined][] = [];
-    const handler = createDeviceTrustHandler(ca, TOKEN, (file, agent) => served.push([file, agent]));
+    const handler = createDeviceTrustHandler(ca, TOKEN, (file, agent) =>
+      served.push([file, agent])
+    );
     const local = http.createServer(handler);
     await new Promise<void>((resolve) => local.listen(0, "127.0.0.1", resolve));
     const base = `http://127.0.0.1:${(local.address() as { port: number }).port}/${TOKEN}/`;
@@ -182,6 +186,9 @@ describe("createDeviceTrustHandler", () => {
     await fetch(`${base}portless-ca.crt`, { headers: { "user-agent": ANDROID } });
     await fetch(`${base}missing`);
     await new Promise((resolve) => local.close(resolve));
-    expect(served).toEqual([["", IPHONE], ["portless-ca.crt", ANDROID]]);
+    expect(served).toEqual([
+      ["", IPHONE],
+      ["portless-ca.crt", ANDROID],
+    ]);
   });
 });
