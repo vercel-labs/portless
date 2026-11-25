@@ -493,6 +493,54 @@ describe("hosts file mutation safety", () => {
     });
   });
 
+  it("falls back to direct write on EBUSY rename (bind-mounted hosts)", () => {
+    let hosts = systemAndCustomEntries;
+    vi.mocked(readFileSync).mockImplementation((() => hosts) as unknown as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((file, data) => {
+      if (!String(file).includes(".portless-hosts.")) hosts = String(data);
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(() => {
+      const err = new Error("EBUSY") as NodeJS.ErrnoException;
+      err.code = "EBUSY";
+      throw err;
+    });
+
+    expect(syncHostsFile(["app.test"])).toEqual({
+      action: "synced",
+      block: "ok",
+      changed: true,
+    });
+    expect(hosts).toContain("127.0.0.1 app.test");
+    expect(rmSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores previous hosts content if EBUSY fallback write fails", () => {
+    let hosts = systemAndCustomEntries;
+    let directAttempts = 0;
+    vi.mocked(readFileSync).mockImplementation((() => hosts) as unknown as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((file, data) => {
+      if (String(file).includes(".portless-hosts.")) return;
+      directAttempts++;
+      if (directAttempts === 1) {
+        hosts = "# portless-start\n";
+        throw new Error("ENOSPC");
+      }
+      hosts = String(data);
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(() => {
+      const err = new Error("EBUSY") as NodeJS.ErrnoException;
+      err.code = "EBUSY";
+      throw err;
+    });
+
+    expect(syncHostsFile(["app.test"])).toEqual({
+      action: "failed",
+      block: "ok",
+      changed: false,
+    });
+    expect(hosts).toBe(systemAndCustomEntries);
+  });
+
   it("keeps getManagedHostnames best-effort on read failure", () => {
     vi.mocked(readFileSync).mockImplementation(throwReadError as typeof readFileSync);
 

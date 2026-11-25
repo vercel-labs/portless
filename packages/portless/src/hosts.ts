@@ -139,7 +139,7 @@ function tryIgnore(fn: () => void): void {
   }
 }
 
-function writeHostsFileAtomic(content: string): void {
+function writeHostsFileAtomic(content: string, previousContent: string): void {
   let targetPath = HOSTS_PATH;
   tryIgnore(() => {
     targetPath = fs.realpathSync(HOSTS_PATH);
@@ -157,7 +157,25 @@ function writeHostsFileAtomic(content: string): void {
     tryIgnore(() => {
       fs.chmodSync(tempPath, mode);
     });
-    fs.renameSync(tempPath, targetPath);
+    try {
+      fs.renameSync(tempPath, targetPath);
+      return;
+    } catch (renameError) {
+      const code = (renameError as NodeJS.ErrnoException | undefined)?.code;
+      if (code !== "EBUSY" && code !== "EXDEV") throw renameError;
+      tryIgnore(() => {
+        fs.rmSync(tempPath, { force: true });
+      });
+      try {
+        fs.writeFileSync(targetPath, content);
+        return;
+      } catch (fallbackError) {
+        tryIgnore(() => {
+          fs.writeFileSync(targetPath, previousContent);
+        });
+        throw fallbackError;
+      }
+    }
   } catch (error) {
     tryIgnore(() => {
       fs.rmSync(tempPath, { force: true });
@@ -179,7 +197,7 @@ function reconcileHostsFile(hostnames: string[]): HostsResult {
   const next =
     hostnames.length === 0 ? cleaned : cleaned.trimEnd() + "\n\n" + buildBlock(hostnames) + "\n";
   try {
-    writeHostsFileAtomic(next);
+    writeHostsFileAtomic(next, content);
   } catch {
     return { action: "failed", block: "ok", changed: false };
   }
