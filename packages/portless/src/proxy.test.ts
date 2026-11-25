@@ -1456,6 +1456,74 @@ describe("createProxyServer", () => {
       expect(resets).toBe(1);
       expect(errors).toEqual([]);
     });
+
+    it("closes a replayed long-lived response on plain HTTP proxy shutdown", async () => {
+      const handled = new WeakSet<net.Socket>();
+      let resets = 0;
+      let streamSocket: net.Socket | undefined;
+      const backend = trackServer(
+        http.createServer((req, res) => {
+          if (handled.has(req.socket)) {
+            resets++;
+            req.socket.resetAndDestroy();
+            return;
+          }
+          handled.add(req.socket);
+          if (req.url !== "/events") return res.end("ok");
+          streamSocket = req.socket;
+          res.writeHead(200, { "content-Type": "text/event-stream" });
+          res.write("data: ready\n\n");
+        })
+      );
+      await listen(backend);
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => [
+            { hostname: "myapp.localhost", port: (backend.address() as net.AddressInfo).port },
+          ],
+          proxyPort: TEST_PROXY_PORT,
+          loopbackOnly: false,
+          onError: () => {},
+        })
+      );
+      let events: http.ClientRequest | undefined;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await listen(server);
+        await request(server, { host: "myapp.localhost", path: "/warm" });
+        events = http.get({
+          hostname: "127.0.0.1",
+          port: (server.address() as net.AddressInfo).port,
+          path: "/events",
+          headers: { host: "myapp.localhost" },
+          agent: false,
+        });
+        events.on("error", () => {});
+        await new Promise<void>((resolve, reject) => {
+          events!.once("response", (res) => {
+            res.on("error", () => {});
+            res.resume();
+            resolve();
+          });
+          events!.once("error", reject);
+        });
+        expect(resets).toBe(1);
+        expect(streamSocket?.destroyed).toBe(false);
+        const streamClosed = new Promise<void>((resolve) => streamSocket!.once("close", resolve));
+        const serverClosed = new Promise<void>((resolve) => server.close(() => resolve()));
+        await Promise.race([
+          Promise.all([streamClosed, serverClosed]),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error("Proxy shutdown timed out")), 2_000);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+        events?.destroy();
+        backend.closeAllConnections();
+        (server as http.Server).closeAllConnections();
+      }
+    });
   });
 
   describe("X-Portless header", () => {
@@ -2464,10 +2532,12 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
 
   it("closes a replayed long-lived response when the proxy shuts down", async () => {
     const handled = new WeakSet<net.Socket>();
+    let resets = 0;
     let streamSocket: net.Socket | undefined;
     const backend = trackServer(
       http.createServer((req, res) => {
         if (handled.has(req.socket)) {
+          resets++;
           req.socket.resetAndDestroy();
           return;
         }
@@ -2482,30 +2552,51 @@ describe("createProxyServer with TLS (HTTP/2)", () => {
     const routes: RouteInfo[] = [
       { hostname: "api.localhost", port: (backend.address() as net.AddressInfo).port },
     ];
-    const server = createProxyServer({
-      getRoutes: () => routes,
-      proxyPort: TEST_PROXY_PORT,
-      tls: { cert: tlsCert, key: tlsKey },
-      onError: () => {},
-    });
-    await listen(server);
+    const server = trackServer(
+      createProxyServer({
+        getRoutes: () => routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: { cert: tlsCert, key: tlsKey },
+        onError: () => {},
+      })
+    );
+    let events: http.ClientRequest | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await listen(server);
+      await httpsRequest(server, { host: "api.localhost", path: "/warm" });
+      events = https.get({
+        hostname: "127.0.0.1",
+        port: (server.address() as net.AddressInfo).port,
+        path: "/events",
+        headers: { host: "api.localhost" },
+        rejectUnauthorized: false,
+      });
+      events.on("error", () => {});
+      await new Promise<void>((resolve, reject) => {
+        events!.once("response", (res) => {
+          res.on("error", () => {});
+          res.resume();
+          resolve();
+        });
+        events!.once("error", reject);
+      });
+      expect(resets).toBe(1);
+      expect(streamSocket?.destroyed).toBe(false);
 
-    await httpsRequest(server, { host: "api.localhost", path: "/warm" });
-    const events = https.get({
-      hostname: "127.0.0.1",
-      port: (server.address() as net.AddressInfo).port,
-      path: "/events",
-      headers: { host: "api.localhost" },
-      rejectUnauthorized: false,
-    });
-    events.on("error", () => {});
-    await new Promise<void>((resolve) => events.once("response", () => resolve()));
-    expect(streamSocket?.destroyed).toBe(false);
-
-    const streamClosed = new Promise<void>((resolve) => streamSocket!.once("close", resolve));
-    server.close();
-    await streamClosed;
-    events.destroy();
+      const streamClosed = new Promise<void>((resolve) => streamSocket!.once("close", resolve));
+      server.close();
+      await Promise.race([
+        streamClosed,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Stream shutdown timed out")), 2_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      events?.destroy();
+      backend.closeAllConnections();
+    }
   });
 
   it("reports a TLS mismatch against a plaintext backend and recovers", async () => {

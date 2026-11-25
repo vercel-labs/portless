@@ -14,6 +14,7 @@ import { UpstreamPool } from "./upstream-pool.js";
 const servers: net.Server[] = [];
 const sockets = new Set<net.Socket>();
 const requests = new Set<http.ClientRequest>();
+const fakeResponses = new Set<FakeServerResponse>();
 const pools: UpstreamPool[] = [];
 const tempDirs: string[] = [];
 
@@ -88,6 +89,8 @@ class FakeServerResponse extends Writable {
 
   constructor(remoteAddress: string, viaSession = false) {
     super();
+    fakeResponses.add(this);
+    this.once("close", () => fakeResponses.delete(this));
     if (viaSession) this.stream = { session: { socket: { remoteAddress } } };
     else this.socket = { remoteAddress };
   }
@@ -174,6 +177,7 @@ function proxy(backendPort: number, onError: (error: string) => void = () => {})
 afterEach(async () => {
   vi.useRealTimers();
   for (const pool of pools.splice(0)) pool.destroy();
+  for (const res of fakeResponses) res.destroy();
   for (const req of requests) req.destroy();
   for (const socket of sockets) socket.destroy();
   await Promise.all(
@@ -569,6 +573,257 @@ describe("UpstreamPool", () => {
     );
   }, 30_000);
 
+  it("evicts stalled upstream requests after first-byte and body inactivity deadlines while preserving 60s long polls", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const started = new Set<string>();
+    let longPoll: http.ServerResponse | undefined;
+    let bodyClosed = false;
+    const backend = http.createServer((req, res) => {
+      started.add(req.url ?? "");
+      if (req.url === "/hang-headers") return;
+      if (req.url === "/hang-body") {
+        res.once("close", () => (bodyClosed = true));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.flushHeaders();
+        return;
+      }
+      if (req.url === "/long-poll") {
+        longPoll = res;
+        res.writeHead(200, { "content-type": "application/json" });
+        res.flushHeaders();
+        return;
+      }
+      res.end("ok");
+    });
+    const backendPort = await listen(backend);
+    const server = proxy(backendPort);
+    const proxyResponses = new Map<string, http.ServerResponse>();
+    server.on("request", (req, res) => proxyResponses.set(req.url ?? "", res));
+    const proxyPort = await listen(server);
+    const headersResult = response(get(proxyPort, "/hang-headers"));
+    void headersResult.catch(() => {});
+    const bodyRequest = get(proxyPort, "/hang-body");
+    bodyRequest.once("response", (res) => {
+      res.on("error", () => {});
+      res.resume();
+    });
+    const longPollResult = response(get(proxyPort, "/long-poll"));
+    void longPollResult.catch(() => {});
+    await waitFor(
+      () =>
+        started.size === 3 &&
+        proxyResponses.get("/hang-body")?.headersSent === true &&
+        proxyResponses.get("/long-poll")?.headersSent === true &&
+        longPoll !== undefined
+    );
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(longPoll!.destroyed).toBe(false);
+    expect(longPoll!.writableEnded).toBe(false);
+    longPoll!.end('{"ok":true}');
+    expect(await longPollResult).toEqual({ status: 200, body: '{"ok":true}' });
+    await vi.advanceTimersByTimeAsync(61_000);
+    const rejected = await headersResult;
+    expect(rejected.status).toBe(504);
+    expect(JSON.parse(rejected.body).error).toBe("gateway_timeout");
+    await waitFor(() => bodyClosed);
+    expect(await response(get(proxyPort, "/health"))).toEqual({ status: 200, body: "ok" });
+  }, 30_000);
+
+  it("shares the 48-request admission cap across host overrides and separate proxy instances on the same backend port while keeping shutdown isolated", async () => {
+    const held: http.ServerResponse[] = [];
+    const hosts: (string | undefined)[] = [];
+    const backend = http.createServer((req, res) => {
+      hosts.push(req.headers.host);
+      held.push(res);
+    });
+    const backendPort = await listen(backend);
+    const makeProxy = (host: string) =>
+      createProxyServer({
+        getRoutes: () => [{ hostname: "app.localhost", port: backendPort, upstream: { host } }],
+        proxyPort: 1355,
+        onError: () => {},
+      }) as http.Server;
+    const firstServer = makeProxy("a.internal");
+    const secondServer = makeProxy("b.internal");
+    let secondArrived = 0;
+    secondServer.on("request", () => secondArrived++);
+    const firstPort = await listen(firstServer);
+    const secondPort = await listen(secondServer);
+    let firstFinished = 0;
+    const first = Array.from({ length: 30 }, () =>
+      response(get(firstPort)).then((result) => {
+        firstFinished++;
+        return result;
+      })
+    );
+    for (const result of first) void result.catch(() => {});
+    await waitFor(() => held.length === 30);
+    let aborted = 0;
+    const second = Array.from({ length: 30 }, () =>
+      response(get(secondPort)).catch(() => {
+        aborted++;
+        return null;
+      })
+    );
+    await waitFor(() => secondArrived === 30 && held.length >= 48);
+    for (let i = 0; i < 10; i++) await settle();
+    expect(held.length).toBe(48);
+    expect(hosts.slice(0, 30)).toEqual(Array(30).fill("a.internal"));
+    expect(hosts.slice(30)).toEqual(Array(18).fill("b.internal"));
+    secondServer.close();
+    await waitFor(() => aborted === 12);
+    expect(firstFinished).toBe(0);
+    expect(held.slice(0, 30).every((res) => !res.destroyed)).toBe(true);
+    for (const res of held) res.end("ok");
+    expect(await Promise.all(first)).toEqual(Array(30).fill({ status: 200, body: "ok" }));
+    const secondResults = await Promise.all(second);
+    expect(secondResults.filter((result) => result === null)).toHaveLength(12);
+    expect(secondResults.filter((result) => result?.status === 200)).toHaveLength(18);
+  }, 30_000);
+
+  it("treats 127.0.0.2 as loopback instead of applying the remote-peer cap", async () => {
+    const held: http.ServerResponse[] = [];
+    const backend = http.createServer((_req, res) => held.push(res));
+    const backendPort = await listen(backend);
+    const pool = new UpstreamPool();
+    pools.push(pool);
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
+    const dispatched = Array.from({ length: 20 }, (_, index) => {
+      const downstream = new FakeServerResponse("127.0.0.2");
+      return { downstream, done: dispatchAndPipe(pool, route, downstream, `/${index}`) };
+    });
+    await waitFor(() => held.length === 20);
+    expect(held).toHaveLength(20);
+    for (const res of held) res.end("ok");
+    await Promise.all(dispatched.map(({ done }) => done));
+    expect(dispatched.every(({ downstream }) => downstream.statusCode === 200)).toBe(true);
+    expect(dispatched.every(({ downstream }) => downstream.body === "ok")).toBe(true);
+  }, 30_000);
+
+  it("keeps the request slot and client disconnect handling active when the backend replies before an upload finishes", async () => {
+    const held: http.ServerResponse[] = [];
+    let afterReceived = false;
+    let earlyClosed = false;
+    const backend = http.createServer((req, res) => {
+      if (req.url === "/early") {
+        req.socket.once("close", () => (earlyClosed = true));
+        res.writeHead(413);
+        res.end("too large");
+        return;
+      }
+      if (req.url === "/after") {
+        afterReceived = true;
+        res.end("ok");
+        return;
+      }
+      held.push(res);
+    });
+    const backendPort = await listen(backend);
+    const server = proxy(backendPort);
+    let afterArrived = false;
+    server.on("request", (req) => {
+      if (req.url === "/after") afterArrived = true;
+    });
+    const proxyPort = await listen(server);
+    const initial = Promise.all(Array.from({ length: 47 }, () => response(get(proxyPort))));
+    void initial.catch(() => {});
+    await waitFor(() => held.length === 47);
+    const upload = net.connect(proxyPort, "127.0.0.1");
+    trackSocket(upload);
+    let earlyResponse = "";
+    upload.on("data", (chunk) => (earlyResponse += chunk.toString()));
+    upload.write("POST /early HTTP/1.1\r\nHost: app.localhost\r\nContent-Length: 10\r\n\r\na");
+    await waitFor(() => earlyResponse.includes("too large"));
+    expect(earlyResponse).toContain("413");
+    expect(earlyClosed).toBe(false);
+    const after = response(get(proxyPort, "/after"));
+    void after.catch(() => {});
+    await waitFor(() => afterArrived);
+    for (let i = 0; i < 10; i++) await settle();
+    expect(afterReceived).toBe(false);
+    upload.destroy();
+    await waitFor(() => earlyClosed && afterReceived);
+    expect(await after).toEqual({ status: 200, body: "ok" });
+    expect(afterReceived).toBe(true);
+    for (const res of held) res.end("ok");
+    expect(await initial).toEqual(Array(47).fill({ status: 200, body: "ok" }));
+  }, 30_000);
+
+  it("rejects queue overflow immediately with 503 once 512 requests are waiting", async () => {
+    const held: http.ServerResponse[] = [];
+    const backend = http.createServer((_req, res) => held.push(res));
+    const backendPort = await listen(backend);
+    const pool = new UpstreamPool();
+    pools.push(pool);
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
+    const active = Array.from({ length: 48 }, (_, index) => {
+      const downstream = new FakeServerResponse("127.0.0.1");
+      return { downstream, done: dispatchAndPipe(pool, route, downstream, `/active/${index}`) };
+    });
+    await waitFor(() => held.length === 48);
+    const queued = Array.from({ length: 512 }, (_, index) => {
+      const downstream = new FakeServerResponse("127.0.0.1");
+      return { downstream, done: dispatchAndPipe(pool, route, downstream, `/queued/${index}`) };
+    });
+    expect(queued.every(({ downstream }) => downstream.statusCode === 0)).toBe(true);
+    const overflow = new FakeServerResponse("127.0.0.1");
+    const overflowDone = dispatchAndPipe(pool, route, overflow, "/overflow");
+    expect(overflow.statusCode).toBe(503);
+    await overflowDone;
+    pool.destroy();
+    for (const { downstream } of active) downstream.destroy();
+    await Promise.all([...active.map(({ done }) => done), ...queued.map(({ done }) => done)]);
+  }, 30_000);
+
+  it("admits WebSocket upgrades while all 48 HTTP request slots are occupied", async () => {
+    const held: http.ServerResponse[] = [];
+    const backend = http.createServer((_req, res) => held.push(res));
+    backend.on("upgrade", (_req, socket, head) => {
+      socket.write(
+        "HTTP/1.1 101 Switching Protocols\r\n" +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n"
+      );
+      if (head.length) socket.write(head);
+      socket.on("data", (chunk) => socket.write(chunk));
+    });
+    const backendPort = await listen(backend);
+    const proxyPort = await listen(proxy(backendPort));
+    let finished = 0;
+    const initial = Promise.all(
+      Array.from({ length: 48 }, () =>
+        response(get(proxyPort)).then((result) => {
+          finished++;
+          return result;
+        })
+      )
+    );
+    void initial.catch(() => {});
+    await waitFor(() => held.length === 48);
+    const socket = net.connect(proxyPort, "127.0.0.1");
+    trackSocket(socket);
+    let received = "";
+    socket.on("data", (chunk) => (received += chunk.toString()));
+    socket.write(
+      "GET /socket HTTP/1.1\r\n" +
+        "Host: app.localhost\r\n" +
+        "Upgrade: websocket\r\n" +
+        "Connection: Upgrade\r\n" +
+        "Sec-WebSocket-Version: 13\r\n" +
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"
+    );
+    await waitFor(() => received.includes("\r\n\r\n"));
+    expect(received).toContain("101 Switching Protocols");
+    socket.write("ping");
+    await waitFor(() => received.includes("ping"));
+    expect(finished).toBe(0);
+    expect(held.every((res) => !res.destroyed && !res.writableEnded)).toBe(true);
+    socket.destroy();
+    for (const res of held) res.end("ok");
+    expect(await initial).toEqual(Array(48).fill({ status: 200, body: "ok" }));
+  }, 30_000);
+
   it("returns 503 when a queued request exceeds the wait deadline", async () => {
     vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     let received = 0;
@@ -598,10 +853,9 @@ describe("UpstreamPool", () => {
     await queuedArrived;
     expect(received).toBe(48);
     await vi.advanceTimersByTimeAsync(30_000);
-    expect(await queued).toEqual({
-      status: 503,
-      body: "Service Unavailable: upstream request queue timed out\n",
-    });
+    const rejected = await queued;
+    expect(rejected.status).toBe(503);
+    expect(JSON.parse(rejected.body).error).toBe("service_unavailable");
     expect(received).toBe(48);
     for (const res of held) res.end("ok");
     expect(await initial).toEqual(Array(48).fill({ status: 200, body: "ok" }));

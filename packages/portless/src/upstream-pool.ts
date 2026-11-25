@@ -2,14 +2,20 @@ import * as http from "node:http";
 import * as net from "node:net";
 import * as nodeTls from "node:tls";
 import type { RouteInfo } from "./types.js";
-import { createLoopbackConnection } from "./utils.js";
+import { createLoopbackConnection, isLoopbackPeer } from "./utils.js";
 
 const MAX_PENDING_DIALS = 8;
 const MAX_REQUEST_SOCKETS = 48;
 const MAX_REMOTE_PEER_SOCKETS = 16;
+const MAX_QUEUED_REQUESTS = 512;
 const UPSTREAM_CONNECT_TIMEOUT_MS = 10_000;
 const RESPONSE_STALL_TIMEOUT_MS = 30_000;
+const UPSTREAM_FIRST_BYTE_TIMEOUT_MS = 120_000;
+const UPSTREAM_BODY_IDLE_TIMEOUT_MS = 120_000;
 const QUEUE_WAIT_TIMEOUT_MS = 30_000;
+const SHUTDOWN_GRACE_MS = 5_000;
+
+export type UpstreamRejectReason = "queue_timeout" | "queue_full" | "gateway_timeout";
 
 /** Options for dispatching an HTTP request through an upstream pool. */
 export interface UpstreamDispatchOptions {
@@ -17,10 +23,13 @@ export interface UpstreamDispatchOptions {
   path?: string;
   headers: http.OutgoingHttpHeaders;
   freshConnection?: boolean;
+  onReject?: (reason: UpstreamRejectReason) => void;
 }
 
 type BackendState = "idle" | "dialing" | "atCapacity";
 type WaitingDispatch = {
+  pool: UpstreamPool;
+  socketKey: string;
   freshConnection: boolean;
   peerKey: string | null;
   res: http.ServerResponse;
@@ -28,14 +37,81 @@ type WaitingDispatch = {
   cancelWait: () => void;
   start: () => void;
 };
-type BackendEntry = {
-  key: string;
+type BackendAdmission = {
+  port: number;
   activeRequests: number;
   peerActive: Map<string, number>;
   dialing: number;
   longLived: number;
   waiting: WaitingDispatch[];
 };
+
+const admissions = new Map<number, BackendAdmission>();
+
+function getAdmission(port: number): BackendAdmission {
+  let admission = admissions.get(port);
+  if (!admission) {
+    admission = {
+      port,
+      activeRequests: 0,
+      peerActive: new Map(),
+      dialing: 0,
+      longLived: 0,
+      waiting: [],
+    };
+    admissions.set(port, admission);
+  }
+  return admission;
+}
+
+function getAdmissionState(admission: BackendAdmission): BackendState {
+  if (admission.activeRequests >= MAX_REQUEST_SOCKETS) return "atCapacity";
+  if (admission.dialing >= MAX_PENDING_DIALS) return "dialing";
+  return "idle";
+}
+
+function peerHasCapacity(admission: BackendAdmission, peerKey: string | null): boolean {
+  return peerKey === null || (admission.peerActive.get(peerKey) ?? 0) < MAX_REMOTE_PEER_SOCKETS;
+}
+
+function pruneAdmission(admission: BackendAdmission): void {
+  if (
+    admission.activeRequests === 0 &&
+    admission.peerActive.size === 0 &&
+    admission.dialing === 0 &&
+    admission.longLived === 0 &&
+    admission.waiting.length === 0 &&
+    admissions.get(admission.port) === admission
+  ) {
+    admissions.delete(admission.port);
+  }
+}
+
+function removeWaiter(admission: BackendAdmission, waiting: WaitingDispatch): void {
+  clearTimeout(waiting.waitTimer);
+  const index = admission.waiting.indexOf(waiting);
+  if (index !== -1) admission.waiting.splice(index, 1);
+  waiting.res.removeListener("close", waiting.cancelWait);
+}
+
+function sendFallbackReject(res: http.ServerResponse, reason: UpstreamRejectReason): void {
+  if (res.destroyed) return;
+  if (res.headersSent) {
+    res.destroy();
+    return;
+  }
+  if (reason === "gateway_timeout") {
+    res.writeHead(504, { "Content-Type": "text/plain" });
+    res.end("Gateway Timeout: upstream did not respond in time\n");
+  } else if (reason === "queue_full") {
+    res.writeHead(503, { "Content-Type": "text/plain" });
+    res.end("Service Unavailable: upstream request queue is full\n");
+  } else {
+    res.writeHead(503, { "Content-Type": "text/plain" });
+    res.end("Service Unavailable: upstream request queue timed out\n");
+  }
+}
+
 type DialRef = { cancel?: () => void; onDialError: () => void };
 type UpstreamOptions = http.RequestOptions & {
   upstreamRoute: RouteInfo;
@@ -59,19 +135,18 @@ function remotePeerKey(res: http.ServerResponse): string | null {
     res.socket?.remoteAddress ??
     (res as unknown as { stream?: { session?: { socket?: net.Socket } } }).stream?.session?.socket
       ?.remoteAddress;
-  if (!addr) return null;
-  const normalized = addr.startsWith("::ffff:") ? addr.slice(7) : addr;
-  if (normalized === "127.0.0.1" || normalized === "::1") return null;
-  return normalized;
+  if (!addr || isLoopbackPeer(addr)) return null;
+  return addr.startsWith("::ffff:") ? addr.slice(7) : addr;
 }
 
 /** Manages per-backend upstream pooling, dial pacing, fresh-connection replay, and shutdown. */
 export class UpstreamPool {
   private readonly keepAliveAgent = new http.Agent({ keepAlive: true });
   private readonly freshSockets = new Set<net.Socket>();
+  private readonly longLivedRequests = new Set<http.ClientRequest>();
   private readonly pendingDials = new Set<() => void>();
-  private readonly backends = new Map<string, BackendEntry>();
   private closing = false;
+  private shutdownTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor() {
     const originalAgentName = this.keepAliveAgent.getName.bind(this.keepAliveAgent);
@@ -82,7 +157,7 @@ export class UpstreamPool {
     this.keepAliveAgent.createConnection = (options, callback) => {
       const { upstreamRoute: route, upstreamDial: dialRef } = options as UpstreamOptions;
       dialRef.cancel = this.dial(
-        this.getBackend(route),
+        getAdmission(route.port),
         route,
         false,
         callback!,
@@ -91,60 +166,69 @@ export class UpstreamPool {
       return undefined;
     };
     this.keepAliveAgent.on("free", (_socket, options) => {
-      const entry = this.backends.get(this.keepAliveAgent.getName(options));
-      if (entry) this.drain(entry);
+      const route = (options as UpstreamOptions).upstreamRoute;
+      if (route) {
+        const admission = admissions.get(route.port);
+        if (admission) UpstreamPool.drainAdmission(admission);
+      }
     });
   }
 
-  private getBackend(route: RouteInfo): BackendEntry {
-    const key = this.keepAliveAgent.getName({
+  private socketKey(route: RouteInfo): string {
+    return this.keepAliveAgent.getName({
       port: route.port,
       upstreamRoute: route,
     } as UpstreamOptions);
-    let entry = this.backends.get(key);
-    if (!entry) {
-      entry = {
-        key,
-        activeRequests: 0,
-        peerActive: new Map(),
-        dialing: 0,
-        longLived: 0,
-        waiting: [],
-      };
-      this.backends.set(key, entry);
-    }
-    return entry;
-  }
-
-  private getBackendState(entry: BackendEntry): BackendState {
-    if (entry.activeRequests >= MAX_REQUEST_SOCKETS) return "atCapacity";
-    if (entry.dialing >= MAX_PENDING_DIALS) return "dialing";
-    return "idle";
   }
 
   private hasIdleSocket(key: string): boolean {
     return (this.keepAliveAgent.freeSockets[key]?.length ?? 0) > 0;
   }
 
-  private peerHasCapacity(entry: BackendEntry, peerKey: string | null): boolean {
-    return peerKey === null || (entry.peerActive.get(peerKey) ?? 0) < MAX_REMOTE_PEER_SOCKETS;
-  }
-
-  private canDispatch(
-    entry: BackendEntry,
+  private static canDispatchTo(
+    admission: BackendAdmission,
+    pool: UpstreamPool,
+    socketKey: string,
     freshConnection: boolean,
     peerKey: string | null
   ): boolean {
-    switch (this.getBackendState(entry)) {
+    switch (getAdmissionState(admission)) {
       case "atCapacity":
         return false;
       case "dialing":
         return (
-          !freshConnection && this.hasIdleSocket(entry.key) && this.peerHasCapacity(entry, peerKey)
+          !freshConnection && pool.hasIdleSocket(socketKey) && peerHasCapacity(admission, peerKey)
         );
       case "idle":
-        return this.peerHasCapacity(entry, peerKey);
+        return peerHasCapacity(admission, peerKey);
     }
+  }
+
+  private static drainAdmission(admission: BackendAdmission): void {
+    for (let i = 0; i < admission.waiting.length; ) {
+      if (getAdmissionState(admission) === "atCapacity") break;
+      const item = admission.waiting[i];
+      if (item.pool.closing) {
+        removeWaiter(admission, item);
+        item.res.destroy();
+        continue;
+      }
+      if (
+        !UpstreamPool.canDispatchTo(
+          admission,
+          item.pool,
+          item.socketKey,
+          item.freshConnection,
+          item.peerKey
+        )
+      ) {
+        i++;
+        continue;
+      }
+      removeWaiter(admission, item);
+      item.start();
+    }
+    pruneAdmission(admission);
   }
 
   /** Open a raw or TLS-wrapped loopback socket to `route` outside the HTTP request pool. */
@@ -225,23 +309,22 @@ export class UpstreamPool {
   }
 
   private dial(
-    entry: BackendEntry,
+    admission: BackendAdmission,
     route: RouteInfo,
     freshConnection: boolean,
     callback: (error: NodeJS.ErrnoException | null, socket: net.Socket) => void,
     onDialError: () => void
   ): () => void {
-    entry.dialing++;
+    admission.dialing++;
     return this.connect(route, (error, socket) => {
-      entry.dialing--;
+      admission.dialing--;
       if (error) onDialError();
       if (!error && freshConnection) {
         this.freshSockets.add(socket);
         socket.once("close", () => this.freshSockets.delete(socket));
       }
       callback(error, socket);
-      if (this.closing) this.prune(entry);
-      else this.drain(entry);
+      UpstreamPool.drainAdmission(admission);
     });
   }
 
@@ -257,9 +340,14 @@ export class UpstreamPool {
       res.destroy();
       return;
     }
-    const entry = this.getBackend(route);
+    const admission = getAdmission(route.port);
+    const socketKey = this.socketKey(route);
     const freshConnection = Boolean(options.freshConnection);
     const peerKey = remotePeerKey(res);
+    const reject = (reason: UpstreamRejectReason) => {
+      if (options.onReject) options.onReject(reason);
+      else sendFallbackReject(res, reason);
+    };
     const start = () => {
       if (res.destroyed) return;
       if (this.closing) {
@@ -267,11 +355,56 @@ export class UpstreamPool {
         return;
       }
       let slotPhase: "active" | "longLived" | "released" = "active";
-      entry.activeRequests++;
-      if (peerKey !== null) entry.peerActive.set(peerKey, (entry.peerActive.get(peerKey) ?? 0) + 1);
+      let hasResponse = false;
+      let requestFinished = false;
+      let socketConnected = false;
+      let requestClosed = false;
+      let responseClosed = false;
+      admission.activeRequests++;
+      if (peerKey !== null) {
+        admission.peerActive.set(peerKey, (admission.peerActive.get(peerKey) ?? 0) + 1);
+      }
       let proxyReq: http.ClientRequest;
       let proxyResponse: http.IncomingMessage | undefined;
+      let firstByteTimer: ReturnType<typeof setTimeout> | undefined;
+      let bodyIdleTimer: ReturnType<typeof setTimeout> | undefined;
       let stallTimer: ReturnType<typeof setTimeout> | undefined;
+      const clearFirstByteTimer = () => {
+        clearTimeout(firstByteTimer);
+        firstByteTimer = undefined;
+      };
+      const maybeStartFirstByteTimer = () => {
+        if (
+          hasResponse ||
+          slotPhase !== "active" ||
+          firstByteTimer !== undefined ||
+          !requestFinished ||
+          !socketConnected
+        ) {
+          return;
+        }
+        firstByteTimer = setTimeout(() => {
+          firstByteTimer = undefined;
+          reject("gateway_timeout");
+          proxyReq.destroy();
+          release();
+        }, UPSTREAM_FIRST_BYTE_TIMEOUT_MS);
+      };
+      const clearBodyIdleTimer = () => {
+        clearTimeout(bodyIdleTimer);
+        bodyIdleTimer = undefined;
+        proxyResponse?.removeListener("data", resetBodyIdleTimer);
+      };
+      const resetBodyIdleTimer = () => {
+        clearTimeout(bodyIdleTimer);
+        if (slotPhase !== "active") return;
+        bodyIdleTimer = setTimeout(() => {
+          bodyIdleTimer = undefined;
+          proxyReq.destroy();
+          if (!res.destroyed) res.destroy();
+          release();
+        }, UPSTREAM_BODY_IDLE_TIMEOUT_MS);
+      };
       const clearStallTimer = () => {
         clearTimeout(stallTimer);
         stallTimer = undefined;
@@ -285,43 +418,62 @@ export class UpstreamPool {
           release();
         }, RESPONSE_STALL_TIMEOUT_MS);
       };
-      const detachStallListeners = () => {
+      const detachResponseTimers = () => {
+        clearFirstByteTimer();
+        clearBodyIdleTimer();
         clearStallTimer();
         proxyResponse?.removeListener("pause", startStallTimer);
         proxyResponse?.removeListener("resume", clearStallTimer);
+        proxyResponse?.removeListener("data", resetBodyIdleTimer);
         res.removeListener("drain", clearStallTimer);
       };
-      const onClientClose = () => {
+      const clientChannel =
+        (
+          res as unknown as {
+            stream?: {
+              once?: (event: string, listener: () => void) => void;
+              removeListener?: (event: string, listener: () => void) => void;
+            };
+          }
+        ).stream ?? res.socket;
+      const onClientAbort = () => {
         dialRef.cancel?.();
         if (!proxyReq.destroyed) proxyReq.destroy();
       };
+      const onClientClose = () => {
+        if (!res.writableFinished) onClientAbort();
+      };
       const releaseActiveSlot = () => {
-        entry.activeRequests--;
+        admission.activeRequests--;
         if (peerKey !== null) {
-          const count = entry.peerActive.get(peerKey)! - 1;
-          if (count === 0) entry.peerActive.delete(peerKey);
-          else entry.peerActive.set(peerKey, count);
+          const count = admission.peerActive.get(peerKey)! - 1;
+          if (count === 0) admission.peerActive.delete(peerKey);
+          else admission.peerActive.set(peerKey, count);
         }
       };
       const release = () => {
         if (slotPhase === "released") return;
-        detachStallListeners();
+        detachResponseTimers();
+        this.longLivedRequests.delete(proxyReq);
         const prev = slotPhase;
         slotPhase = "released";
         if (prev === "active") releaseActiveSlot();
-        else entry.longLived--;
+        else admission.longLived--;
         res.removeListener("close", onClientClose);
-        if (this.closing) this.prune(entry);
-        else this.drain(entry);
+        if (typeof clientChannel?.removeListener === "function") {
+          clientChannel.removeListener("close", onClientAbort);
+        }
+        UpstreamPool.drainAdmission(admission);
       };
       const promoteToLongLived = () => {
         if (slotPhase !== "active") return;
-        detachStallListeners();
+        detachResponseTimers();
         slotPhase = "longLived";
+        this.longLivedRequests.add(proxyReq);
         releaseActiveSlot();
-        entry.longLived++;
-        if (this.closing) this.prune(entry);
-        else this.drain(entry);
+        admission.longLived++;
+        if (this.closing) proxyReq.destroy();
+        else UpstreamPool.drainAdmission(admission);
       };
       const dialRef: DialRef = { onDialError: release };
       const requestOptions = {
@@ -335,7 +487,7 @@ export class UpstreamPool {
           ? http.request({
               ...requestOptions,
               createConnection: (_opts, callback) => {
-                dialRef.cancel = this.dial(entry, route, true, callback, release);
+                dialRef.cancel = this.dial(admission, route, true, callback, release);
                 return undefined;
               },
             })
@@ -349,119 +501,129 @@ export class UpstreamPool {
         release();
         throw error;
       }
-      let hasResponse = false;
+      proxyReq.once("socket", () => {
+        socketConnected = true;
+        maybeStartFirstByteTimer();
+      });
+      proxyReq.once("finish", () => {
+        requestFinished = true;
+        maybeStartFirstByteTimer();
+      });
       proxyReq.once("response", (proxyRes) => {
         hasResponse = true;
         proxyResponse = proxyRes;
+        clearFirstByteTimer();
         if (isLongLivedResponse(proxyRes)) {
           promoteToLongLived();
         } else {
-          proxyRes.once("end", detachStallListeners);
+          resetBodyIdleTimer();
+          proxyRes.once("end", detachResponseTimers);
           queueMicrotask(() => {
             if (slotPhase !== "active" || proxyRes.complete || proxyRes.destroyed) return;
+            proxyRes.on("data", resetBodyIdleTimer);
             proxyRes.on("pause", startStallTimer);
             proxyRes.on("resume", clearStallTimer);
             res.on("drain", clearStallTimer);
             if (proxyRes.isPaused() || res.writableNeedDrain) startStallTimer();
           });
         }
-        proxyRes.once("close", release);
+        proxyRes.once("close", () => {
+          responseClosed = true;
+          if (requestClosed) release();
+        });
       });
       proxyReq.once("error", release);
       proxyReq.once("close", () => {
+        requestClosed = true;
         dialRef.cancel?.();
-        if (!hasResponse) release();
+        if (!hasResponse || responseClosed) release();
       });
       res.once("close", onClientClose);
+      if (typeof clientChannel?.once === "function") {
+        clientChannel.once("close", onClientAbort);
+      }
       onRequest(proxyReq);
     };
-    if (this.canDispatch(entry, freshConnection, peerKey)) {
+    if (UpstreamPool.canDispatchTo(admission, this, socketKey, freshConnection, peerKey)) {
       start();
-      this.prune(entry);
+      pruneAdmission(admission);
+      return;
+    }
+    if (admission.waiting.length >= MAX_QUEUED_REQUESTS) {
+      reject("queue_full");
+      pruneAdmission(admission);
       return;
     }
     const cancelWait = () => {
-      clearTimeout(waiting.waitTimer);
-      const index = entry.waiting.indexOf(waiting);
-      if (index !== -1) entry.waiting.splice(index, 1);
-      this.prune(entry);
+      removeWaiter(admission, waiting);
+      pruneAdmission(admission);
     };
     const waiting: WaitingDispatch = {
+      pool: this,
+      socketKey,
       freshConnection,
       peerKey,
       res,
       cancelWait,
       start,
       waitTimer: setTimeout(() => {
-        const index = entry.waiting.indexOf(waiting);
-        if (index !== -1) entry.waiting.splice(index, 1);
-        res.removeListener("close", cancelWait);
-        this.prune(entry);
-        if (!res.destroyed && !res.headersSent) {
-          res.writeHead(503, { "Content-Type": "text/plain" });
-          res.end("Service Unavailable: upstream request queue timed out\n");
-        } else if (!res.destroyed) {
-          res.destroy();
-        }
+        removeWaiter(admission, waiting);
+        pruneAdmission(admission);
+        reject("queue_timeout");
       }, QUEUE_WAIT_TIMEOUT_MS),
     };
-    entry.waiting.push(waiting);
+    admission.waiting.push(waiting);
     res.once("close", cancelWait);
-  }
-
-  private drain(entry: BackendEntry): void {
-    if (this.closing) return;
-    for (let i = 0; i < entry.waiting.length; ) {
-      const item = entry.waiting[i];
-      if (!this.canDispatch(entry, item.freshConnection, item.peerKey)) {
-        i++;
-        continue;
-      }
-      entry.waiting.splice(i, 1);
-      clearTimeout(item.waitTimer);
-      item.res.removeListener("close", item.cancelWait);
-      item.start();
-    }
-    this.prune(entry);
-  }
-
-  private prune(entry: BackendEntry): void {
-    if (
-      entry.activeRequests === 0 &&
-      entry.peerActive.size === 0 &&
-      entry.dialing === 0 &&
-      entry.longLived === 0 &&
-      entry.waiting.length === 0 &&
-      this.backends.get(entry.key) === entry
-    ) {
-      this.backends.delete(entry.key);
-    }
   }
 
   /** Stop dispatching new requests and cancel pending dials while in-flight sockets finish. */
   close(): void {
     this.closing = true;
-    for (const entry of this.backends.values()) {
-      for (const item of entry.waiting.splice(0)) {
-        clearTimeout(item.waitTimer);
-        item.res.removeListener("close", item.cancelWait);
+    for (const admission of admissions.values()) {
+      for (const item of [...admission.waiting]) {
+        if (item.pool !== this) continue;
+        removeWaiter(admission, item);
         item.res.destroy();
       }
-      this.prune(entry);
+      pruneAdmission(admission);
     }
     for (const cancel of [...this.pendingDials]) cancel();
+    for (const sockets of Object.values(this.keepAliveAgent.freeSockets)) {
+      for (const socket of sockets ?? []) socket.destroy();
+    }
+    for (const req of this.longLivedRequests) req.destroy();
+    clearTimeout(this.shutdownTimer);
+    this.shutdownTimer = undefined;
+    if (
+      this.freshSockets.size > 0 ||
+      Object.values(this.keepAliveAgent.sockets).some((sockets) => (sockets?.length ?? 0) > 0)
+    ) {
+      this.shutdownTimer = setTimeout(() => {
+        this.shutdownTimer = undefined;
+        this.destroy();
+      }, SHUTDOWN_GRACE_MS);
+      this.shutdownTimer.unref?.();
+    }
   }
 
   /** Stop all work and destroy every pooled, fresh, and pending upstream socket. */
   destroy(): void {
+    clearTimeout(this.shutdownTimer);
+    this.shutdownTimer = undefined;
     this.close();
+    clearTimeout(this.shutdownTimer);
+    this.shutdownTimer = undefined;
     this.keepAliveAgent.destroy();
     for (const socket of this.freshSockets) socket.destroy();
     this.freshSockets.clear();
+    for (const req of this.longLivedRequests) req.destroy();
+    this.longLivedRequests.clear();
   }
 
   /** Re-enable dispatching when a closed proxy server listens again. */
   reopen(): void {
+    clearTimeout(this.shutdownTimer);
+    this.shutdownTimer = undefined;
     this.closing = false;
   }
 }

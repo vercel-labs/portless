@@ -3947,6 +3947,11 @@ ${colors.bold("State directory:")}
   The proxy exits instead of running on a state directory another user owns,
   can write to, or can redirect.
 
+${colors.bold("Errors:")}
+  Proxy errors include 404, 421, 502, 503 (queue full or wait over 30s),
+  504 (no upstream headers within 120s after upload), and 508. Based on Accept,
+  they return JSON (error, upstream, message) or HTML; app responses pass through unchanged.
+
 ${colors.bold("LAN mode (--lan):")}
   Without LAN mode, the proxy listens only on 127.0.0.1 and ::1.
   LAN mode explicitly binds the proxy to 0.0.0.0 and ::.

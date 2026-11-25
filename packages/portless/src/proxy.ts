@@ -4,7 +4,7 @@ import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { ProxyServerOptions, RouteInfo } from "./types.js";
 import { UpstreamPool } from "./upstream-pool.js";
-import { escapeHtml, formatUptime, formatUrl, parsePort } from "./utils.js";
+import { escapeHtml, formatUptime, formatUrl, isLoopbackPeer, parsePort } from "./utils.js";
 import {
   ARROW_SVG,
   FILTER_CONTROLS,
@@ -83,12 +83,6 @@ function isEncrypted(req: http.IncomingMessage): boolean {
 }
 
 export const HOSTS_SYNC_PATH = "/.portless/hosts-sync";
-
-function isLoopbackPeer(address: string | undefined): boolean {
-  if (!address) return false;
-  const bare = address.startsWith("::ffff:") ? address.slice("::ffff:".length) : address;
-  return bare === "::1" || bare.startsWith("127.");
-}
 
 function hasValidPort(authority: string, hostname: string): boolean {
   if (authority === hostname) return true;
@@ -500,6 +494,35 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         path: req.url,
         headers: proxyReqHeaders,
         freshConnection: isReplay || undefined,
+        onReject: (reason) => {
+          if (res.destroyed || res.headersSent) {
+            if (!res.destroyed) res.destroy();
+            return;
+          }
+          const requestHost = getRequestHost(req);
+          if (reason === "gateway_timeout") {
+            const detail = "The target app took too long to respond.";
+            sendProxyError(req, res, 504, "gateway_timeout", detail, requestHost, () =>
+              renderPage(
+                504,
+                "Gateway Timeout",
+                `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
+              )
+            );
+            return;
+          }
+          const detail =
+            reason === "queue_full"
+              ? "Too many requests are queued for the target app. Try again shortly."
+              : "The request waited too long in the proxy queue for the target app.";
+          sendProxyError(req, res, 503, "service_unavailable", detail, requestHost, () =>
+            renderPage(
+              503,
+              "Service Unavailable",
+              `<div class="content"><p class="desc">${escapeHtml(detail)}</p></div>`
+            )
+          );
+        },
       },
       res,
       (proxyReq) => {
