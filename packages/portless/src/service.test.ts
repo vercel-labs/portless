@@ -118,7 +118,8 @@ describe("buildServiceSpec", () => {
     if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
     expect(spec.plistPath).toBe("/Library/LaunchDaemons/sh.portless.proxy.plist");
     expect(spec.programArguments).toEqual([
-      "/usr/local/bin/node",
+      "/usr/bin/env",
+      "node",
       "/usr/local/lib/node_modules/portless/dist/cli.js",
       "proxy",
       "start",
@@ -130,6 +131,7 @@ describe("buildServiceSpec", () => {
     ]);
     expect(spec.plist).toContain("<key>RunAtLoad</key>");
     expect(spec.plist).toContain("<key>KeepAlive</key>");
+    expect(spec.plist).toContain("<key>PATH</key>");
     expect(spec.plist).toContain("<key>PORTLESS_STATE_DIR</key>");
     expect(spec.plist).toContain("<string>/Users/alice/.portless</string>");
     expect(spec.plist).toContain("<key>SUDO_UID</key>");
@@ -144,13 +146,15 @@ describe("buildServiceSpec", () => {
       userHome: "/home/alice",
       uid: "1000",
       gid: "1000",
+      pathEnv: "/home/alice/.local/bin:/usr/local/bin:/bin",
     });
 
     expect(spec.platform).toBe("linux");
     if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
     expect(spec.unitPath).toBe("/etc/systemd/system/portless.service");
     expect(spec.execStart).toEqual([
-      "/usr/bin/node",
+      "/usr/bin/env",
+      "node",
       "/usr/lib/node_modules/portless/dist/cli.js",
       "proxy",
       "start",
@@ -163,8 +167,9 @@ describe("buildServiceSpec", () => {
     expect(spec.unit).toContain("Description=Portless HTTPS proxy");
     expect(spec.unit).toContain('Environment=PORTLESS_STATE_DIR="/home/alice/.portless"');
     expect(spec.unit).toContain('Environment=SUDO_UID="1000"');
+    expect(spec.unit).toContain('Environment=PATH="/home/alice/.local/bin:/usr/local/bin:/bin:/usr/bin"');
     expect(spec.unit).toContain(
-      'ExecStart="/usr/bin/node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
+      'ExecStart="/usr/bin/env" "node" "/usr/lib/node_modules/portless/dist/cli.js" "proxy" "start" "--foreground" "--port" "443" "--https" "--skip-trust"'
     );
     expect(spec.unit).toContain("WantedBy=multi-user.target");
   });
@@ -199,7 +204,9 @@ describe("buildServiceSpec", () => {
       "<Arguments>/d /s /c &quot;&quot;C:\\ProgramData\\portless\\service\\portless-service.cmd&quot;&quot;</Arguments>"
     );
     expect(spec.script).toContain("PORTLESS_STATE_DIR=C:\\Users\\Alice\\.portless");
-    expect(spec.script).toContain('"C:\\Program Files\\nodejs\\node.exe"');
+    expect(spec.script).toContain(
+      'node "C:\\Users\\Alice\\AppData\\Roaming\\npm\\node_modules\\portless\\dist\\cli.js" "proxy" "start"'
+    );
     expect(spec.script).toContain("proxy");
     expect(spec.script).toContain("--port");
     expect(spec.script).toContain("443");
@@ -218,8 +225,53 @@ describe("buildServiceSpec", () => {
 
     if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
     expect(spec.script).toContain(
-      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%%Done"'
+      'set "PATH=C:\\Program Files\\Git\\mingw64\\bin;C:\\Tools\\100%%Done;C:\\nodejs"'
     );
+  });
+
+  it("appends the install-time Node directory after existing macOS PATH entries", () => {
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/opt/homebrew/Cellar/node/22.1.0/bin/node",
+      entryScript: "/usr/local/lib/portless/cli.js",
+      userHome: "/Users/alice",
+      pathEnv: "/Users/alice/.local/share/mise/shims:/usr/bin:/usr/bin/::/bin",
+    });
+
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.plist).toContain(
+      "<key>PATH</key>\n    <string>/Users/alice/.local/share/mise/shims:/usr/bin:/bin:/opt/homebrew/Cellar/node/22.1.0/bin</string>"
+    );
+  });
+
+  it("deduplicates an existing install-time Node directory in Linux PATH", () => {
+    const spec = buildServiceSpec({
+      platform: "linux",
+      nodePath: "/home/alice/.nvm/versions/node/v22/bin/node",
+      entryScript: "/usr/lib/portless/cli.js",
+      userHome: "/home/alice",
+      pathEnv:
+        "/home/alice/.nvm/versions/node/v22/bin/:/usr/bin:/home/alice/.nvm/versions/node/v22/bin::/usr/bin/",
+    });
+
+    if (spec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(spec.unit).toContain(
+      'Environment=PATH="/home/alice/.nvm/versions/node/v22/bin/:/usr/bin"'
+    );
+    expect(spec.unit.match(/^Environment=PATH=/gm)).toHaveLength(1);
+  });
+
+  it("deduplicates Windows PATH entries without changing their priority", () => {
+    const spec = buildServiceSpec({
+      platform: "win32",
+      nodePath: "C:\\nodejs\\node.exe",
+      entryScript: "C:\\cli.js",
+      userHome: "C:\\Users\\Alice",
+      pathEnv: "C:\\NodeJS\\;C:/nodejs;C:\\Windows\\System32;C:\\WINDOWS\\SYSTEM32\\",
+    });
+
+    if (spec.platform !== "win32") throw new Error("Expected Windows service spec");
+    expect(spec.script).toContain('set "PATH=C:\\NodeJS\\;C:\\Windows\\System32"');
   });
 
   it("escapes percent signs in Windows batch env values", () => {
@@ -1171,6 +1223,7 @@ describe("handleService", () => {
       },
     });
     if (installedSpec.platform !== "linux") throw new Error("Expected Linux service spec");
+    expect(installedSpec.execStart.slice(0, 3)).toEqual(["/usr/bin/env", "node", "/fake/cli.js"]);
 
     vi.mocked(existsSync).mockImplementation((file) => file === installedSpec.unitPath);
     vi.mocked(readFileSync).mockImplementation((file) => {

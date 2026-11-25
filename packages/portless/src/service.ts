@@ -469,6 +469,36 @@ function buildProxyCommand(entryScript: string, serviceConfig: ServiceInstallCon
   return [entryScript, "proxy", "start", ...proxyConfig.args];
 }
 
+function buildLaunchCommand(ctx: ServiceContext): string[] {
+  const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
+  return ctx.platform === "win32"
+    ? ["node", ...proxyCommand]
+    : ["/usr/bin/env", "node", ...proxyCommand];
+}
+
+function servicePathEnv(ctx: ServiceContext): string {
+  const separator = ctx.platform === "win32" ? ";" : ":";
+  const pathImpl = ctx.platform === "win32" ? path.win32 : path.posix;
+  const nodeDir = pathImpl.isAbsolute(ctx.nodePath) ? pathImpl.dirname(ctx.nodePath) : "";
+  const normalizeEntry = (entry: string): string => {
+    const normalized = ctx.platform === "win32" ? entry.replace(/\//g, "\\") : entry;
+    const root = pathImpl.parse(normalized).root;
+    const trimmed = normalized.replace(ctx.platform === "win32" ? /\\+$/ : /\/+$/, "");
+    const key = /^[a-z]:$/i.test(trimmed) && root.endsWith("\\") ? `${trimmed}\\` : trimmed || root;
+    return ctx.platform === "win32" ? key.toLowerCase() : key;
+  };
+  const entries: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of [...ctx.pathEnv.split(separator), nodeDir]) {
+    if (!entry) continue;
+    const key = normalizeEntry(entry);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    entries.push(entry);
+  }
+  return entries.join(separator);
+}
+
 function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
   const env: Record<string, string> = {
     PORTLESS_STATE_DIR: ctx.stateDir,
@@ -492,12 +522,12 @@ function buildServiceEnv(ctx: ServiceContext): Record<string, string> {
 
   if (ctx.platform === "win32") {
     env.USERPROFILE = ctx.user.home;
-    env.PATH = ctx.pathEnv;
   } else {
     env.HOME = ctx.user.home;
     if (ctx.user.uid) env.SUDO_UID = ctx.user.uid;
     if (ctx.user.gid) env.SUDO_GID = ctx.user.gid;
   }
+  env.PATH = servicePathEnv(ctx);
 
   return env;
 }
@@ -559,7 +589,6 @@ Wants=network-online.target
 [Service]
 Type=simple
 ${envLines}
-Environment=PATH=${systemdEscape(ctx.pathEnv)}
 ExecStart=${execStart.map(systemdEscape).join(" ")}
 Restart=on-failure
 RestartSec=2
@@ -571,12 +600,12 @@ WantedBy=multi-user.target
 `;
 }
 
-function buildWindowsScript(ctx: ServiceContext, command: string[]): string {
+function buildWindowsScript(ctx: ServiceContext, launchCommand: string[]): string {
   const env = buildServiceEnv(ctx);
   const setEnv = Object.entries(env)
     .map(([key, value]) => `set "${key}=${value.replace(/"/g, "").replace(/%/g, "%%")}"`)
     .join("\r\n");
-  const proxyCommand = [windowsQuote(ctx.nodePath), ...command.map(windowsQuote)].join(" ");
+  const proxyCommand = [launchCommand[0], ...launchCommand.slice(1).map(windowsQuote)].join(" ");
   return `@echo off\r\n${setEnv}\r\n${proxyCommand}\r\n`;
 }
 
@@ -671,38 +700,36 @@ export function buildServiceSpec(options: {
     programData: options.programData || "C:\\ProgramData",
     config: normalizedConfig,
   };
-  const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
+  const launchCommand = buildLaunchCommand(ctx);
 
   if (ctx.platform === "darwin") {
-    const programArguments = [ctx.nodePath, ...proxyCommand];
     return {
       platform: "darwin",
       label: SERVICE_LABEL,
       plistPath: `/Library/LaunchDaemons/${SERVICE_LABEL}.plist`,
-      plist: buildLaunchdPlist(ctx, programArguments),
+      plist: buildLaunchdPlist(ctx, launchCommand),
       stateDir: ctx.stateDir,
       config: ctx.config,
-      programArguments,
+      programArguments: launchCommand,
     };
   }
 
   if (ctx.platform === "linux") {
-    const execStart = [ctx.nodePath, ...proxyCommand];
     return {
       platform: "linux",
       serviceName: SYSTEMD_SERVICE,
       unitPath: `/etc/systemd/system/${SYSTEMD_SERVICE}`,
-      unit: buildSystemdUnit(ctx, execStart),
+      unit: buildSystemdUnit(ctx, launchCommand),
       stateDir: ctx.stateDir,
       config: ctx.config,
-      execStart,
+      execStart: launchCommand,
     };
   }
 
   const scriptDir = path.win32.join(ctx.programData, "portless", "service");
   const scriptPath = path.win32.join(scriptDir, "portless-service.cmd");
   const taskXmlPath = path.win32.join(scriptDir, "portless-task.xml");
-  const script = buildWindowsScript(ctx, proxyCommand);
+  const script = buildWindowsScript(ctx, launchCommand);
   const taskXml = buildWindowsTaskXml(scriptPath);
   return {
     platform: "win32",
