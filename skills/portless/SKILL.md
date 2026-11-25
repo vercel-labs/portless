@@ -66,7 +66,7 @@ pnpm dev        # -> works without portless, plain "next dev"
 
 Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command. In Turbo mode only the root script is checked, and Turbo passes the arguments to each package script unchanged.
 
-Use an optional `portless.json` to override defaults (name, script, port):
+Use an optional `portless.json` to override defaults (name, script, port). In each project directory, portless checks `portless.json`, `.config/portless.json`, and the `package.json` `"portless"` key in that order. Only a missing standalone file advances to the next source; an invalid or unreadable file fails. `apps` paths are relative to the project directory even when the config is in `.config`:
 
 ```json
 { "name": "myapp" }
@@ -152,7 +152,16 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
-Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"`, and `worktree.hostnameTemplate` to replace the hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash at runtime, and a template applies only when a label exists. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree. `get` reads worktree config from the current directory, not the named service's package, so `cd` into a package to use its per-app options; `get --no-worktree` skips worktree config and naming, and without it an invalid config in the current directory or workspace fails instead of printing a guessed URL. Worktree options inherit from the workspace root into package directories, and a package's own `portless.json` applies in a root multi-app startup; for worktree options, the `package.json` `"portless"` key is used only when the package has no `portless.json`, while `name`, `script`, `appPort`, and `proxy` keep their existing precedence. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` to use the whole branch. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree.
+
+When a label exists, the hostname layout is selected in this order:
+
+1. `worktree.hostnameTemplate` replaces the hostname with `{worktree}` (required) and `{name}` (optional), for example `tenant.{worktree}-{name}`. Templates are validated when config loads and must render valid DNS labels; labels over 63 characters are shortened with a stable hash.
+2. `worktree.flat: true` joins the label and all name labels into one DNS label. For example, `fix-ui` and `api.myapp` become `fix-ui-api-myapp`. The final label is shortened if it exceeds 63 characters.
+3. `worktree.base` inserts the label before a matching DNS suffix. With `"base": "myapp"`, `api.myapp` becomes `api.fix-ui.myapp`. Matching ignores case and respects label boundaries; unrelated names use the default layout.
+4. The default prepends the label, producing `fix-ui.api.myapp`.
+
+`--no-worktree` wins over `--prefix` and `PORTLESS_PREFIX`. In bare and `run` launches, it skips worktree naming but keeps normal launch configuration. Named launches use the supplied hostname unchanged, with or without the flag. `get --no-worktree` skips config loading as well as naming. Without it, `get` reads worktree config from the current directory, including workspace root defaults, not the named service's package; `cd` into a package to use its per-app options. Invalid config fails instead of printing a guessed URL. Worktree options inherit from the workspace root into package directories, and a package's own config applies in a root multi-app startup. Duplicate proxied hostnames fail before app startup. Use unique app names or, when a worktree template is active, include `{name}`.
 
 ### Bypassing portless
 
@@ -345,6 +354,8 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless run [cmd] [args...]`                    | Infer name from project, run through proxy (auto-starts)       |
 | `portless run --name <name> <cmd>`                | Override inferred base name (worktree prefix still applies)    |
 | `portless run --prefix <label> <cmd>`             | Set the worktree prefix (`""` for none)                        |
+| `portless run --no-worktree <cmd>`                | Run without worktree naming                                    |
+| `portless --no-worktree`                          | Start configured apps without worktree naming                  |
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)      |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)             |
 | `portless get <name> --no-worktree`               | Print URL without worktree config or naming                    |
@@ -421,7 +432,7 @@ Optional config file. Portless looks for it in the current directory; `worktree`
 | `appPort`  | number  | auto-assigned              | Fixed port for the child process                         |
 | `proxy`    | boolean | auto-detected              | Whether to route through the proxy (`false` for tasks)   |
 | `apps`     | object  |                            | Overrides for workspace packages, keyed by relative path |
-| `worktree` | object  |                            | Worktree label style and hostname template               |
+| `worktree` | object  |                            | Worktree label style and hostname layout                 |
 | `turbo`    | boolean | `true`                     | Set `false` to use direct spawning instead of turborepo  |
 
 Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode; the top-level `worktree` sets defaults for every app, and app entries override it by key.
@@ -440,7 +451,7 @@ An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `wo
 { "portless": { "name": "myapp", "script": "dev:app" } }
 ```
 
-Precedence (closest wins): CLI flags > the package's own config > the root portless.json `apps` entry (when run from the workspace root) > defaults. The package's own config is its portless.json, or its package.json `"portless"` key when the directory has no portless.json.
+Precedence (closest wins): CLI flags > the package's own config > the root config's `apps` entry (when run from the workspace root) > defaults. The package's own config is the first available source in that directory: `portless.json`, `.config/portless.json`, or the `package.json` `"portless"` key.
 
 ## Troubleshooting
 

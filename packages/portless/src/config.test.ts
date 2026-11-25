@@ -14,7 +14,6 @@ import {
   hasScript,
   splitCommand,
   isServerCommand,
-  loadPackagePortlessConfig,
   ConfigValidationError,
 } from "./config.js";
 
@@ -113,6 +112,73 @@ describe("loadConfig", () => {
     expect(result!.config.name).toBe("myapp");
     expect(result!.configDir).toBe(tmpDir);
     expect(result!.source).toBe("portless.json");
+  });
+
+  it("uses the first available config and resolves apps from the project root", () => {
+    const configDir = path.join(tmpDir, ".config");
+    fs.mkdirSync(configDir);
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ portless: { name: "pkg" } })
+    );
+    fs.writeFileSync(
+      path.join(configDir, "portless.json"),
+      JSON.stringify({ apps: { "apps/web": { name: "nested" } } })
+    );
+    fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ name: "root" }));
+
+    expect(loadConfig(tmpDir)).toEqual({
+      config: { name: "root" },
+      configDir: tmpDir,
+      source: "portless.json",
+    });
+    fs.unlinkSync(path.join(tmpDir, "portless.json"));
+    const nested = loadConfig(tmpDir)!;
+    expect(nested.source).toBe(".config/portless.json");
+    expect(nested.configDir).toBe(tmpDir);
+    expect(
+      resolveAppConfig(nested.config, nested.configDir, path.join(tmpDir, "apps/web"))
+    ).toEqual({
+      name: "nested",
+    });
+    fs.unlinkSync(path.join(configDir, "portless.json"));
+    expect(loadConfig(tmpDir)).toEqual({
+      config: { name: "pkg" },
+      configDir: tmpDir,
+      source: "package.json",
+    });
+  });
+
+  it("falls back to package.json when .config is a file", () => {
+    fs.writeFileSync(path.join(tmpDir, ".config"), "not a directory");
+    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ portless: "pkg" }));
+    expect(loadConfig(tmpDir)).toEqual({
+      config: { name: "pkg" },
+      configDir: tmpDir,
+      source: "package.json",
+    });
+  });
+
+  it("does not fall through invalid or unreadable standalone configs", () => {
+    const nestedDir = path.join(tmpDir, ".config");
+    fs.mkdirSync(nestedDir);
+    fs.writeFileSync(
+      path.join(tmpDir, "package.json"),
+      JSON.stringify({ portless: { name: "pkg" } })
+    );
+    const root = path.join(tmpDir, "portless.json");
+    const nested = path.join(nestedDir, "portless.json");
+    fs.writeFileSync(nested, JSON.stringify({ name: "nested" }));
+    fs.writeFileSync(root, "{");
+    expect(() => loadConfig(tmpDir)).toThrow(`Invalid JSON in ${root}`);
+    fs.writeFileSync(root, "[]");
+    expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
+    fs.unlinkSync(root);
+    fs.writeFileSync(nested, "{");
+    expect(() => loadConfig(tmpDir)).toThrow(`Invalid JSON in ${nested}`);
+    fs.unlinkSync(nested);
+    fs.mkdirSync(nested);
+    expect(() => loadConfig(tmpDir)).toThrow();
   });
 
   it("does not walk up from a subdirectory", () => {
@@ -273,11 +339,42 @@ describe("loadConfig validation", () => {
       [{ prefix: "full" }, /last-segment/],
       [{ hostnameTemplate: "tenant.{name}" }, /\{worktree\}/],
       [{ hostnameTemplate: "" }, /hostnameTemplate/],
+      [{ flat: "true" }, /worktree.flat/],
+      ...[
+        "",
+        ".example",
+        "example.",
+        "a..example",
+        "-bad.example",
+        "bad_.example",
+        "a".repeat(64),
+      ].map((base): [unknown, RegExp] => [{ base }, /worktree.base/]),
+      [{ base: 42 }, /worktree.base/],
     ];
     for (const [worktree, message] of cases) {
       fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ worktree }));
       expect(() => loadConfig(tmpDir)).toThrow(message);
     }
+  });
+
+  it("validates worktree layout fields in top-level and app configs", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const configFile = path.join(tmpDir, "portless.json");
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({
+        worktree: { flat: false, base: "Example.COM" },
+        apps: { "apps/web": { worktree: { flat: true, base: "local" } } },
+      })
+    );
+    expect(loadConfig(tmpDir)?.config.worktree).toEqual({ flat: false, base: "Example.COM" });
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+    fs.writeFileSync(
+      configFile,
+      JSON.stringify({ apps: { "apps/web": { worktree: { base: "bad." } } } })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/apps\.apps\/web\.worktree\.base/);
   });
 
   it("validates rendered hostnameTemplate labels in every config location", () => {
@@ -542,61 +639,6 @@ describe("hasScript", () => {
   it("returns false when scripts object is missing", () => {
     fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test" }));
     expect(hasScript("dev", tmpDir)).toBe(false);
-  });
-});
-
-describe("loadPackagePortlessConfig", () => {
-  let tmpDir: string;
-
-  beforeEach(() => {
-    tmpDir = createTmpDir();
-  });
-
-  afterEach(() => {
-    cleanupDir(tmpDir);
-  });
-
-  it("returns config from package.json portless key", () => {
-    fs.writeFileSync(
-      path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: { name: "myapp", script: "start" } })
-    );
-    const result = loadPackagePortlessConfig(tmpDir);
-    expect(result).toEqual({ name: "myapp", script: "start" });
-  });
-
-  it("returns config from string shorthand", () => {
-    fs.writeFileSync(
-      path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: "myapp" })
-    );
-    const result = loadPackagePortlessConfig(tmpDir);
-    expect(result).toEqual({ name: "myapp" });
-  });
-
-  it("returns null for empty string shorthand", () => {
-    fs.writeFileSync(
-      path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: "" })
-    );
-    expect(loadPackagePortlessConfig(tmpDir)).toBeNull();
-  });
-
-  it("returns null when no portless key", () => {
-    fs.writeFileSync(path.join(tmpDir, "package.json"), JSON.stringify({ name: "test" }));
-    expect(loadPackagePortlessConfig(tmpDir)).toBeNull();
-  });
-
-  it("returns null when no package.json", () => {
-    expect(loadPackagePortlessConfig(tmpDir)).toBeNull();
-  });
-
-  it("throws ConfigValidationError for invalid portless config", () => {
-    fs.writeFileSync(
-      path.join(tmpDir, "package.json"),
-      JSON.stringify({ name: "test", portless: { appPort: "bad" } })
-    );
-    expect(() => loadPackagePortlessConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 });
 

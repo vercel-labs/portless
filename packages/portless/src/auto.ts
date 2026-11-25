@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { WorktreeConfig } from "./config.js";
 
 // ---------------------------------------------------------------------------
 // Hostname sanitization
@@ -27,19 +28,13 @@ export function truncateLabel(label: string): string {
   return `${prefix}-${hash}`;
 }
 
-/**
- * Sanitize a string for use as a .localhost hostname label.
- * Lowercases, replaces invalid characters with hyphens, collapses consecutive
- * hyphens, trims leading/trailing hyphens, and enforces the 63-character DNS
- * label limit (RFC 1035).
- */
+/** Sanitize a name without shortening it before composition. */
 export function sanitizeForHostname(name: string): string {
-  const sanitized = name
+  return name
     .toLowerCase()
     .replace(/[^a-z0-9-]/g, "-")
     .replace(/-{2,}/g, "-")
     .replace(/^-+|-+$/g, "");
-  return truncateLabel(sanitized);
 }
 
 // ---------------------------------------------------------------------------
@@ -155,146 +150,128 @@ function findGitRoot(startDir: string): string | null {
 // Worktree detection
 // ---------------------------------------------------------------------------
 
-export interface WorktreePrefix {
+interface WorktreePrefix {
   prefix: string;
   source: string;
 }
 
-export type WorktreePrefixStyle = "last-segment" | "branch";
+type WorktreePrefixStyle = NonNullable<WorktreeConfig["prefix"]>;
 
-/**
- * Compose a worktree label with a base hostname, using the configured template
- * when present. No label returns the base name. Templated output is lowercased
- * and each label is truncated to the DNS label limit.
- */
-export function applyWorktreePrefix(
-  baseName: string,
-  worktree: WorktreePrefix | null,
-  template?: string
-): string {
-  if (!worktree) return baseName;
-  if (template) {
-    return template
-      .replaceAll("{worktree}", worktree.prefix)
-      .replaceAll("{name}", baseName)
-      .split(".")
-      .map((label) => truncateLabel(label.toLowerCase()))
-      .join(".");
-  }
-  return `${worktree.prefix}.${baseName}`;
+type WorktreeLayout =
+  | { kind: "template"; template: string }
+  | { kind: "flat"; fullPrefix: string }
+  | { kind: "base"; base: string }
+  | { kind: "prepend" };
+
+export interface WorktreeNaming extends WorktreePrefix {
+  layout: WorktreeLayout;
 }
 
-/** Branch names that represent the default/primary checkout — no prefix needed. */
+function truncateHostname(name: string): string {
+  return name.split(".").map(truncateLabel).join(".");
+}
+
+/** Compose a hostname and enforce the DNS label length limit. */
+export function composeHostname(baseName: string, naming: WorktreeNaming | null): string {
+  if (!naming) return truncateHostname(baseName);
+
+  const { prefix, layout } = naming;
+  switch (layout.kind) {
+    case "template":
+      return truncateHostname(
+        layout.template
+          .replaceAll("{worktree}", prefix)
+          .replaceAll("{name}", truncateHostname(baseName))
+          .toLowerCase()
+      );
+    case "flat": {
+      const labels = baseName.split(".");
+      if (!labels.includes("")) {
+        return truncateLabel(`${layout.fullPrefix}-${labels.join("-")}`.toLowerCase());
+      }
+      break;
+    }
+    case "base": {
+      if (baseName.toLowerCase().endsWith(`.${layout.base}`)) {
+        const split = baseName.length - layout.base.length;
+        return truncateHostname(`${baseName.slice(0, split)}${prefix}.${baseName.slice(split)}`);
+      }
+      break;
+    }
+    case "prepend":
+      break;
+  }
+
+  return truncateHostname(`${prefix}.${baseName}`);
+}
+
 const DEFAULT_BRANCHES = new Set(["main", "master"]);
 
-/** Convert a branch to a worktree prefix using the configured style. */
 function branchToPrefix(branch: string, style: WorktreePrefixStyle): string | null {
   if (!branch || branch === "HEAD" || DEFAULT_BRANCHES.has(branch)) return null;
   const label = style === "branch" ? branch : branch.split("/").pop()!;
-  const prefix = sanitizeForHostname(label);
-  return prefix || null;
+  return sanitizeForHostname(label) || null;
 }
 
-/**
- * Detect if the current directory is inside a multi-worktree git repo and
- * return the current branch name as a prefix for hostname composition.
- *
- * Heuristic:
- *   1. `git worktree list` — if there are multiple worktrees, this repo
- *      uses worktrees and checkouts need distinguishing.
- *   2. `git rev-parse --abbrev-ref HEAD` — get the current branch name.
- *   3. If the branch is `main` or `master`, no prefix (primary checkout).
- *   4. Otherwise, its sanitized label is the prefix, using the requested style.
- *
- * Falls back to parsing `.git` file + HEAD when git CLI is unavailable.
- *
- * `PORTLESS_PREFIX` overrides detection when set: its sanitized value becomes
- * the prefix, and an empty value suppresses the prefix entirely.
- */
-export function detectWorktreePrefix(
-  cwd: string = process.cwd(),
-  style: WorktreePrefixStyle = "last-segment"
-): WorktreePrefix | null {
-  if (process.env.PORTLESS_PREFIX !== undefined) {
-    const prefix = sanitizeForHostname(process.env.PORTLESS_PREFIX);
-    return prefix ? { prefix, source: "PORTLESS_PREFIX" } : null;
+/** Resolve the worktree prefix and hostname layout for a directory. */
+export function resolveWorktreeNaming({
+  cwd = process.cwd(),
+  config,
+  override,
+}: {
+  cwd?: string;
+  config?: WorktreeConfig;
+  override?: string | null;
+} = {}): WorktreeNaming | null {
+  if (override === null) return null;
+
+  let detected: WorktreePrefix | null | undefined;
+  if (override !== undefined) {
+    detected = { prefix: sanitizeForHostname(override), source: "--prefix flag" };
+  } else if (process.env.PORTLESS_PREFIX !== undefined) {
+    detected = {
+      prefix: sanitizeForHostname(process.env.PORTLESS_PREFIX),
+      source: "PORTLESS_PREFIX",
+    };
+  } else {
+    const style = config?.prefix ?? "last-segment";
+    detected = detectWorktreeViaCli(cwd, style);
+    if (detected === undefined) detected = detectWorktreeViaFilesystem(cwd, style);
   }
+  if (!detected?.prefix) return null;
 
-  // Primary: git CLI
-  const cliResult = detectWorktreeViaCli(cwd, style);
-  if (cliResult !== undefined) return cliResult;
-
-  // Fallback: parse .git file and HEAD when git binary is unavailable
-  return detectWorktreeViaFilesystem(cwd, style);
+  const layout: WorktreeLayout = config?.hostnameTemplate
+    ? { kind: "template", template: config.hostnameTemplate }
+    : config?.flat
+      ? { kind: "flat", fullPrefix: detected.prefix }
+      : config?.base
+        ? { kind: "base", base: config.base.toLowerCase() }
+        : { kind: "prepend" };
+  return { prefix: truncateLabel(detected.prefix), source: detected.source, layout };
 }
 
-/**
- * Use git CLI to detect worktree prefix. Returns:
- *   - `{ prefix, source }` if in a linked worktree on a non-default branch
- *   - `null` if not in a linked worktree, or on main/master
- *   - `undefined` if git CLI is unavailable (caller should try fallback)
- */
 function detectWorktreeViaCli(
   cwd: string,
   style: WorktreePrefixStyle
 ): WorktreePrefix | null | undefined {
   try {
-    const listOutput = execFileSync("git", ["worktree", "list", "--porcelain"], {
-      cwd,
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-    });
-
-    // Count worktrees — each block starts with "worktree "
-    const worktreeCount = listOutput.split("\n").filter((l) => l.startsWith("worktree ")).length;
-    if (worktreeCount <= 1) return null;
-
-    // Multiple worktrees exist, but only add a prefix if the current
-    // directory is a *linked* worktree (created via `git worktree add`),
-    // not the root/main worktree. Developers frequently work on feature
-    // branches in their main clone and don't want branch prefixes there.
-    //
-    // In a linked worktree, --git-dir points to .git/worktrees/<name>
-    // while --git-common-dir points to the shared .git directory. In the
-    // root worktree they resolve to the same path.
-    const gitDir = path.resolve(
-      cwd,
-      execFileSync("git", ["rev-parse", "--git-dir"], {
+    const output = execFileSync(
+      "git",
+      ["rev-parse", "--git-dir", "--git-common-dir", "--abbrev-ref", "HEAD"],
+      {
         cwd,
         encoding: "utf-8",
         timeout: 5000,
         stdio: ["ignore", "pipe", "ignore"],
         windowsHide: true,
-      }).trim()
-    );
-
-    const gitCommonDir = path.resolve(
-      cwd,
-      execFileSync("git", ["rev-parse", "--git-common-dir"], {
-        cwd,
-        encoding: "utf-8",
-        timeout: 5000,
-        stdio: ["ignore", "pipe", "ignore"],
-        windowsHide: true,
-      }).trim()
-    );
-
-    if (gitDir === gitCommonDir) return null;
-
-    const branch = execFileSync("git", ["rev-parse", "--abbrev-ref", "HEAD"], {
-      cwd,
-      encoding: "utf-8",
-      timeout: 5000,
-      stdio: ["ignore", "pipe", "ignore"],
-      windowsHide: true,
-    }).trim();
+      }
+    ).trim();
+    const [gitDir, gitCommonDir, branch] = output.split(/\r?\n/);
+    if (!gitDir || !gitCommonDir || !branch) return undefined;
+    if (path.resolve(cwd, gitDir) === path.resolve(cwd, gitCommonDir)) return null;
 
     const prefix = branchToPrefix(branch, style);
-    if (!prefix) return null;
-
-    return { prefix, source: "git branch" };
+    return prefix ? { prefix, source: "git branch" } : null;
   } catch {
     return undefined;
   }
