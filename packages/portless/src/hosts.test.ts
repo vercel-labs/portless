@@ -321,7 +321,7 @@ describe("hosts file mutation safety", () => {
       expect(tempPath).not.toBe(hostsPath);
       expect(path.dirname(tempPath)).toBe(path.dirname(hostsPath));
       expect(path.basename(tempPath)).toMatch(/^\.portless-hosts\.\d+\.[0-9a-f]{12}\.tmp$/);
-      expect(options).toEqual({ mode: 0o644, flag: "wx" });
+      expect(options).toEqual({ mode: 0o644, flag: "wx", flush: true });
       files.set(tempPath, String(data));
     }) as typeof writeFileSync);
     vi.mocked(renameSync).mockImplementation((from, to) => {

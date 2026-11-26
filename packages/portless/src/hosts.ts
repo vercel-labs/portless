@@ -153,7 +153,7 @@ function writeHostsFileAtomic(content: string, previousContent: string): void {
     mode = fs.statSync(targetPath).mode & 0o777;
   });
   try {
-    fs.writeFileSync(tempPath, content, { mode, flag: "wx" });
+    fs.writeFileSync(tempPath, content, { mode, flag: "wx", flush: true });
     tryIgnore(() => {
       fs.chmodSync(tempPath, mode);
     });
@@ -167,11 +167,11 @@ function writeHostsFileAtomic(content: string, previousContent: string): void {
         fs.rmSync(tempPath, { force: true });
       });
       try {
-        fs.writeFileSync(targetPath, content);
+        fs.writeFileSync(targetPath, content, { flush: true });
         return;
       } catch (fallbackError) {
         tryIgnore(() => {
-          fs.writeFileSync(targetPath, previousContent);
+          fs.writeFileSync(targetPath, previousContent, { flush: true });
         });
         throw fallbackError;
       }

@@ -723,6 +723,38 @@ describe("CertIssuer", () => {
     expect(fromDisk).not.toBe(defaultCtx);
   });
 
+  it("refuses unregistered cache misses when ephemeral issuance is disabled", async () => {
+    let allowed = ["myapp.localhost"];
+    const issuer = makeIssuer({
+      getAllowedHostnames: () => allowed,
+      allowEphemeralUnregistered: false,
+    });
+    const issued = await request(issuer, "myapp.localhost");
+    allowed = [];
+    expect(await request(issuer, "myapp.localhost")).toBe(issued);
+
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(request(issuer, "unknown.localhost")).rejects.toThrow("no active route");
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("serializes concurrent distinct-hostname signing so serial numbers stay unique", async () => {
+    const hosts = Array.from({ length: 6 }, (_, i) => `svc${i}.localhost`);
+    const issuer = makeIssuer({ getAllowedHostnames: () => hosts });
+    await Promise.all(hosts.map((host) => request(issuer, host)));
+    const serials = hosts.map((host) => {
+      const pem = fs.readFileSync(
+        path.join(tmpDir, "host-certs", `${host.replace(/\./g, "_")}.pem`)
+      );
+      return new crypto.X509Certificate(pem).serialNumber;
+    });
+    expect(new Set(serials).size).toBe(hosts.length);
+  });
+
   it("exposes the default certificate and optional CA in TLS options", async () => {
     const issuer = makeIssuer();
     expect(issuer.tlsOptions.cert).toEqual(fs.readFileSync(path.join(tmpDir, "server.pem")));

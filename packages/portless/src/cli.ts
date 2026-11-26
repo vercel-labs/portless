@@ -1006,6 +1006,7 @@ function startProxyServer(
             }
           },
           allowWildcards: strict === false,
+          allowEphemeralUnregistered: !lanModeActive,
         }).tlsOptions
       : tlsMode;
 

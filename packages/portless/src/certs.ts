@@ -264,6 +264,18 @@ function isCertSignatureStrong(certPath: string): boolean {
   }
 }
 
+/** Check asynchronously whether a certificate uses a non-SHA-1 signature algorithm. */
+async function isCertSignatureStrongAsync(certPath: string): Promise<boolean> {
+  try {
+    const text = await opensslAsync(["x509", "-in", certPath, "-noout", "-text"]);
+    const match = text.match(/Signature Algorithm:\s*(\S+)/i);
+    if (!match) return false;
+    return !match[1].toLowerCase().includes("sha1");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Check whether a certificate lists the same X.509v3 extension more than once.
  * RFC 5280 requires extensions to be unique, and macOS's Security framework
@@ -1315,6 +1327,7 @@ export interface CertIssuerOptions {
   tlds?: string | readonly string[];
   getAllowedHostnames: () => readonly string[];
   allowWildcards?: boolean;
+  allowEphemeralUnregistered?: boolean;
   maxMemoryEntries?: number;
   maxDiskEntries?: number;
 }
@@ -1336,7 +1349,12 @@ export class CertIssuer {
   ) => void;
 
   constructor(options: CertIssuerOptions) {
-    const { stateDir, getAllowedHostnames, allowWildcards = false } = options;
+    const {
+      stateDir,
+      getAllowedHostnames,
+      allowWildcards = false,
+      allowEphemeralUnregistered = true,
+    } = options;
     const tlds = options.tlds ?? ["localhost"];
     const configuredTlds = [
       ...new Set((typeof tlds === "string" ? [tlds] : tlds).map((tld) => tld.toLowerCase())),
@@ -1357,6 +1375,16 @@ export class CertIssuer {
     const hostDir = path.join(stateDir, HOST_CERTS_DIR);
     let ephemeralTokens = EPHEMERAL_BURST;
     let lastEphemeralRefill = Date.now();
+    let signQueue: Promise<void> = Promise.resolve();
+
+    const enqueueSign = <T>(fn: () => Promise<T>): Promise<T> => {
+      const next = signQueue.then(fn, fn);
+      signQueue = next.then(
+        () => undefined,
+        () => undefined
+      );
+      return next;
+    };
 
     const rememberIn = (
       target: Map<string, tls.SecureContext>,
@@ -1418,6 +1446,35 @@ export class CertIssuer {
         }
       } catch {
         return;
+      }
+    };
+
+    const loadDiskCertAsync = async (
+      certPath: string,
+      keyPath: string
+    ): Promise<tls.SecureContext | null> => {
+      if (!fileExists(certPath) || !fileExists(keyPath)) return null;
+      if (
+        !isCertValid(certPath) ||
+        hasTldWildcardSan(certPath) ||
+        !(await isCertSignatureStrongAsync(certPath))
+      ) {
+        return null;
+      }
+      try {
+        const [hostCert, hostKey] = await Promise.all([
+          fs.promises.readFile(certPath),
+          fs.promises.readFile(keyPath),
+        ]);
+        const ctx = tls.createSecureContext({
+          cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+          key: hostKey,
+        });
+        const now = new Date();
+        await fs.promises.utimes(certPath, now, now).catch(() => undefined);
+        return ctx;
+      } catch {
+        return null;
       }
     };
 
@@ -1484,68 +1541,42 @@ export class CertIssuer {
       const safeName = sanitizeHostForFilename(name);
       const certPath = path.join(hostDir, `${safeName}.pem`);
       const keyPath = path.join(hostDir, `${safeName}-key.pem`);
-      if (
-        fileExists(certPath) &&
-        fileExists(keyPath) &&
-        isCertValid(certPath) &&
-        isCertSignatureStrong(certPath) &&
-        !hasTldWildcardSan(certPath)
-      ) {
-        try {
-          const hostCert = fs.readFileSync(certPath);
-          const ctx = tls.createSecureContext({
-            cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
-            key: fs.readFileSync(keyPath),
-          });
-          try {
-            const now = new Date();
-            fs.utimesSync(certPath, now, now);
-          } catch {
-            void 0;
+
+      const promise = (async () => {
+        const diskCtx = await loadDiskCertAsync(certPath, keyPath);
+        if (diskCtx) {
+          rememberIn(cache, name, diskCtx, maxMemoryEntries);
+          return diskCtx;
+        }
+        if (admission === "unregistered") {
+          if (!allowEphemeralUnregistered) {
+            throw new Error(`Refusing certificate for ${servername}: no active route`);
           }
-          rememberIn(cache, name, ctx, maxMemoryEntries);
-          cb(null, ctx);
-          return;
-        } catch {
-          void 0;
-        }
-      }
-      if (admission === "unregistered") {
-        if (!takeEphemeralToken()) {
-          cb(
-            new Error(
+          if (!takeEphemeralToken()) {
+            throw new Error(
               `Refusing certificate for ${servername}: unregistered certificate rate limit exceeded`
-            )
-          );
-          return;
-        }
-        const promise = generateEphemeralHostCertAsync(stateDir, name)
-          .then(({ cert: hostCert, key: hostKey }) => {
+            );
+          }
+          try {
+            const { cert: hostCert, key: hostKey } = await enqueueSign(() =>
+              generateEphemeralHostCertAsync(stateDir, name)
+            );
             const ctx = tls.createSecureContext({
               cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
               key: hostKey,
             });
             rememberIn(ephemeralCache, name, ctx, MAX_EPHEMERAL_MEMORY_ENTRIES);
-            pending.delete(name);
             return ctx;
-          })
-          .catch((err: unknown) => {
-            pending.delete(name);
+          } catch (err: unknown) {
             const error = err instanceof Error ? err : new Error(String(err));
             console.error(
               `[portless] Failed to prepare a TLS certificate for ${name}: ${error.message}`
             );
             throw error;
-          });
-        pending.set(name, promise);
-        promise.then(
-          (ctx) => cb(null, ctx),
-          (error: Error) => cb(error)
-        );
-        return;
-      }
-      const promise = generateHostCertAsync(stateDir, name)
-        .then(async (generated) => {
+          }
+        }
+        try {
+          const generated = await enqueueSign(() => generateHostCertAsync(stateDir, name));
           const [hostCert, hostKey] = await Promise.all([
             fs.promises.readFile(generated.certPath),
             fs.promises.readFile(generated.keyPath),
@@ -1556,18 +1587,19 @@ export class CertIssuer {
           });
           ephemeralCache.delete(name);
           rememberIn(cache, name, ctx, maxMemoryEntries);
-          pending.delete(name);
           prune(safeName);
           return ctx;
-        })
-        .catch((err: unknown) => {
-          pending.delete(name);
+        } catch (err: unknown) {
           const error = err instanceof Error ? err : new Error(String(err));
           console.error(
             `[portless] Failed to prepare a TLS certificate for ${name}: ${error.message}`
           );
           throw error;
-        });
+        }
+      })().finally(() => {
+        pending.delete(name);
+      });
+
       pending.set(name, promise);
       promise.then(
         (ctx) => cb(null, ctx),
