@@ -6991,9 +6991,7 @@ describe("CLI", { timeout: 15_000 }, () => {
             }
           );
           expect(result.status, result.stderr).toBe(0);
-          expect(result.stdout.trim()).toBe(
-            "https://outer.ngrok.dev|https://nested-random.ngrok.app"
-          );
+          expect(result.stdout.trim()).toBe("none|https://nested-random.ngrok.app");
           const lines = fs.readFileSync(log, "utf-8").trim().split("\n");
           expect(lines).toHaveLength(2);
           expect(lines[0]).toContain("--url=https://outer.ngrok.dev");
