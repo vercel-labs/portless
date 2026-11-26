@@ -8,8 +8,8 @@
       "title": "portless | Named .localhost URLs for Development",
       "markdownTitle": "Getting Started",
       "description": "Replace port numbers with stable, named .localhost URLs. For humans and agents.",
-      "mdxSha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
-      "markdownBodySha256": "4cd679c155d4eaf5bbcaed6fe1ff591dfe2f1c1db66f3c6d472bd16a4901f8c2",
+      "mdxSha256": "1e79ce5b22636da16ba6e8dc97c5be43d5dfa2b0fbd9343eec5435343ffeac40",
+      "markdownBodySha256": "1e79ce5b22636da16ba6e8dc97c5be43d5dfa2b0fbd9343eec5435343ffeac40",
       "ssr": [
         "Portless replaces port numbers with stable, named .localhost URLs for local development.",
         "npm install -g portless",

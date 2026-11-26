@@ -103,4 +103,4 @@ If you only need Google OAuth and don't want to change TLDs, you can add `http:/
 NEXTAUTH_URL=http://localhost:3000
 ```
 
-The downside is you lose the portless benefits (named URLs, no port conflicts) for the OAuth callback flow.
+The downside is you lose the portless benefits (named URLs, no port conflicts) for the OAuth callback flow. If a redirect lands on the portless 404 page on plain `localhost` instead, its active app links preserve the request path and query string so you can jump straight to the matching app URL when your auth state lives on that app's hostname.
