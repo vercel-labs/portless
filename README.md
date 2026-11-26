@@ -111,7 +111,7 @@ Install the portless skill into an agent harness from [skills.sh](https://skills
 npx skills add vercel-labs/portless
 ```
 
-For MCP clients, `portless mcp` starts an MCP server over stdio. The default `core` profile lists routes, looks up URLs, and manages static aliases. `--tools all` adds proxy control and diagnostics:
+For MCP clients, `portless mcp` starts an MCP server over stdio supporting MCP `2026-07-28` (`server/discover` and per-request `_meta`) as well as legacy `initialize` revisions `2025-11-25` through `2024-11-05`. The default `core` profile lists routes, looks up URLs, and manages static aliases. `--tools all` adds proxy control and diagnostics:
 
 ```json
 { "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }

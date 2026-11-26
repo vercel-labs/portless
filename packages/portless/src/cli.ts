@@ -2561,7 +2561,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy
   ${colors.cyan("portless proxy stop")}              Stop the proxy
-  ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
+  ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server (2026-07-28 and legacy)
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service
   ${colors.cyan("portless alias <name> <port>")}     Register a static route
