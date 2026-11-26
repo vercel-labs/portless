@@ -15,7 +15,29 @@ export interface RouteInfo {
   pid?: number;
 }
 
+/** Status codes for pages rendered directly by the proxy. */
+export type ProxyPageStatus = 200 | 404 | 421 | 502 | 503 | 504 | 508;
+
+/** Structured context passed to proxy page renderers. */
+export interface ProxyPageContext {
+  status: ProxyPageStatus;
+  host: string;
+  path: string;
+  routes: readonly RouteInfo[];
+  proxyPort: number;
+  tls: boolean;
+  tlds: readonly string[];
+  message?: string;
+  code?: string;
+  hops?: number;
+}
+
+/** Custom page renderer hook. Return null or undefined to use the built-in page. */
+export type ProxyPageRenderer = (context: ProxyPageContext) => string | null | undefined;
+
 export interface ProxyServerOptions {
+  /** Override HTML pages. Return null or undefined to use the built-in page. */
+  renderPage?: ProxyPageRenderer;
   /** Called on each request to get the current route table. */
   getRoutes: () => RouteInfo[];
   /** The port the proxy is listening on (used to build correct URLs). */

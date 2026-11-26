@@ -57,6 +57,8 @@ Each app gets a random port from 4000 to 4999 through the `PORT` environment var
 
 The port and host variable names are `PORT` and `HOST` by default. Change them with `--port-var <name>` and `--host-var <name>` (also accepted in zero-arg and multi-app mode), the `PORTLESS_PORT_VAR` and `PORTLESS_HOST_VAR` environment variables, or `portVar` and `hostVar` in project config. A CLI flag wins over the matching environment variable, which wins over the config field. In a monorepo run, every app also gets `PORTLESS_URL_<APP>` for every proxied app, including itself, and `NODE_EXTRA_CA_CERTS` points at the portless CA merged with any bundle you already set ([Environment variables](https://portless.sh/configuration#environment-variables)).
 
+Open `portless.localhost` in a browser (or `portless.<tld>` when using a custom TLD that resolves to the proxy) to see active routes and proxy status when no app is registered under that name. Links on the 404 page preserve the request path and query string.
+
 Outside LAN mode, the proxy listens only on `127.0.0.1` and `::1`. It keeps `/etc/hosts` in sync for route hostnames, which custom TLDs such as `.test` need. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
 To reach an app from another device or share it, use [LAN mode](https://portless.sh/commands#lan-mode) for phones on the same network, or [Tailscale](https://portless.sh/commands#share-on-tailscale), [ngrok](https://portless.sh/commands#share-with-ngrok), or a [Cloudflare quick tunnel](https://portless.sh/commands#share-with-cloudflare) with `--tailscale`, `--ngrok`, or `--cloudflare`. For HTTPS in LAN mode, `portless trust --device` lets a phone install the local CA from a QR code.

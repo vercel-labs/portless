@@ -270,6 +270,255 @@ describe("createProxyServer", () => {
       expect(res.body).not.toContain(":80");
     });
 
+    it.each([
+      ["/callback?code=abc&state=xyz", "/callback?code=abc&amp;state=xyz"],
+      ["/?foo=bar", "/?foo=bar"],
+      ["/", ""],
+      ["http://evil.com/phish", ""],
+      ["*", ""],
+    ])("preserves only origin-form paths in 404 links: %s", async (path, suffix) => {
+      const routes: RouteInfo[] = [{ hostname: "myapp.localhost", port: 4001 }];
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
+      await listen(server);
+
+      const res = await request(server, { host: "other.localhost", path });
+      expect(res.status).toBe(404);
+      expect(res.body).toContain(`href="http://myapp.localhost:8080${suffix}"`);
+      if (!suffix) expect(res.body).not.toContain('href="http://myapp.localhost:8080/');
+    });
+
+    it("serves an empty dashboard at portless.localhost", async () => {
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("text/html");
+      expect(res.body).toContain("No apps running.");
+      expect(res.body).toContain("portless myapp your-command");
+    });
+
+    it("shows active routes and shared filter controls on the dashboard", async () => {
+      const routes = makeRoutes(6);
+      routes[0].registeredAt = Date.now() - 2 * 3600 * 1000;
+      const server = trackServer(createProxyServer({ getRoutes: () => routes, proxyPort: 8080 }));
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost", path: "/dashboard?x=1" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain('href="http://app0.localhost:8080"');
+      expect(res.body).not.toContain('href="http://app0.localhost:8080/dashboard');
+      expect(res.body).toContain("app0.localhost");
+      expect(res.body).toContain("127.0.0.1:4000");
+      expect(res.body).toContain("up 2h");
+      expect(res.body).toContain('type="search"');
+      expect(res.body).toContain("Newest first");
+      expect(res.body).toContain("<script>");
+    });
+
+    it.each(["portless.test", "portless.localhost"])(
+      "serves the dashboard for %s with a custom TLD",
+      async (host) => {
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT, tld: "test" })
+        );
+        await listen(server);
+
+        const res = await request(server, { host });
+        expect(res.status).toBe(200);
+        expect(res.body).toContain("TLD: .test");
+      }
+    );
+
+    it("returns dashboard routes as JSON with Vary: Accept", async () => {
+      const routes = makeRoutes(2);
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, tld: "test" })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.test", accept: "application/json" });
+      expect(res.status).toBe(200);
+      expect(res.headers["content-type"]).toContain("application/json");
+      expect(res.headers.vary).toBe("Accept");
+      expect(JSON.parse(res.body)).toEqual({
+        proxy: { port: TEST_PROXY_PORT, tls: false, tlds: ["test"] },
+        routes,
+      });
+    });
+
+    it("prefers an explicit portless.localhost route over the dashboard", async () => {
+      const backend = trackServer(http.createServer((_req, res) => res.end("backend")));
+      await listen(backend);
+      const addr = backend.address();
+      if (!addr || typeof addr === "string") throw new Error("no addr");
+      const routes: RouteInfo[] = [{ hostname: "portless.localhost", port: addr.port }];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toBe("backend");
+    });
+
+    it("passes structured contexts to the custom renderer for 404 and dashboard pages", async () => {
+      const routes = makeRoutes(1);
+      const renderPage = vi.fn(() => "<html>custom page</html>");
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT, renderPage })
+      );
+      await listen(server);
+
+      const missing = await request(server, { host: "missing.localhost", path: "/callback?x=1" });
+      expect(missing.status).toBe(404);
+      expect(missing.body).toBe("<html>custom page</html>");
+      expect(renderPage).toHaveBeenNthCalledWith(1, {
+        status: 404,
+        host: "missing.localhost",
+        path: "/callback?x=1",
+        routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: false,
+        tlds: ["localhost"],
+        message: "No app registered for missing.localhost",
+      });
+
+      const dashboard = await request(server, { host: "portless.localhost", path: "/dashboard" });
+      expect(dashboard.status).toBe(200);
+      expect(dashboard.body).toBe("<html>custom page</html>");
+      expect(renderPage).toHaveBeenNthCalledWith(2, {
+        status: 200,
+        host: "portless.localhost",
+        path: "/dashboard",
+        routes,
+        proxyPort: TEST_PROXY_PORT,
+        tls: false,
+        tlds: ["localhost"],
+      });
+    });
+
+    it.each([null, undefined])(
+      "uses the built-in page when the renderer returns %s",
+      async (value) => {
+        const renderPage = vi.fn(() => value);
+        const server = trackServer(
+          createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT, renderPage })
+        );
+        await listen(server);
+
+        const res = await request(server, { host: "missing.localhost" });
+        expect(res.status).toBe(404);
+        expect(res.body).toContain("Not Found");
+        expect(renderPage).toHaveBeenCalledOnce();
+      }
+    );
+
+    it("logs a renderer error and falls back to the built-in page", async () => {
+      const routes: RouteInfo[] = [{ hostname: "app.localhost", port: 4001 }];
+      const onError = vi.fn();
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError,
+          renderPage: (ctx) => {
+            (ctx.routes as RouteInfo[]).pop();
+            (ctx.tlds as string[]).push("mutated");
+            throw new Error("renderer failed");
+          },
+        })
+      );
+      await listen(server);
+
+      const res = await request(server, { host: "portless.localhost" });
+      expect(res.status).toBe(200);
+      expect(res.body).toContain("app.localhost");
+      expect(res.body).not.toContain("mutated");
+      expect(routes).toHaveLength(1);
+      expect(onError).toHaveBeenCalledWith(expect.stringContaining("renderer failed"));
+    });
+
+    it("passes connection errors and loop hops to the custom renderer", async () => {
+      const closedServer = http.createServer();
+      await listen(closedServer);
+      const closedAddr = closedServer.address();
+      if (!closedAddr || typeof closedAddr === "string") throw new Error("no addr");
+      const deadPort = closedAddr.port;
+      await new Promise<void>((resolve) => closedServer.close(() => resolve()));
+
+      const routes: RouteInfo[] = [{ hostname: "dead.localhost", port: deadPort }];
+      const renderPage = vi.fn(() => "custom error");
+      const server = trackServer(
+        createProxyServer({
+          getRoutes: () => routes,
+          proxyPort: TEST_PROXY_PORT,
+          onError: () => {},
+          renderPage,
+        })
+      );
+      await listen(server);
+
+      const badGateway = await request(server, { host: "dead.localhost" });
+      expect(badGateway.status).toBe(502);
+      expect(badGateway.body).toBe("custom error");
+      expect(renderPage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 502, code: "ECONNREFUSED" })
+      );
+
+      const loop = await request(server, {
+        host: "dead.localhost",
+        headers: { "x-portless-hops": "5" },
+      });
+      expect(loop.status).toBe(508);
+      expect(loop.body).toBe("custom error");
+      expect(renderPage).toHaveBeenLastCalledWith(
+        expect.objectContaining({ status: 508, hops: 5 })
+      );
+    });
+
+    it("preserves bracketed IPv6 hosts and strips trailing dots in 404 suggestions", async () => {
+      const renderPage = vi.fn(() => null);
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT, renderPage })
+      );
+      await listen(server);
+
+      const ipv6 = await request(server, { host: "[::1]:1355" });
+      expect(ipv6.status).toBe(404);
+      expect(ipv6.body).toContain("<strong>[::1]</strong>");
+      expect(renderPage).toHaveBeenLastCalledWith(expect.objectContaining({ host: "[::1]" }));
+
+      const dotted = await request(server, { host: "myapp.localhost." });
+      expect(dotted.status).toBe(404);
+      expect(dotted.body).toContain("portless myapp your-command");
+    });
+
+    it("does not invoke the renderer for JSON error and dashboard responses", async () => {
+      const renderPage = vi.fn(() => "custom page");
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => [], proxyPort: TEST_PROXY_PORT, renderPage })
+      );
+      await listen(server);
+
+      const missing = await request(server, {
+        host: "missing.localhost",
+        accept: "application/json",
+      });
+      const dashboard = await request(server, {
+        host: "portless.localhost",
+        accept: "application/json",
+      });
+      expect(missing.status).toBe(404);
+      expect(dashboard.status).toBe(200);
+      expect(missing.headers["content-type"]).toContain("application/json");
+      expect(dashboard.headers["content-type"]).toContain("application/json");
+      expect(renderPage).not.toHaveBeenCalled();
+    });
+
     it("renders the filter controls and script only above 5 routes", async () => {
       const five = trackServer(
         createProxyServer({ getRoutes: () => makeRoutes(5), proxyPort: TEST_PROXY_PORT })
