@@ -8,6 +8,7 @@ import {
   PROCESS_TUNNELS,
   buildNgrokArgs,
   buildNetbirdArgs,
+  buildNetbirdEnv,
   ensureNgrokAvailable,
   ensureNetbirdAvailable,
   extractNgrokUrl,
@@ -272,10 +273,12 @@ class MockNetbirdChild extends EventEmitter {
 
 function createNetbirdSpawner(
   child: MockNetbirdChild,
-  calls: string[][] = []
-): (args: string[]) => MockNetbirdChild {
-  return (args: string[]) => {
+  calls: string[][] = [],
+  envs: Array<Record<string, string> | undefined> = []
+): (args: string[], env?: Record<string, string>) => MockNetbirdChild {
+  return (args: string[], env?: Record<string, string>) => {
     calls.push(args);
+    envs.push(env);
     return child;
   };
 }
@@ -355,7 +358,7 @@ describe("netbird", () => {
   });
 
   describe("buildNetbirdArgs", () => {
-    it("builds the expose command with sanitized prefix and groups", () => {
+    it("builds the expose command with sanitized prefix and groups without secrets in argv", () => {
       expect(
         buildNetbirdArgs(4123, {
           appName: "My App! 2026 With A Very Long Name That Keeps Going",
@@ -367,16 +370,22 @@ describe("netbird", () => {
         "expose",
         "--protocol",
         "http",
-        "--with-password",
-        "secret",
-        "--with-pin",
-        "123456",
         "--with-name-prefix",
         "my-app--2026-with-a-very-long-na",
         "--with-user-groups",
         "dev,ops",
         "4123",
       ]);
+    });
+  });
+
+  describe("buildNetbirdEnv", () => {
+    it("passes password and PIN via NB_WITH_* environment variables", () => {
+      expect(buildNetbirdEnv({ password: "secret", pin: "123456" })).toEqual({
+        NB_WITH_PASSWORD: "secret",
+        NB_WITH_PIN: "123456",
+      });
+      expect(buildNetbirdEnv({})).toEqual({});
     });
   });
 
@@ -393,11 +402,14 @@ describe("netbird", () => {
   });
 
   describe("startNetbird", () => {
-    it("spawns netbird and resolves with the public URL", async () => {
+    it("spawns netbird with credentials in child env and resolves with the public URL", async () => {
       const child = new MockNetbirdChild();
       const calls: string[][] = [];
+      const envs: Array<Record<string, string> | undefined> = [];
       const promise = startNetbird(4123, {
-        spawner: createNetbirdSpawner(child, calls),
+        password: "secret",
+        pin: "123456",
+        spawner: createNetbirdSpawner(child, calls, envs),
         timeoutMs: 1000,
       });
 
@@ -408,6 +420,7 @@ describe("netbird", () => {
         pid: 67890,
       });
       expect(calls).toEqual([["expose", "--protocol", "http", "4123"]]);
+      expect(envs).toEqual([{ NB_WITH_PASSWORD: "secret", NB_WITH_PIN: "123456" }]);
     });
 
     it("throws when netbird exits before printing a URL", async () => {

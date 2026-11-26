@@ -15,7 +15,7 @@ export interface TunnelChildProcess {
   on(event: "exit", listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
 }
 
-export type TunnelSpawner = (args: string[]) => TunnelChildProcess;
+export type TunnelSpawner = (args: string[], env?: Record<string, string>) => TunnelChildProcess;
 
 export interface TunnelCommandResult {
   status: number | null;
@@ -50,6 +50,7 @@ export interface TunnelProvider {
   versionArgs: string[];
   validateReady?(result: TunnelCommandResult): void;
   buildArgs(localPort: number, options: TunnelStartOptions): string[];
+  buildEnv?(options: TunnelStartOptions): Record<string, string> | undefined;
   extractUrl(output: string): string | null;
   formatOutputError(output: string): Error;
   notFound: string;
@@ -70,11 +71,18 @@ export interface ProcessTunnelSpec {
   readonly formatHint?: (message: string) => string[] | null;
 }
 
-function defaultSpawner(binary: string, args: string[]): TunnelChildProcess {
+function defaultSpawner(
+  binary: string,
+  args: string[],
+  extraEnv?: Record<string, string>
+): TunnelChildProcess {
   const spawnedAt = Date.now();
   const child = spawn(binary, args, {
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
+    ...(extraEnv && Object.keys(extraEnv).length > 0
+      ? { env: { ...process.env, ...extraEnv } }
+      : {}),
   });
   guardWindowsOrphans(child, spawnedAt);
   return child as TunnelChildProcess;
@@ -129,13 +137,15 @@ export function startTunnel(
   localPort: number,
   options: TunnelStartOptions
 ): Promise<StartedTunnel> {
-  const spawner = options.spawner ?? ((args) => defaultSpawner(provider.binary, args));
+  const spawner =
+    options.spawner ?? ((args, extraEnv) => defaultSpawner(provider.binary, args, extraEnv));
   const timeoutMs = options.timeoutMs ?? START_TIMEOUT_MS;
   const args = provider.buildArgs(localPort, options);
+  const env = provider.buildEnv?.(options);
 
   let child: TunnelChildProcess;
   try {
-    child = spawner(args);
+    child = spawner(args, env);
   } catch (err: unknown) {
     const error = err instanceof Error ? err : new Error(String(err));
     return Promise.reject(formatSpawnError(provider, error));
@@ -350,8 +360,6 @@ export async function startCloudflare(
 
 export function buildNetbirdArgs(localPort: number, options: TunnelStartOptions = {}): string[] {
   const args = ["expose", "--protocol", "http"];
-  if (options.password) args.push("--with-password", options.password);
-  if (options.pin) args.push("--with-pin", options.pin);
   if (options.appName) {
     const prefix = options.appName
       .toLowerCase()
@@ -366,6 +374,14 @@ export function buildNetbirdArgs(localPort: number, options: TunnelStartOptions 
   }
   args.push(String(localPort));
   return args;
+}
+
+/** Build NetBird env vars so access secrets stay out of child process argv. */
+export function buildNetbirdEnv(options: TunnelStartOptions = {}): Record<string, string> {
+  const env: Record<string, string> = {};
+  if (options.password) env.NB_WITH_PASSWORD = options.password;
+  if (options.pin) env.NB_WITH_PIN = options.pin;
+  return env;
 }
 
 export function extractNetbirdUrl(output: string): string | null {
@@ -399,6 +415,7 @@ const netbird: TunnelProvider = {
     }
   },
   buildArgs: buildNetbirdArgs,
+  buildEnv: buildNetbirdEnv,
   extractUrl: extractNetbirdUrl,
   formatOutputError: (output) => {
     const details = normalizeSpace(output);
