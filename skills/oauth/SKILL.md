@@ -9,7 +9,7 @@ OAuth providers validate redirect URIs against domain rules. `.localhost` subdom
 
 ## The Problem
 
-When portless uses the default `.localhost` TLD, OAuth providers reject redirect URIs like `http://myapp.localhost:1355/callback`:
+When portless uses the default `.localhost` TLD, some OAuth providers reject redirect URIs like `http://myapp.localhost:1355/callback`:
 
 | Provider  | `localhost` | `.localhost` subdomains | Reason                         |
 | --------- | ----------- | ----------------------- | ------------------------------ |
@@ -20,6 +20,8 @@ When portless uses the default `.localhost` TLD, OAuth providers reject redirect
 | GitHub    | Allowed     | Allowed                 | Permissive                     |
 
 Google and Apple are the strictest. Microsoft and GitHub are more lenient with localhost.
+
+If a provider redirects to plain `localhost` on the portless proxy port, such as `http://localhost:1355/callback`, the request lands on the 404 page. Clicking an active app link carries the request path and query string to that app's URL (useful when your app already holds its auth state on its own hostname, though flows that rely on cookies scoped to `localhost` still need a matching origin or a custom TLD).
 
 ## The Fix
 

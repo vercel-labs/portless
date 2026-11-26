@@ -1499,6 +1499,7 @@ export class CertIssuer {
         } else {
           const allowed = getAllowedHostnames().map((hostname) => hostname.toLowerCase());
           admission =
+            configuredTlds.some((tld) => name === `portless.${tld}`) ||
             allowed.includes(name) ||
             (allowWildcards && allowed.some((parent) => name.endsWith(`.${parent}`)))
               ? "admitted"
