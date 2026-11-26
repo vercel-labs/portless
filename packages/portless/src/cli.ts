@@ -75,6 +75,7 @@ import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
+  RoutesFileError,
   isPortFree,
   isValidUpstream,
   type RouteMapping,
@@ -3375,6 +3376,18 @@ ${colors.bold("Examples:")}
 `);
 }
 
+/** Return the active route port for `hostname`, or `undefined` when unavailable. */
+function findActiveRoutePort(stateDir: string, hostname: string): number | undefined {
+  const store = new RouteStore(stateDir, { onWarning: () => {} });
+  if (store.untrustedReason()) return undefined;
+  try {
+    return store.loadRoutes().find((route) => route.hostname === hostname)?.port;
+  } catch (err) {
+    if (err instanceof RoutesFileError) return undefined;
+    throw err;
+  }
+}
+
 async function handleGet(args: string[]): Promise<void> {
   const parsed = parseCommandArgs("get", args.slice(1), GET_FLAG_SPEC, 1);
   const name = parsed.positionals[0];
@@ -3397,13 +3410,16 @@ async function handleGet(args: string[]): Promise<void> {
   const { dir, port, tls, tlds } = await discoverState();
   const hostname = buildHostnames({ baseName: name, naming: worktree }, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
-  const activeRoute = json
-    ? new RouteStore(dir, { onWarning: () => {} }).loadRoutes().find((r) => r.hostname === hostname)
-    : undefined;
+  const activePort = json ? findActiveRoutePort(dir, hostname) : undefined;
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write(
     (json
-      ? JSON.stringify({ name, hostname, url, ...(activeRoute ? { port: activeRoute.port } : {}) })
+      ? JSON.stringify({
+          name,
+          hostname,
+          url,
+          ...(activePort !== undefined ? { port: activePort } : {}),
+        })
       : url) + "\n"
   );
 }

@@ -5556,6 +5556,16 @@ describe("CLI", { timeout: 15_000 }, () => {
       const stale = run(["get", "backend", "--json"], options);
       expect(stale.status, stale.stderr).toBe(0);
       expect(JSON.parse(stale.stdout)).not.toHaveProperty("port");
+
+      fs.writeFileSync(routePath, "{");
+      const corrupt = run(["get", "backend", "--json"], options);
+      expect(corrupt.status, corrupt.stderr).toBe(0);
+      expect(JSON.parse(corrupt.stdout)).toEqual({
+        name: "backend",
+        hostname: "backend.localhost",
+        url: JSON.parse(stale.stdout).url,
+      });
+      expect(fs.readFileSync(routePath, "utf-8")).toBe("{");
     });
 
     it("prints URL for a dotted service name", () => {
