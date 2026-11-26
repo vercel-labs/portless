@@ -22,6 +22,7 @@ const PORTLESS_STATE_FILES = [
   ...PROXY_FILES,
 ];
 
+const CA_BUNDLE_FILE_PATTERN = /^ca-bundle-[0-9a-f]{16}\.pem(?:\.\d+\.[0-9a-f]+\.tmp)?$/;
 const HOST_CERTS_DIR = "host-certs";
 const CA_IDENTITY_FILES = new Set(["ca-key.pem", "ca.pem", "ca.trust-refresh-pending"]);
 const PROXY_RUNTIME_FILES = new Set(PROXY_FILES);
@@ -105,6 +106,28 @@ export function attemptCATrustRemovalForCleanup(
   return results;
 }
 
+/** Remove generated CA bundle files. fs.unlinkSync removes a symlink itself and never follows it. */
+function removeCABundleFiles(dir: string): string[] {
+  let names: string[];
+  try {
+    names = fs.readdirSync(dir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+    return [dir];
+  }
+  const failures: string[] = [];
+  for (const name of names) {
+    if (!CA_BUNDLE_FILE_PATTERN.test(name)) continue;
+    const file = path.join(dir, name);
+    try {
+      fs.unlinkSync(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(file);
+    }
+  }
+  return failures;
+}
+
 /**
  * Best-effort removal of portless state files under dir. Only known filenames
  * are deleted; other files in the directory are left intact.
@@ -133,6 +156,7 @@ export function removePortlessStateFiles(
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") failures.push(file);
     }
   }
+  failures.push(...removeCABundleFiles(dir));
   if (options.preserveProxyRuntime) return failures;
   const hostCerts = path.join(dir, HOST_CERTS_DIR);
   try {

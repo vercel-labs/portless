@@ -3,6 +3,18 @@
 declare const __VERSION__: string;
 
 import colors, { colorFor } from "./colors.js";
+import {
+  ChildEnvError,
+  childEnv,
+  formatShellExports,
+  formatViteAllowedHosts,
+  isReservedEnvVarName,
+  isValidEnvVarName,
+  resolveEnvVarNaming,
+  type EnvVarNaming,
+  type EnvVarOverrides,
+  type PeerApp,
+} from "./child-env.js";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -635,10 +647,6 @@ function aliasRouteTld(hostname: string, tlds: readonly string[]): string {
 
 function formatUrls(hostnames: readonly string[], proxyPort: number, tls: boolean): string[] {
   return hostnames.map((hostname) => formatUrl(hostname, proxyPort, tls));
-}
-
-function formatViteAllowedHosts(tlds: readonly string[]): string {
-  return tlds.map((configuredTld) => `.${configuredTld}`).join(",");
 }
 
 function formatBindEndpoint(host: string, port: number): string {
@@ -1722,7 +1730,8 @@ async function runApp(
   force: boolean,
   desiredPort?: number,
   lanMode = false,
-  lanIp?: string | null
+  lanIp?: string | null,
+  envVarNaming?: EnvVarNaming
 ) {
   let store = initialStore;
   initialStore.recoverCorruptRoutesFile();
@@ -2019,42 +2028,31 @@ async function runApp(
   const isExpoLan = framework === "expo" && (lanMode || isLanEnvEnabled());
   const hostBind = isExpoLan ? undefined : "127.0.0.1";
 
-  // Ensure PORTLESS_LAN is propagated to child processes when the proxy
-  // was started with --lan separately and discovered from the state marker,
-  // not from the env var.
   if (lanMode && !process.env.PORTLESS_LAN) {
     process.env.PORTLESS_LAN = "1";
   }
-
-  // Inject --port for frameworks that ignore the PORT env var (e.g. Vite)
   injectPackageScriptFrameworkFlags(commandArgs, port);
   injectFrameworkFlags(commandArgs, port);
 
-  // Point Node.js at the portless CA so server-side fetches (e.g. Next.js
-  // Server Components) trust portless-proxied HTTPS services. Node.js does
-  // not use the system trust store, so without this env var it rejects the
-  // portless CA as "self-signed certificate in certificate chain".
-  // Respect any value the user already set. Note: we check process.env here
-  // rather than the constructed child env because the child env inherits from
-  // process.env via spread. If a future code path injects NODE_EXTRA_CA_CERTS
-  // into the child env independently, this guard would need updating.
-  const caEnv: Record<string, string> = {};
-  if (tls && !process.env.NODE_EXTRA_CA_CERTS) {
-    const caPath = path.join(stateDir, "ca.pem");
-    if (fs.existsSync(caPath)) {
-      caEnv.NODE_EXTRA_CA_CERTS = caPath;
-    }
+  const shareEnv: Record<string, string> = {};
+  if (tailscaleUrl) shareEnv.PORTLESS_TAILSCALE_URL = tailscaleUrl;
+  for (const run of tunnelRuns) {
+    if (run.proc && !run.handled) shareEnv[`${run.t.env}_URL`] = run.proc.url;
   }
-
-  // Run the command
-  const caFragment = caEnv.NODE_EXTRA_CA_CERTS
-    ? ` NODE_EXTRA_CA_CERTS="${caEnv.NODE_EXTRA_CA_CERTS}"`
-    : "";
-  console.error(
-    chalk.gray(
-      `Running: PORT=${port}${hostBind ? ` HOST=${hostBind}` : ""} PORTLESS_URL=${finalUrl}${caFragment} ${commandArgs.join(" ")}\n`
-    )
+  const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
+  const built = childEnv(
+    {
+      port,
+      host: hostBind,
+      url: finalUrl,
+      tlds,
+      childPrefix: name.childPrefix,
+      lan: lanMode,
+      shareEnv,
+    },
+    { naming: envVarNaming, shareUrl: tailscaleUrl, caPath }
   );
+  console.error(chalk.gray(`Running: ${built.display} ${commandArgs.join(" ")}\n`));
 
   const preexistingListener = await findPreexistingListener(port);
 
@@ -2063,23 +2061,7 @@ async function runApp(
   }
 
   spawnCommand(commandArgs, {
-    env: {
-      ...process.env,
-      ...(name.childPrefix !== undefined ? { PORTLESS_PREFIX: name.childPrefix } : {}),
-      PORT: port.toString(),
-      ...(hostBind ? { HOST: hostBind } : {}),
-      PORTLESS_URL: finalUrl,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
-      // Note: EXPO_PACKAGER_PROXY_URL is not used — expo-dev-client removed
-      // baked-in pinging, making this env var ineffective. Expo handles its
-      // own LAN discovery natively.
-      ...(lanMode ? { PORTLESS_LAN: "1" } : {}),
-      ...(tailscaleUrl ? { PORTLESS_TAILSCALE_URL: tailscaleUrl } : {}),
-      ...Object.fromEntries(
-        tunnelRuns.flatMap((r) => (r.proc && !r.handled ? [[`${r.t.env}_URL`, r.proc.url]] : []))
-      ),
-      ...caEnv,
-    },
+    env: { ...process.env, ...built.env },
     onExit: (childPid, code) =>
       transferRoutesToDaemon(store, hostnames, port, childPid, preexistingListener, code === 0),
     onSpawn: (pid) => {
@@ -2166,10 +2148,49 @@ const SHARE_FLAG_SPEC = {
 } as const;
 
 const WORKTREE_FLAG_SPEC = { "--no-worktree": "boolean" } as const;
+const ENV_VAR_FLAG_SPEC = { "--port-var": "value", "--host-var": "value" } as const;
+
+function validateEarlyNaming(overrides: EnvVarOverrides, checkDefaultCollision: boolean): void {
+  const portVar = overrides.portVar ?? (process.env.PORTLESS_PORT_VAR || undefined);
+  const hostVar = overrides.hostVar ?? (process.env.PORTLESS_HOST_VAR || undefined);
+  const values = [
+    [portVar, overrides.portVar !== undefined ? "override" : "PORTLESS_PORT_VAR"],
+    [hostVar, overrides.hostVar !== undefined ? "override" : "PORTLESS_HOST_VAR"],
+  ] as const;
+  for (const [value, source] of values) {
+    if (value === undefined) continue;
+    if (!isValidEnvVarName(value)) {
+      throw new UsageError(
+        `Invalid environment variable name "${value}" from ${source}. Names must start with a letter or underscore and contain only letters, digits, and underscores.`
+      );
+    }
+    if (isReservedEnvVarName(value)) {
+      throw new UsageError(`Environment variable name "${value}" is reserved by portless.`);
+    }
+  }
+  if (
+    (checkDefaultCollision || (portVar && hostVar)) &&
+    (portVar ?? "PORT") === (hostVar ?? "HOST")
+  ) {
+    throw new UsageError(
+      `Port and host environment variables cannot use the same name ("${portVar ?? "PORT"}").`
+    );
+  }
+}
+
+function resolveNamingOrThrow(overrides?: EnvVarOverrides, config?: EnvVarOverrides): EnvVarNaming {
+  try {
+    return resolveEnvVarNaming(overrides, config);
+  } catch (err) {
+    if (err instanceof ChildEnvError) throw new UsageError(err.message);
+    throw err;
+  }
+}
 
 const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--force": "boolean",
   "--app-port": "value",
+  ...ENV_VAR_FLAG_SPEC,
   ...WORKTREE_FLAG_SPEC,
   ...LAN_FLAG_SPEC,
   ...SHARE_FLAG_SPEC,
@@ -2182,6 +2203,7 @@ const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--prefix": "text",
   "--force": "boolean",
   "--app-port": "value",
+  ...ENV_VAR_FLAG_SPEC,
   ...WORKTREE_FLAG_SPEC,
   "--script": "value",
   ...LAN_FLAG_SPEC,
@@ -2246,6 +2268,8 @@ ${colors.bold("Options:")}
   --no-worktree          Use the base name without worktree naming; overrides --prefix
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --port-var <name>      Set the app port environment variable name
+  --host-var <name>      Set the app host environment variable name
   --tailscale            Share the app on your Tailscale network (tailnet)
   --funnel               Share the app publicly via Tailscale Funnel
   --ngrok                Share the app publicly via ngrok
@@ -2374,7 +2398,9 @@ function readNamedArgs(args: readonly string[]): { name: string | undefined; has
   const end = args.indexOf("--");
   const flagRegion = end === -1 ? args : args.slice(0, end);
   const words = flagRegion.filter(
-    (arg, i) => !arg.startsWith("-") && flagRegion[i - 1] !== "--app-port"
+    (arg, i) =>
+      !arg.startsWith("-") &&
+      !["--app-port", "--port-var", "--host-var"].includes(flagRegion[i - 1])
   );
   if (end !== -1) words.push(...args.slice(end + 1));
   return { name: words[0], hasCommand: words.length > 1 };
@@ -2399,6 +2425,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service
+  ${colors.cyan("portless env [name...]")}           Print shell exports for sibling processes
   ${colors.cyan("portless alias <name> <port>")}     Register a static route
   ${colors.cyan("portless alias --remove <name>")}   Remove a static route
   ${colors.cyan("portless compose up [args...]")}    Run a Docker Compose project
@@ -2447,6 +2474,8 @@ ${colors.bold("Environment variables:")}
   PORTLESS=0                    Run app commands directly without the proxy
   PORTLESS_PORT=<number>        Set the default proxy port
   PORTLESS_APP_PORT=<number>    Set a fixed port for the app
+  PORTLESS_PORT_VAR=<name>      Set the app port environment variable name
+  PORTLESS_HOST_VAR=<name>      Set the app host environment variable name
   PORTLESS_HTTPS=0              Disable HTTPS for the proxy
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
@@ -3220,6 +3249,114 @@ async function handleGet(args: string[]): Promise<void> {
   const url = formatUrl(hostname, port, tls);
   // Print bare URL to stdout so it works in $(portless get <name>)
   process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
+}
+
+function printEnvHelp(): void {
+  console.log(`
+${colors.bold("portless env")} - Print environment variables for sibling processes.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless env [name]")}
+  ${colors.cyan("portless env VAR=name [VAR=name...]")}
+
+Prints shell export lines for processes that run outside portless run, such as
+Vitest, Playwright, or a local script. Load them with eval.
+
+Exports NODE_EXTRA_CA_CERTS when the proxy serves HTTPS, merged with any existing
+NODE_EXTRA_CA_CERTS bundle, plus PORTLESS_LAN=1 in LAN mode. A name argument also
+exports PORTLESS_URL, worktree-aware unless you pass --no-worktree. Each VAR=name
+pair resolves a worktree-aware service URL into the variable you name. Names use
+the worktree config in the current directory, including workspace defaults.
+
+${colors.bold("Options:")}
+  --no-worktree          Skip config loading and worktree naming
+  --json                 Print the same variables as JSON
+  --help, -h             Show this help
+
+${colors.bold("Examples:")}
+  eval "$(portless env)"                          # CA trust, plus PORTLESS_LAN=1 in LAN mode
+  eval "$(portless env myapp)"                    # also PORTLESS_URL
+  eval "$(portless env APP_URL=web API_URL=api)"  # resolve service URLs into your own names
+  portless env myapp --json                       # the same variables as JSON
+`);
+}
+
+async function handleEnv(args: string[]): Promise<void> {
+  const parsed = parseCommandArgs("env", args.slice(1), {
+    ...WORKTREE_FLAG_SPEC,
+    "--json": "boolean",
+  });
+  const skipWorktree = parsed.has("--no-worktree");
+  const json = parsed.has("--json");
+
+  let name: string | undefined;
+  const mappings: { variable: string; service: string }[] = [];
+  for (const target of parsed.positionals) {
+    const separator = target.indexOf("=");
+    if (separator === -1) {
+      if (name !== undefined) {
+        throw new UsageError(
+          "Only one bare service name is allowed. Use VAR=name to map multiple services.",
+          ["  portless env APP_URL=web API_URL=api"]
+        );
+      }
+      if (target.trim().length === 0) {
+        throw new UsageError("Missing service name.", ["See: portless env --help"]);
+      }
+      name = target.trim();
+      continue;
+    }
+    const variable = target.slice(0, separator);
+    const service = target.slice(separator + 1);
+    if (!isValidEnvVarName(variable)) {
+      throw new UsageError(
+        `Invalid environment variable name "${variable}". Names must start with a letter or underscore and contain only letters, digits, and underscores.`,
+        ["See: portless env --help"]
+      );
+    }
+    if (service.trim().length === 0) {
+      throw new UsageError(`Missing service name in "${target}".`, [
+        "Expected VAR=name, for example:",
+        "  portless env APP_URL=web",
+      ]);
+    }
+    mappings.push({ variable, service: service.trim() });
+  }
+
+  const { dir, port, tls, tlds, lanMode } = await discoverState();
+  const hasTargets = name !== undefined || mappings.length > 0;
+  const appConfig = hasTargets && !skipWorktree ? loadAppConfig() : null;
+  const worktree = hasTargets
+    ? resolveWorktreeNaming({
+        config: appConfig?.worktree,
+        override: skipWorktree ? null : undefined,
+      })
+    : null;
+  const urlFor = (service: string): string => {
+    const hostname = buildHostnames({ baseName: service, naming: worktree }, tlds)[0]!;
+    return formatUrl(hostname, port, tls);
+  };
+
+  const namedUrls: Record<string, string> = Object.create(null);
+  for (const { variable, service } of mappings) {
+    Object.defineProperty(namedUrls, variable, {
+      value: urlFor(service),
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  }
+
+  const built = childEnv(
+    {
+      url: name === undefined ? undefined : urlFor(name),
+      namedUrls,
+      lan: lanMode,
+    },
+    { caPath: tls ? path.join(dir, "ca.pem") : undefined }
+  );
+  const output = json ? `${JSON.stringify(built.env, null, 2)}\n` : formatShellExports(built.env);
+  process.stdout.write(output);
 }
 
 function printAliasHelp(): void {
@@ -4664,7 +4801,8 @@ function loadAppConfig(cwd: string = process.cwd()): AppConfigWithSource | null 
 async function handleDefaultMode(
   globalScript: string | undefined,
   extraArgs: string[],
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  envVarOverrides: EnvVarOverrides
 ): Promise<boolean> {
   const cwd = process.cwd();
 
@@ -4686,7 +4824,7 @@ async function handleDefaultMode(
     }
     const hasMatchingPackages = packages.some((p) => p.scripts[wsScriptName]);
     if (hasMatchingPackages) {
-      await handleDefaultMulti(cwd, globalScript, extraArgs, worktreeOverride);
+      await handleDefaultMulti(cwd, globalScript, extraArgs, worktreeOverride, envVarOverrides);
       return true;
     }
   }
@@ -4694,7 +4832,14 @@ async function handleDefaultMode(
   const appConfig = loadAppConfig(cwd);
   const scriptName = globalScript ?? appConfig?.script ?? "dev";
   if (hasScript(scriptName, cwd)) {
-    await handleDefaultSingle(cwd, scriptName, appConfig, extraArgs, worktreeOverride);
+    await handleDefaultSingle(
+      cwd,
+      scriptName,
+      appConfig,
+      extraArgs,
+      worktreeOverride,
+      envVarOverrides
+    );
     return true;
   }
 
@@ -4743,7 +4888,8 @@ async function handleDefaultSingle(
   scriptName: string,
   appConfig: AppConfigWithSource | null,
   extraArgs: string[],
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   const forwardedArgs = forwardScriptExtraArgs(scriptName, cwd, extraArgs);
   const resolved = resolveScriptCommand(scriptName, cwd, forwardedArgs);
@@ -4783,7 +4929,8 @@ async function handleDefaultSingle(
     false,
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveNamingOrThrow(envVarOverrides, appConfig ?? undefined)
   );
 }
 
@@ -4798,6 +4945,8 @@ interface MultiAppEntry extends WorktreeHostnameInput {
   commandArgs: string[];
   appPort?: number;
   proxied: boolean;
+  usesPortless: boolean;
+  envVarNaming: EnvVarNaming;
 }
 
 function spawnChildProcess(
@@ -4811,6 +4960,21 @@ function spawnChildProcess(
     cwd,
     ...(isWindows ? {} : { detached: true }),
   });
+}
+
+function collectPeerApps(
+  apps: readonly MultiAppEntry[],
+  tlds: readonly string[],
+  proxyPort: number,
+  tls: boolean
+): PeerApp[] {
+  const peers: PeerApp[] = [];
+  for (const app of apps) {
+    if (app.usesPortless) continue;
+    const url = formatUrls(buildHostnames(app, tlds), proxyPort, tls)[0];
+    if (url) peers.push({ baseName: app.baseName, url });
+  }
+  return peers;
 }
 
 function prefixStream(
@@ -4848,6 +5012,8 @@ async function spawnProxiedApp(
   tls: boolean,
   tlds: string[],
   lanMode: boolean,
+  peers: readonly PeerApp[],
+  warnPeers: boolean,
   exitCodes: Map<MultiAppEntry, number | null>
 ): Promise<{
   child: ReturnType<typeof spawn>;
@@ -4856,11 +5022,6 @@ async function spawnProxiedApp(
   settled: Promise<void>;
 }> {
   const name = composeHostname(app.baseName, app.naming);
-  const usesPortless = app.commandArgs[0] === "portless";
-
-  if (lanMode && !process.env.PORTLESS_LAN) {
-    process.env.PORTLESS_LAN = "1";
-  }
 
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
@@ -4870,9 +5031,11 @@ async function spawnProxiedApp(
   let hostnames: string[] = [];
   let displayUrl: string;
   let appPort: number | undefined;
+  const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
 
-  if (usesPortless) {
-    env = pkgEnv;
+  if (app.usesPortless) {
+    const built = childEnv({ lan: lanMode }, { peers, caPath });
+    env = { ...pkgEnv, ...built.env };
     displayUrl = "(managed by portless)";
   } else {
     store = new RouteStore(stateDir, {
@@ -4887,22 +5050,23 @@ async function spawnProxiedApp(
     displayUrl = url;
 
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
+    if (lanMode && !process.env.PORTLESS_LAN) {
+      process.env.PORTLESS_LAN = "1";
+    }
     injectPackageScriptFrameworkFlags(app.commandArgs, appPort, app.pkg.dir);
 
-    env = {
-      ...pkgEnv,
-      PORT: String(appPort),
-      HOST: "127.0.0.1",
-      PORTLESS_URL: url,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
-    };
-
-    if (tls) {
-      const caPath = path.join(stateDir, "ca.pem");
-      if (fs.existsSync(caPath)) {
-        env.NODE_EXTRA_CA_CERTS = caPath;
+    const built = childEnv(
+      { port: appPort, host: "127.0.0.1", url, tlds, lan: lanMode },
+      {
+        peers,
+        naming: app.envVarNaming,
+        caPath,
+        onWarning: warnPeers
+          ? (msg: string) => console.warn(colors.yellow(`[${name}] ${msg}`))
+          : undefined,
       }
-    }
+    );
+    env = { ...pkgEnv, ...built.env };
   }
 
   const preexistingListener = appPort === undefined ? null : await findPreexistingListener(appPort);
@@ -4956,13 +5120,19 @@ async function spawnProxiedApp(
 
 function spawnTaskApp(
   app: MultiAppEntry,
+  stateDir: string,
+  tls: boolean,
+  lanMode: boolean,
+  peers: readonly PeerApp[],
   exitCodes: Map<MultiAppEntry, number | null>
 ): ReturnType<typeof spawn> {
   const name = composeHostname(app.baseName, app.naming);
   const pkgEnv: Record<string, string | undefined> = { ...process.env };
   pkgEnv.PATH = augmentedPath(pkgEnv, app.pkg.dir);
 
-  const child = spawnChildProcess(app.commandArgs, pkgEnv, app.pkg.dir);
+  const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
+  const built = childEnv({ lan: lanMode }, { peers, naming: app.envVarNaming, caPath });
+  const child = spawnChildProcess(app.commandArgs, { ...pkgEnv, ...built.env }, app.pkg.dir);
   pipeOutput(child, chalk.gray(`[${name}]`));
 
   child.on("exit", (code, signal) => {
@@ -4981,7 +5151,8 @@ async function handleDefaultMulti(
   wsRoot: string,
   globalScript: string | undefined,
   extraArgs: string[],
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   let loaded: ReturnType<typeof loadConfig>;
   try {
@@ -5115,6 +5286,10 @@ async function handleDefaultMulti(
       config: appOverride.worktree,
       override: worktreeOverride,
     });
+    const envVarNaming = resolveNamingOrThrow(envVarOverrides, {
+      portVar: appOverride.portVar,
+      hostVar: appOverride.hostVar,
+    });
     apps.push({
       pkg,
       baseName: name,
@@ -5123,6 +5298,8 @@ async function handleDefaultMulti(
       commandArgs,
       appPort: envAppPort ?? appOverride.appPort,
       proxied,
+      usesPortless: rawScript[0] === "portless",
+      envVarNaming,
     });
   }
 
@@ -5237,15 +5414,19 @@ async function runWithTurbo(
   extraArgs: string[] = []
 ): Promise<void> {
   const store = new RouteStore(stateDir);
+  const peers = collectPeerApps(proxiedApps, tlds, proxyPort, tls);
+  const peerWarner = proxiedApps.find((app) => !app.usesPortless);
+  const caPath = tls ? path.join(stateDir, "ca.pem") : undefined;
 
   const manifest: Record<string, ManifestEntry> = {};
   const routes: { hostnames: string[] }[] = [];
   const appUrls: { label: string; url: string }[] = [];
 
   for (const app of proxiedApps) {
-    const usesPortless = app.commandArgs[0] === "portless";
-    if (usesPortless) {
+    if (app.usesPortless) {
       appUrls.push({ label: app.label, url: "(managed by portless)" });
+      const entry = childEnv({ lan: lanMode }, { peers, caPath }).env;
+      if (Object.keys(entry).length > 0) manifest[app.pkg.dir] = entry;
       continue;
     }
 
@@ -5259,19 +5440,27 @@ async function runWithTurbo(
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
     routes.push({ hostnames });
 
-    const entry: ManifestEntry = {
-      PORT: String(appPort),
-      HOST: "127.0.0.1",
-      PORTLESS_URL: url,
-      __VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS: formatViteAllowedHosts(tlds),
-    };
-    if (tls) {
-      const caPath = path.join(stateDir, "ca.pem");
-      if (fs.existsSync(caPath)) {
-        entry.NODE_EXTRA_CA_CERTS = caPath;
+    manifest[app.pkg.dir] = childEnv(
+      { port: appPort, host: "127.0.0.1", url, tlds, lan: lanMode },
+      {
+        peers,
+        naming: app.envVarNaming,
+        caPath,
+        onWarning:
+          app === peerWarner
+            ? (msg: string) => console.warn(colors.yellow(`[${app.label}] ${msg}`))
+            : undefined,
+      }
+    ).env;
+  }
+
+  const sharedEnv = childEnv({ lan: lanMode }, { peers, caPath }).env;
+  if (Object.keys(sharedEnv).length > 0) {
+    for (const app of taskApps) {
+      if (!app.usesPortless && !Object.hasOwn(manifest, app.pkg.dir)) {
+        manifest[app.pkg.dir] = sharedEnv;
       }
     }
-    manifest[app.pkg.dir] = entry;
   }
 
   const envPublication = new EnvPublication(stateDir);
@@ -5309,6 +5498,7 @@ async function runWithTurbo(
     cwd: wsRoot,
     env: {
       ...process.env,
+      ...sharedEnv,
       NODE_OPTIONS: buildNodeOptions(stateDir),
     },
     ...(isWindows ? {} : { detached: true }),
@@ -5368,6 +5558,8 @@ async function runWithDirectSpawn(
   const appUrls: { label: string; url: string }[] = [];
   const routeEntries: { store: RouteStore; hostnames: string[] }[] = [];
   const routeSettlements: Promise<void>[] = [];
+  const peers = collectPeerApps(proxiedApps, tlds, proxyPort, tls);
+  const peerWarner = proxiedApps.find((app) => !app.usesPortless);
 
   for (const app of proxiedApps) {
     const { child, displayUrl, route, settled } = await spawnProxiedApp(
@@ -5377,6 +5569,8 @@ async function runWithDirectSpawn(
       tls,
       tlds,
       lanMode,
+      peers,
+      app === peerWarner,
       exitCodes
     );
     children.push(child);
@@ -5387,7 +5581,7 @@ async function runWithDirectSpawn(
 
   const taskLabels: string[] = [];
   for (const app of taskApps) {
-    children.push(spawnTaskApp(app, exitCodes));
+    children.push(spawnTaskApp(app, stateDir, tls, lanMode, peers, exitCodes));
     taskLabels.push(app.label);
   }
 
@@ -5456,7 +5650,8 @@ async function runWithDirectSpawn(
 async function handleRunMode(
   args: string[],
   globalScript: string | undefined,
-  worktreeOverride: null | undefined
+  worktreeOverride: null | undefined,
+  envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   const parsed = parseRunArgs(args);
 
@@ -5514,7 +5709,8 @@ async function handleRunMode(
     parsed.force,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveNamingOrThrow(envVarOverrides, appConfig ?? undefined)
   );
 }
 
@@ -5525,7 +5721,11 @@ const NAMED_USAGE = [
   "  portless myapp next dev",
 ];
 
-async function handleNamedMode(args: string[], explicitName: boolean): Promise<void> {
+async function handleNamedMode(
+  args: string[],
+  explicitName: boolean,
+  envVarOverrides: EnvVarOverrides
+): Promise<void> {
   const { name, hasCommand } = readNamedArgs(args);
   const suggestion = explicitName || hasCommand ? undefined : suggestCommand(name);
   if (name && suggestion) {
@@ -5542,11 +5742,9 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     throw new UsageError("No command provided.", NAMED_USAGE);
   }
 
-  if (!parsed.appPort) {
-    const appConfig = loadAppConfig();
-    if (appConfig?.appPort) {
-      parsed.appPort = appConfig.appPort;
-    }
+  const appConfig = loadAppConfig();
+  if (!parsed.appPort && appConfig?.appPort) {
+    parsed.appPort = appConfig.appPort;
   }
 
   const nameInput = { baseName: parsed.name, naming: null };
@@ -5565,7 +5763,8 @@ async function handleNamedMode(args: string[], explicitName: boolean): Promise<v
     parsed.force,
     parsed.appPort,
     lanMode,
-    lanIp
+    lanIp,
+    resolveNamingOrThrow(envVarOverrides, appConfig ?? undefined)
   );
 }
 
@@ -6019,17 +6218,18 @@ function isPortlessSkipped(): boolean {
 interface CommandEntry {
   run: (
     args: string[],
-    context: { globalScript?: string; worktreeOverride?: null }
+    context: { globalScript?: string; worktreeOverride?: null; envVarOverrides: EnvVarOverrides }
   ) => Promise<void>;
   help?: () => void;
 }
 
 const COMMANDS: Record<CommandName, CommandEntry> = {
   run: {
-    run: (args, { globalScript, worktreeOverride }) =>
-      handleRunMode(args.slice(1), globalScript, worktreeOverride),
+    run: (args, { globalScript, worktreeOverride, envVarOverrides }) =>
+      handleRunMode(args.slice(1), globalScript, worktreeOverride, envVarOverrides),
   },
   get: { run: handleGet, help: printGetHelp },
+  env: { run: handleEnv, help: printEnvHelp },
   list: { run: handleList, help: printListHelp },
   alias: { run: handleAlias },
   compose: { run: handleCompose },
@@ -6164,6 +6364,23 @@ async function main() {
   }
   const globalScript = typeof scriptResult === "string" ? scriptResult : undefined;
 
+  const portVarResult = stripGlobalFlag("--port-var", true);
+  if (portVarResult === false) {
+    throw new UsageError("--port-var requires an environment variable name.", [
+      "  portless run --port-var APP_PORT <command>",
+    ]);
+  }
+  const hostVarResult = stripGlobalFlag("--host-var", true);
+  if (hostVarResult === false) {
+    throw new UsageError("--host-var requires an environment variable name.", [
+      "  portless run --host-var APP_HOST <command>",
+    ]);
+  }
+  const envVarOverrides: EnvVarOverrides = {
+    ...(typeof portVarResult === "string" ? { portVar: portVarResult } : {}),
+    ...(typeof hostVarResult === "string" ? { hostVar: hostVarResult } : {}),
+  };
+
   let worktreeOverride: null | undefined;
   const leadingMode = args[skipFlags(0, LEADING_FLAG_SPEC)];
   if (!isCommandName(leadingMode) || leadingMode === "run") {
@@ -6196,6 +6413,26 @@ async function main() {
   }
   const command = explicitName || !isCommandName(args[0]) ? undefined : COMMANDS[args[0]];
   const isRunCommand = command === COMMANDS.run;
+  let runHelp = false;
+  if (isRunCommand) {
+    for (let index = 1; index < flagLimit(); ) {
+      if (args[index] === "--help" || args[index] === "-h") {
+        runHelp = true;
+        break;
+      }
+      const next = advancePortlessFlag(index, RUN_FLAG_SPEC);
+      if (next === null) break;
+      index = next;
+    }
+  }
+
+  if (
+    (!command || isRunCommand) &&
+    !runHelp &&
+    !["--help", "-h", "--version", "-v"].includes(args[0])
+  ) {
+    validateEarlyNaming(envVarOverrides, isPortlessSkipped());
+  }
 
   if (
     isPortlessSkipped() &&
@@ -6237,7 +6474,7 @@ async function main() {
       command.help();
       return;
     }
-    await command.run(args, { globalScript, worktreeOverride });
+    await command.run(args, { globalScript, worktreeOverride, envVarOverrides });
     return;
   }
   if (!explicitName) {
@@ -6247,7 +6484,12 @@ async function main() {
     }
     if (args.length === 0 || args[0] === "--") {
       const extraArgs = args[0] === "--" ? args.slice(1) : [];
-      const handled = await handleDefaultMode(globalScript, extraArgs, worktreeOverride);
+      const handled = await handleDefaultMode(
+        globalScript,
+        extraArgs,
+        worktreeOverride,
+        envVarOverrides
+      );
       if (handled) return;
       printHelp();
       return;
@@ -6258,7 +6500,7 @@ async function main() {
     }
   }
 
-  await handleNamedMode(args, explicitName);
+  await handleNamedMode(args, explicitName, envVarOverrides);
 }
 
 main().catch((err: unknown) => {
