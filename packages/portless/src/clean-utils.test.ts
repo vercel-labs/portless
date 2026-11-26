@@ -240,6 +240,23 @@ describe("removePortlessStateFiles", () => {
     expect(() => removePortlessStateFiles(tmpDir)).not.toThrow();
   });
 
+  it("removes ca-bundle-<16hex>.pem and leaves unrelated files intact", () => {
+    const bundle = "ca-bundle-0123456789abcdef.pem";
+    fs.writeFileSync(path.join(tmpDir, bundle), "bundle");
+    fs.writeFileSync(path.join(tmpDir, "ca-bundle-0123456789abcdeg.pem"), "non-hex");
+    fs.writeFileSync(path.join(tmpDir, `${bundle}.bak`), "backup");
+    fs.writeFileSync(path.join(tmpDir, "user-notes.txt"), "keep me");
+
+    removePortlessStateFiles(tmpDir);
+
+    expect(fs.existsSync(path.join(tmpDir, bundle))).toBe(false);
+    expect(fs.readFileSync(path.join(tmpDir, "ca-bundle-0123456789abcdeg.pem"), "utf-8")).toBe(
+      "non-hex"
+    );
+    expect(fs.readFileSync(path.join(tmpDir, `${bundle}.bak`), "utf-8")).toBe("backup");
+    expect(fs.readFileSync(path.join(tmpDir, "user-notes.txt"), "utf-8")).toBe("keep me");
+  });
+
   it("preserves proxy runtime files while the proxy still owns them", () => {
     fs.writeFileSync(path.join(tmpDir, "proxy.pid"), "123");
     fs.writeFileSync(path.join(tmpDir, "proxy.port"), "443");
