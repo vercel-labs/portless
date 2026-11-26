@@ -2641,8 +2641,6 @@ ${colors.bold("Options for run and <name> <command>:")}
   --name <name>                 Set the app name or bypass command dispatch
   --force                       Kill the existing process and take over its route
   --app-port <number>           Use a fixed port for the app
-  --port-var <name>             Set the app port environment variable name
-  --host-var <name>             Set the app host environment variable name
 
 ${colors.bold("Environment variables:")}
   PORTLESS=0                    Run app commands directly without the proxy
