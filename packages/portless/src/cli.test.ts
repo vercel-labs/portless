@@ -6941,9 +6941,11 @@ describe("CLI", { timeout: 15_000 }, () => {
             [
               'import { execFileSync } from "node:child_process";',
               'if (process.env.PORTLESS_NGROK_URL !== "https://outer.ngrok.dev") throw new Error("missing output URL");',
+              'if (process.env.PORTLESS_NGROK !== undefined) throw new Error("leaked PORTLESS_NGROK");',
               'if (process.env.PORTLESS_NGROK_CUSTOM_URL !== undefined) throw new Error("leaked custom URL");',
-              'const out = execFileSync(process.execPath, [process.env.PORTLESS_TEST_CLI, "inner", process.execPath, "-e", "console.log(process.env.PORTLESS_NGROK_URL)"], { encoding: "utf-8" });',
-              "process.stdout.write(out);",
+              'const localOut = execFileSync(process.execPath, [process.env.PORTLESS_TEST_CLI, "inner-local", process.execPath, "-e", "console.log(process.env.PORTLESS_NGROK_URL ?? \'none\')"], { encoding: "utf-8" });',
+              'const sharedOut = execFileSync(process.execPath, [process.env.PORTLESS_TEST_CLI, "inner-shared", "--ngrok", process.execPath, "-e", "console.log(process.env.PORTLESS_NGROK_URL)"], { encoding: "utf-8" });',
+              'process.stdout.write(localOut.trim() + "|" + sharedOut.trim());',
               "",
             ].join("\n")
           );
@@ -6964,7 +6966,9 @@ describe("CLI", { timeout: 15_000 }, () => {
             }
           );
           expect(result.status, result.stderr).toBe(0);
-          expect(result.stdout.trim()).toBe("https://nested-random.ngrok.app");
+          expect(result.stdout.trim()).toBe(
+            "https://outer.ngrok.dev|https://nested-random.ngrok.app"
+          );
           const lines = fs.readFileSync(log, "utf-8").trim().split("\n");
           expect(lines).toHaveLength(2);
           expect(lines[0]).toContain("--url=https://outer.ngrok.dev");

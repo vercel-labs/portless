@@ -2165,12 +2165,21 @@ async function runApp(
   }
 
   const childBaseEnv: NodeJS.ProcessEnv = { ...process.env };
-  delete childBaseEnv.PORTLESS_NGROK_CUSTOM_URL;
-  delete childBaseEnv.PORTLESS_TAILSCALE_PORT;
-  delete childBaseEnv.PORTLESS_TAILSCALE_SERVICE;
-  delete childBaseEnv.PORTLESS_NETBIRD_PASSWORD;
-  delete childBaseEnv.PORTLESS_NETBIRD_PIN;
-  delete childBaseEnv.PORTLESS_NETBIRD_GROUPS;
+  for (const key of [
+    "PORTLESS_TAILSCALE",
+    "PORTLESS_TAILSCALE_PORT",
+    "PORTLESS_TAILSCALE_SERVICE",
+    "PORTLESS_FUNNEL",
+    "PORTLESS_NGROK",
+    "PORTLESS_NGROK_CUSTOM_URL",
+    "PORTLESS_CLOUDFLARE",
+    "PORTLESS_NETBIRD",
+    "PORTLESS_NETBIRD_PASSWORD",
+    "PORTLESS_NETBIRD_PIN",
+    "PORTLESS_NETBIRD_GROUPS",
+  ]) {
+    delete childBaseEnv[key];
+  }
 
   spawnCommand(commandArgs, {
     env: {
