@@ -55,6 +55,22 @@ The name is inferred from `package.json` if not set in config. The script defaul
       <td>Fixed port for the child process.</td>
     </tr>
     <tr>
+      <td>`portVar`</td>
+      <td>string</td>
+      <td>`PORT`</td>
+      <td>
+        Environment variable that carries the app port. Also `--port-var` or `PORTLESS_PORT_VAR`.
+      </td>
+    </tr>
+    <tr>
+      <td>`hostVar`</td>
+      <td>string</td>
+      <td>`HOST`</td>
+      <td>
+        Environment variable that carries the app host. Also `--host-var` or `PORTLESS_HOST_VAR`.
+      </td>
+    </tr>
+    <tr>
       <td>`proxy`</td>
       <td>boolean</td>
       <td>auto</td>
@@ -87,7 +103,7 @@ The name is inferred from `package.json` if not set in config. The script defaul
   </tbody>
 </table>
 
-Each `apps` entry has the same shape (`name`, `script`, `appPort`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode, except `worktree`, which sets defaults for every app that `apps` entries override by key.
+Each `apps` entry has the same shape (`name`, `script`, `appPort`, `portVar`, `hostVar`, `proxy`, `worktree`). When `apps` is present, top-level fields apply only in single-app mode, except `worktree`, which sets defaults for every app that `apps` entries override by key.
 
 ### Worktree hostnames
 
@@ -119,7 +135,7 @@ Instead of a separate `portless.json`, you can add a `"portless"` key to your `p
 }
 ```
 
-An object supports all per-app fields (`name`, `script`, `appPort`, `proxy`, `worktree`):
+An object supports all per-app fields (`name`, `script`, `appPort`, `portVar`, `hostVar`, `proxy`, `worktree`):
 
 ```json
 {
@@ -189,9 +205,17 @@ For `script`: CLI `--script` flag > package config > root `portless.json` `apps`
 
 For `appPort`: CLI `--app-port` flag > `PORTLESS_APP_PORT` env var > package config > root `portless.json` `apps` entry > auto-assigned.
 
+For `portVar` and `hostVar`: CLI `--port-var` and `--host-var` flags > `PORTLESS_PORT_VAR` and `PORTLESS_HOST_VAR` env vars > package config > root `portless.json` `apps` entry > `PORT` and `HOST`.
+
 The package config is the first available source in the package directory: `portless.json`, `.config/portless.json`, or the `package.json` `"portless"` key. The root `apps` entry applies when you run portless from the workspace root.
 
 For the worktree label: `--no-worktree` > CLI `--prefix` flag (`portless run`) > `PORTLESS_PREFIX` env var > branch of a linked worktree.
+
+### Peer URLs
+
+In a monorepo run, whether portless starts the apps directly or through Turbo, every proxied app receives `PORTLESS_URL_<APP>` for every proxied app, including itself. The suffix is the app's base name uppercased with dots and hyphens replaced by underscores, so `api.myrepo` becomes `PORTLESS_URL_API_MYREPO`. The variable name stays the same across git worktrees while the value carries the worktree prefix.
+
+If two apps differ only in punctuation, such as `web.api` and `web-api`, the first keeps the variable and portless warns about the second. An app whose dev script invokes `portless` directly registers its own route and gets no variable. Outside a monorepo run, use `portless get <name>` or `portless env VAR=name`.
 
 ## Environment variables
 
@@ -228,6 +252,16 @@ For the worktree label: `--no-worktree` > CLI `--prefix` flag (`portless run`) >
       <td>`PORTLESS_APP_PORT`</td>
       <td>Use a fixed port for the app (skip auto-assignment)</td>
       <td>random 4000 to 4999</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_PORT_VAR`</td>
+      <td>Rename the app port variable (same as `--port-var`)</td>
+      <td>`PORT`</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_HOST_VAR`</td>
+      <td>Rename the app host variable (same as `--host-var`)</td>
+      <td>`HOST`</td>
     </tr>
     <tr>
       <td>`PORTLESS_PREFIX`</td>
@@ -277,6 +311,10 @@ For the worktree label: `--no-worktree` > CLI `--prefix` flag (`portless run`) >
   </tbody>
 </table>
 
+Portless also sets variables in the child process. `PORT` and `HOST` carry the assigned port and host, under the names chosen by `portVar` and `hostVar`. `PORTLESS_URL` holds the URL you open in the browser, and a monorepo run adds `PORTLESS_URL_<APP>` for every proxied app.
+
+`NODE_EXTRA_CA_CERTS` points at the portless CA. When the variable is already set, for example to a corporate CA bundle, portless merges that bundle with the portless CA into a combined bundle and points the child at it, so the existing certificates and local HTTPS routes are both trusted. `portless env` prints the same combined value for sibling processes.
+
 ## State directory
 
 Portless stores state (routes, PID file, port file, TLS marker) in `~/.portless` on all platforms. Override with `PORTLESS_STATE_DIR`. When the proxy runs under sudo, portless resolves this path from the invoking user's home, so the proxy and unprivileged app processes share the same route registrations.
@@ -320,4 +358,4 @@ Portless stores state (routes, PID file, port file, TLS marker) in `~/.portless`
 
 ## Port assignment
 
-Apps get a random port in the 4000--4999 range. Portless sets `PORT` and usually `HOST` before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, VitePlus, VitePress, Astro, React Router, Angular, Expo, React Native, Wrangler), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag (`--ip` for Wrangler). Injection reaches through a package script whose command starts with the framework or a known runner (`"dev": "vite"`, `"dev": "bunx vite"`). Only the framework's server commands get the flags (`dev`, `serve`, `preview`, `start`, a bare `vite`, or `vite [root]`); a command that does not serve, such as `vite build`, `vite optimize`, `vp test` or `astro check`, rejects them and is left alone. Expo connection modes (`--localhost`, `--lan`, `--tunnel`) are preserved while the assigned port is still injected. A script portless cannot classify is left alone too: a flag before the subcommand on a CLI whose flag grammar it does not track (`vp --mode dev build`). Portless also leaves a script alone when appending flags to it would not work: a compound command (`&&`, `|`, `;`), a trailing `#` comment, its own `--` option terminator, an env prefix (`NODE_ENV=production vite`), delegation to another script (`"dev": "npm run dev:vite"`), or runner flags before the script name (`bun run --bun dev`). Those keep their own port, so set it in the script yourself. At a workspace root that uses Turbo, Turbo starts each package script itself, so portless sets `PORT` and `HOST` but adds no flags. Read them in the framework config (for Vite, set `server.port` and `server.host` from `process.env`), or set `"turbo": false` in the root portless configuration so portless starts the apps and adds the flags.
+Apps get a random port in the 4000 to 4999 range. Portless sets `PORT` and usually `HOST` (or the names chosen by `portVar` and `hostVar`) before running your command. Most frameworks respect `PORT` automatically. For frameworks that ignore it (Vite, VitePlus, VitePress, Astro, React Router, Angular, Expo, React Native, Wrangler), portless auto-injects the right `--port` flag and, when needed, a matching `--host` flag (`--ip` for Wrangler). Injection reaches through a package script whose command starts with the framework or a known runner (`"dev": "vite"`, `"dev": "bunx vite"`). Only the framework's server commands get the flags (`dev`, `serve`, `preview`, `start`, a bare `vite`, or `vite [root]`); a command that does not serve, such as `vite build`, `vite optimize`, `vp test` or `astro check`, rejects them and is left alone. Expo connection modes (`--localhost`, `--lan`, `--tunnel`) are preserved while the assigned port is still injected. A script portless cannot classify is left alone too: a flag before the subcommand on a CLI whose flag grammar it does not track (`vp --mode dev build`). Portless also leaves a script alone when appending flags to it would not work: a compound command (`&&`, `|`, `;`), a trailing `#` comment, its own `--` option terminator, an env prefix (`NODE_ENV=production vite`), delegation to another script (`"dev": "npm run dev:vite"`), or runner flags before the script name (`bun run --bun dev`). Those keep their own port, so set it in the script yourself. At a workspace root that uses Turbo, Turbo starts each package script itself, so portless sets `PORT` and `HOST` but adds no flags. Read them in the framework config (for Vite, set `server.port` and `server.host` from `process.env`), or set `"turbo": false` in the root portless configuration so portless starts the apps and adds the flags.

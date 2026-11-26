@@ -445,6 +445,81 @@ describe("loadConfig validation", () => {
     expect(() => loadConfig(tmpDir)).toThrow(ConfigValidationError);
   });
 
+  it("accepts portVar and hostVar at top level and in apps without warnings", () => {
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({
+        portVar: "APP_PORT",
+        hostVar: "APP_HOST",
+        apps: { "apps/web": { portVar: "WEB_PORT", hostVar: "WEB_HOST" } },
+      })
+    );
+    const result = loadConfig(tmpDir);
+    expect(result?.config.portVar).toBe("APP_PORT");
+    expect(result?.config.hostVar).toBe("APP_HOST");
+    expect(result?.config.apps?.["apps/web"]).toEqual({ portVar: "WEB_PORT", hostVar: "WEB_HOST" });
+    expect(spy).not.toHaveBeenCalled();
+    spy.mockRestore();
+  });
+
+  it("rejects invalid portVar and hostVar names at top level and in apps", () => {
+    const names: unknown[] = ["", "1PORT", "MY-PORT", "PORT NAME", "PORT=1", 42];
+    for (const name of names) {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ portVar: name }));
+      expect(() => loadConfig(tmpDir), String(name)).toThrow(
+        /"portVar" in .* must be a valid environment variable name/
+      );
+
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ apps: { "apps/web": { hostVar: name } } })
+      );
+      expect(() => loadConfig(tmpDir), String(name)).toThrow(
+        /"apps\.apps\/web\.hostVar" in .* must be a valid environment variable name/
+      );
+    }
+  });
+
+  it("rejects portVar and hostVar set to the same name at top level and in apps", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ portVar: "PORT", hostVar: "PORT" })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(/must not use the same name/);
+
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ apps: { "apps/web": { portVar: "HOST", hostVar: "HOST" } } })
+    );
+    expect(() => loadConfig(tmpDir)).toThrow(
+      /"apps\.apps\/web\.portVar" and "apps\.apps\/web\.hostVar" in .* must not use the same name/
+    );
+  });
+
+  it("rejects reserved portVar and hostVar names at top level and in apps", () => {
+    const names = [
+      "PORTLESS_URL",
+      "PORTLESS_TAILSCALE_URL",
+      "NODE_EXTRA_CA_CERTS",
+      "PORTLESS_URL_API",
+    ];
+    for (const name of names) {
+      fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ hostVar: name }));
+      expect(() => loadConfig(tmpDir), name).toThrow(
+        /"hostVar" in .* must not be a reserved environment variable name/
+      );
+
+      fs.writeFileSync(
+        path.join(tmpDir, "portless.json"),
+        JSON.stringify({ apps: { "apps/web": { portVar: name } } })
+      );
+      expect(() => loadConfig(tmpDir), name).toThrow(
+        /"apps\.apps\/web\.portVar" in .* must not be a reserved environment variable name/
+      );
+    }
+  });
+
   it("warns on unknown top-level keys", () => {
     const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     fs.writeFileSync(
@@ -473,6 +548,13 @@ describe("resolveAppConfig", () => {
     const config = { name: "myapp", script: "dev" };
     const result = resolveAppConfig(config, "/repo", "/repo");
     expect(result).toEqual({ name: "myapp", script: "dev", appPort: undefined, proxy: undefined });
+  });
+
+  it("returns portVar and hostVar from top-level config when no apps key", () => {
+    const config = { portVar: "APP_PORT", hostVar: "APP_HOST" };
+    const result = resolveAppConfig(config, "/repo", "/repo");
+    expect(result.portVar).toBe("APP_PORT");
+    expect(result.hostVar).toBe("APP_HOST");
   });
 
   it("returns proxy field from top-level config", () => {
