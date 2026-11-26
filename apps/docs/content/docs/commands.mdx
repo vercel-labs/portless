@@ -21,6 +21,8 @@ Arguments after `--` go to the script. At a monorepo root, portless passes them 
 
 Use a `portless.json` to override defaults. See [Configuration](/configuration).
 
+Use `--port-var <name>` and `--host-var <name>` to rename the `PORT` and `HOST` variables, including in multi-app mode.
+
 ## Run an app
 
 ```bash
@@ -30,7 +32,7 @@ portless <name> [--no-worktree] <cmd> [args...]
 
 `portless run` infers the project name from config, `package.json`, git root, or directory name. When no command is given, runs the configured script (default: `"dev"`) from `package.json`. Repeat `--name` to serve one dev server on multiple hostnames. Each name gets the worktree prefix or configured `worktree.hostnameTemplate`. The first name sets `PORTLESS_URL` and receives any tunnel. Use `--prefix` to set the worktree label, with `""` for none; it wins over `PORTLESS_PREFIX` and the branch.
 
-Use `--no-worktree` in bare or `run` mode to skip worktree naming, even when `--prefix` or `PORTLESS_PREFIX` is set. Other launch configuration still applies. `portless <name>` uses the supplied name with no inference or prefixing, with or without `--no-worktree`. Value flags for `portless run` and named apps accept either `--flag value` or `--flag=value`.
+Use `--no-worktree` in bare or `run` mode to skip worktree naming, even when `--prefix` or `PORTLESS_PREFIX` is set. Other launch configuration still applies. `portless <name>` uses the supplied name with no inference or prefixing, with or without `--no-worktree`. Value flags for `portless run` and named apps accept either `--flag value` or `--flag=value`. `--port-var <name>` and `--host-var <name>` rename the `PORT` and `HOST` variables and are also accepted in zero-arg and multi-app mode.
 
 ```bash
 portless run                             # run dev script through proxy
@@ -80,6 +82,14 @@ portless docs.myapp next dev
       <td>Ignore stdin for the spawned app, useful for interactive stdin handlers such as Elixir, Phoenix, or Erlang.</td>
     </tr>
     <tr>
+      <td>`--port-var <name>`</td>
+      <td>Name of the environment variable that carries the app port (default: `PORT`). Also `PORTLESS_PORT_VAR` or `portVar` in config.</td>
+    </tr>
+    <tr>
+      <td>`--host-var <name>`</td>
+      <td>Name of the environment variable that carries the app host (default: `HOST`). Also `PORTLESS_HOST_VAR` or `hostVar` in config.</td>
+    </tr>
+    <tr>
       <td>`--force`</td>
       <td>Override an existing route registered by another process</td>
     </tr>
@@ -114,7 +124,7 @@ If a wrapped command self-daemonizes, exiting while its server keeps listening o
 
 In non-interactive environments (no TTY, or `CI=1`), portless exits with a descriptive error instead of prompting, so task runners such as Turborepo and CI scripts fail early with a clear message.
 
-`run`, `get`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `completion`, and `mcp` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
+`run`, `get`, `env`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `completion`, and `mcp` are subcommands and can't be used as app names directly. Use `portless run <cmd>` to infer the name from your project, or `portless --name <name> <cmd>` to force any name, including a reserved one.
 
 ### Share on Tailscale
 
@@ -132,6 +142,8 @@ Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port, so no fr
 portless myapp --tailscale next dev     # -> https://devbox.ts.net
 portless api --tailscale pnpm start     # -> https://devbox.ts.net:8443
 ```
+
+With Vite and Tailscale or Funnel, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This applies to `--tailscale`, `--funnel`, `PORTLESS_TAILSCALE=1`, and `PORTLESS_FUNNEL=1`. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added. ngrok and Cloudflare rewrite the upstream `Host` header to the local app hostname, so the local TLD allowlist already covers them.
 
 Use `--funnel` to expose your dev server to the public internet through [Tailscale Funnel](https://tailscale.com/kb/1223/funnel/):
 
@@ -180,6 +192,24 @@ BACKEND_URL=$(portless get backend)
 Use `portless get <name> --json` to print the input name, hostname, and URL as JSON. The output includes `port` when an active route matches the resolved hostname.
 
 Worktree config is read from the current directory, including workspace root defaults, not from the named service's package; `cd` into a package to use its per-app options. Use `--no-worktree` to skip config loading and all worktree naming, including `PORTLESS_PREFIX`. Without it, an invalid config in the current directory or workspace fails instead of printing a guessed URL.
+
+## Export environment for sibling processes
+
+```bash
+portless env [name] [VAR=name...] [--no-worktree] [--json]
+```
+
+`portless env` prints shell `export` lines for processes that run outside `portless run`, such as Vitest, Playwright, or a local script:
+
+```bash
+eval "$(portless env)"                          # CA trust, plus PORTLESS_LAN=1 in LAN mode
+eval "$(portless env myapp)"                    # also PORTLESS_URL
+eval "$(portless env APP_URL=web API_URL=api)"  # resolve service URLs into your own names
+```
+
+The base form exports `NODE_EXTRA_CA_CERTS` for the portless CA when the proxy serves HTTPS, merged with any existing `NODE_EXTRA_CA_CERTS` bundle, and `PORTLESS_LAN=1` when LAN mode is active. A name argument also exports `PORTLESS_URL` for that service, worktree-aware unless you pass `--no-worktree`. Each `VAR=name` pair resolves a worktree-aware service URL into the variable you name. Use `--json` to print the same variables as JSON.
+
+When `NODE_EXTRA_CA_CERTS` is already set, for example to a corporate CA bundle, portless writes a combined bundle that contains both the existing certificates and the portless CA, so the process trusts corporate services and local HTTPS routes at the same time.
 
 ## Alias (static routes)
 
@@ -507,7 +537,7 @@ Manual sync reconciles portless-managed entries with current routes and removes 
 portless mcp [--tools <profiles>]
 ```
 
-Starts a stdio MCP server using line-delimited JSON-RPC. The default `core` profile includes route listing, URL lookup, static alias management, and profile discovery. Use comma-separated profiles: `proxy` adds proxy start and stop tools, `diagnostics` adds doctor, prune, and version tools, and `all` enables every tool. `default` aliases `core`; `full` aliases `all`.
+Starts a stdio MCP server using line-delimited JSON-RPC. It supports MCP `2026-07-28` (`server/discover` and per-request `_meta`) and legacy `initialize` revisions `2025-11-25` through `2024-11-05`, including `2025-03-26` JSON-RPC batches. The default `core` profile includes route listing, URL lookup, sibling environment exports, static alias management, and profile discovery. Use comma-separated profiles: `proxy` adds proxy start and stop tools, `diagnostics` adds doctor, prune, and version tools, and `all` enables every tool. `default` aliases `core`; `full` aliases `all`.
 
 Tools accept shared `cwd`, `extraArgs`, and `timeoutMs` arguments, except `tools_profiles`. Bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. The server does not run dev servers; use `portless run <cmd>` in a shell.
 

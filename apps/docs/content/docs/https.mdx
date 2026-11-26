@@ -14,9 +14,20 @@ On Linux, `portless trust` also updates the invoking user's existing Chrome/Chro
 
 On declarative systems such as NixOS that do not provide `update-ca-certificates`, `portless trust` prints instructions to add `ca.pem` through `security.pki.certificateFiles`, or to use `--no-tls`.
 
-Portless sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. For a Node.js process you start outside portless, point it at the CA yourself with `NODE_EXTRA_CA_CERTS=~/.portless/ca.pem`, or use `--no-tls`.
+Portless sets `NODE_EXTRA_CA_CERTS` in child processes so Node.js trusts the portless CA. When the variable is already set, for example to a corporate CA bundle, portless merges that bundle with the portless CA into a combined bundle instead of replacing it, so the existing certificates and local HTTPS routes are both trusted.
 
 On WSL, portless updates both the Linux trust store and the Windows current-user Root store. Windows browsers can then verify portless HTTPS certificates served from WSL.
+
+## Sibling Node processes
+
+Node reads `NODE_EXTRA_CA_CERTS` at startup, so a process that did not start through portless needs the value before it runs:
+
+```bash
+eval "$(portless env)"
+pnpm vitest
+```
+
+`portless env` prints `export` lines for the merged CA bundle, and adds `PORTLESS_LAN=1` in LAN mode. To resolve a service URL into a variable your test runner reads, pass `VAR=name` pairs, for example `eval "$(portless env API_URL=api)"`. Without the command, point `NODE_EXTRA_CA_CERTS` at `~/.portless/ca.pem` yourself, or use `--no-tls`.
 
 ## Vite HMR connects to the app port
 

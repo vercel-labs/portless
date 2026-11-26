@@ -82,6 +82,14 @@ describe("buildArgv", () => {
     ["get", { name: "backend", noWorktree: true }, ["get", "backend", "--no-worktree"]],
     ["get", { name: "backend", noWorktree: false }, ["get", "backend"]],
     ["get", { name: "backend", json: true }, ["get", "backend", "--json"]],
+    ["env", {}, ["env"]],
+    ["env", { targets: ["myapp"] }, ["env", "myapp"]],
+    [
+      "env",
+      { targets: ["API_URL=api", "WEB_URL=web"], noWorktree: true, json: true },
+      ["env", "API_URL=api", "WEB_URL=web", "--no-worktree", "--json"],
+    ],
+    ["env", { noWorktree: false, json: false }, ["env"]],
     ["list", { json: true }, ["list", "--json"]],
     ["alias_add", { name: "db", port: 5432, force: true }, ["alias", "db", "5432", "--force"]],
     [
@@ -128,6 +136,18 @@ describe("buildArgv", () => {
     );
   });
 
+  it.each(["--json", "-h", "", 123])("rejects invalid env target %j", (target) => {
+    expect(() => buildArgv("env", { targets: [target] })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+  });
+
+  it("rejects non-array env targets", () => {
+    expect(() => buildArgv("env", { targets: "myapp" })).toThrow(
+      expect.objectContaining({ code: -32602 })
+    );
+  });
+
   it("rejects an empty tld list with -32602", () => {
     expect(() => buildArgv("alias_add", { name: "db", port: 5432, tld: [] })).toThrow(
       expect.objectContaining({ code: -32602 })
@@ -167,6 +187,7 @@ describe("profiles", () => {
       (await call(p, "tools/list")).result.tools.map((t: { name: string }) => t.name);
     const core = await names(["core"]);
     expect(core).toContain("get");
+    expect(core).toContain("env");
     expect(core).not.toContain("proxy_start");
     expect(await names(["core", "proxy"])).toContain("proxy_start");
     expect(await names(["all"])).toHaveLength(TOOLS.length);

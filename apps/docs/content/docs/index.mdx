@@ -83,6 +83,12 @@ portless docs.myapp next dev
 # -> https://docs.myapp.localhost
 ```
 
+## Referencing another app
+
+In a monorepo run, every proxied app receives `PORTLESS_URL_<APP>` for every proxied app, so services can call each other without hardcoded ports. `api.myrepo` becomes `PORTLESS_URL_API_MYREPO`: the base name uppercased with dots and hyphens replaced by underscores. The name is stable across git worktrees while the value carries the worktree prefix.
+
+Outside a monorepo run, use `portless get <name>` or `eval "$(portless env API_URL=api)"`.
+
 ## Git Worktrees
 
 `portless run` automatically detects git worktrees. In a linked worktree, the branch name is prepended as a subdomain so each worktree gets its own URL without any config changes:
