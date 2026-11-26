@@ -677,17 +677,31 @@ describe("CertIssuer", () => {
     }
   });
 
-  it("refuses unregistered names without creating certificate files", async () => {
+  it("mints rate-limited in-memory certs for unregistered names without writing to host-certs", async () => {
     const issuer = makeIssuer({ getAllowedHostnames: () => [] });
+    const defaultCtx = await request(issuer, "localhost");
     const hostDir = path.join(tmpDir, "host-certs");
     fs.mkdirSync(hostDir);
     const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
+      const typo = await request(issuer, "typo.localhost");
+      expect(typo).toBeDefined();
+      expect(typo).not.toBe(defaultCtx);
+      expect(await request(issuer, "typo.localhost")).toBe(typo);
+
+      let succeeded = 0;
+      let rateLimited = 0;
       for (let i = 0; i < 30; i++) {
-        await expect(request(issuer, `unknown${i}.localhost`)).rejects.toThrow(
-          "hostname is not registered"
-        );
+        try {
+          await request(issuer, `unknown${i}.localhost`);
+          succeeded++;
+        } catch (err) {
+          expect(err instanceof Error ? err.message : "").toContain("rate limit exceeded");
+          rateLimited++;
+        }
       }
+      expect(succeeded).toBe(3);
+      expect(rateLimited).toBe(27);
       expect(fs.readdirSync(hostDir)).toEqual([]);
       expect(consoleError).not.toHaveBeenCalled();
     } finally {
@@ -695,12 +709,18 @@ describe("CertIssuer", () => {
     }
   });
 
-  it("rechecks route registration before returning a cached context", async () => {
+  it("keeps serving an already cached cert after a route stops without reissuing", async () => {
     let allowed = ["myapp.localhost"];
     const issuer = makeIssuer({ getAllowedHostnames: () => allowed });
-    await request(issuer, "myapp.localhost");
+    const issued = await request(issuer, "myapp.localhost");
     allowed = [];
-    await expect(request(issuer, "myapp.localhost")).rejects.toThrow("hostname is not registered");
+    expect(await request(issuer, "myapp.localhost")).toBe(issued);
+
+    const freshIssuer = makeIssuer({ getAllowedHostnames: () => [] });
+    const defaultCtx = await request(freshIssuer, "localhost");
+    const fromDisk = await request(freshIssuer, "myapp.localhost");
+    expect(fromDisk).toBeDefined();
+    expect(fromDisk).not.toBe(defaultCtx);
   });
 
   it("exposes the default certificate and optional CA in TLS options", async () => {
@@ -714,18 +734,18 @@ describe("CertIssuer", () => {
     expect(makeIssuer().tlsOptions.ca).toBeUndefined();
   });
 
-  it("admits wildcard descendants only when enabled and their parent is registered", async () => {
+  it("persists wildcard descendants only when enabled and their parent is registered", async () => {
     const options = { getAllowedHostnames: () => ["MYAPP.LOCALHOST"] };
     const disabled = makeIssuer(options);
     const enabled = makeIssuer({ ...options, allowWildcards: true });
-    await expect(request(disabled, "chat.myapp.localhost")).rejects.toThrow(
-      "hostname is not registered"
-    );
-    await expect(request(enabled, "CHAT.MYAPP.LOCALHOST")).resolves.toBeDefined();
-    await expect(request(enabled, "chat.other.localhost")).rejects.toThrow(
-      "hostname is not registered"
-    );
+    expect(await request(disabled, "chat.myapp.localhost")).toBeDefined();
+    expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_myapp_localhost.pem"))).toBe(false);
+    const wildcardCtx = await request(enabled, "CHAT.MYAPP.LOCALHOST");
+    expect(wildcardCtx).toBeDefined();
+    expect(wildcardCtx).not.toBe(await request(enabled, "localhost"));
+    expect(await request(enabled, "chat.other.localhost")).toBeDefined();
     expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_myapp_localhost.pem"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_other_localhost.pem"))).toBe(false);
   });
 
   it("evicts the least recently used memory entry", async () => {

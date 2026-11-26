@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
@@ -1177,31 +1178,28 @@ export function sanitizeHostForFilename(hostname: string): string {
  */
 const MAX_CN_LENGTH = 64;
 
-/**
- * Generate a certificate for a specific hostname, signed by the local CA.
- * Certs are cached on disk in the host-certs subdirectory.
- *
- * Uses async openssl calls to avoid blocking the event loop, since this
- * runs on demand inside the SNI callback during TLS handshakes.
- */
-async function generateHostCertAsync(
+/** Maximum in-memory contexts cached for unregistered hostnames under configured TLDs. */
+const MAX_EPHEMERAL_MEMORY_ENTRIES = 8;
+
+/** Maximum burst of ephemeral certificates minted for unregistered hostnames. */
+const EPHEMERAL_BURST = 4;
+
+/** Interval in milliseconds to refill one unregistered certificate token. */
+const EPHEMERAL_REFILL_MS = 15_000;
+
+async function signHostCertAsync(
   stateDir: string,
-  hostname: string
+  outputDir: string,
+  hostname: string,
+  includeWildcard: boolean
 ): Promise<{ certPath: string; keyPath: string }> {
   const caKeyPath = path.join(stateDir, CA_KEY_FILE);
   const caCertPath = path.join(stateDir, CA_CERT_FILE);
-  const hostDir = path.join(stateDir, HOST_CERTS_DIR);
-
-  if (!fs.existsSync(hostDir)) {
-    await fs.promises.mkdir(hostDir, { recursive: true, mode: 0o755 });
-    fixOwnership(hostDir);
-  }
-
   const safeName = sanitizeHostForFilename(hostname);
-  const keyPath = path.join(hostDir, `${safeName}-key.pem`);
-  const certPath = path.join(hostDir, `${safeName}.pem`);
-  const csrPath = path.join(hostDir, `${safeName}.csr`);
-  const extPath = path.join(hostDir, `${safeName}-ext.cnf`);
+  const keyPath = path.join(outputDir, `${safeName}-key.pem`);
+  const certPath = path.join(outputDir, `${safeName}.pem`);
+  const csrPath = path.join(outputDir, `${safeName}.csr`);
+  const extPath = path.join(outputDir, `${safeName}-ext.cnf`);
   const srlPath = path.join(stateDir, "ca.srl");
 
   try {
@@ -1214,7 +1212,7 @@ async function generateHostCertAsync(
 
     const sans = [`DNS:${hostname}`];
     const parts = hostname.split(".");
-    if (parts.length >= 3) {
+    if (includeWildcard && parts.length >= 3) {
       sans.push(`DNS:*.${parts.slice(1).join(".")}`);
     }
 
@@ -1274,6 +1272,43 @@ async function generateHostCertAsync(
   return { certPath, keyPath };
 }
 
+/**
+ * Generate a certificate for a specific hostname, signed by the local CA.
+ * Certs are cached on disk in the host-certs subdirectory.
+ *
+ * Uses async openssl calls to avoid blocking the event loop, since this
+ * runs on demand inside the SNI callback during TLS handshakes.
+ */
+async function generateHostCertAsync(
+  stateDir: string,
+  hostname: string
+): Promise<{ certPath: string; keyPath: string }> {
+  const hostDir = path.join(stateDir, HOST_CERTS_DIR);
+  if (!fs.existsSync(hostDir)) {
+    await fs.promises.mkdir(hostDir, { recursive: true, mode: 0o755 });
+    fixOwnership(hostDir);
+  }
+  return signHostCertAsync(stateDir, hostDir, hostname, true);
+}
+
+/** Generate an in-memory-only host certificate without persisting anything in host-certs. */
+async function generateEphemeralHostCertAsync(
+  stateDir: string,
+  hostname: string
+): Promise<{ cert: Buffer; key: Buffer }> {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "portless-ephemeral-cert-"));
+  try {
+    const generated = await signHostCertAsync(stateDir, tmpDir, hostname, false);
+    const [cert, key] = await Promise.all([
+      fs.promises.readFile(generated.certPath),
+      fs.promises.readFile(generated.keyPath),
+    ]);
+    return { cert, key };
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
 /** Configuration for bounded per-hostname TLS certificate issuance. */
 export interface CertIssuerOptions {
   stateDir: string;
@@ -1317,17 +1352,38 @@ export class CertIssuer {
       key,
     });
     const cache = new Map<string, tls.SecureContext>();
+    const ephemeralCache = new Map<string, tls.SecureContext>();
     const pending = new Map<string, Promise<tls.SecureContext>>();
     const hostDir = path.join(stateDir, HOST_CERTS_DIR);
+    let ephemeralTokens = EPHEMERAL_BURST;
+    let lastEphemeralRefill = Date.now();
 
-    const remember = (name: string, ctx: tls.SecureContext) => {
-      cache.delete(name);
-      cache.set(name, ctx);
-      while (cache.size > maxMemoryEntries) {
-        const oldest = cache.keys().next().value;
+    const rememberIn = (
+      target: Map<string, tls.SecureContext>,
+      name: string,
+      ctx: tls.SecureContext,
+      limit: number
+    ) => {
+      target.delete(name);
+      target.set(name, ctx);
+      while (target.size > limit) {
+        const oldest = target.keys().next().value;
         if (oldest === undefined) break;
-        cache.delete(oldest);
+        target.delete(oldest);
       }
+    };
+
+    const takeEphemeralToken = (): boolean => {
+      const now = Date.now();
+      const elapsed = now - lastEphemeralRefill;
+      if (elapsed >= EPHEMERAL_REFILL_MS) {
+        const refill = Math.floor(elapsed / EPHEMERAL_REFILL_MS);
+        ephemeralTokens = Math.min(EPHEMERAL_BURST, ephemeralTokens + refill);
+        lastEphemeralRefill += refill * EPHEMERAL_REFILL_MS;
+      }
+      if (ephemeralTokens < 1) return false;
+      ephemeralTokens--;
+      return true;
     };
 
     const prune = (safeName: string) => {
@@ -1400,16 +1456,22 @@ export class CertIssuer {
           cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
           return;
         case "unregistered":
-          cb(new Error(`Refusing certificate for ${servername}: hostname is not registered`));
-          return;
         case "admitted":
           break;
       }
       const cached = cache.get(name);
       if (cached) {
-        remember(name, cached);
+        rememberIn(cache, name, cached, maxMemoryEntries);
         cb(null, cached);
         return;
+      }
+      if (admission === "unregistered") {
+        const ephemeral = ephemeralCache.get(name);
+        if (ephemeral) {
+          rememberIn(ephemeralCache, name, ephemeral, MAX_EPHEMERAL_MEMORY_ENTRIES);
+          cb(null, ephemeral);
+          return;
+        }
       }
       const inFlight = pending.get(name);
       if (inFlight) {
@@ -1441,12 +1503,46 @@ export class CertIssuer {
           } catch {
             void 0;
           }
-          remember(name, ctx);
+          rememberIn(cache, name, ctx, maxMemoryEntries);
           cb(null, ctx);
           return;
         } catch {
           void 0;
         }
+      }
+      if (admission === "unregistered") {
+        if (!takeEphemeralToken()) {
+          cb(
+            new Error(
+              `Refusing certificate for ${servername}: unregistered certificate rate limit exceeded`
+            )
+          );
+          return;
+        }
+        const promise = generateEphemeralHostCertAsync(stateDir, name)
+          .then(({ cert: hostCert, key: hostKey }) => {
+            const ctx = tls.createSecureContext({
+              cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+              key: hostKey,
+            });
+            rememberIn(ephemeralCache, name, ctx, MAX_EPHEMERAL_MEMORY_ENTRIES);
+            pending.delete(name);
+            return ctx;
+          })
+          .catch((err: unknown) => {
+            pending.delete(name);
+            const error = err instanceof Error ? err : new Error(String(err));
+            console.error(
+              `[portless] Failed to prepare a TLS certificate for ${name}: ${error.message}`
+            );
+            throw error;
+          });
+        pending.set(name, promise);
+        promise.then(
+          (ctx) => cb(null, ctx),
+          (error: Error) => cb(error)
+        );
+        return;
       }
       const promise = generateHostCertAsync(stateDir, name)
         .then(async (generated) => {
@@ -1458,7 +1554,8 @@ export class CertIssuer {
             cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
             key: hostKey,
           });
-          remember(name, ctx);
+          ephemeralCache.delete(name);
+          rememberIn(cache, name, ctx, maxMemoryEntries);
           pending.delete(name);
           prune(safeName);
           return ctx;
