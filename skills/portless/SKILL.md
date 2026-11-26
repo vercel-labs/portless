@@ -242,7 +242,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_TAILSCALE_SERVICE` | Set to `1` to infer a Service name, a name to select it, or `0` to disable             |
 | `PORTLESS_FUNNEL`            | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)            |
 | `PORTLESS_NGROK`             | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                        |
-| `PORTLESS_NGROK_URL`         | Pin a custom or static ngrok URL; implies `--ngrok`                                    |
+| `PORTLESS_NGROK_CUSTOM_URL`  | Pin a custom or static ngrok URL; implies `--ngrok`                                    |
 | `PORTLESS_NETBIRD`           | Set to `1` to share via NetBird, or `0` to disable                                     |
 | `PORTLESS_NETBIRD_PASSWORD`  | Set the NetBird access password; implies `--netbird`                                   |
 | `PORTLESS_NETBIRD_PIN`       | Set the NetBird access PIN; implies `--netbird`                                        |
@@ -335,7 +335,7 @@ portless myapp --ngrok next dev
 # -> https://abc123.ngrok.app          (public internet)
 ```
 
-Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--ngrok-url <url>` or `PORTLESS_NGROK_URL` to pin a custom or static URL. Either implies `--ngrok` and passes `--url` to `ngrok http`. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
+Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--ngrok-url <url>` or `PORTLESS_NGROK_CUSTOM_URL` to pin a custom or static URL. Either implies `--ngrok` and passes `--url` to `ngrok http`. Child processes receive the active URL in `PORTLESS_NGROK_URL`. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
 
 ### NetBird sharing
 

@@ -1767,7 +1767,7 @@ async function runApp(
       : wantsFunnel
         ? { kind: "funnel", preferredPort: preferredTailscalePort }
         : { kind: "serve", preferredPort: preferredTailscalePort };
-  const rawNgrokUrl = process.env.PORTLESS_NGROK_URL?.trim();
+  const rawNgrokUrl = process.env.PORTLESS_NGROK_CUSTOM_URL?.trim();
   let ngrokUrl: string | undefined;
   if (rawNgrokUrl && !isDisabledEnv(process.env.PORTLESS_NGROK)) {
     try {
@@ -2164,9 +2164,17 @@ async function runApp(
     process.once(signal, () => (stoppingTunnels = true));
   }
 
+  const childBaseEnv: NodeJS.ProcessEnv = { ...process.env };
+  delete childBaseEnv.PORTLESS_NGROK_CUSTOM_URL;
+  delete childBaseEnv.PORTLESS_TAILSCALE_PORT;
+  delete childBaseEnv.PORTLESS_TAILSCALE_SERVICE;
+  delete childBaseEnv.PORTLESS_NETBIRD_PASSWORD;
+  delete childBaseEnv.PORTLESS_NETBIRD_PIN;
+  delete childBaseEnv.PORTLESS_NETBIRD_GROUPS;
+
   spawnCommand(commandArgs, {
     env: {
-      ...process.env,
+      ...childBaseEnv,
       ...(name.childPrefix !== undefined ? { PORTLESS_PREFIX: name.childPrefix } : {}),
       PORT: port.toString(),
       ...(hostBind ? { HOST: hostBind } : {}),
@@ -2317,7 +2325,7 @@ function applyGlobalFlag(flag: string, value?: string): void {
   } else if (flag === "--ngrok") process.env.PORTLESS_NGROK = "1";
   else if (flag === "--ngrok-url") {
     try {
-      process.env.PORTLESS_NGROK_URL = normalizeNgrokUrl(value ?? "");
+      process.env.PORTLESS_NGROK_CUSTOM_URL = normalizeNgrokUrl(value ?? "");
     } catch (err) {
       throw new UsageError(err instanceof Error ? err.message : String(err));
     }

@@ -6743,7 +6743,7 @@ describe("CLI", { timeout: 15_000 }, () => {
       { args: ["--tailscale-service=api"], key: "PORTLESS_TAILSCALE_SERVICE", value: "svc:api" },
       {
         args: ["--ngrok-url", "app.ngrok.dev"],
-        key: "PORTLESS_NGROK_URL",
+        key: "PORTLESS_NGROK_CUSTOM_URL",
         value: "https://app.ngrok.dev",
       },
       { args: ["--netbird"], key: "PORTLESS_NETBIRD", value: "1" },
@@ -6840,7 +6840,7 @@ describe("CLI", { timeout: 15_000 }, () => {
     it.each([
       { PORTLESS_NETBIRD: "0", PORTLESS_NETBIRD_PIN: "1234" },
       { PORTLESS_NETBIRD: "0", PORTLESS_NETBIRD_PASSWORD: "" },
-      { PORTLESS_NGROK: "0", PORTLESS_NGROK_URL: "https://a.ngrok.dev" },
+      { PORTLESS_NGROK: "0", PORTLESS_NGROK_CUSTOM_URL: "https://a.ngrok.dev" },
       { PORTLESS_TAILSCALE: "0", PORTLESS_TAILSCALE_PORT: "8443" },
       { PORTLESS_TAILSCALE: "false", PORTLESS_TAILSCALE_SERVICE: "myapp" },
     ])("does not enable sharing when explicitly disabled: %s", async (sharingEnv) => {
@@ -6900,6 +6900,75 @@ describe("CLI", { timeout: 15_000 }, () => {
           });
           expect(result.status, result.stderr).toBe(0);
           expect(fs.readFileSync(log, "utf-8")).toContain("--service=svc:docs-myapp");
+        } finally {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "does not reuse parent PORTLESS_NGROK_URL or pinned URL on nested portless runs",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-nested-ngrok-"));
+        const proxy = await startMockProxy(tmpDir);
+        const log = path.join(tmpDir, "ngrok.log");
+        const childScript = path.join(tmpDir, "child.mjs");
+        try {
+          fs.writeFileSync(
+            path.join(tmpDir, "ngrok"),
+            [
+              "#!/bin/sh",
+              'if [ "$1" = version ]; then exit 0; fi',
+              'printf "%s\\n" "$*" >> "$PORTLESS_TEST_NGROK_LOG"',
+              'case "$*" in',
+              '  *"--url=https://outer.ngrok.dev"*)',
+              '    if [ -f "$PORTLESS_TEST_NGROK_LOCK" ]; then echo "ERROR: URL already in use" >&2; exit 1; fi',
+              '    : > "$PORTLESS_TEST_NGROK_LOCK"',
+              "    echo 't=1 lvl=info msg=\"started tunnel\" addr=http://127.0.0.1:4000 url=https://outer.ngrok.dev'",
+              "    ;;",
+              "  *)",
+              "    echo 't=1 lvl=info msg=\"started tunnel\" addr=http://127.0.0.1:4001 url=https://nested-random.ngrok.app'",
+              "    ;;",
+              "esac",
+              "exec sleep 30",
+              "",
+            ].join("\n"),
+            { mode: 0o755 }
+          );
+          fs.writeFileSync(
+            childScript,
+            [
+              'import { execFileSync } from "node:child_process";',
+              'if (process.env.PORTLESS_NGROK_URL !== "https://outer.ngrok.dev") throw new Error("missing output URL");',
+              'if (process.env.PORTLESS_NGROK_CUSTOM_URL !== undefined) throw new Error("leaked custom URL");',
+              'const out = execFileSync(process.execPath, [process.env.PORTLESS_TEST_CLI, "inner", process.execPath, "-e", "console.log(process.env.PORTLESS_NGROK_URL)"], { encoding: "utf-8" });',
+              "process.stdout.write(out);",
+              "",
+            ].join("\n")
+          );
+          const result = run(
+            ["outer", "--ngrok-url", "https://outer.ngrok.dev", process.execPath, childScript],
+            {
+              env: {
+                PORTLESS: undefined,
+                PORTLESS_STATE_DIR: tmpDir,
+                PORTLESS_PORT: String(proxy.port),
+                PORTLESS_HTTPS: "0",
+                PORTLESS_SYNC_HOSTS: "0",
+                PORTLESS_TEST_CLI: CLI_PATH,
+                PORTLESS_TEST_NGROK_LOG: log,
+                PORTLESS_TEST_NGROK_LOCK: path.join(tmpDir, "outer.lock"),
+                PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              },
+            }
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout.trim()).toBe("https://nested-random.ngrok.app");
+          const lines = fs.readFileSync(log, "utf-8").trim().split("\n");
+          expect(lines).toHaveLength(2);
+          expect(lines[0]).toContain("--url=https://outer.ngrok.dev");
+          expect(lines[1]).not.toContain("--url=");
         } finally {
           await stopChild(proxy.child);
           fs.rmSync(tmpDir, { recursive: true, force: true });

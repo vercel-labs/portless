@@ -168,7 +168,7 @@ portless myapp --ngrok next dev
 # -> https://abc123.ngrok.app          (public)
 ```
 
-The ngrok CLI must be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again. Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--ngrok-url <url>` or `PORTLESS_NGROK_URL` to pin a custom or static URL. Either implies `--ngrok` and passes `--url` to `ngrok http`. `portless list` shows both local and ngrok URLs, and the tunnel closes when the app exits.
+The ngrok CLI must be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again. Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--ngrok-url <url>` or `PORTLESS_NGROK_CUSTOM_URL` to pin a custom or static URL. Either implies `--ngrok` and passes `--url` to `ngrok http`. Child processes receive the active URL in `PORTLESS_NGROK_URL`. `portless list` shows both local and ngrok URLs, and the tunnel closes when the app exits.
 
 ### Share with NetBird
 
