@@ -40,7 +40,7 @@ import {
   staleAliases,
 } from "./compose.js";
 import {
-  createSNICallback,
+  CertIssuer,
   ensureCerts,
   ensureTrust,
   inspectTrust,
@@ -82,6 +82,7 @@ import {
   syncHostsFile,
   cleanHostsFile,
   shouldAutoSyncHosts,
+  type HostsResult,
 } from "./hosts.js";
 import {
   FILE_MODE,
@@ -205,6 +206,10 @@ const chalk = colors;
 
 /** Display-friendly hosts file path. */
 const HOSTS_DISPLAY = isWindows ? "hosts file" : "/etc/hosts";
+
+function malformedHostsMessage(): string {
+  return `Malformed portless block in ${HOSTS_DISPLAY} (missing or unmatched # portless-start / # portless-end markers). Remove the incomplete block manually.`;
+}
 
 /** Grace period (ms) for connections to drain before force-exiting the proxy. */
 const EXIT_TIMEOUT_MS = 2000;
@@ -869,16 +874,16 @@ function startProxyServer(
   proxyPort: number,
   tld: string,
   tlds: string[],
-  tlsOptions?: { cert: Buffer; key: Buffer },
+  tlsMode?: { cert: Buffer; key: Buffer } | "managed",
   lanIp?: string | null,
   strict?: boolean,
-  customCert = false,
   unprivileged = false
 ): void {
   store.ensureDir();
   const state = new ProxyState(store.dir);
 
-  const isTls = !!tlsOptions;
+  const isTls = !!tlsMode;
+  const customCert = tlsMode !== undefined && tlsMode !== "managed";
   const mdnsSupport = isMdnsSupported();
   let activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
   const lanModeActive = activeLanIp !== null;
@@ -898,7 +903,17 @@ function startProxyServer(
   }
 
   let cachedRoutes: RouteMapping[] = [];
+  let routesMtimeMs = -1;
   let routesReloadWarningShown = false;
+
+  const getRoutesMtimeMs = (): number => {
+    try {
+      return fs.statSync(store.getRoutesPath()).mtimeMs;
+    } catch (err) {
+      if (isErrnoException(err) && err.code === "ENOENT") return -1;
+      throw err;
+    }
+  };
 
   // Writing the hosts file needs root, which unprivileged mode never has, so
   // it does not try; `proxy start` refuses an explicit PORTLESS_SYNC_HOSTS=1.
@@ -929,6 +944,7 @@ function startProxyServer(
   // Bounds proxy.log on repeated reloads. Not a user-facing channel: users are
   // warned by the CLI reading the resolver, so latching here silences nobody.
   let hostsSyncWarned = false;
+  let malformedHostsWarned = false;
   const syncHostsAndLatch = (hostnames: string[]): boolean => {
     let ok = true;
     hostsSyncWarned = syncHostsWithWarning(
@@ -936,8 +952,13 @@ function startProxyServer(
       hostsSyncWarned,
       () => console.warn(colors.yellow(`Could not write ${HOSTS_DISPLAY} for route hostnames.`)),
       (names) => {
-        ok = syncHostsFile(names);
-        return ok;
+        const result = syncHostsFile(names);
+        ok = result.action !== "failed";
+        if (result.block === "malformed" && !malformedHostsWarned) {
+          console.warn(colors.yellow(malformedHostsMessage()));
+        }
+        malformedHostsWarned = result.block === "malformed";
+        return result;
       }
     );
     return ok;
@@ -950,7 +971,9 @@ function startProxyServer(
 
   const reloadRoutes = () => {
     try {
+      const mtimeMs = getRoutesMtimeMs();
       cachedRoutes = store.loadTrustedRoutes();
+      routesMtimeMs = mtimeMs;
       routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
@@ -967,16 +990,33 @@ function startProxyServer(
   };
 
   const stopWatchingRoutes = store.watch(reloadRoutes);
-  try {
-    cachedRoutes = store.loadTrustedRoutes();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(colors.yellow(`Could not read routes: ${message}`));
-  }
+  reloadRoutes();
 
-  if (autoSyncHosts) {
-    syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
-  }
+  const tlsOptions =
+    tlsMode === "managed"
+      ? new CertIssuer({
+          stateDir: store.dir,
+          tlds,
+          getAllowedHostnames: () => {
+            try {
+              if (
+                getRoutesMtimeMs() !== routesMtimeMs ||
+                !cachedRoutes.every((route) => store.isRouteOwnerAlive(route))
+              ) {
+                reloadRoutes();
+              }
+              return cachedRoutes
+                .filter((route) => store.isRouteOwnerAlive(route))
+                .map((route) => route.hostname);
+            } catch {
+              reloadRoutes();
+              return [];
+            }
+          },
+          allowWildcards: strict === false,
+          allowEphemeralUnregistered: !lanModeActive,
+        }).tlsOptions
+      : tlsMode;
 
   const createServer = () =>
     createProxyServer({
@@ -1132,7 +1172,10 @@ function startProxyServer(
     }
     state.reset();
     removeHostsSyncToken(store.dir);
-    if (autoSyncHosts) cleanHostsFile();
+    if (autoSyncHosts) {
+      const result = cleanHostsFile();
+      if (result.block === "malformed") console.warn(colors.yellow(malformedHostsMessage()));
+    }
     const closeServer = new Promise<void>((resolve) => server.close(() => resolve()));
     void Promise.all([stopMdns, closeServer]).finally(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
@@ -2704,8 +2747,10 @@ function runCleanupSteps(
   const stateFailures = steps.includes("files")
     ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime)
     : [];
-  const hostsCleaned = !steps.includes("hosts") || cleanHostsFile();
-  return { caResults, failedCAStateDirs, stateFailures, hostsCleaned };
+  const hostsResult: HostsResult = steps.includes("hosts")
+    ? cleanHostsFile()
+    : { action: "unchanged", block: "ok", changed: false };
+  return { caResults, failedCAStateDirs, stateFailures, hostsResult };
 }
 
 /**
@@ -2752,7 +2797,8 @@ Stops the proxy if it is running, uninstalls the startup service if installed,
 removes the local CA from the OS trust store when it was installed by portless,
 deletes known files under state directories (~/.portless, the system state
 directory, and PORTLESS_STATE_DIR when set), and removes the portless block
-from ${HOSTS_DISPLAY}.
+from ${HOSTS_DISPLAY}. Hosts writes are atomic. Malformed # portless-start or
+# portless-end blocks fail with a nonzero exit and must be removed manually.
 
 Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
@@ -2763,8 +2809,9 @@ is left alone. Clean prints the reason and exits nonzero. A /tmp/portless
 directory that fails the check is skipped without an error.
 
 On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
-or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
-steps against the same allowlisted state directories. If the proxy cannot be
+or ${HOSTS_DISPLAY} step is retried with sudo, except for malformed blocks. The
+retry runs only those failed steps against the same allowlisted state
+directories. If the proxy cannot be
 confirmed stopped, its PID, port, runtime marker files, and CA files are kept
 and the CA stays trusted. On Windows, run as Administrator if needed.
 
@@ -2798,7 +2845,7 @@ async function handleClean(args: string[]): Promise<void> {
       cleanableDirs.length === approvedDirs.length &&
       left.failedCAStateDirs.size === 0 &&
       left.stateFailures.length === 0 &&
-      left.hostsCleaned;
+      left.hostsResult.action !== "failed";
     process.exitCode = clean ? 0 : 1;
     return;
   }
@@ -2898,18 +2945,21 @@ async function handleClean(args: string[]): Promise<void> {
     preserveProxyRuntime
   );
   const { caResults: caRemovalResults, failedCAStateDirs } = outcome;
-  let { stateFailures, hostsCleaned } = outcome;
+  let { stateFailures, hostsResult } = outcome;
+  const hostsOk = hostsResult.action !== "failed";
 
   const retrySteps: CleanupStep[] = [];
   if (failedCAStateDirs.size > 0) retrySteps.push("ca");
   if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
-  if (!hostsCleaned) retrySteps.push("hosts");
+  if (!hostsOk && hostsResult.block !== "malformed") retrySteps.push("hosts");
   if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
     const elevatedStatus = runElevatedCleanup(retrySteps, stateDirs, preserveProxyRuntime);
     if (elevatedStatus === 0) {
       failedCAStateDirs.clear();
       if (retrySteps.includes("files")) stateFailures = [];
-      if (retrySteps.includes("hosts")) hostsCleaned = true;
+      if (retrySteps.includes("hosts")) {
+        hostsResult = { action: "cleaned", block: "ok", changed: true };
+      }
     } else {
       for (const stateDir of [...failedCAStateDirs]) {
         if (
@@ -2927,7 +2977,7 @@ async function handleClean(args: string[]): Promise<void> {
           preserveProxyRuntime
         );
       }
-      if (!hostsCleaned) hostsCleaned = cleanHostsFile();
+      if (!hostsOk && hostsResult.block !== "malformed") hostsResult = cleanHostsFile();
     }
   }
 
@@ -2958,8 +3008,11 @@ async function handleClean(args: string[]): Promise<void> {
     );
   }
 
-  if (hostsCleaned) {
+  if (hostsResult.action !== "failed") {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+  } else if (hostsResult.block === "malformed") {
+    console.warn(colors.yellow(malformedHostsMessage()));
+    problems++;
   } else {
     console.warn(
       colors.yellow(
@@ -3509,8 +3562,9 @@ ${colors.bold("Auto-sync:")}
 
 ${colors.bold("Safety:")}
   Sync removes stale entries when there are no routes. It requires a successful
-  hosts-file read before writing and verifies every write. Read or verification
-  failures use the normal elevated privileges or error path.
+  hosts-file read before writing and verifies every atomic write. Malformed
+  # portless-start or # portless-end blocks fail with a nonzero exit and must
+  be removed manually. Other failures use the elevated privileges or error path.
 `);
 }
 
@@ -3526,8 +3580,14 @@ async function handleHosts(args: string[]): Promise<void> {
   parseCommandArgs(`hosts ${args[1]}`, args.slice(2), {}, 0);
 
   if (args[1] === "clean") {
-    if (cleanHostsFile()) {
+    const result = cleanHostsFile();
+    if (result.action !== "failed") {
       console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+      return;
+    }
+    if (result.block === "malformed") {
+      console.error(colors.red(malformedHostsMessage()));
+      process.exit(1);
       return;
     }
 
@@ -3551,7 +3611,8 @@ async function handleHosts(args: string[]): Promise<void> {
 
   const routes = store.loadRoutes();
   const hostnames = routes.map((r) => r.hostname);
-  if (syncHostsFile(hostnames)) {
+  const hostsResult = syncHostsFile(hostnames);
+  if (hostsResult.action !== "failed") {
     if (hostnames.length === 0) {
       console.log(colors.green(`No stale portless entries remain in ${HOSTS_DISPLAY}.`));
       return;
@@ -3560,6 +3621,11 @@ async function handleHosts(args: string[]): Promise<void> {
     for (const h of hostnames) {
       console.log(colors.cyan(`  127.0.0.1 ${h}`));
     }
+    return;
+  }
+  if (hostsResult.block === "malformed") {
+    console.error(colors.red(malformedHostsMessage()));
+    process.exit(1);
     return;
   }
 
@@ -4500,7 +4566,7 @@ async function handleProxy(args: string[]): Promise<void> {
   }
 
   // Prepare TLS options if HTTPS is requested
-  let tlsOptions: import("./types.js").ProxyServerOptions["tls"];
+  let tlsMode: { cert: Buffer; key: Buffer } | "managed" | undefined;
   if (useHttps) {
     store.ensureDir();
     if (customCertPath && customKeyPath) {
@@ -4524,7 +4590,7 @@ async function handleProxy(args: string[]): Promise<void> {
         }
 
         createSecureContext({ cert, key });
-        tlsOptions = { cert, key };
+        tlsMode = { cert, key };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(colors.red(`Error reading certificate files: ${message}`));
@@ -4597,15 +4663,7 @@ async function handleProxy(args: string[]): Promise<void> {
         }
       }
 
-      const cert = fs.readFileSync(certs.certPath);
-      const key = fs.readFileSync(certs.keyPath);
-      const ca = fs.readFileSync(certs.caPath);
-      tlsOptions = {
-        cert,
-        key,
-        ca,
-        SNICallback: createSNICallback(stateDir, cert, key, tlds, ca),
-      };
+      tlsMode = "managed";
     }
   }
 
@@ -4617,10 +4675,9 @@ async function handleProxy(args: string[]): Promise<void> {
       proxyPort,
       tld,
       tlds,
-      tlsOptions,
+      tlsMode,
       lanIp,
       desiredWildcard ? false : undefined,
-      !!(customCertPath && customKeyPath),
       desiredUnprivileged
     );
     return;

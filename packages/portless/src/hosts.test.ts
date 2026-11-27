@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("node:fs", async (importOriginal) => {
@@ -6,6 +7,11 @@ vi.mock("node:fs", async (importOriginal) => {
     ...mod,
     readFileSync: vi.fn(),
     writeFileSync: vi.fn(),
+    renameSync: vi.fn(),
+    rmSync: vi.fn(),
+    statSync: vi.fn(),
+    chmodSync: vi.fn(),
+    realpathSync: vi.fn((filePath: string) => filePath),
   };
 });
 
@@ -21,11 +27,20 @@ import {
   syncHostsFile,
 } from "./hosts.js";
 
-const { readFileSync, writeFileSync } = await import("node:fs");
+const { readFileSync, writeFileSync, renameSync, rmSync, statSync, chmodSync, realpathSync } =
+  await import("node:fs");
 
 beforeEach(() => {
   vi.mocked(readFileSync).mockReset();
   vi.mocked(writeFileSync).mockReset();
+  vi.mocked(renameSync).mockReset();
+  vi.mocked(rmSync).mockReset();
+  vi.mocked(statSync).mockReset();
+  vi.mocked(chmodSync).mockReset();
+  vi.mocked(realpathSync).mockReset();
+  vi.mocked(realpathSync).mockImplementation(
+    ((filePath: string) => filePath) as typeof realpathSync
+  );
 });
 
 // ---------------------------------------------------------------------------
@@ -270,6 +285,8 @@ describe("blockMatchesHostnames", () => {
   it("treats no hostnames as satisfied only when no block remains", () => {
     expect(blockMatchesHostnames("127.0.0.1 localhost\n", [])).toBe(true);
     expect(blockMatchesHostnames(block, [])).toBe(false);
+    expect(blockMatchesHostnames("# portless-start\n# portless-end\n", [])).toBe(false);
+    expect(blockMatchesHostnames("# portless-start\n", [])).toBe(false);
   });
 });
 
@@ -286,12 +303,36 @@ describe("hosts file mutation safety", () => {
     throw new Error("EACCES");
   }
 
+  const hostsPath =
+    process.platform === "win32"
+      ? path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "drivers", "etc", "hosts")
+      : "/etc/hosts";
+
   function useInMemoryHosts(initial: string): () => string {
     let hosts = initial;
-    vi.mocked(readFileSync).mockImplementation((() => hosts) as unknown as typeof readFileSync);
-    vi.mocked(writeFileSync).mockImplementation(((_, data) => {
-      hosts = String(data);
+    const files = new Map<string, string>();
+    vi.mocked(readFileSync).mockImplementation(((file) => {
+      expect(file).toBe(hostsPath);
+      return hosts;
+    }) as typeof readFileSync);
+    vi.mocked(statSync).mockReturnValue({ mode: 0o100644 } as ReturnType<typeof statSync>);
+    vi.mocked(writeFileSync).mockImplementation(((file, data, options) => {
+      const tempPath = String(file);
+      expect(tempPath).not.toBe(hostsPath);
+      expect(path.dirname(tempPath)).toBe(path.dirname(hostsPath));
+      expect(path.basename(tempPath)).toMatch(/^\.portless-hosts\.\d+\.[0-9a-f]{12}\.tmp$/);
+      expect(options).toEqual({ mode: 0o644, flag: "wx", flush: true });
+      files.set(tempPath, String(data));
     }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation((from, to) => {
+      expect(to).toBe(hostsPath);
+      expect(files.has(String(from))).toBe(true);
+      hosts = files.get(String(from))!;
+      files.delete(String(from));
+    });
+    vi.mocked(rmSync).mockImplementation((file) => {
+      files.delete(String(file));
+    });
     return () => hosts;
   }
 
@@ -300,7 +341,7 @@ describe("hosts file mutation safety", () => {
       .mockImplementationOnce(throwReadError as typeof readFileSync)
       .mockReturnValue(systemAndCustomEntries);
 
-    expect(syncHostsFile(["app.test"])).toBe(false);
+    expect(syncHostsFile(["app.test"])).toEqual({ action: "failed", block: "ok", changed: false });
     expect(readFileSync).toHaveBeenCalledTimes(1);
     expect(writeFileSync).not.toHaveBeenCalled();
   });
@@ -310,7 +351,7 @@ describe("hosts file mutation safety", () => {
       .mockImplementationOnce(throwReadError as typeof readFileSync)
       .mockReturnValue(staleBlock);
 
-    expect(syncHostsFile([])).toBe(false);
+    expect(syncHostsFile([])).toEqual({ action: "failed", block: "ok", changed: false });
     expect(readFileSync).toHaveBeenCalledTimes(1);
     expect(writeFileSync).not.toHaveBeenCalled();
   });
@@ -320,7 +361,7 @@ describe("hosts file mutation safety", () => {
       .mockImplementationOnce(throwReadError as typeof readFileSync)
       .mockReturnValue(staleBlock);
 
-    expect(cleanHostsFile()).toBe(false);
+    expect(cleanHostsFile()).toEqual({ action: "failed", block: "ok", changed: false });
     expect(readFileSync).toHaveBeenCalledTimes(1);
     expect(writeFileSync).not.toHaveBeenCalled();
   });
@@ -328,39 +369,55 @@ describe("hosts file mutation safety", () => {
   it.each([
     ["populated", ["app.test"]],
     ["empty", []],
-  ])("returns false when verification cannot read a %s sync", (_description, hostnames) => {
+  ])("reports failure when verification cannot read a %s sync", (_description, hostnames) => {
     vi.mocked(readFileSync)
       .mockReturnValueOnce(staleBlock)
       .mockImplementationOnce(throwReadError as typeof readFileSync);
 
-    expect(syncHostsFile(hostnames)).toBe(false);
+    expect(syncHostsFile(hostnames)).toEqual({ action: "failed", block: "ok", changed: false });
     expect(writeFileSync).toHaveBeenCalledTimes(1);
   });
 
-  it("returns false when the hosts write fails", () => {
-    vi.mocked(readFileSync).mockReturnValue(systemAndCustomEntries);
+  it("leaves the hosts file untouched and removes the temp file when a write fails", () => {
+    const hosts = useInMemoryHosts(systemAndCustomEntries);
     vi.mocked(writeFileSync).mockImplementation((() => {
       throw new Error("EACCES");
     }) as typeof writeFileSync);
 
-    expect(syncHostsFile(["app.test"])).toBe(false);
-    expect(readFileSync).toHaveBeenCalledTimes(1);
+    expect(syncHostsFile(["app.test"])).toEqual({ action: "failed", block: "ok", changed: false });
+    expect(hosts()).toBe(systemAndCustomEntries);
     expect(writeFileSync).toHaveBeenCalledTimes(1);
+    const tempPath = vi.mocked(writeFileSync).mock.calls[0][0];
+    expect(path.dirname(String(tempPath))).toBe(path.dirname(hostsPath));
+    expect(tempPath).not.toBe(hostsPath);
+    expect(rmSync).toHaveBeenCalledWith(tempPath, { force: true });
+    expect(renameSync).not.toHaveBeenCalled();
   });
 
-  it("returns false when a successful write does not produce the requested block", () => {
+  it("removes the temp file and preserves the hosts file when rename fails", () => {
+    const hosts = useInMemoryHosts(systemAndCustomEntries);
+    vi.mocked(renameSync).mockImplementation(() => {
+      throw new Error("EACCES");
+    });
+
+    expect(syncHostsFile(["app.test"])).toEqual({ action: "failed", block: "ok", changed: false });
+    expect(hosts()).toBe(systemAndCustomEntries);
+    expect(rmSync).toHaveBeenCalledWith(vi.mocked(writeFileSync).mock.calls[0][0], { force: true });
+  });
+
+  it("reports failure when a successful write does not produce the requested block", () => {
     vi.mocked(readFileSync)
       .mockReturnValueOnce(systemAndCustomEntries)
       .mockReturnValueOnce(systemAndCustomEntries);
 
-    expect(syncHostsFile(["app.test"])).toBe(false);
+    expect(syncHostsFile(["app.test"])).toEqual({ action: "failed", block: "ok", changed: false });
     expect(writeFileSync).toHaveBeenCalledTimes(1);
   });
 
   it("treats a readable empty file as an already synchronized empty set", () => {
     vi.mocked(readFileSync).mockReturnValue("");
 
-    expect(syncHostsFile([])).toBe(true);
+    expect(syncHostsFile([])).toEqual({ action: "unchanged", block: "ok", changed: false });
     expect(writeFileSync).not.toHaveBeenCalled();
   });
 
@@ -369,14 +426,18 @@ describe("hosts file mutation safety", () => {
       "# portless-start\n127.0.0.1 app.test\n# portless-end\n"
     );
 
-    expect(syncHostsFile(["app.test"])).toBe(true);
+    expect(syncHostsFile(["app.test"])).toEqual({
+      action: "unchanged",
+      block: "ok",
+      changed: false,
+    });
     expect(writeFileSync).not.toHaveBeenCalled();
   });
 
   it("removes stale entries while preserving entries before and after the block", () => {
     const hosts = useInMemoryHosts(staleBlock);
 
-    expect(syncHostsFile([])).toBe(true);
+    expect(syncHostsFile([])).toEqual({ action: "cleaned", block: "ok", changed: true });
     expect(writeFileSync).toHaveBeenCalledTimes(1);
     expect(hosts()).toContain("127.0.0.1 localhost");
     expect(hosts()).toContain("192.0.2.10 custom.test");
@@ -387,11 +448,97 @@ describe("hosts file mutation safety", () => {
   it("writes and verifies a replacement block without changing unrelated entries", () => {
     const hosts = useInMemoryHosts(staleBlock);
 
-    expect(syncHostsFile(["app.test"])).toBe(true);
+    expect(syncHostsFile(["app.test"])).toEqual({ action: "synced", block: "ok", changed: true });
     expect(hosts()).toContain("127.0.0.1 localhost");
     expect(hosts()).toContain("192.0.2.10 custom.test");
     expect(hosts()).toContain("127.0.0.1 app.test");
     expect(hosts()).not.toContain("stale.test");
+  });
+
+  it.each([
+    ["start without end", "# portless-start\n"],
+    ["end without start", "# portless-end\n"],
+    ["reversed markers", "# portless-end\n# portless-start\n"],
+    ["duplicate start", "# portless-start\n# portless-start\n# portless-end\n"],
+    ["duplicate end", "# portless-start\n# portless-end\n# portless-end\n"],
+  ])("refuses to clean or sync %s", (_description, content) => {
+    const hosts = useInMemoryHosts(content);
+    const failed = { action: "failed", block: "malformed", changed: false };
+    expect(extractManagedBlock(content)).toEqual([]);
+    expect(removeBlock(content)).toBe(content);
+    expect(blockMatchesHostnames(content, [])).toBe(false);
+    expect(blockMatchesHostnames(content, ["app.test"])).toBe(false);
+    expect(cleanHostsFile()).toEqual(failed);
+    expect(syncHostsFile(["app.test"])).toEqual(failed);
+    expect(hosts()).toBe(content);
+    expect(writeFileSync).not.toHaveBeenCalled();
+    expect(renameSync).not.toHaveBeenCalled();
+  });
+
+  it("removes an empty valid managed block", () => {
+    const hosts = useInMemoryHosts("# portless-start\n# portless-end\n");
+    expect(cleanHostsFile()).toEqual({ action: "cleaned", block: "ok", changed: true });
+    expect(hosts()).not.toContain("portless-start");
+    expect(renameSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a malformed block on verification", () => {
+    vi.mocked(readFileSync)
+      .mockReturnValueOnce(systemAndCustomEntries)
+      .mockReturnValueOnce("# portless-start\n");
+    expect(syncHostsFile(["app.test"])).toEqual({
+      action: "failed",
+      block: "malformed",
+      changed: false,
+    });
+  });
+
+  it("falls back to direct write on EBUSY rename (bind-mounted hosts)", () => {
+    let hosts = systemAndCustomEntries;
+    vi.mocked(readFileSync).mockImplementation((() => hosts) as unknown as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((file, data) => {
+      if (!String(file).includes(".portless-hosts.")) hosts = String(data);
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(() => {
+      const err = new Error("EBUSY") as NodeJS.ErrnoException;
+      err.code = "EBUSY";
+      throw err;
+    });
+
+    expect(syncHostsFile(["app.test"])).toEqual({
+      action: "synced",
+      block: "ok",
+      changed: true,
+    });
+    expect(hosts).toContain("127.0.0.1 app.test");
+    expect(rmSync).toHaveBeenCalledTimes(1);
+  });
+
+  it("restores previous hosts content if EBUSY fallback write fails", () => {
+    let hosts = systemAndCustomEntries;
+    let directAttempts = 0;
+    vi.mocked(readFileSync).mockImplementation((() => hosts) as unknown as typeof readFileSync);
+    vi.mocked(writeFileSync).mockImplementation(((file, data) => {
+      if (String(file).includes(".portless-hosts.")) return;
+      directAttempts++;
+      if (directAttempts === 1) {
+        hosts = "# portless-start\n";
+        throw new Error("ENOSPC");
+      }
+      hosts = String(data);
+    }) as typeof writeFileSync);
+    vi.mocked(renameSync).mockImplementation(() => {
+      const err = new Error("EBUSY") as NodeJS.ErrnoException;
+      err.code = "EBUSY";
+      throw err;
+    });
+
+    expect(syncHostsFile(["app.test"])).toEqual({
+      action: "failed",
+      block: "ok",
+      changed: false,
+    });
+    expect(hosts).toBe(systemAndCustomEntries);
   });
 
   it("keeps getManagedHostnames best-effort on read failure", () => {

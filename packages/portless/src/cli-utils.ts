@@ -9,7 +9,12 @@ import * as readline from "node:readline";
 import { execFileSync, execSync, spawn } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { DEFAULT_TLD, ProxyState, parseTldList } from "./proxy-state.js";
-import { checkHostResolution, getManagedHostnames, syncHostsFile } from "./hosts.js";
+import {
+  checkHostResolution,
+  getManagedHostnames,
+  syncHostsFile,
+  type HostsResult,
+} from "./hosts.js";
 import { isYarnClassic, resolveScript, resolveScriptRaw } from "./config.js";
 import {
   createLoopbackConnection,
@@ -940,9 +945,9 @@ export function syncHostsWithWarning(
   hostnames: string[],
   alreadyWarned: boolean,
   onWarn: () => void,
-  sync: (hostnames: string[]) => boolean = syncHostsFile
+  sync: (hostnames: string[]) => HostsResult = syncHostsFile
 ): boolean {
-  if (sync(hostnames)) return false;
+  if (sync(hostnames).action !== "failed") return false;
   if (hostnames.length === 0) return alreadyWarned;
   if (!alreadyWarned) onWarn();
   return true;
