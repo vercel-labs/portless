@@ -23,7 +23,16 @@ import { isWindows, killTree } from "./cli-utils.js";
 
 const VERSION = typeof __VERSION__ === "string" ? __VERSION__ : "0.0.0";
 
-const PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+const MODERN_PROTOCOL_VERSIONS = ["2026-07-28"] as const;
+const LEGACY_PROTOCOL_VERSIONS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"] as const;
+const META_PROTOCOL_VERSION = "io.modelcontextprotocol/protocolVersion";
+const META_CLIENT_CAPABILITIES = "io.modelcontextprotocol/clientCapabilities";
+const META_CLIENT_INFO = "io.modelcontextprotocol/clientInfo";
+const META_SERVER_INFO = "io.modelcontextprotocol/serverInfo";
+const ERROR_UNSUPPORTED_PROTOCOL_VERSION = -32022;
+const DISCOVER_CACHE_TTL_MS = 3_600_000;
+const TOOLS_CACHE_TTL_MS = 300_000;
+const SERVER_INFO = { name: "portless", title: "Portless", version: VERSION };
 const DEFAULT_TIMEOUT_MS = 120000;
 const PAGE_SIZE = 64;
 
@@ -147,7 +156,11 @@ export const TOOLS: ToolDef[] = [
         description:
           "Skip config loading and worktree naming, including PORTLESS_PREFIX and git worktree detection, so the URL has no worktree label.",
       },
-      json: { type: "boolean", description: "Return the name, hostname, and URL as JSON." },
+      json: {
+        type: "boolean",
+        description:
+          "Return the name, hostname, and URL as JSON, including the port when the route is active.",
+      },
     },
     ["name"],
     {
@@ -654,17 +667,140 @@ function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function errorResponse(id: unknown, code: number, message: string): Record<string, unknown> {
-  return { jsonrpc: "2.0", id, error: { code, message } };
+function errorResponse(
+  id: unknown,
+  code: number,
+  message: string,
+  data?: unknown
+): Record<string, unknown> {
+  return { jsonrpc: "2.0", id, error: { code, message, ...(data !== undefined ? { data } : {}) } };
 }
 
 function resultResponse(id: unknown, result: Record<string, unknown>): Record<string, unknown> {
   return { jsonrpc: "2.0", id, result };
 }
 
+type RequestEra =
+  | { kind: "modern"; version: string }
+  | { kind: "legacy" }
+  | { kind: "error"; response: Record<string, unknown> };
+
+function isModernMessage(message: Record<string, unknown>): boolean {
+  if (message.method === "server/discover") return true;
+  const params = message.params;
+  if (!isObject(params)) return false;
+  const meta = params._meta;
+  if (!isObject(meta)) return false;
+  return (
+    Object.prototype.hasOwnProperty.call(meta, META_PROTOCOL_VERSION) ||
+    Object.prototype.hasOwnProperty.call(meta, META_CLIENT_CAPABILITIES)
+  );
+}
+
+function resolveRequestEra(
+  message: Record<string, unknown>,
+  method: string,
+  id: unknown,
+  params: unknown
+): RequestEra {
+  if (params !== undefined && !isObject(params)) {
+    return { kind: "error", response: errorResponse(id, -32602, "params must be an object") };
+  }
+  const meta = params?._meta;
+  if (meta !== undefined && !isObject(meta)) {
+    return { kind: "error", response: errorResponse(id, -32602, "_meta must be an object") };
+  }
+  if (isModernMessage(message)) {
+    if (message.jsonrpc !== "2.0") {
+      return {
+        kind: "error",
+        response: errorResponse(null, -32600, 'Invalid Request: jsonrpc must be "2.0"'),
+      };
+    }
+    if (!(typeof id === "string" || (typeof id === "number" && Number.isInteger(id)))) {
+      return {
+        kind: "error",
+        response: errorResponse(null, -32600, "Invalid Request: id must be a string or integer"),
+      };
+    }
+    const requested = meta?.[META_PROTOCOL_VERSION];
+    if (typeof requested !== "string" || requested.length === 0) {
+      return {
+        kind: "error",
+        response: errorResponse(
+          id,
+          -32602,
+          "Missing or invalid _meta['io.modelcontextprotocol/protocolVersion']"
+        ),
+      };
+    }
+    if (!isObject(meta?.[META_CLIENT_CAPABILITIES])) {
+      return {
+        kind: "error",
+        response: errorResponse(
+          id,
+          -32602,
+          "Missing or invalid _meta['io.modelcontextprotocol/clientCapabilities']"
+        ),
+      };
+    }
+    const clientInfo = meta?.[META_CLIENT_INFO];
+    if (
+      clientInfo !== undefined &&
+      (!isObject(clientInfo) ||
+        typeof clientInfo.name !== "string" ||
+        typeof clientInfo.version !== "string")
+    ) {
+      return {
+        kind: "error",
+        response: errorResponse(id, -32602, "Invalid _meta['io.modelcontextprotocol/clientInfo']"),
+      };
+    }
+    if (!(MODERN_PROTOCOL_VERSIONS as readonly string[]).includes(requested)) {
+      return {
+        kind: "error",
+        response: errorResponse(
+          id,
+          ERROR_UNSUPPORTED_PROTOCOL_VERSION,
+          "Unsupported protocol version",
+          {
+            supported: [...MODERN_PROTOCOL_VERSIONS],
+            requested,
+          }
+        ),
+      };
+    }
+    return { kind: "modern", version: requested };
+  }
+  return { kind: "legacy" };
+}
+
+function formatResult(
+  era: Exclude<RequestEra, { kind: "error" }>,
+  payload: Record<string, unknown>
+): Record<string, unknown> {
+  return era.kind === "modern"
+    ? { resultType: "complete", ...payload, _meta: { [META_SERVER_INFO]: SERVER_INFO } }
+    : payload;
+}
+
+function buildInstructions(profiles: string[], enabled: Set<string>): string {
+  const lookup: string[] = [];
+  if (enabled.has("get")) lookup.push("the get tool to find an app's URL");
+  if (enabled.has("list")) lookup.push("the list tool to see active routes");
+  return [
+    `Portless MCP server. Active profiles: ${profiles.join(", ")}.`,
+    lookup.length > 0 ? `Use ${lookup.join(", ")}.` : "",
+    "Start dev servers with `portless run <cmd>` in a shell; value flags accept `--flag <value>` or `--flag=<value>`. MCP does not run them.",
+    enabled.has("tools_profiles") ? "Call the tools_profiles tool to see other tool profiles." : "",
+  ]
+    .filter((part) => part.length > 0)
+    .join(" ");
+}
+
 /** A server for the given canonical profile names. */
 export function createServer(profiles: string[]): {
-  handleLine(line: string): Promise<Record<string, unknown> | null>;
+  handleLine(line: string): Promise<string | null>;
   readonly shutdown: boolean;
 } {
   let shutdown = false;
@@ -686,52 +822,50 @@ export function createServer(profiles: string[]): {
     const hasId = Object.prototype.hasOwnProperty.call(message, "id");
     const method = message.method;
     if (typeof method !== "string") {
-      return hasId ? errorResponse(id, -32600, "Invalid request: missing method") : null;
+      return errorResponse(hasId ? id : null, -32600, "Invalid Request");
     }
     if (!hasId) return null;
-
     const params = message.params;
+    const era = resolveRequestEra(message, method, id, params);
+    if (era.kind === "error") return era.response;
+    const objectParams = isObject(params) ? params : undefined;
 
     switch (method) {
+      case "server/discover":
+        return resultResponse(
+          id,
+          formatResult(era, {
+            supportedVersions: [...MODERN_PROTOCOL_VERSIONS],
+            capabilities: { tools: {} },
+            instructions: buildInstructions(profiles, enabled),
+            ttlMs: DISCOVER_CACHE_TTL_MS,
+            cacheScope: "public",
+          })
+        );
       case "initialize": {
-        if (params !== undefined && !isObject(params)) {
-          return errorResponse(id, -32602, "params must be an object");
-        }
-        const requested = params?.protocolVersion;
+        if (era.kind === "modern") return errorResponse(id, -32601, "Method not found: initialize");
+        const requested = objectParams?.protocolVersion;
         if (requested !== undefined && typeof requested !== "string") {
           return errorResponse(id, -32602, "protocolVersion must be a string");
         }
         const version =
-          typeof requested === "string" && PROTOCOL_VERSIONS.includes(requested)
+          typeof requested === "string" &&
+          (LEGACY_PROTOCOL_VERSIONS as readonly string[]).includes(requested)
             ? requested
-            : PROTOCOL_VERSIONS[0];
-        const lookup: string[] = [];
-        if (enabled.has("get")) lookup.push("the get tool to find an app's URL");
-        if (enabled.has("list")) lookup.push("the list tool to see active routes");
-        const instructions = [
-          `Portless MCP server. Active profiles: ${profiles.join(", ")}.`,
-          lookup.length > 0 ? `Use ${lookup.join(", ")}.` : "",
-          "Start dev servers with `portless run <cmd>` in a shell; value flags accept `--flag <value>` or `--flag=<value>`. MCP does not run them.",
-          enabled.has("tools_profiles")
-            ? "Call the tools_profiles tool to see other tool profiles."
-            : "",
-        ]
-          .filter((part) => part.length > 0)
-          .join(" ");
+            : LEGACY_PROTOCOL_VERSIONS[0];
         return resultResponse(id, {
           protocolVersion: version,
           capabilities: { tools: {} },
-          serverInfo: { name: "portless", title: "Portless", version: VERSION },
-          instructions,
+          serverInfo: SERVER_INFO,
+          instructions: buildInstructions(profiles, enabled),
         });
       }
       case "ping":
-        return resultResponse(id, {});
+        return era.kind === "modern"
+          ? errorResponse(id, -32601, "Method not found: ping")
+          : resultResponse(id, {});
       case "tools/list": {
-        if (params !== undefined && !isObject(params)) {
-          return errorResponse(id, -32602, "params must be an object");
-        }
-        const cursor = params?.cursor;
+        const cursor = objectParams?.cursor;
         const page = TOOLS.filter((def) => enabled.has(def.name));
         let start = 0;
         if (cursor !== undefined && cursor !== null) {
@@ -744,9 +878,15 @@ export function createServer(profiles: string[]): {
           }
         }
         const slice = page.slice(start, start + PAGE_SIZE);
-        const result: Record<string, unknown> = { tools: slice };
-        if (start + PAGE_SIZE < page.length) result.nextCursor = String(start + PAGE_SIZE);
-        return resultResponse(id, result);
+        const nextCursor = start + PAGE_SIZE < page.length ? String(start + PAGE_SIZE) : undefined;
+        return resultResponse(
+          id,
+          formatResult(era, {
+            tools: slice,
+            ...(nextCursor ? { nextCursor } : {}),
+            ...(era.kind === "modern" ? { ttlMs: TOOLS_CACHE_TTL_MS, cacheScope: "public" } : {}),
+          })
+        );
       }
       case "tools/call": {
         if (!isObject(params)) {
@@ -766,8 +906,11 @@ export function createServer(profiles: string[]): {
         if (!enabled.has(toolName)) {
           return resultResponse(
             id,
-            toolErrorResult(
-              `Tool ${toolName} is not enabled. Restart with portless mcp --tools all or add a profile that includes it.`
+            formatResult(
+              era,
+              toolErrorResult(
+                `Tool ${toolName} is not enabled. Restart with portless mcp --tools all or add a profile that includes it.`
+              )
             )
           );
         }
@@ -780,8 +923,11 @@ export function createServer(profiles: string[]): {
           const own = accepted.filter((key) => !SHARED_FIELDS.includes(key)).join(", ") || "none";
           return resultResponse(
             id,
-            toolErrorResult(
-              `Unknown argument(s) for ${toolName}: ${unknown.join(", ")}. Tool arguments: ${own}.`
+            formatResult(
+              era,
+              toolErrorResult(
+                `Unknown argument(s) for ${toolName}: ${unknown.join(", ")}. Tool arguments: ${own}.`
+              )
             )
           );
         }
@@ -801,11 +947,14 @@ export function createServer(profiles: string[]): {
                   `${profile.name}: ${profile.description} (${profile.toolCount} tools), ${profile.usage}`
               ),
             ].join("\n");
-            return resultResponse(id, {
-              content: [{ type: "text", text }],
-              structuredContent: { activeProfiles: profiles, profiles: summaries },
-              isError: false,
-            });
+            return resultResponse(
+              id,
+              formatResult(era, {
+                content: [{ type: "text", text }],
+                structuredContent: { activeProfiles: profiles, profiles: summaries },
+                isError: false,
+              })
+            );
           }
           const argv = buildArgv(toolName, args);
           const cwd = typeof args.cwd === "string" ? args.cwd : process.cwd();
@@ -815,13 +964,16 @@ export function createServer(profiles: string[]): {
           if ("spawnError" in run) {
             return resultResponse(
               id,
-              toolErrorResult(`Failed to run portless in ${cwd}: ${run.spawnError}`)
+              formatResult(
+                era,
+                toolErrorResult(`Failed to run portless in ${cwd}: ${run.spawnError}`)
+              )
             );
           }
-          return resultResponse(id, toToolResult(run));
+          return resultResponse(id, formatResult(era, toToolResult(run)));
         } catch (error) {
           if (error instanceof McpError && error.code === -32602) {
-            return resultResponse(id, toolErrorResult(error.message));
+            return resultResponse(id, formatResult(era, toolErrorResult(error.message)));
           }
           if (error instanceof McpError) {
             return errorResponse(id, error.code, error.message);
@@ -831,7 +983,7 @@ export function createServer(profiles: string[]): {
       }
       case "shutdown": {
         shutdown = true;
-        return resultResponse(id, {});
+        return resultResponse(id, formatResult(era, {}));
       }
       default:
         return errorResponse(id, -32601, `Method not found: ${method}`);
@@ -839,18 +991,38 @@ export function createServer(profiles: string[]): {
   }
 
   return {
-    async handleLine(line: string): Promise<Record<string, unknown> | null> {
+    async handleLine(line: string): Promise<string | null> {
       if (line.trim().length === 0) return null;
       let message: unknown;
       try {
         message = JSON.parse(line);
       } catch (error) {
-        return errorResponse(null, -32700, `Parse error: ${(error as Error).message}`);
+        return JSON.stringify(
+          errorResponse(null, -32700, `Parse error: ${(error as Error).message}`)
+        );
       }
-      if (!isObject(message)) {
-        return null;
+      if (Array.isArray(message)) {
+        if (message.length === 0)
+          return JSON.stringify(errorResponse(null, -32600, "Invalid Request"));
+        if (message.some((item) => isObject(item) && isModernMessage(item))) {
+          return JSON.stringify(
+            errorResponse(null, -32600, "JSON-RPC batches are not supported in MCP 2026-07-28")
+          );
+        }
+        const responses: Record<string, unknown>[] = [];
+        for (const item of message) {
+          if (!isObject(item)) {
+            responses.push(errorResponse(null, -32600, "Invalid Request"));
+          } else {
+            const response = await handleRequest(item);
+            if (response !== null) responses.push(response);
+          }
+        }
+        return responses.length > 0 ? JSON.stringify(responses) : null;
       }
-      return handleRequest(message);
+      if (!isObject(message)) return null;
+      const response = await handleRequest(message);
+      return response === null ? null : JSON.stringify(response);
     },
     get shutdown() {
       return shutdown;
@@ -866,6 +1038,8 @@ export function printMcpHelp(): void {
       "Start a Model Context Protocol server over stdio. The client launches this",
       "process and exchanges newline-delimited JSON-RPC messages on stdin/stdout;",
       "stdout carries only protocol messages and diagnostics go to stderr.",
+      "Supports MCP 2026-07-28 (server/discover and per-request _meta) as well as",
+      "legacy initialize revisions 2025-11-25 through 2024-11-05 (including 2025-03-26 batches).",
       "",
       "Profiles:",
       ...Object.entries(PROFILES).map(
@@ -874,7 +1048,7 @@ export function printMcpHelp(): void {
       "",
       "Common tools:",
       "  list            List active routes (json: true for JSON).",
-      "  get             Print an app URL (json: true for JSON).",
+      "  get             Print an app URL (json: true includes the active route port).",
       "  env             Print environment variables for sibling processes.",
       "  alias_add       Register a static route with an optional HTTP or HTTPS upstream.",
       "  tools_profiles  Show active and available profiles.",
@@ -949,10 +1123,10 @@ export async function runMcp(args: string[]): Promise<void> {
   process.stdout.on("error", onStreamError);
 
   for await (const line of rl) {
-    const response = await server.handleLine(line);
-    if (response !== null) {
+    const reply = await server.handleLine(line);
+    if (reply !== null) {
       try {
-        process.stdout.write(`${JSON.stringify(response)}\n`);
+        process.stdout.write(`${reply}\n`);
       } catch {
         break;
       }

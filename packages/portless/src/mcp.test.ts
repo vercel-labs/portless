@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { spawn, spawnSync } from "node:child_process";
+import { createInterface } from "node:readline";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -20,7 +21,8 @@ const CLI_PATH = path.resolve(__dirname, "../dist/cli.js");
 async function call(profiles: string[], method: string, params?: unknown) {
   const server = createServer(profiles);
   const res = await server.handleLine(JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }));
-  return res as {
+  expect(res).not.toBeNull();
+  return JSON.parse(res!) as {
     result: {
       tools: typeof TOOLS;
       content: { text: string }[];
@@ -29,8 +31,14 @@ async function call(profiles: string[], method: string, params?: unknown) {
       protocolVersion: string;
       serverInfo: { name: string };
       capabilities: unknown;
+      resultType: string;
+      supportedVersions: string[];
+      instructions: string;
+      ttlMs: number;
+      cacheScope: string;
+      _meta: Record<string, unknown>;
     };
-    error?: { code: number; message: string };
+    error?: { code: number; message: string; data?: unknown };
   };
 }
 
@@ -220,8 +228,10 @@ describe("tools/call validation", () => {
     expect(unknown.error?.code).toBe(-32602);
 
     const malformed = await createServer(["core"]).handleLine("not json");
-    expect(malformed?.id).toBeNull();
-    expect((malformed?.error as { code: number } | undefined)?.code).toBe(-32700);
+    expect(malformed).not.toBeNull();
+    const parsed = JSON.parse(malformed!);
+    expect(parsed.id).toBeNull();
+    expect(parsed.error.code).toBe(-32700);
   });
 
   it("returns an error result when the child cannot spawn", async () => {
@@ -263,6 +273,230 @@ describe("initialize and tools/list", () => {
   });
 });
 
+describe("modern protocol", () => {
+  const protocol = "io.modelcontextprotocol/protocolVersion";
+  const capabilities = "io.modelcontextprotocol/clientCapabilities";
+  const clientInfo = "io.modelcontextprotocol/clientInfo";
+  const serverInfo = "io.modelcontextprotocol/serverInfo";
+  const meta = { [protocol]: "2026-07-28", [capabilities]: {} };
+  const server = { name: "portless", title: "Portless", version: expect.any(String) };
+
+  it("discovers the server with shared instructions and public caching", async () => {
+    const discovered = await call(["core"], "server/discover", { _meta: meta });
+    expect(discovered.result).toMatchObject({
+      resultType: "complete",
+      supportedVersions: ["2026-07-28"],
+      capabilities: { tools: {} },
+      cacheScope: "public",
+      _meta: { [serverInfo]: server },
+    });
+    expect(discovered.result.ttlMs).toBe(3_600_000);
+    expect(discovered.result.instructions).toContain("Portless MCP server.");
+    expect(discovered.result.instructions).toBe(
+      (await call(["core"], "initialize")).result.instructions
+    );
+  });
+
+  it("lists deterministic tools without initialization", async () => {
+    const first = await call(["core"], "tools/list", { _meta: meta });
+    const second = await call(["core"], "tools/list", { _meta: meta });
+    const legacy = await call(["core"], "tools/list");
+    expect(first.result).toMatchObject({
+      resultType: "complete",
+      cacheScope: "public",
+      _meta: { [serverInfo]: server },
+    });
+    expect(first.result.ttlMs).toBe(300_000);
+    expect(first.result.tools).toEqual(second.result.tools);
+    expect(first.result.tools).toEqual(legacy.result.tools);
+    expect(legacy.result).not.toHaveProperty("resultType");
+    expect(legacy.result).not.toHaveProperty("ttlMs");
+  });
+
+  it.each([
+    [{ name: "tools_profiles" }, false, "Active profiles"],
+    [{ name: "get", arguments: { bogus: 1 } }, true, "Unknown argument"],
+    [{ name: "proxy_start" }, true, "not enabled"],
+    [{ name: "get", arguments: {} }, true, "name"],
+    [
+      { name: "list", arguments: { cwd: "/definitely/not/a/real/dir-portless-mcp" } },
+      true,
+      "Failed to run",
+    ],
+  ])("formats a stateless tool call result", async (params, isError, text) => {
+    const res = await call(["core"], "tools/call", { ...params, _meta: meta });
+    expect(res.result).toMatchObject({
+      resultType: "complete",
+      isError,
+      _meta: { [serverInfo]: server },
+    });
+    expect(res.result.content[0].text).toContain(text);
+  });
+
+  it.each(["2027-01-01", "2025-11-25"])(
+    "reports unsupported version %s with -32022",
+    async (requested) => {
+      const res = await call(["core"], "tools/list", {
+        _meta: { [protocol]: requested, [capabilities]: {} },
+      });
+      expect(res.error).toEqual({
+        code: -32022,
+        message: "Unsupported protocol version",
+        data: { supported: ["2026-07-28"], requested },
+      });
+    }
+  );
+
+  it.each([
+    [null, "params must be an object"],
+    [{}, "protocolVersion"],
+    [{ _meta: {} }, "protocolVersion"],
+    [{ _meta: null }, "_meta must be an object"],
+    [{ _meta: [] }, "_meta must be an object"],
+    [{ _meta: { [capabilities]: {} } }, "protocolVersion"],
+    [{ _meta: { [protocol]: "", [capabilities]: {} } }, "protocolVersion"],
+    [{ _meta: { [protocol]: 1, [capabilities]: {} } }, "protocolVersion"],
+    [{ _meta: { [protocol]: "2026-07-28" } }, "clientCapabilities"],
+    [{ _meta: { [protocol]: "2027-01-01" } }, "clientCapabilities"],
+    [{ _meta: { [protocol]: "2026-07-28", [capabilities]: [] } }, "clientCapabilities"],
+    [{ _meta: { ...meta, [clientInfo]: "bad" } }, "clientInfo"],
+    [{ _meta: { ...meta, [clientInfo]: { name: "only-name" } } }, "clientInfo"],
+  ])("rejects invalid modern parameters", async (params, message) => {
+    const res = await call(["core"], "server/discover", params);
+    expect(res.error?.code).toBe(-32602);
+    expect(res.error?.message).toContain(message);
+  });
+
+  it("rejects modern requests without jsonrpc 2.0 and modern JSON-RPC batches", async () => {
+    const serverInstance = createServer(["core"]);
+    const badJsonRpc = await serverInstance.handleLine(
+      JSON.stringify({ jsonrpc: "1.0", id: 1, method: "server/discover", params: { _meta: meta } })
+    );
+    expect(JSON.parse(badJsonRpc!).error.code).toBe(-32600);
+
+    const modernBatch = await serverInstance.handleLine(
+      JSON.stringify([
+        { jsonrpc: "2.0", id: 1, method: "shutdown" },
+        { jsonrpc: "2.0", id: 2, method: "server/discover", params: { _meta: meta } },
+      ])
+    );
+    expect(JSON.parse(modernBatch!)).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "JSON-RPC batches are not supported in MCP 2026-07-28" },
+    });
+    expect(serverInstance.shutdown).toBe(false);
+  });
+
+  it.each([null, 1.5, true])("rejects invalid modern request IDs", async (id) => {
+    const reply = await createServer(["core"]).handleLine(
+      JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list", params: { _meta: meta } })
+    );
+    expect(JSON.parse(reply!)).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid Request: id must be a string or integer" },
+    });
+  });
+
+  it.each(["initialize", "ping"])("rejects removed modern method %s", async (method) => {
+    const res = await call(["core"], method, { _meta: meta });
+    expect(res.error).toEqual({ code: -32601, message: `Method not found: ${method}` });
+  });
+
+  it("keeps modern notifications silent", async () => {
+    const instance = createServer(["core"]);
+    expect(
+      await instance.handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/cancelled",
+          params: { _meta: meta },
+        })
+      )
+    ).toBeNull();
+    expect(
+      await instance.handleLine(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          method: "notifications/progress",
+          params: "non-object",
+        })
+      )
+    ).toBeNull();
+  });
+
+  it("formats shutdown and changes server state", async () => {
+    const instance = createServer(["core"]);
+    const reply = await instance.handleLine(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: "shutdown",
+        method: "shutdown",
+        params: { _meta: meta },
+      })
+    );
+    expect(JSON.parse(reply!).result).toEqual({
+      resultType: "complete",
+      _meta: { [serverInfo]: server },
+    });
+    expect(instance.shutdown).toBe(true);
+  });
+});
+
+describe("JSON-RPC batches", () => {
+  const ping = { jsonrpc: "2.0", id: 1, method: "ping" };
+  const list = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+  const notification = { jsonrpc: "2.0", method: "notifications/initialized" };
+
+  it("answers requests in order", async () => {
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([ping, list]));
+    expect(reply).not.toBeNull();
+    const responses = JSON.parse(reply!);
+    expect(responses.map((response: { id: number }) => response.id)).toEqual([1, 2]);
+    expect(responses[0].result).toEqual({});
+    expect(responses[1].result.tools.map((tool: ToolDef) => tool.name)).toContain("get");
+  });
+
+  it("wraps a single response in an array", async () => {
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([ping]));
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+  });
+
+  it("omits notifications from responses", async () => {
+    const reply = await createServer(["core"]).handleLine(
+      JSON.stringify([notification, ping, notification])
+    );
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual([{ jsonrpc: "2.0", id: 1, result: {} }]);
+  });
+
+  it("returns null for a notification-only batch", async () => {
+    expect(await createServer(["core"]).handleLine(JSON.stringify([notification]))).toBeNull();
+  });
+
+  it("rejects an empty batch with one error object", async () => {
+    const reply = await createServer(["core"]).handleLine("[]");
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual({
+      jsonrpc: "2.0",
+      id: null,
+      error: { code: -32600, message: "Invalid Request" },
+    });
+  });
+
+  it("reports invalid entries and answers following requests", async () => {
+    const reply = await createServer(["core"]).handleLine(JSON.stringify([null, {}, ping]));
+    expect(reply).not.toBeNull();
+    expect(JSON.parse(reply!)).toEqual([
+      { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } },
+      { jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } },
+      { jsonrpc: "2.0", id: 1, result: {} },
+    ]);
+  });
+});
+
 describe("toToolResult", () => {
   it("appends stderr, flags non-zero exit, and fills empty output", () => {
     const ok = toToolResult({ exitCode: 0, stdout: "hi\n", stderr: "" });
@@ -285,6 +519,7 @@ const OMITTED_COMMANDS: Record<string, string> = {
   portless: "zero-arg and named mode run foreground dev servers",
   "portless run": "runs a foreground dev server",
   "portless compose up": "runs Docker Compose, often in the foreground",
+  "portless completion": "generates shell setup scripts",
   "portless mcp": "the MCP server itself",
   "portless service install": "may prompt for sudo",
   "portless trust": "may prompt for sudo",
@@ -371,6 +606,136 @@ describe("CLI coverage", () => {
 });
 
 describe("portless mcp end to end", () => {
+  it.each(["2026-07-28", "2025-11-25", "2025-03-26"])(
+    "runs the %s protocol over stdio",
+    async (version) => {
+      const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-mcp-era-"));
+      const env: Record<string, string | undefined> = {
+        ...process.env,
+        PORTLESS_STATE_DIR: stateDir,
+        PORTLESS: "0",
+        NO_COLOR: "1",
+      };
+      delete env.PNPM_SCRIPT_SRC_DIR;
+      if (env.npm_command === "exec") delete env.npm_command;
+      const child = spawn(process.execPath, [CLI_PATH, "mcp"], {
+        env,
+        stdio: ["pipe", "pipe", "pipe"],
+      });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => (stderr += chunk));
+      const closed = new Promise<number | null>((resolve, reject) => {
+        child.on("error", reject);
+        child.on("close", resolve);
+      });
+      const timer = setTimeout(() => child.kill("SIGKILL"), 20_000);
+      const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
+      const iterator = lines[Symbol.asyncIterator]();
+      let id = 0;
+      const request = async (method: string, params: Record<string, unknown>) => {
+        const requestId = ++id;
+        child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: requestId, method, params }) + "\n");
+        const line = await iterator.next();
+        expect(line.done, stderr).toBeFalsy();
+        const response = JSON.parse(line.value!);
+        expect(response.id).toBe(requestId);
+        expect(response.error).toBeUndefined();
+        return response.result;
+      };
+      const modern = version === "2026-07-28";
+      const meta = {
+        "io.modelcontextprotocol/protocolVersion": version,
+        "io.modelcontextprotocol/clientCapabilities": {},
+      };
+      const params = modern ? { _meta: meta } : {};
+      try {
+        const first = await request(
+          modern ? "server/discover" : "initialize",
+          modern ? params : { protocolVersion: version }
+        );
+        if (modern) {
+          expect(first.resultType).toBe("complete");
+          expect(first.supportedVersions).toEqual([version]);
+        } else {
+          expect(first.protocolVersion).toBe(version);
+          expect(first).not.toHaveProperty("resultType");
+        }
+        const listed = await request("tools/list", params);
+        expect(listed.tools.map((tool: ToolDef) => tool.name)).toContain("get");
+        const result = await request("tools/call", {
+          ...params,
+          name: "get",
+          arguments: { name: "backend", noWorktree: true, json: true },
+        });
+        expect(result.isError).toBe(false);
+        expect(JSON.parse(result.content[0].text)).toMatchObject({
+          name: "backend",
+          hostname: "backend.localhost",
+          url: expect.stringContaining("backend.localhost"),
+        });
+        if (modern) {
+          for (const response of [first, listed, result]) {
+            expect(response.resultType).toBe("complete");
+            expect(response._meta["io.modelcontextprotocol/serverInfo"]).toMatchObject({
+              name: "portless",
+              title: "Portless",
+              version: expect.any(String),
+            });
+          }
+        } else {
+          expect(listed).not.toHaveProperty("resultType");
+          expect(result).not.toHaveProperty("resultType");
+        }
+        await request("shutdown", params);
+        expect(await closed, stderr).toBe(0);
+        expect(stderr).toBe("");
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+        lines.close();
+        fs.rmSync(stateDir, { recursive: true, force: true });
+      }
+    },
+    30_000
+  );
+
+  it("preserves batch and single response framing over stdio", () => {
+    const lines = [
+      { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-03-26" } },
+      [
+        { jsonrpc: "2.0", id: 2, method: "ping" },
+        { jsonrpc: "2.0", id: 3, method: "tools/list" },
+      ],
+      { jsonrpc: "2.0", id: 4, method: "ping" },
+    ];
+    const env: Record<string, string | undefined> = {
+      ...process.env,
+      PORTLESS: "0",
+      NO_COLOR: "1",
+    };
+    delete env.PNPM_SCRIPT_SRC_DIR;
+    if (env.npm_command === "exec") delete env.npm_command;
+    const out = spawnSync(process.execPath, [CLI_PATH, "mcp"], {
+      input: lines.map((line) => JSON.stringify(line)).join("\n") + "\n",
+      encoding: "utf-8",
+      timeout: 10_000,
+      env,
+    });
+    expect(out.status).toBe(0);
+    const responses = out.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    expect(responses).toHaveLength(3);
+    expect(responses[0].id).toBe(1);
+    expect(responses[0].result.protocolVersion).toBe("2025-03-26");
+    expect(responses[1]).toHaveLength(2);
+    expect(responses[1][0]).toEqual({ jsonrpc: "2.0", id: 2, result: {} });
+    expect(responses[1][1].id).toBe(3);
+    expect(responses[1][1].result.tools.map((tool: ToolDef) => tool.name)).toContain("get");
+    expect(responses[2]).toEqual({ jsonrpc: "2.0", id: 4, result: {} });
+  });
+
   it("answers over stdio and matches the CLI output", async () => {
     const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-mcp-"));
     const env: Record<string, string | undefined> = {

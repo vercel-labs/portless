@@ -40,7 +40,7 @@ import {
   staleAliases,
 } from "./compose.js";
 import {
-  createSNICallback,
+  CertIssuer,
   ensureCerts,
   ensureTrust,
   inspectTrust,
@@ -82,11 +82,13 @@ import {
   syncHostsFile,
   cleanHostsFile,
   shouldAutoSyncHosts,
+  type HostsResult,
 } from "./hosts.js";
 import {
   FILE_MODE,
   RouteConflictError,
   RouteStore,
+  RoutesFileError,
   isPortFree,
   isValidUpstream,
   type RouteMapping,
@@ -197,7 +199,19 @@ import {
   tryUninstallService,
 } from "./service.js";
 import { printMcpHelp, runMcp } from "./mcp.js";
-import { hasHelpFlag, isCommandName, suggestCommand, type CommandName } from "./commands.js";
+import {
+  COMMAND_NAMES,
+  hasHelpFlag,
+  isCommandName,
+  suggestCommand,
+  type CommandName,
+} from "./commands.js";
+import {
+  COMPLETION_SHELLS,
+  generateCompletionScript,
+  isCompletionShell,
+  type CompletionSpec,
+} from "./completion.js";
 import {
   parseCommandArgs,
   visitLeadingFlags,
@@ -214,6 +228,10 @@ const chalk = colors;
 
 /** Display-friendly hosts file path. */
 const HOSTS_DISPLAY = isWindows ? "hosts file" : "/etc/hosts";
+
+function malformedHostsMessage(): string {
+  return `Malformed portless block in ${HOSTS_DISPLAY} (missing or unmatched # portless-start / # portless-end markers). Remove the incomplete block manually.`;
+}
 
 /** Grace period (ms) for connections to drain before force-exiting the proxy. */
 const EXIT_TIMEOUT_MS = 2000;
@@ -669,6 +687,30 @@ function buildHostnames(
   return parseHostnames(name, normalizedTlds, targetTlds);
 }
 
+function buildAppHostnames(
+  inputs: readonly WorktreeHostnameInput[],
+  tlds: readonly string[],
+  labels?: readonly string[]
+): string[] {
+  const owners = new Map<string, number>();
+  const hostnames: string[] = [];
+  for (const [index, input] of inputs.entries()) {
+    for (const hostname of buildHostnames(input, tlds)) {
+      const owner = owners.get(hostname);
+      if (owner !== undefined && owner !== index) {
+        throw new Error(
+          `Names "${labels?.[owner] ?? inputs[owner]!.baseName}" and "${labels?.[index] ?? input.baseName}" both resolve to "${hostname}". Use distinct names; if using worktree.hostnameTemplate, include {name}.`
+        );
+      }
+      if (owner === undefined) {
+        owners.set(hostname, index);
+        hostnames.push(hostname);
+      }
+    }
+  }
+  return hostnames;
+}
+
 /**
  * The TLD a route hostname was registered with: the longest of `tlds` the
  * hostname ends with, else its last label.
@@ -888,16 +930,16 @@ function startProxyServer(
   proxyPort: number,
   tld: string,
   tlds: string[],
-  tlsOptions?: { cert: Buffer; key: Buffer },
+  tlsMode?: { cert: Buffer; key: Buffer } | "managed",
   lanIp?: string | null,
   strict?: boolean,
-  customCert = false,
   unprivileged = false
 ): void {
   store.ensureDir();
   const state = new ProxyState(store.dir);
 
-  const isTls = !!tlsOptions;
+  const isTls = !!tlsMode;
+  const customCert = tlsMode !== undefined && tlsMode !== "managed";
   const mdnsSupport = isMdnsSupported();
   let activeLanIp = lanIp && mdnsSupport.supported ? lanIp : null;
   const lanModeActive = activeLanIp !== null;
@@ -917,7 +959,17 @@ function startProxyServer(
   }
 
   let cachedRoutes: RouteMapping[] = [];
+  let routesMtimeMs = -1;
   let routesReloadWarningShown = false;
+
+  const getRoutesMtimeMs = (): number => {
+    try {
+      return fs.statSync(store.getRoutesPath()).mtimeMs;
+    } catch (err) {
+      if (isErrnoException(err) && err.code === "ENOENT") return -1;
+      throw err;
+    }
+  };
 
   // Writing the hosts file needs root, which unprivileged mode never has, so
   // it does not try; `proxy start` refuses an explicit PORTLESS_SYNC_HOSTS=1.
@@ -948,6 +1000,7 @@ function startProxyServer(
   // Bounds proxy.log on repeated reloads. Not a user-facing channel: users are
   // warned by the CLI reading the resolver, so latching here silences nobody.
   let hostsSyncWarned = false;
+  let malformedHostsWarned = false;
   const syncHostsAndLatch = (hostnames: string[]): boolean => {
     let ok = true;
     hostsSyncWarned = syncHostsWithWarning(
@@ -955,8 +1008,13 @@ function startProxyServer(
       hostsSyncWarned,
       () => console.warn(colors.yellow(`Could not write ${HOSTS_DISPLAY} for route hostnames.`)),
       (names) => {
-        ok = syncHostsFile(names);
-        return ok;
+        const result = syncHostsFile(names);
+        ok = result.action !== "failed";
+        if (result.block === "malformed" && !malformedHostsWarned) {
+          console.warn(colors.yellow(malformedHostsMessage()));
+        }
+        malformedHostsWarned = result.block === "malformed";
+        return result;
       }
     );
     return ok;
@@ -969,7 +1027,9 @@ function startProxyServer(
 
   const reloadRoutes = () => {
     try {
+      const mtimeMs = getRoutesMtimeMs();
       cachedRoutes = store.loadTrustedRoutes();
+      routesMtimeMs = mtimeMs;
       routesReloadWarningShown = false;
       if (autoSyncHosts) {
         syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
@@ -986,16 +1046,33 @@ function startProxyServer(
   };
 
   const stopWatchingRoutes = store.watch(reloadRoutes);
-  try {
-    cachedRoutes = store.loadTrustedRoutes();
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    console.warn(colors.yellow(`Could not read routes: ${message}`));
-  }
+  reloadRoutes();
 
-  if (autoSyncHosts) {
-    syncHostsAndLatch(cachedRoutes.map((r) => r.hostname));
-  }
+  const tlsOptions =
+    tlsMode === "managed"
+      ? new CertIssuer({
+          stateDir: store.dir,
+          tlds,
+          getAllowedHostnames: () => {
+            try {
+              if (
+                getRoutesMtimeMs() !== routesMtimeMs ||
+                !cachedRoutes.every((route) => store.isRouteOwnerAlive(route))
+              ) {
+                reloadRoutes();
+              }
+              return cachedRoutes
+                .filter((route) => store.isRouteOwnerAlive(route))
+                .map((route) => route.hostname);
+            } catch {
+              reloadRoutes();
+              return [];
+            }
+          },
+          allowWildcards: strict === false,
+          allowEphemeralUnregistered: !lanModeActive,
+        }).tlsOptions
+      : tlsMode;
 
   const createServer = () =>
     createProxyServer({
@@ -1151,7 +1228,10 @@ function startProxyServer(
     }
     state.reset();
     removeHostsSyncToken(store.dir);
-    if (autoSyncHosts) cleanHostsFile();
+    if (autoSyncHosts) {
+      const result = cleanHostsFile();
+      if (result.block === "malformed") console.warn(colors.yellow(malformedHostsMessage()));
+    }
     const closeServer = new Promise<void>((resolve) => server.close(() => resolve()));
     void Promise.all([stopMdns, closeServer]).finally(() => process.exit(0));
     // Force exit after a short timeout in case connections don't drain
@@ -1468,29 +1548,46 @@ async function stopProxy(store: RouteStore, proxyPort: number, _tls: boolean): P
   }
 }
 
+interface RouteView extends Pick<
+  RouteMapping,
+  | "hostname"
+  | "port"
+  | "pid"
+  | "registeredAt"
+  | "upstream"
+  | "tailscaleUrl"
+  | "tailscaleFunnel"
+  | "ngrokUrl"
+  | "cloudflareUrl"
+  | "netbirdUrl"
+> {
+  url: string;
+  tailscaleService?: string;
+}
+
+function toRouteView(route: RouteMapping, proxyPort: number, tls: boolean): RouteView {
+  const tsRecord = tailscaleShareFromRoute(route);
+  return {
+    hostname: route.hostname,
+    url: formatUrl(route.hostname, proxyPort, tls),
+    port: route.port,
+    pid: route.pid,
+    registeredAt: route.registeredAt,
+    ...(route.upstream ? { upstream: route.upstream } : {}),
+    ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
+    ...(tsRecord?.kind === "funnel" || route.tailscaleFunnel ? { tailscaleFunnel: true } : {}),
+    ...(tsRecord?.kind === "service" ? { tailscaleService: tsRecord.serviceName } : {}),
+    ...Object.fromEntries(
+      PROCESS_TUNNELS.flatMap((t) => (route[t.urlField] ? [[t.urlField, route[t.urlField]]] : []))
+    ),
+  };
+}
+
 function listRoutes(store: RouteStore, proxyPort: number, tls: boolean, json: boolean): void {
   const routes = store.loadRoutes();
 
   if (json) {
-    const output = routes.map((route) => {
-      const tsRecord = tailscaleShareFromRoute(route);
-      return {
-        hostname: route.hostname,
-        url: formatUrl(route.hostname, proxyPort, tls),
-        port: route.port,
-        pid: route.pid,
-        registeredAt: route.registeredAt,
-        ...(route.upstream ? { upstream: route.upstream } : {}),
-        ...(route.tailscaleUrl ? { tailscaleUrl: route.tailscaleUrl } : {}),
-        ...(tsRecord?.kind === "funnel" || route.tailscaleFunnel ? { tailscaleFunnel: true } : {}),
-        ...(tsRecord?.kind === "service" ? { tailscaleService: tsRecord.serviceName } : {}),
-        ...Object.fromEntries(
-          PROCESS_TUNNELS.flatMap((t) =>
-            route[t.urlField] ? [[t.urlField, route[t.urlField]]] : []
-          )
-        ),
-      };
-    });
+    const output = routes.map((route) => toRouteView(route, proxyPort, tls));
     console.log(JSON.stringify({ routes: output }));
     return;
   }
@@ -1708,23 +1805,81 @@ async function ensureProxyRunning(
   return { started: true, state: discovered };
 }
 
+/** Effective TLDs for hostname preflight before the proxy starts or while it is running. */
+async function resolvePreflightTlds(
+  port: number,
+  tls: boolean,
+  tlds: readonly string[],
+  desired: ProxyDesiredState
+): Promise<readonly string[]> {
+  if (await isProxyUp(port, tls)) return tlds;
+  const { startConfig } = resolveProxyStart(desired);
+  return startConfig.lanMode ? ["local"] : startConfig.tlds;
+}
+
+/** Formats stderr progress output for app runs, hiding informational status when quiet. */
+interface RunReporter {
+  banner(): void;
+  status(message: string): void;
+  urls(urls: readonly string[]): void;
+  share(label: string, url: string, caption?: string): void;
+  tableEnd(): void;
+}
+
+/** Create a run output reporter from a verbosity flag resolved once at startup. */
+function createRunReporter(options: { quiet: boolean }): RunReporter {
+  const { quiet } = options;
+  const status = (message: string): void => {
+    if (!quiet) console.error(message);
+  };
+  return {
+    banner() {
+      status(chalk.blue.bold("\nportless\n"));
+    },
+    status,
+    urls(urls) {
+      const [primary, ...extra] = urls;
+      if (!primary) return;
+      console.error(chalk.cyan.bold(quiet ? `  -> ${primary}` : `\n  -> ${primary}\n`));
+      for (const extraUrl of extra) {
+        console.error(chalk.cyan(`  also -> ${extraUrl}`));
+      }
+      if (extra.length > 0) status("");
+    },
+    share(label, url, caption) {
+      console.error(chalk.green(`  ${label} -> ${url}`));
+      if (caption) status(chalk.gray(`  ${caption}`));
+    },
+    tableEnd() {
+      status("");
+    },
+  };
+}
+
 async function runApp(
   initialStore: RouteStore,
   proxyPort: number,
   stateDir: string,
-  name: WorktreeHostnameInput & { nameSource?: string; childPrefix?: string },
+  name: {
+    baseNames: readonly string[];
+    naming: WorktreeNaming | null;
+    nameSource?: string;
+    childPrefix?: string;
+  },
   commandArgs: string[],
   tls: boolean,
   tlds: string[],
   force: boolean,
-  desiredPort?: number,
-  lanMode = false,
-  lanIp?: string | null,
-  envVarNaming?: EnvVarNaming
+  desiredPort: number | undefined,
+  lanMode: boolean,
+  lanIp: string | null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean,
+  envVarNaming: EnvVarNaming
 ) {
   let store = initialStore;
   initialStore.recoverCorruptRoutesFile();
-  console.error(chalk.blue.bold(`\nportless\n`));
+  reporter.banner();
 
   const wantsFunnel = isEnabledEnv(process.env.PORTLESS_FUNNEL);
   const tailscaleDisabled = isDisabledEnv(process.env.PORTLESS_TAILSCALE) && !wantsFunnel;
@@ -1747,7 +1902,7 @@ async function runApp(
     try {
       serviceName =
         rawTsService === "1" || rawTsService === "true"
-          ? inferServiceName(name.baseName)
+          ? inferServiceName(name.baseNames[0])
           : rawTsService;
     } catch (err) {
       console.error(colors.red(`Error: ${err instanceof Error ? err.message : String(err)}`));
@@ -1850,7 +2005,9 @@ async function runApp(
   }
 
   // Validate the hostname before we try to auto-start the proxy.
-  buildHostnames(name, tlds);
+  const nameInputs = name.baseNames.map((baseName) => ({ baseName, naming: name.naming }));
+  const preflightTlds = await resolvePreflightTlds(proxyPort, tls, tlds, desired);
+  buildAppHostnames(nameInputs, preflightTlds, name.baseNames);
 
   const ensureResult = await ensureProxyRunning(proxyPort, tls, desired);
 
@@ -1880,11 +2037,11 @@ async function runApp(
     lanMode = runningConfig.lanMode;
     lanIp = runningConfig.lanIp;
     tlds = runningConfig.tlds;
-    console.error(chalk.gray("  Proxy is running"));
+    reporter.status(chalk.gray("  Proxy is running"));
   }
 
   // Compute hostnames after auto-start so TLDs reflect the running proxy.
-  const hostnames = buildHostnames(name, tlds);
+  const hostnames = buildAppHostnames(nameInputs, tlds, name.baseNames);
   const hostname = hostnames[0]!;
 
   if (
@@ -1900,14 +2057,18 @@ async function runApp(
   }
 
   if (lanIp) {
-    console.error(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
+    reporter.status(chalk.gray(`  ${hostnames.join(", ")} (LAN: ${lanIp})`));
   } else {
-    console.error(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
+    reporter.status(chalk.gray(`  ${hostnames.join(", ")} (auto-resolves to 127.0.0.1)`));
   }
   if (name.nameSource !== undefined) {
-    console.error(chalk.gray(`  Name "${name.baseName}" (from ${name.nameSource})`));
+    reporter.status(
+      chalk.gray(
+        `  ${name.baseNames.length === 1 ? "Name" : "Names"} ${name.baseNames.map((baseName) => `"${baseName}"`).join(", ")} (from ${name.nameSource})`
+      )
+    );
     if (name.naming) {
-      console.error(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
+      reporter.status(chalk.gray(`  Prefix "${name.naming.prefix}" (from ${name.naming.source})`));
     }
   }
 
@@ -1925,9 +2086,9 @@ async function runApp(
     port = registration.port;
     killedPids = registration.killedPids;
     if (desiredPort) {
-      console.error(colors.green(`  Using port ${port} (fixed)`));
+      reporter.status(colors.green(`  Using port ${port} (fixed)`));
     } else {
-      console.error(colors.green(`  Using port ${port}`));
+      reporter.status(colors.green(`  Using port ${port}`));
     }
     await reportHostsSyncHere(hostnames, proxyPort, tls, lanMode);
   } catch (err) {
@@ -1943,16 +2104,10 @@ async function runApp(
 
   const finalUrl = formatUrl(hostname, proxyPort, tls);
   const allUrls = formatUrls(hostnames, proxyPort, tls);
-  console.error(chalk.cyan.bold(`\n  -> ${finalUrl}\n`));
-  for (const extraUrl of allUrls.slice(1)) {
-    console.error(chalk.cyan(`  also -> ${extraUrl}`));
-  }
-  if (allUrls.length > 1) {
-    console.error("");
-  }
+  reporter.urls(allUrls);
   if (lanIp) {
-    console.error(chalk.green(`  LAN -> ${finalUrl}`));
-    console.error(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
+    reporter.status(chalk.green(`  LAN -> ${finalUrl}`));
+    reporter.status(chalk.gray("  (accessible from other devices on the same WiFi network)\n"));
   }
 
   let tailscaleRecord: TailscaleShareRecord | undefined;
@@ -2044,26 +2199,22 @@ async function runApp(
             : shared.record.kind === "tcp"
               ? "Tailscale (HTTP)"
               : "Tailscale";
-      console.error(chalk.green(`  ${label} -> ${tailscaleUrl}`));
-      if (shared.record.kind === "funnel") {
-        console.error(chalk.gray("  (accessible from the public internet via Tailscale Funnel)\n"));
-      } else if (shared.record.kind === "service") {
-        if (shared.pendingApproval) {
-          console.error(
-            colors.yellow("  (pending admin approval in Tailscale; DNS will not resolve yet)")
-          );
-          console.error(chalk.gray("  Approve at: https://login.tailscale.com/admin/services\n"));
-        } else {
-          console.error(
-            chalk.gray(`  (accessible on your tailnet as ${shared.record.serviceId})\n`)
-          );
-        }
-      } else if (shared.record.kind === "tcp") {
+      if (shared.record.kind === "service" && shared.pendingApproval) {
+        reporter.share(label, tailscaleUrl);
         console.error(
-          chalk.gray("  (accessible from your tailnet over HTTP; MagicDNS is disabled)\n")
+          colors.yellow("  (pending admin approval in Tailscale; DNS will not resolve yet)")
         );
+        console.error(chalk.gray("  Approve at: https://login.tailscale.com/admin/services\n"));
       } else {
-        console.error(chalk.gray("  (accessible from your tailnet)\n"));
+        const caption =
+          shared.record.kind === "funnel"
+            ? "(accessible from the public internet via Tailscale Funnel)\n"
+            : shared.record.kind === "service"
+              ? `(accessible on your tailnet as ${shared.record.serviceId})\n`
+              : shared.record.kind === "tcp"
+                ? "(accessible from your tailnet over HTTP; MagicDNS is disabled)\n"
+                : "(accessible from your tailnet)\n";
+        reporter.share(label, tailscaleUrl, caption);
       }
       try {
         store.updateRoute(hostname, {
@@ -2088,15 +2239,18 @@ async function runApp(
       run.proc = await run.t.start(port, {
         hostHeader: hostname,
         url: ngrokUrl,
-        appName: name.baseName,
+        appName: name.baseNames[0],
         configPath: path.join(store.dir, "cloudflared.yml"),
         password: netbirdPassword,
         pin: netbirdPin,
         groups: netbirdGroups,
         onExit: (code, signal) => handleTunnelExit(run, code, signal),
       });
-      console.error(chalk.green(`  ${run.t.label} -> ${run.proc.url}`));
-      console.error(chalk.gray(`  (accessible from the public internet via ${run.t.via})\n`));
+      reporter.share(
+        run.t.label,
+        run.proc.url,
+        `(accessible from the public internet via ${run.t.via})\n`
+      );
 
       try {
         store.updateRoute(hostname, {
@@ -2154,7 +2308,7 @@ async function runApp(
     },
     { naming: envVarNaming, shareUrl: tailscaleUrl, caPath }
   );
-  console.error(chalk.gray(`Running: ${built.display} ${commandArgs.join(" ")}\n`));
+  reporter.status(chalk.gray(`Running: ${built.display} ${commandArgs.join(" ")}\n`));
 
   const preexistingListener = await findPreexistingListener(port);
 
@@ -2184,6 +2338,7 @@ async function runApp(
   }
 
   spawnCommand(commandArgs, {
+    noStdin,
     env: { ...childBaseEnv, ...built.env },
     onExit: (childPid, code) =>
       transferRoutesToDaemon(store, hostnames, port, childPid, preexistingListener, code === 0),
@@ -2213,8 +2368,7 @@ interface ParsedRunArgs {
   force: boolean;
   /** Fixed app port (overrides automatic assignment). */
   appPort?: number;
-  /** Override the inferred base name (from --name flag). */
-  name?: string;
+  names: string[];
   /** Override the worktree label (from --prefix flag). Empty disables it. */
   prefix?: string;
   noWorktree?: boolean;
@@ -2222,7 +2376,7 @@ interface ParsedRunArgs {
   commandArgs: string[];
 }
 
-interface ParsedAppArgs extends ParsedRunArgs {
+interface ParsedAppArgs extends Omit<ParsedRunArgs, "names"> {
   /** App name. */
   name: string;
 }
@@ -2308,6 +2462,8 @@ function resolveNamingOrThrow(overrides?: EnvVarOverrides, config?: EnvVarOverri
 const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--force": "boolean",
   "--app-port": "value",
+  "--quiet": "boolean",
+  "--no-stdin": "boolean",
   ...ENV_VAR_FLAG_SPEC,
   ...WORKTREE_FLAG_SPEC,
   ...LAN_FLAG_SPEC,
@@ -2316,24 +2472,113 @@ const APP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "-h": "boolean",
 };
 
-const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+const NAMING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   "--name": "value",
   "--prefix": "text",
-  "--force": "boolean",
-  "--app-port": "value",
-  ...ENV_VAR_FLAG_SPEC,
-  ...WORKTREE_FLAG_SPEC,
+};
+
+const RUN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...NAMING_FLAG_SPEC,
+  ...APP_FLAG_SPEC,
   "--script": "value",
-  ...LAN_FLAG_SPEC,
-  ...SHARE_FLAG_SPEC,
-  "--help": "boolean",
-  "-h": "boolean",
 };
 
 const LEADING_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
   ...APP_FLAG_SPEC,
   "--script": "value",
 };
+
+const TRUST_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--device": "boolean" };
+const CLEAN_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--yes": "boolean", "-y": "boolean" };
+const PRUNE_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--force": "boolean" };
+const LIST_FLAG_SPEC: Readonly<Record<string, FlagKind>> = { "--json": "boolean" };
+const GET_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...WORKTREE_FLAG_SPEC,
+  "--json": "boolean",
+};
+const ENV_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  ...WORKTREE_FLAG_SPEC,
+  "--json": "boolean",
+};
+const ALIAS_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--remove": "value",
+  "--force": "boolean",
+  "--tld": "value",
+  "--upstream": "value",
+};
+const DOCTOR_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--json": "boolean",
+  ...LAN_FLAG_SPEC,
+};
+const PROXY_STOP_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--port": "value",
+  "-p": "value",
+};
+const PROXY_START_FLAG_SPEC: Readonly<Record<string, FlagKind>> = {
+  "--foreground": "boolean",
+  "--skip-trust": "boolean",
+  "--unprivileged": "boolean",
+  "--https": "boolean",
+  "--no-tls": "boolean",
+  "--wildcard": "boolean",
+  "--cert": "value",
+  "--key": "value",
+  "--port": "value",
+  "-p": "value",
+  "--tld": "value",
+  ...LAN_FLAG_SPEC,
+};
+
+function valueFlagNames(spec: Readonly<Record<string, FlagKind>>): string[] {
+  return Object.entries(spec)
+    .filter(([, kind]) => kind === "value")
+    .map(([flag]) => flag);
+}
+
+function buildCompletionSpec(): CompletionSpec {
+  return {
+    commands: COMMAND_NAMES,
+    globalFlags: [...Object.keys(LEADING_FLAG_SPEC), "--name", "--version", "-v"],
+    globalValueFlags: [...valueFlagNames(LEADING_FLAG_SPEC), "--name"],
+    byCommand: {
+      run: {
+        flags: Object.keys(RUN_FLAG_SPEC),
+        valueFlags: valueFlagNames(RUN_FLAG_SPEC),
+        stopsAtPositional: true,
+      },
+      get: { flags: Object.keys(GET_FLAG_SPEC) },
+      env: { flags: Object.keys(ENV_FLAG_SPEC) },
+      list: { flags: Object.keys(LIST_FLAG_SPEC) },
+      alias: { flags: Object.keys(ALIAS_FLAG_SPEC) },
+      compose: { subcommands: ["up", "down"], subcommandFlags: { up: ["-d"] } },
+      proxy: {
+        subcommands: ["start", "stop"],
+        subcommandFlags: {
+          start: Object.keys(PROXY_START_FLAG_SPEC),
+          stop: Object.keys(PROXY_STOP_FLAG_SPEC),
+        },
+      },
+      service: {
+        subcommands: ["install", "uninstall", "status"],
+        subcommandFlags: {
+          install: [
+            ...Object.keys(PROXY_START_FLAG_SPEC).filter(
+              (flag) => flag !== "--foreground" && flag !== "--skip-trust"
+            ),
+            "--state-dir",
+          ],
+        },
+      },
+      hosts: { subcommands: ["sync", "clean"] },
+      doctor: { flags: Object.keys(DOCTOR_FLAG_SPEC) },
+      trust: { flags: Object.keys(TRUST_FLAG_SPEC) },
+      clean: { flags: Object.keys(CLEAN_FLAG_SPEC) },
+      prune: { flags: Object.keys(PRUNE_FLAG_SPEC) },
+      mcp: { flags: ["--tools"] },
+      completion: { subcommands: COMPLETION_SHELLS },
+    },
+  };
+}
 
 /** Sets the environment a LAN or sharing flag stands for. Rejects an --ip value that is not an IP address. */
 function applyGlobalFlag(flag: string, value?: string): void {
@@ -2421,11 +2666,13 @@ ${colors.bold("Usage:")}
   or can write to the state directory.
 
 ${colors.bold("Options:")}
-  --name <name>          Override the inferred base name (worktree prefix still applies)
+  --name <name>          Override the inferred name (repeatable; worktree prefix still applies)
   --prefix <label>       Override the worktree label (an empty value disables it)
   --no-worktree          Use the base name without worktree naming; overrides --prefix
   --force                Kill the existing process and take over its route
   --app-port <number>    Use a fixed port for the app (skip auto-assignment)
+  --quiet                Hide startup status lines (keeps URLs, proxy startup, warnings, and errors; or PORTLESS_QUIET=1)
+  --no-stdin             Detach stdin from the child process (useful for interactive runtimes)
   --port-var <name>      Set the app port environment variable name
   --host-var <name>      Set the app host environment variable name
   --tailscale            Share the app on your Tailscale network (tailnet)
@@ -2476,7 +2723,7 @@ ${colors.bold("Examples:")}
 function parseRunArgs(args: string[]): ParsedRunArgs {
   let force = false;
   let appPort: number | undefined;
-  let name: string | undefined;
+  const names: string[] = [];
   let prefix: string | undefined;
   let noWorktree = false;
 
@@ -2493,7 +2740,8 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
         appPort = parseAppPort(value);
         break;
       case "--name":
-        name = value;
+        if (!value || value.startsWith("-")) throw new UsageError("--name requires a name.");
+        names.push(value);
         break;
       case "--prefix":
         prefix = value;
@@ -2509,7 +2757,7 @@ function parseRunArgs(args: string[]): ParsedRunArgs {
   return {
     force,
     appPort: appPort ?? appPortFromEnv(),
-    name,
+    names,
     prefix,
     noWorktree,
     commandArgs,
@@ -2587,7 +2835,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless <name> <cmd>")}            Run with an explicit app name
   ${colors.cyan("portless proxy start")}             Start the proxy
   ${colors.cyan("portless proxy stop")}              Stop the proxy
-  ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server
+  ${colors.cyan("portless mcp [--tools <profiles>]")} Start the stdio MCP server (2026-07-28 and legacy)
   ${colors.cyan("portless service install")}         Start proxy automatically when the OS starts
   ${colors.cyan("portless get <name>")}              Print URL for a service
   ${colors.cyan("portless env [name...]")}           Print shell exports for sibling processes
@@ -2602,6 +2850,7 @@ ${colors.bold("Usage:")}
   ${colors.cyan("portless prune")}                   Clean up routes left by crashed sessions
   ${colors.cyan("portless hosts sync")}              Reconcile routes with ${HOSTS_DISPLAY}
   ${colors.cyan("portless hosts clean")}             Remove portless entries from ${HOSTS_DISPLAY}
+  ${colors.cyan("portless completion <shell>")}      Print shell completion script (bash, zsh, fish)
 
 Every command accepts --help or -h, which only prints help. After run <cmd>,
 compose <subcommand>, or --, they belong to the wrapped command.
@@ -2635,6 +2884,8 @@ ${colors.bold("Options:")}
   --netbird-password <pw>       Protect the NetBird share with a password
   --netbird-pin <code>          Protect the NetBird share with a PIN
   --netbird-groups <csv>        Restrict the NetBird share to user groups
+  --quiet                       Hide startup status lines (keeps URLs, proxy startup, warnings, and errors)
+  --no-stdin                    Detach stdin from the child process
   --                            Stop flag parsing and pass remaining arguments to the app
 
 ${colors.bold("Options for run and <name> <command>:")}
@@ -2652,6 +2903,7 @@ ${colors.bold("Environment variables:")}
   PORTLESS_LAN=1                Enable LAN mode
   PORTLESS_TLD=<tld[,tld]>      Set one or more proxy TLDs
   PORTLESS_PREFIX=<label>       Set the worktree prefix; an empty value disables it
+  PORTLESS_QUIET=1              Same as --quiet
 
 Precedence: flags override PORTLESS_* variables, which override project config.
 Project config lookup: portless.json, .config/portless.json, then package.json portless.
@@ -2663,6 +2915,39 @@ Run options: portless run --help
 Run portless <command> --help or visit https://portless.sh for details.
 `);
   process.exit(0);
+}
+
+function printCompletionHelp(): void {
+  console.log(`
+${colors.bold("portless completion")} - Print shell completion script for bash, zsh, or fish.
+
+${colors.bold("Usage:")}
+  ${colors.cyan("portless completion <bash|zsh|fish>")}
+
+${colors.bold("Examples:")}
+  source <(portless completion bash)
+  eval "$(portless completion zsh)"
+  portless completion fish > ~/.config/fish/completions/portless.fish
+
+${colors.bold("Options:")}
+  --help, -h             Show this help
+`);
+}
+
+async function handleCompletion(args: string[]): Promise<void> {
+  const parsed = parseCommandArgs("completion", args.slice(1), {}, 1);
+  const shell = parsed.positionals[0];
+  if (!shell) {
+    printCompletionHelp();
+    return;
+  }
+  if (!isCompletionShell(shell)) {
+    throw new UsageError(
+      `Unknown shell "${shell}". Supported shells: ${COMPLETION_SHELLS.join(", ")}.`,
+      ["Usage:", "  portless completion <bash|zsh|fish>"]
+    );
+  }
+  process.stdout.write(generateCompletionScript(shell, buildCompletionSpec()));
 }
 
 function printVersion(): void {
@@ -2716,7 +3001,7 @@ async function trustProxyCaIfAllowed(dir: string, tls: boolean): Promise<void> {
 }
 
 async function handleTrust(args: string[] = []): Promise<void> {
-  const parsed = parseCommandArgs("trust", args.slice(1), { "--device": "boolean" }, 0);
+  const parsed = parseCommandArgs("trust", args.slice(1), TRUST_FLAG_SPEC, 0);
   const { dir, port, tls } = await discoverState();
   if (!fs.existsSync(dir)) ensureStateDir(dir);
   const unsafe = explainUnsafeStateDir(dir);
@@ -2922,8 +3207,10 @@ function runCleanupSteps(
   const stateFailures = steps.includes("files")
     ? removeStateFilesForCleanup(stateDirs, failedCAStateDirs, preserveProxyRuntime, preserveRoutes)
     : [];
-  const hostsCleaned = !steps.includes("hosts") || cleanHostsFile();
-  return { caResults, failedCAStateDirs, stateFailures, hostsCleaned };
+  const hostsResult: HostsResult = steps.includes("hosts")
+    ? cleanHostsFile()
+    : { action: "unchanged", block: "ok", changed: false };
+  return { caResults, failedCAStateDirs, stateFailures, hostsResult };
 }
 
 /**
@@ -2972,7 +3259,8 @@ Stops the proxy if it is running, uninstalls the startup service if installed,
 removes the local CA from the OS trust store when it was installed by portless,
 deletes known files under state directories (~/.portless, the system state
 directory, and PORTLESS_STATE_DIR when set), and removes the portless block
-from ${HOSTS_DISPLAY}.
+from ${HOSTS_DISPLAY}. Hosts writes are atomic. Malformed # portless-start or
+# portless-end blocks fail with a nonzero exit and must be removed manually.
 
 Only allowlisted filenames under each state directory are deleted. Custom
 certificate paths from --cert and --key are never removed. If trust removal
@@ -2985,8 +3273,9 @@ is left alone. Clean prints the reason and exits nonzero. A /tmp/portless
 directory that fails the check is skipped without an error.
 
 On macOS and Linux, a privileged proxy stop or a failed trust-store, state-file,
-or ${HOSTS_DISPLAY} step is retried with sudo. The retry runs only those failed
-steps against the same allowlisted state directories. If the proxy cannot be
+or ${HOSTS_DISPLAY} step is retried with sudo, except for malformed blocks. The
+retry runs only those failed steps against the same allowlisted state
+directories. If the proxy cannot be
 confirmed stopped, its PID, port, runtime marker files, and CA files are kept
 and the CA stays trusted. On Windows, run as Administrator if needed.
 
@@ -3000,12 +3289,7 @@ ${colors.bold("Options:")}
 }
 
 async function handleClean(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs(
-    "clean",
-    args.slice(1),
-    { "--yes": "boolean", "-y": "boolean" },
-    0
-  );
+  const parsed = parseCommandArgs("clean", args.slice(1), CLEAN_FLAG_SPEC, 0);
 
   const requestedCleanupSteps = parseCleanupSteps(process.env[CLEAN_ELEVATED_STEPS_ENV]);
   if (requestedCleanupSteps) {
@@ -3026,7 +3310,7 @@ async function handleClean(args: string[]): Promise<void> {
       cleanableDirs.length === approvedDirs.length &&
       left.failedCAStateDirs.size === 0 &&
       left.stateFailures.length === 0 &&
-      left.hostsCleaned;
+      left.hostsResult.action !== "failed";
     process.exitCode = clean ? 0 : 1;
     return;
   }
@@ -3137,12 +3421,13 @@ async function handleClean(args: string[]): Promise<void> {
     preserveRoutes
   );
   const { caResults: caRemovalResults, failedCAStateDirs } = outcome;
-  let { stateFailures, hostsCleaned } = outcome;
+  let { stateFailures, hostsResult } = outcome;
+  const hostsOk = hostsResult.action !== "failed";
 
   const retrySteps: CleanupStep[] = [];
   if (failedCAStateDirs.size > 0) retrySteps.push("ca");
   if (stateFailures.length > 0 || failedCAStateDirs.size > 0) retrySteps.push("files");
-  if (!hostsCleaned) retrySteps.push("hosts");
+  if (!hostsOk && hostsResult.block !== "malformed") retrySteps.push("hosts");
   if (retrySteps.length > 0 && !isWindows && process.getuid?.() !== 0) {
     const elevatedStatus = runElevatedCleanup(
       retrySteps,
@@ -3153,7 +3438,9 @@ async function handleClean(args: string[]): Promise<void> {
     if (elevatedStatus === 0) {
       failedCAStateDirs.clear();
       if (retrySteps.includes("files")) stateFailures = [];
-      if (retrySteps.includes("hosts")) hostsCleaned = true;
+      if (retrySteps.includes("hosts")) {
+        hostsResult = { action: "cleaned", block: "ok", changed: true };
+      }
     } else {
       for (const stateDir of [...failedCAStateDirs]) {
         if (
@@ -3172,7 +3459,7 @@ async function handleClean(args: string[]): Promise<void> {
           preserveRoutes
         );
       }
-      if (!hostsCleaned) hostsCleaned = cleanHostsFile();
+      if (!hostsOk && hostsResult.block !== "malformed") hostsResult = cleanHostsFile();
     }
   }
 
@@ -3203,8 +3490,11 @@ async function handleClean(args: string[]): Promise<void> {
     );
   }
 
-  if (hostsCleaned) {
+  if (hostsResult.action !== "failed") {
     console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+  } else if (hostsResult.block === "malformed") {
+    console.warn(colors.yellow(malformedHostsMessage()));
+    problems++;
   } else {
     console.warn(
       colors.yellow(
@@ -3257,9 +3547,7 @@ ${colors.bold("Options:")}
 }
 
 async function handlePrune(args: string[]): Promise<void> {
-  const forceKill = parseCommandArgs("prune", args.slice(1), { "--force": "boolean" }, 0).has(
-    "--force"
-  );
+  const forceKill = parseCommandArgs("prune", args.slice(1), PRUNE_FLAG_SPEC, 0).has("--force");
 
   const { dir } = await discoverState();
   const store = new RouteStore(dir);
@@ -3374,7 +3662,7 @@ async function handlePrune(args: string[]): Promise<void> {
 }
 
 async function handleList(args: string[]): Promise<void> {
-  const json = parseCommandArgs("list", args.slice(1), { "--json": "boolean" }, 0).has("--json");
+  const json = parseCommandArgs("list", args.slice(1), LIST_FLAG_SPEC, 0).has("--json");
   const { dir, port, tls } = await discoverState();
   const store = new RouteStore(dir);
   listRoutes(store, port, tls, json);
@@ -3409,7 +3697,7 @@ PORTLESS_PREFIX="" skips worktree naming.
 
 ${colors.bold("Options:")}
   --no-worktree          Skip config loading and worktree naming
-  --json                 Print name, hostname, and URL as JSON
+  --json                 Print name, hostname, URL, and active route port as JSON
   --help, -h             Show this help
 
 ${colors.bold("Examples:")}
@@ -3419,13 +3707,20 @@ ${colors.bold("Examples:")}
 `);
 }
 
+/** Return the active route port for `hostname`, or `undefined` when unavailable. */
+function findActiveRoutePort(stateDir: string, hostname: string): number | undefined {
+  const store = new RouteStore(stateDir, { onWarning: () => {} });
+  if (store.untrustedReason()) return undefined;
+  try {
+    return store.loadRoutes().find((route) => route.hostname === hostname)?.port;
+  } catch (err) {
+    if (err instanceof RoutesFileError) return undefined;
+    throw err;
+  }
+}
+
 async function handleGet(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs(
-    "get",
-    args.slice(1),
-    { ...WORKTREE_FLAG_SPEC, "--json": "boolean" },
-    1
-  );
+  const parsed = parseCommandArgs("get", args.slice(1), GET_FLAG_SPEC, 1);
   const name = parsed.positionals[0];
   if (!name) {
     throw new UsageError("Missing service name.", [
@@ -3443,11 +3738,21 @@ async function handleGet(args: string[]): Promise<void> {
     config: appConfig?.worktree,
     override: skipWorktree ? null : undefined,
   });
-  const { port, tls, tlds } = await discoverState();
+  const { dir, port, tls, tlds } = await discoverState();
   const hostname = buildHostnames({ baseName: name, naming: worktree }, tlds)[0]!;
   const url = formatUrl(hostname, port, tls);
+  const activePort = json ? findActiveRoutePort(dir, hostname) : undefined;
   // Print bare URL to stdout so it works in $(portless get <name>)
-  process.stdout.write((json ? JSON.stringify({ name, hostname, url }) : url) + "\n");
+  process.stdout.write(
+    (json
+      ? JSON.stringify({
+          name,
+          hostname,
+          url,
+          ...(activePort !== undefined ? { port: activePort } : {}),
+        })
+      : url) + "\n"
+  );
 }
 
 function printEnvHelp(): void {
@@ -3481,10 +3786,7 @@ ${colors.bold("Examples:")}
 }
 
 async function handleEnv(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs("env", args.slice(1), {
-    ...WORKTREE_FLAG_SPEC,
-    "--json": "boolean",
-  });
+  const parsed = parseCommandArgs("env", args.slice(1), ENV_FLAG_SPEC);
   const skipWorktree = parsed.has("--no-worktree");
   const json = parsed.has("--json");
 
@@ -3612,17 +3914,7 @@ async function handleAlias(args: string[]): Promise<void> {
     printAliasHelp();
     return;
   }
-  const parsed = parseCommandArgs(
-    "alias",
-    args.slice(1),
-    {
-      "--remove": "value",
-      "--force": "boolean",
-      "--tld": "value",
-      "--upstream": "value",
-    },
-    2
-  );
+  const parsed = parseCommandArgs("alias", args.slice(1), ALIAS_FLAG_SPEC, 2);
   const isRemove = parsed.has("--remove");
   const removeName = parsed.value("--remove");
   const [aliasName, aliasPortValue] = parsed.positionals;
@@ -3761,8 +4053,9 @@ ${colors.bold("Auto-sync:")}
 
 ${colors.bold("Safety:")}
   Sync removes stale entries when there are no routes. It requires a successful
-  hosts-file read before writing and verifies every write. Read or verification
-  failures use the normal elevated privileges or error path.
+  hosts-file read before writing and verifies every atomic write. Malformed
+  # portless-start or # portless-end blocks fail with a nonzero exit and must
+  be removed manually. Other failures use the elevated privileges or error path.
 `);
 }
 
@@ -3778,8 +4071,14 @@ async function handleHosts(args: string[]): Promise<void> {
   parseCommandArgs(`hosts ${args[1]}`, args.slice(2), {}, 0);
 
   if (args[1] === "clean") {
-    if (cleanHostsFile()) {
+    const result = cleanHostsFile();
+    if (result.action !== "failed") {
       console.log(colors.green(`Removed portless entries from ${HOSTS_DISPLAY}.`));
+      return;
+    }
+    if (result.block === "malformed") {
+      console.error(colors.red(malformedHostsMessage()));
+      process.exit(1);
       return;
     }
 
@@ -3803,7 +4102,8 @@ async function handleHosts(args: string[]): Promise<void> {
 
   const routes = store.loadRoutes();
   const hostnames = routes.map((r) => r.hostname);
-  if (syncHostsFile(hostnames)) {
+  const hostsResult = syncHostsFile(hostnames);
+  if (hostsResult.action !== "failed") {
     if (hostnames.length === 0) {
       console.log(colors.green(`No stale portless entries remain in ${HOSTS_DISPLAY}.`));
       return;
@@ -3812,6 +4112,11 @@ async function handleHosts(args: string[]): Promise<void> {
     for (const h of hostnames) {
       console.log(colors.cyan(`  127.0.0.1 ${h}`));
     }
+    return;
+  }
+  if (hostsResult.block === "malformed") {
+    console.error(colors.red(malformedHostsMessage()));
+    process.exit(1);
     return;
   }
 
@@ -3932,12 +4237,7 @@ ${colors.bold("Exit codes:")}
 }
 
 async function handleDoctor(args: string[]): Promise<void> {
-  const parsed = parseCommandArgs(
-    "doctor",
-    args.slice(1),
-    { "--json": "boolean", ...LAN_FLAG_SPEC },
-    0
-  );
+  const parsed = parseCommandArgs("doctor", args.slice(1), DOCTOR_FLAG_SPEC, 0);
   applyLanFlags(parsed);
   const json = parsed.has("--json");
 
@@ -4358,12 +4658,7 @@ async function handleProxy(args: string[]): Promise<void> {
   }
 
   if (args[1] === "stop") {
-    const parsed = parseCommandArgs(
-      "proxy stop",
-      args.slice(2),
-      { "--port": "value", "-p": "value" },
-      0
-    );
+    const parsed = parseCommandArgs("proxy stop", args.slice(2), PROXY_STOP_FLAG_SPEC, 0);
     for (const value of [...parsed.values("--port"), ...parsed.values("-p")]) {
       if (parsePort(value) === null) {
         throw new UsageError(`Invalid port number: ${value}`, [
@@ -4391,25 +4686,7 @@ async function handleProxy(args: string[]): Promise<void> {
   if (autoIpIndex !== -1) {
     applyGlobalFlag(INTERNAL_LAN_IP_FLAG, startArgs.splice(autoIpIndex, 2)[1]);
   }
-  const startFlags = parseCommandArgs(
-    "proxy start",
-    startArgs,
-    {
-      "--foreground": "boolean",
-      "--skip-trust": "boolean",
-      "--unprivileged": "boolean",
-      "--https": "boolean",
-      "--no-tls": "boolean",
-      "--wildcard": "boolean",
-      "--cert": "value",
-      "--key": "value",
-      "--port": "value",
-      "-p": "value",
-      "--tld": "value",
-      ...LAN_FLAG_SPEC,
-    },
-    0
-  );
+  const startFlags = parseCommandArgs("proxy start", startArgs, PROXY_START_FLAG_SPEC, 0);
   applyLanFlags(startFlags);
   const isForeground = startFlags.has("--foreground");
   const skipTrust = startFlags.has("--skip-trust");
@@ -4752,7 +5029,7 @@ async function handleProxy(args: string[]): Promise<void> {
   }
 
   // Prepare TLS options if HTTPS is requested
-  let tlsOptions: import("./types.js").ProxyServerOptions["tls"];
+  let tlsMode: { cert: Buffer; key: Buffer } | "managed" | undefined;
   if (useHttps) {
     store.ensureDir();
     if (customCertPath && customKeyPath) {
@@ -4776,7 +5053,7 @@ async function handleProxy(args: string[]): Promise<void> {
         }
 
         createSecureContext({ cert, key });
-        tlsOptions = { cert, key };
+        tlsMode = { cert, key };
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
         console.error(colors.red(`Error reading certificate files: ${message}`));
@@ -4849,15 +5126,7 @@ async function handleProxy(args: string[]): Promise<void> {
         }
       }
 
-      const cert = fs.readFileSync(certs.certPath);
-      const key = fs.readFileSync(certs.keyPath);
-      const ca = fs.readFileSync(certs.caPath);
-      tlsOptions = {
-        cert,
-        key,
-        ca,
-        SNICallback: createSNICallback(stateDir, cert, key, tlds, ca),
-      };
+      tlsMode = "managed";
     }
   }
 
@@ -4869,10 +5138,9 @@ async function handleProxy(args: string[]): Promise<void> {
       proxyPort,
       tld,
       tlds,
-      tlsOptions,
+      tlsMode,
       lanIp,
       desiredWildcard ? false : undefined,
-      !!(customCertPath && customKeyPath),
       desiredUnprivileged
     );
     return;
@@ -4997,6 +5265,8 @@ async function handleDefaultMode(
   globalScript: string | undefined,
   extraArgs: string[],
   worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean,
   envVarOverrides: EnvVarOverrides
 ): Promise<boolean> {
   const cwd = process.cwd();
@@ -5019,7 +5289,15 @@ async function handleDefaultMode(
     }
     const hasMatchingPackages = packages.some((p) => p.scripts[wsScriptName]);
     if (hasMatchingPackages) {
-      await handleDefaultMulti(cwd, globalScript, extraArgs, worktreeOverride, envVarOverrides);
+      await handleDefaultMulti(
+        cwd,
+        globalScript,
+        extraArgs,
+        worktreeOverride,
+        reporter,
+        noStdin,
+        envVarOverrides
+      );
       return true;
     }
   }
@@ -5033,6 +5311,8 @@ async function handleDefaultMode(
       appConfig,
       extraArgs,
       worktreeOverride,
+      reporter,
+      noStdin,
       envVarOverrides
     );
     return true;
@@ -5084,6 +5364,8 @@ async function handleDefaultSingle(
   appConfig: AppConfigWithSource | null,
   extraArgs: string[],
   worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean,
   envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   const forwardedArgs = forwardScriptExtraArgs(scriptName, cwd, extraArgs);
@@ -5117,7 +5399,7 @@ async function handleDefaultSingle(
     store,
     port,
     dir,
-    { baseName, naming: worktree, nameSource },
+    { baseNames: [baseName], naming: worktree, nameSource },
     resolved,
     tls,
     tlds,
@@ -5125,6 +5407,8 @@ async function handleDefaultSingle(
     appPortFromEnv() ?? appConfig?.appPort,
     lanMode,
     lanIp,
+    reporter,
+    noStdin,
     resolveNamingOrThrow(envVarOverrides, appConfig ?? undefined)
   );
 }
@@ -5347,6 +5631,8 @@ async function handleDefaultMulti(
   globalScript: string | undefined,
   extraArgs: string[],
   worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean,
   envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   let loaded: ReturnType<typeof loadConfig>;
@@ -5517,7 +5803,7 @@ async function handleDefaultMulti(
     );
   }
 
-  console.error(chalk.blue.bold(`\nportless\n`));
+  reporter.banner();
 
   let { dir, port, tls, tlds, lanMode } = await discoverState();
 
@@ -5551,11 +5837,7 @@ async function handleDefaultMulti(
     };
     // A running proxy keeps its own TLDs; a stopped one starts with the same
     // persisted/env merge ensureProxyRunning uses, with LAN normalized to .local.
-    let preflightTlds = tlds;
-    if (!(await isProxyUp(port, tls))) {
-      const { startConfig } = resolveProxyStart(multiDesired);
-      preflightTlds = startConfig.lanMode ? ["local"] : startConfig.tlds;
-    }
+    const preflightTlds = await resolvePreflightTlds(port, tls, tlds, multiDesired);
     checkHostnameCollisions(preflightTlds);
 
     const ensureResult = await ensureProxyRunning(port, tls, multiDesired);
@@ -5589,10 +5871,12 @@ async function handleDefaultMulti(
       scriptName,
       proxiedApps,
       taskApps,
-      extraArgs
+      extraArgs,
+      reporter,
+      noStdin
     );
   } else {
-    await runWithDirectSpawn(dir, port, tls, tlds, lanMode, proxiedApps, taskApps);
+    await runWithDirectSpawn(dir, port, tls, tlds, lanMode, proxiedApps, taskApps, reporter);
   }
 }
 
@@ -5606,7 +5890,9 @@ async function runWithTurbo(
   scriptName: string,
   proxiedApps: MultiAppEntry[],
   taskApps: MultiAppEntry[],
-  extraArgs: string[] = []
+  extraArgs: string[],
+  reporter: RunReporter,
+  noStdin: boolean
 ): Promise<void> {
   const store = new RouteStore(stateDir);
   const peers = collectPeerApps(proxiedApps, tlds, proxyPort, tls);
@@ -5669,7 +5955,7 @@ async function runWithTurbo(
       console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.error("");
+  reporter.tableEnd();
 
   const pm = detectPackageManager(wsRoot);
   const useRootScript = hasScript(scriptName, wsRoot);
@@ -5689,7 +5975,7 @@ async function runWithTurbo(
 
   const turboSpawnedAt = Date.now();
   const turboChild = spawn(turboArgs[0], turboArgs.slice(1), {
-    stdio: "inherit",
+    stdio: noStdin ? ["ignore", "inherit", "inherit"] : "inherit",
     cwd: wsRoot,
     env: {
       ...process.env,
@@ -5746,7 +6032,8 @@ async function runWithDirectSpawn(
   tlds: string[],
   lanMode: boolean,
   proxiedApps: MultiAppEntry[],
-  taskApps: MultiAppEntry[]
+  taskApps: MultiAppEntry[],
+  reporter: RunReporter
 ): Promise<void> {
   const children: ReturnType<typeof spawn>[] = [];
   const exitCodes = new Map<MultiAppEntry, number | null>();
@@ -5788,7 +6075,7 @@ async function runWithDirectSpawn(
       console.error(`  ${label}${pad}  ${chalk.dim(url)}`);
     }
   }
-  console.error("");
+  reporter.tableEnd();
 
   const SIGKILL_TIMEOUT_MS = 5_000;
 
@@ -5846,6 +6133,8 @@ async function handleRunMode(
   args: string[],
   globalScript: string | undefined,
   worktreeOverride: null | undefined,
+  reporter: RunReporter,
+  noStdin: boolean,
   envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   const parsed = parseRunArgs(args);
@@ -5869,18 +6158,18 @@ async function handleRunMode(
     ]);
   }
 
-  let baseName: string;
+  let baseNames: string[];
   let nameSource: string;
 
-  if (parsed.name) {
-    baseName = parsed.name;
-    nameSource = "--name flag";
+  if (parsed.names.length > 0) {
+    baseNames = [...new Set(parsed.names)];
+    nameSource = parsed.names.length === 1 ? "--name flag" : "--name flags";
   } else if (appConfig?.name) {
-    baseName = appConfig.name;
+    baseNames = [appConfig.name];
     nameSource = appConfig.source;
   } else {
     const inferred = inferProjectName();
-    baseName = inferred.name;
+    baseNames = [inferred.name];
     nameSource = inferred.source;
   }
 
@@ -5897,7 +6186,7 @@ async function handleRunMode(
     store,
     port,
     dir,
-    { baseName, naming: worktree, nameSource, childPrefix: override ?? undefined },
+    { baseNames, naming: worktree, nameSource, childPrefix: override ?? undefined },
     parsed.commandArgs,
     tls,
     tlds,
@@ -5905,6 +6194,8 @@ async function handleRunMode(
     parsed.appPort,
     lanMode,
     lanIp,
+    reporter,
+    noStdin,
     resolveNamingOrThrow(envVarOverrides, appConfig ?? undefined)
   );
 }
@@ -5919,6 +6210,8 @@ const NAMED_USAGE = [
 async function handleNamedMode(
   args: string[],
   explicitName: boolean,
+  reporter: RunReporter,
+  noStdin: boolean,
   envVarOverrides: EnvVarOverrides
 ): Promise<void> {
   const { name, hasCommand } = readNamedArgs(args);
@@ -5951,7 +6244,7 @@ async function handleNamedMode(
     store,
     port,
     dir,
-    nameInput,
+    { baseNames: [parsed.name], naming: null },
     parsed.commandArgs,
     tls,
     tlds,
@@ -5959,6 +6252,8 @@ async function handleNamedMode(
     parsed.appPort,
     lanMode,
     lanIp,
+    reporter,
+    noStdin,
     resolveNamingOrThrow(envVarOverrides, appConfig ?? undefined)
   );
 }
@@ -6413,15 +6708,28 @@ function isPortlessSkipped(): boolean {
 interface CommandEntry {
   run: (
     args: string[],
-    context: { globalScript?: string; worktreeOverride?: null; envVarOverrides: EnvVarOverrides }
+    context: {
+      globalScript?: string;
+      worktreeOverride?: null;
+      reporter: RunReporter;
+      noStdin: boolean;
+      envVarOverrides: EnvVarOverrides;
+    }
   ) => Promise<void>;
   help?: () => void;
 }
 
 const COMMANDS: Record<CommandName, CommandEntry> = {
   run: {
-    run: (args, { globalScript, worktreeOverride, envVarOverrides }) =>
-      handleRunMode(args.slice(1), globalScript, worktreeOverride, envVarOverrides),
+    run: (args, { globalScript, worktreeOverride, reporter, noStdin, envVarOverrides }) =>
+      handleRunMode(
+        args.slice(1),
+        globalScript,
+        worktreeOverride,
+        reporter,
+        noStdin,
+        envVarOverrides
+      ),
   },
   get: { run: handleGet, help: printGetHelp },
   env: { run: handleEnv, help: printEnvHelp },
@@ -6439,6 +6747,7 @@ const COMMANDS: Record<CommandName, CommandEntry> = {
   clean: { run: handleClean, help: printCleanHelp },
   prune: { run: handlePrune, help: printPruneHelp },
   mcp: { run: (args) => runMcp(args.slice(1)), help: printMcpHelp },
+  completion: { run: handleCompletion, help: printCompletionHelp },
 };
 
 async function main() {
@@ -6576,6 +6885,11 @@ async function main() {
     }
   }
 
+  const quiet =
+    stripGlobalFlag("--quiet", false) === true || isEnabledEnv(process.env.PORTLESS_QUIET);
+  const reporter = createRunReporter({ quiet });
+  const noStdin = stripGlobalFlag("--no-stdin", false) === true;
+
   // --script flag: override the default "dev" script for zero-arg mode.
   const scriptResult = stripGlobalFlag("--script", true);
   if (scriptResult === false) {
@@ -6665,7 +6979,7 @@ async function main() {
     const forwardedArgs = forwardScriptExtraArgs(scriptName, process.cwd(), scriptArgs);
     const resolved = resolveScriptCommand(scriptName, process.cwd(), forwardedArgs);
     if (resolved) {
-      spawnCommand(resolved);
+      spawnCommand(resolved, { noStdin });
       return;
     }
     throw new UsageError("No command provided.");
@@ -6684,7 +6998,7 @@ async function main() {
       if (resolved) commandArgs = resolved;
     }
     if (commandArgs.length === 0) throw new UsageError("No command provided.");
-    spawnCommand(commandArgs);
+    spawnCommand(commandArgs, { noStdin });
     return;
   }
 
@@ -6693,7 +7007,7 @@ async function main() {
       command.help();
       return;
     }
-    await command.run(args, { globalScript, worktreeOverride, envVarOverrides });
+    await command.run(args, { globalScript, worktreeOverride, reporter, noStdin, envVarOverrides });
     return;
   }
   if (!explicitName) {
@@ -6707,6 +7021,8 @@ async function main() {
         globalScript,
         extraArgs,
         worktreeOverride,
+        reporter,
+        noStdin,
         envVarOverrides
       );
       if (handled) return;
@@ -6719,7 +7035,7 @@ async function main() {
     }
   }
 
-  await handleNamedMode(args, explicitName, envVarOverrides);
+  await handleNamedMode(args, explicitName, reporter, noStdin, envVarOverrides);
 }
 
 main().catch((err: unknown) => {
