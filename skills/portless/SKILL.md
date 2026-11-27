@@ -572,7 +572,7 @@ portless hosts clean   # Remove entries later
 
 Auto-syncs `/etc/hosts` for route hostnames by default. Set `PORTLESS_SYNC_HOSTS=0` to disable. If a route hostname will not resolve, the command that registered it warns and points you to `portless hosts sync`.
 
-Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. A read or verification failure follows the normal sync error path.
+Manual sync reconciles portless-managed entries with current routes and removes stale entries when there are no routes. It requires a successful initial hosts-file read before writing and verifies each write. Hosts file updates write atomically through a temporary file and rename. If a `# portless-start` / `# portless-end` block is malformed, `portless hosts sync` and `portless hosts clean` leave `/etc/hosts` untouched and exit nonzero. Fix the block manually before retrying. A read or verification failure follows the normal sync error path.
 
 ### Browser shows certificate warning with --https
 
@@ -592,7 +592,7 @@ On macOS and Linux, `portless trust`, `portless proxy stop`, `portless prune`, `
 portless clean
 ```
 
-Stops the proxy if needed, removes the startup service and portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. On macOS and Linux, failed CA, state-file, and hosts steps are retried with sudo against the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. If trust-store removal still fails, portless retains its CA certificate and key so a later `portless clean` can safely retry. A state directory that another user owns or can write to is left alone: clean prints the reason and exits nonzero, and a `/tmp/portless` directory that fails the check is skipped without an error. The rule is the same one `portless trust` applies.
+Stops the proxy if needed, removes the startup service and portless CA from the trust store (when portless added it), deletes known files under state directories, and removes the portless `/etc/hosts` block. The command previews these actions and asks for confirmation. Use `portless clean --yes` or `portless clean -y` in CI or without a terminal. Service, CA, state-file, and hosts cleanup failures produce a nonzero exit code. If the portless hosts block is malformed, clean leaves `/etc/hosts` untouched and exits nonzero so you can fix the block manually. On macOS and Linux, failed CA, state-file, and hosts steps (except for malformed blocks) are retried with sudo against the same allowlisted targets. If the proxy cannot be confirmed stopped, its PID, port, runtime marker files, and CA files are kept and the CA stays trusted. If trust-store removal still fails, portless retains its CA certificate and key so a later `portless clean` can safely retry. A state directory that another user owns or can write to is left alone: clean prints the reason and exits nonzero, and a `/tmp/portless` directory that fails the check is skipped without an error. The rule is the same one `portless trust` applies.
 
 ### Proxy loop (508 Loop Detected)
 
@@ -638,6 +638,7 @@ Requires the ngrok CLI to be installed (https://ngrok.com/download) and on PATH.
 ### Requirements
 
 - Node.js 24+
+- Bun 1.4.4+ (optional; required when running the HTTPS proxy under Bun)
 - macOS, Linux, or Windows
 - `openssl` (for `--https` cert generation; ships with macOS and most Linux distributions; on Windows, install via `winget install -e --id ShiningLight.OpenSSL.Dev` or use the copy bundled with Git for Windows)
 - `tailscale` CLI (optional, for `--tailscale` and `--funnel`)

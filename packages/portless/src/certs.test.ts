@@ -6,7 +6,8 @@ import * as crypto from "node:crypto";
 import * as tls from "node:tls";
 import { execFileSync } from "node:child_process";
 import {
-  createSNICallback,
+  CertIssuer,
+  type CertIssuerOptions,
   ensureCerts,
   ensureTrust,
   inspectTrust,
@@ -374,16 +375,31 @@ describe("ensureCerts", () => {
   });
 });
 
-describe("createSNICallback", () => {
+describe("CertIssuer", () => {
   let tmpDir: string;
-  let defaultCert: Buffer;
-  let defaultKey: Buffer;
+  const allowedHostnames = [
+    "myapp.localhost",
+    "blocked.localhost",
+    "skew.localhost",
+    "chat.myapp.localhost",
+    "myapp.local.example.dev",
+    `service.${"a".repeat(55)}.localhost`,
+    "deep.sub.localhost",
+  ];
+  const makeIssuer = (options: Partial<CertIssuerOptions> = {}) =>
+    new CertIssuer({ stateDir: tmpDir, getAllowedHostnames: () => allowedHostnames, ...options });
+  const request = (issuer: CertIssuer, name: string) =>
+    new Promise<tls.SecureContext>((resolve, reject) => {
+      issuer.sniCallback(name, (err, ctx) => {
+        if (err) reject(err);
+        else if (ctx) resolve(ctx);
+        else reject(new Error("Missing secure context"));
+      });
+    });
 
   beforeEach(() => {
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-sni-test-"));
-    const certs = ensureCerts(tmpDir);
-    defaultCert = fs.readFileSync(certs.certPath);
-    defaultKey = fs.readFileSync(certs.keyPath);
+    ensureCerts(tmpDir);
   });
 
   afterEach(() => {
@@ -391,7 +407,7 @@ describe("createSNICallback", () => {
   });
 
   it("returns default context for localhost", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("localhost", (err, ctx) => {
         if (err) reject(err);
@@ -403,7 +419,7 @@ describe("createSNICallback", () => {
   });
 
   it("generates per-hostname cert for single-level subdomains", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("myapp.localhost", (err, ctx) => {
         if (err) reject(err);
@@ -422,6 +438,42 @@ describe("createSNICallback", () => {
     const cert = new crypto.X509Certificate(fs.readFileSync(hostCertPath));
     expect(cert.subjectAltName).toBe("DNS:myapp.localhost");
   });
+
+  const canSimulateReadOnlySerial =
+    process.platform !== "win32" && (process.getuid?.() ?? -1) !== 0;
+
+  it.skipIf(!canSimulateReadOnlySerial)(
+    "removes partial cert files and logs the OpenSSL error when signing fails",
+    async () => {
+      const srlPath = path.join(tmpDir, "ca.srl");
+      const hostDir = path.join(tmpDir, "host-certs");
+      fs.chmodSync(srlPath, 0o444);
+
+      const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+      try {
+        const sniCallback = makeIssuer().sniCallback;
+        const error = await new Promise<Error | null>((resolve) => {
+          sniCallback("blocked.localhost", (err) => resolve(err));
+        });
+
+        expect(error).toBeInstanceOf(Error);
+        expect(error?.message).toMatch(/ca\.srl|Permission denied/);
+        for (const file of [
+          "blocked_localhost.pem",
+          "blocked_localhost-key.pem",
+          "blocked_localhost.csr",
+          "blocked_localhost-ext.cnf",
+        ]) {
+          expect(fs.existsSync(path.join(hostDir, file))).toBe(false);
+        }
+        expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("blocked.localhost"));
+        expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("ca.srl"));
+      } finally {
+        fs.chmodSync(srlPath, 0o644);
+        consoleError.mockRestore();
+      }
+    }
+  );
 
   it("reissues a cached host cert that has a bare TLD wildcard SAN", async () => {
     const hostDir = path.join(tmpDir, "host-certs");
@@ -453,7 +505,7 @@ describe("createSNICallback", () => {
       "subjectAltName=DNS:myapp.localhost,DNS:*.localhost",
     ]);
 
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     await new Promise<void>((resolve, reject) => {
       sniCallback("myapp.localhost", (err) => (err ? reject(err) : resolve()));
     });
@@ -463,7 +515,7 @@ describe("createSNICallback", () => {
   });
 
   it("backdates a host cert's notBefore when openssl can set it", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     await new Promise<void>((resolve, reject) => {
       sniCallback("skew.localhost", (err) => (err ? reject(err) : resolve()));
     });
@@ -478,7 +530,7 @@ describe("createSNICallback", () => {
   });
 
   it("generates per-hostname cert for multi-level subdomains", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("chat.myapp.localhost", (err, ctx) => {
         if (err) reject(err);
@@ -498,7 +550,7 @@ describe("createSNICallback", () => {
   });
 
   it("generates per-hostname cert for multi-segment TLDs (issue #260)", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey, "local.example.dev");
+    const sniCallback = makeIssuer({ tlds: "local.example.dev" }).sniCallback;
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("myapp.local.example.dev", (err, ctx) => {
         if (err) reject(err);
@@ -524,7 +576,7 @@ describe("createSNICallback", () => {
     const longHostname = `service.${longPrefix}.localhost`;
     expect(longHostname.length).toBeGreaterThan(64);
 
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     const ctx = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback(longHostname, (err, ctx) => {
         if (err) reject(err);
@@ -545,7 +597,7 @@ describe("createSNICallback", () => {
   });
 
   it("caches generated certs in memory on subsequent calls", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
 
     const ctx1 = await new Promise<tls.SecureContext | undefined>((resolve, reject) => {
       sniCallback("deep.sub.localhost", (err, ctx) => {
@@ -566,7 +618,7 @@ describe("createSNICallback", () => {
   });
 
   it("drops per-hostname certs issued by a previous CA when the CA is regenerated", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     await new Promise<void>((resolve, reject) => {
       sniCallback("myapp.localhost", (err) => (err ? reject(err) : resolve()));
     });
@@ -585,11 +637,7 @@ describe("createSNICallback", () => {
     expect(fs.existsSync(hostCertPath)).toBe(false);
 
     // A fresh callback re-issues the host cert under the new CA.
-    const freshCallback = createSNICallback(
-      tmpDir,
-      fs.readFileSync(regenerated.certPath),
-      fs.readFileSync(regenerated.keyPath)
-    );
+    const freshCallback = makeIssuer().sniCallback;
     await new Promise<void>((resolve, reject) => {
       freshCallback("myapp.localhost", (err) => (err ? reject(err) : resolve()));
     });
@@ -598,12 +646,16 @@ describe("createSNICallback", () => {
   });
 
   it("refuses hostnames outside the configured TLDs without issuing a cert", async () => {
-    const sniCallback = createSNICallback(tmpDir, defaultCert, defaultKey);
+    const sniCallback = makeIssuer().sniCallback;
     for (const name of [
       "outside.example.com",
       "localhost.example.net",
       "evillocalhost",
       "outside.example.com,DNS:app.localhost",
+      ".app.localhost",
+      "app..localhost",
+      "app.localhost.",
+      `${"a".repeat(244)}.localhost`,
     ]) {
       const error = await new Promise<Error | null>((resolve) => {
         sniCallback(name, (err) => resolve(err));
@@ -613,17 +665,183 @@ describe("createSNICallback", () => {
     expect(fs.existsSync(path.join(tmpDir, "host-certs"))).toBe(false);
   });
 
-  it("returns error via callback when state dir is invalid", async () => {
-    const badDir = path.join(tmpDir, "nonexistent");
-    const sniCallback = createSNICallback(badDir, defaultCert, defaultKey);
+  it("returns an error when the CA is missing during generation", async () => {
+    const issuer = makeIssuer();
+    fs.unlinkSync(path.join(tmpDir, "ca.pem"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(request(issuer, "deep.sub.localhost")).rejects.toThrow();
+      expect(consoleError).toHaveBeenCalledTimes(1);
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
 
-    const error = await new Promise<Error | null>((resolve) => {
-      sniCallback("deep.sub.localhost", (err) => {
-        resolve(err);
-      });
+  it("mints rate-limited in-memory certs for unregistered names without writing to host-certs", async () => {
+    const issuer = makeIssuer({ getAllowedHostnames: () => [] });
+    const defaultCtx = await request(issuer, "localhost");
+    const hostDir = path.join(tmpDir, "host-certs");
+    fs.mkdirSync(hostDir);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const typo = await request(issuer, "typo.localhost");
+      expect(typo).toBeDefined();
+      expect(typo).not.toBe(defaultCtx);
+      expect(await request(issuer, "typo.localhost")).toBe(typo);
+
+      let succeeded = 0;
+      let rateLimited = 0;
+      for (let i = 0; i < 30; i++) {
+        try {
+          await request(issuer, `unknown${i}.localhost`);
+          succeeded++;
+        } catch (err) {
+          expect(err instanceof Error ? err.message : "").toContain("rate limit exceeded");
+          rateLimited++;
+        }
+      }
+      expect(succeeded).toBe(3);
+      expect(rateLimited).toBe(27);
+      expect(fs.readdirSync(hostDir)).toEqual([]);
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("keeps serving an already cached cert after a route stops without reissuing", async () => {
+    let allowed = ["myapp.localhost"];
+    const issuer = makeIssuer({ getAllowedHostnames: () => allowed });
+    const issued = await request(issuer, "myapp.localhost");
+    allowed = [];
+    expect(await request(issuer, "myapp.localhost")).toBe(issued);
+
+    const freshIssuer = makeIssuer({ getAllowedHostnames: () => [] });
+    const defaultCtx = await request(freshIssuer, "localhost");
+    const fromDisk = await request(freshIssuer, "myapp.localhost");
+    expect(fromDisk).toBeDefined();
+    expect(fromDisk).not.toBe(defaultCtx);
+  });
+
+  it("refuses unregistered cache misses when ephemeral issuance is disabled", async () => {
+    let allowed = ["myapp.localhost"];
+    const issuer = makeIssuer({
+      getAllowedHostnames: () => allowed,
+      allowEphemeralUnregistered: false,
     });
+    const issued = await request(issuer, "myapp.localhost");
+    allowed = [];
+    expect(await request(issuer, "myapp.localhost")).toBe(issued);
 
-    expect(error).toBeInstanceOf(Error);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await expect(request(issuer, "unknown.localhost")).rejects.toThrow("no active route");
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it("serializes concurrent distinct-hostname signing so serial numbers stay unique", async () => {
+    const hosts = Array.from({ length: 6 }, (_, i) => `svc${i}.localhost`);
+    const issuer = makeIssuer({ getAllowedHostnames: () => hosts });
+    await Promise.all(hosts.map((host) => request(issuer, host)));
+    const serials = hosts.map((host) => {
+      const pem = fs.readFileSync(
+        path.join(tmpDir, "host-certs", `${host.replace(/\./g, "_")}.pem`)
+      );
+      return new crypto.X509Certificate(pem).serialNumber;
+    });
+    expect(new Set(serials).size).toBe(hosts.length);
+  });
+
+  it("exposes the default certificate and optional CA in TLS options", async () => {
+    const issuer = makeIssuer();
+    expect(issuer.tlsOptions.cert).toEqual(fs.readFileSync(path.join(tmpDir, "server.pem")));
+    expect(issuer.tlsOptions.key).toEqual(fs.readFileSync(path.join(tmpDir, "server-key.pem")));
+    expect(issuer.tlsOptions.ca).toEqual(fs.readFileSync(path.join(tmpDir, "ca.pem")));
+    expect(issuer.tlsOptions.SNICallback).toBe(issuer.sniCallback);
+    expect(await request(issuer, "LOCALHOST")).toBe(await request(issuer, "localhost"));
+    fs.unlinkSync(path.join(tmpDir, "ca.pem"));
+    expect(makeIssuer().tlsOptions.ca).toBeUndefined();
+  });
+
+  it("persists wildcard descendants only when enabled and their parent is registered", async () => {
+    const options = { getAllowedHostnames: () => ["MYAPP.LOCALHOST"] };
+    const disabled = makeIssuer(options);
+    const enabled = makeIssuer({ ...options, allowWildcards: true });
+    expect(await request(disabled, "chat.myapp.localhost")).toBeDefined();
+    expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_myapp_localhost.pem"))).toBe(false);
+    const wildcardCtx = await request(enabled, "CHAT.MYAPP.LOCALHOST");
+    expect(wildcardCtx).toBeDefined();
+    expect(wildcardCtx).not.toBe(await request(enabled, "localhost"));
+    expect(await request(enabled, "chat.other.localhost")).toBeDefined();
+    expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_myapp_localhost.pem"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_other_localhost.pem"))).toBe(false);
+  });
+
+  it("evicts the least recently used memory entry", async () => {
+    const issuer = makeIssuer({
+      getAllowedHostnames: () => ["one.localhost", "two.localhost", "three.localhost"],
+      maxMemoryEntries: 2,
+    });
+    const one = await request(issuer, "one.localhost");
+    const two = await request(issuer, "two.localhost");
+    expect(await request(issuer, "ONE.LOCALHOST")).toBe(one);
+    await request(issuer, "three.localhost");
+    expect(await request(issuer, "one.localhost")).toBe(one);
+    expect(await request(issuer, "two.localhost")).not.toBe(two);
+  });
+
+  it("evicts the oldest disk pair and refreshes disk cache recency", async () => {
+    const options = {
+      getAllowedHostnames: () => ["one.localhost", "two.localhost", "three.localhost"],
+      maxDiskEntries: 2,
+    };
+    const issuer = makeIssuer(options);
+    await request(issuer, "one.localhost");
+    await request(issuer, "two.localhost");
+    const hostDir = path.join(tmpDir, "host-certs");
+    const old = new Date(1_000);
+    const newer = new Date(2_000);
+    fs.utimesSync(path.join(hostDir, "one_localhost.pem"), old, old);
+    fs.utimesSync(path.join(hostDir, "two_localhost.pem"), newer, newer);
+    const freshIssuer = makeIssuer(options);
+    await request(freshIssuer, "one.localhost");
+    await request(freshIssuer, "three.localhost");
+    expect(fs.readdirSync(hostDir).sort()).toEqual([
+      "one_localhost-key.pem",
+      "one_localhost.pem",
+      "three_localhost-key.pem",
+      "three_localhost.pem",
+    ]);
+  });
+
+  it("shares one context across concurrent requests", async () => {
+    const issuer = makeIssuer();
+    const contexts = await Promise.all(
+      Array.from({ length: 10 }, (_, i) =>
+        request(issuer, i % 2 ? "MYAPP.LOCALHOST" : "myapp.localhost")
+      )
+    );
+    expect(contexts.every((ctx) => ctx === contexts[0])).toBe(true);
+  });
+
+  it("logs a shared generation failure once", async () => {
+    const issuer = makeIssuer();
+    fs.unlinkSync(path.join(tmpDir, "ca-key.pem"));
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const results = await Promise.allSettled(
+        Array.from({ length: 10 }, () => request(issuer, "myapp.localhost"))
+      );
+      expect(results.every((result) => result.status === "rejected")).toBe(true);
+      expect(consoleError).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringContaining("myapp.localhost"));
+      expect(fs.readdirSync(path.join(tmpDir, "host-certs"))).toEqual([]);
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 });
 

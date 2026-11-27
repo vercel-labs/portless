@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as crypto from "node:crypto";
 import * as tls from "node:tls";
@@ -263,6 +264,18 @@ function isCertSignatureStrong(certPath: string): boolean {
   }
 }
 
+/** Check asynchronously whether a certificate uses a non-SHA-1 signature algorithm. */
+async function isCertSignatureStrongAsync(certPath: string): Promise<boolean> {
+  try {
+    const text = await opensslAsync(["x509", "-in", certPath, "-noout", "-text"]);
+    const match = text.match(/Signature Algorithm:\s*(\S+)/i);
+    if (!match) return false;
+    return !match[1].toLowerCase().includes("sha1");
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Check whether a certificate lists the same X.509v3 extension more than once.
  * RFC 5280 requires extensions to be unique, and macOS's Security framework
@@ -489,68 +502,69 @@ function generateServerCert(stateDir: string): { certPath: string; keyPath: stri
   const serverCertPath = path.join(stateDir, SERVER_CERT_FILE);
   const csrPath = path.join(stateDir, "server.csr");
   const extPath = path.join(stateDir, "server-ext.cnf");
-
-  // Generate server private key
-  withPrivateFileMode(() =>
-    openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath])
-  );
-
-  // Generate CSR
-  openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
-
-  // Write extension config for SANs
-  const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
-  fs.writeFileSync(
-    extPath,
-    [
-      "authorityKeyIdentifier=keyid,issuer",
-      "basicConstraints=CA:FALSE",
-      "keyUsage=digitalSignature,keyEncipherment",
-      "extendedKeyUsage=serverAuth",
-      `subjectAltName=${sans.join(",")}`,
-    ].join("\n") + "\n"
-  );
-
-  // Sign with CA
-  // Use -CAserial with an explicit path instead of -CAcreateserial.
-  // -CAcreateserial derives the .srl path by stripping the CA cert's file
-  // extension, but some OpenSSL/LibreSSL versions use the *last dot in the
-  // full path*, so a dot in $HOME (e.g. /Users/ashish.jaiswal) causes it
-  // to write "/Users/ashish.srl" instead of the intended location.
   const srlPath = path.join(stateDir, "ca.srl");
-  if (!fileExists(srlPath)) {
-    fs.writeFileSync(
-      srlPath,
-      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
-    );
-  }
-  openssl([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    serverCertPath,
-    ...backdatedNotBeforeArgs(),
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
 
-  // Clean up temporary files (keep ca.srl for serial number tracking)
-  for (const tmp of [csrPath, extPath]) {
-    try {
-      fs.unlinkSync(tmp);
-    } catch {
-      // Non-fatal
+  try {
+    withPrivateFileMode(() =>
+      openssl(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", serverKeyPath])
+    );
+
+    openssl(["req", "-new", "-key", serverKeyPath, "-out", csrPath, "-subj", "/CN=localhost"]);
+
+    const sans = ["DNS:localhost", "DNS:*.localhost", "DNS:*.local"];
+    fs.writeFileSync(
+      extPath,
+      [
+        "authorityKeyIdentifier=keyid,issuer",
+        "basicConstraints=CA:FALSE",
+        "keyUsage=digitalSignature,keyEncipherment",
+        "extendedKeyUsage=serverAuth",
+        `subjectAltName=${sans.join(",")}`,
+      ].join("\n") + "\n"
+    );
+
+    if (!fileExists(srlPath)) {
+      fs.writeFileSync(
+        srlPath,
+        crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+      );
+    }
+    openssl([
+      "x509",
+      "-req",
+      "-sha256",
+      "-in",
+      csrPath,
+      "-CA",
+      caCertPath,
+      "-CAkey",
+      caKeyPath,
+      "-CAserial",
+      srlPath,
+      "-out",
+      serverCertPath,
+      ...backdatedNotBeforeArgs(),
+      "-days",
+      SERVER_VALIDITY_DAYS.toString(),
+      "-extfile",
+      extPath,
+    ]);
+  } catch (error) {
+    for (const file of [serverCertPath, serverKeyPath]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        continue;
+      }
+    }
+    throw error;
+  } finally {
+    for (const file of [csrPath, extPath]) {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        continue;
+      }
     }
   }
 
@@ -1176,6 +1190,100 @@ export function sanitizeHostForFilename(hostname: string): string {
  */
 const MAX_CN_LENGTH = 64;
 
+/** Maximum in-memory contexts cached for unregistered hostnames under configured TLDs. */
+const MAX_EPHEMERAL_MEMORY_ENTRIES = 8;
+
+/** Maximum burst of ephemeral certificates minted for unregistered hostnames. */
+const EPHEMERAL_BURST = 4;
+
+/** Interval in milliseconds to refill one unregistered certificate token. */
+const EPHEMERAL_REFILL_MS = 15_000;
+
+async function signHostCertAsync(
+  stateDir: string,
+  outputDir: string,
+  hostname: string,
+  includeWildcard: boolean
+): Promise<{ certPath: string; keyPath: string }> {
+  const caKeyPath = path.join(stateDir, CA_KEY_FILE);
+  const caCertPath = path.join(stateDir, CA_CERT_FILE);
+  const safeName = sanitizeHostForFilename(hostname);
+  const keyPath = path.join(outputDir, `${safeName}-key.pem`);
+  const certPath = path.join(outputDir, `${safeName}.pem`);
+  const csrPath = path.join(outputDir, `${safeName}.csr`);
+  const extPath = path.join(outputDir, `${safeName}-ext.cnf`);
+  const srlPath = path.join(stateDir, "ca.srl");
+
+  try {
+    await withPrivateFileMode(() =>
+      opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
+    );
+
+    const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
+    await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
+
+    const sans = [`DNS:${hostname}`];
+    const parts = hostname.split(".");
+    if (includeWildcard && parts.length >= 3) {
+      sans.push(`DNS:*.${parts.slice(1).join(".")}`);
+    }
+
+    await fs.promises.writeFile(
+      extPath,
+      [
+        "authorityKeyIdentifier=keyid,issuer",
+        "basicConstraints=CA:FALSE",
+        "keyUsage=digitalSignature,keyEncipherment",
+        "extendedKeyUsage=serverAuth",
+        `subjectAltName=${sans.join(",")}`,
+      ].join("\n") + "\n"
+    );
+
+    if (!fs.existsSync(srlPath)) {
+      await fs.promises.writeFile(
+        srlPath,
+        crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
+      );
+    }
+    await opensslAsync([
+      "x509",
+      "-req",
+      "-sha256",
+      "-in",
+      csrPath,
+      "-CA",
+      caCertPath,
+      "-CAkey",
+      caKeyPath,
+      "-CAserial",
+      srlPath,
+      "-out",
+      certPath,
+      ...(await backdatedNotBeforeArgsAsync()),
+      "-days",
+      SERVER_VALIDITY_DAYS.toString(),
+      "-extfile",
+      extPath,
+    ]);
+    await fs.promises.chmod(keyPath, 0o600);
+    await fs.promises.chmod(certPath, 0o644);
+    fixOwnership(keyPath, certPath, srlPath);
+  } catch (error) {
+    await Promise.all([
+      fs.promises.rm(certPath, { force: true }).catch(() => undefined),
+      fs.promises.rm(keyPath, { force: true }).catch(() => undefined),
+    ]);
+    throw error;
+  } finally {
+    await Promise.all([
+      fs.promises.rm(csrPath, { force: true }).catch(() => undefined),
+      fs.promises.rm(extPath, { force: true }).catch(() => undefined),
+    ]);
+  }
+
+  return { certPath, keyPath };
+}
+
 /**
  * Generate a certificate for a specific hostname, signed by the local CA.
  * Certs are cached on disk in the host-certs subdirectory.
@@ -1187,215 +1295,320 @@ async function generateHostCertAsync(
   stateDir: string,
   hostname: string
 ): Promise<{ certPath: string; keyPath: string }> {
-  const caKeyPath = path.join(stateDir, CA_KEY_FILE);
-  const caCertPath = path.join(stateDir, CA_CERT_FILE);
   const hostDir = path.join(stateDir, HOST_CERTS_DIR);
-
   if (!fs.existsSync(hostDir)) {
     await fs.promises.mkdir(hostDir, { recursive: true, mode: 0o755 });
     fixOwnership(hostDir);
   }
-
-  const safeName = sanitizeHostForFilename(hostname);
-  const keyPath = path.join(hostDir, `${safeName}-key.pem`);
-  const certPath = path.join(hostDir, `${safeName}.pem`);
-  const csrPath = path.join(hostDir, `${safeName}.csr`);
-  const extPath = path.join(hostDir, `${safeName}-ext.cnf`);
-
-  // Generate key
-  await withPrivateFileMode(() =>
-    opensslAsync(["ecparam", "-genkey", "-name", "prime256v1", "-noout", "-out", keyPath])
-  );
-
-  // The X.509 CN field has a 64-character limit (RFC 5280 §4.1.2.6).
-  // Truncate when necessary. TLS validation uses SANs, not CN, so this is safe.
-  const cn = hostname.length > MAX_CN_LENGTH ? hostname.slice(0, MAX_CN_LENGTH) : hostname;
-  // Generate CSR
-  await opensslAsync(["req", "-new", "-key", keyPath, "-out", csrPath, "-subj", `/CN=${cn}`]);
-
-  const sans = [`DNS:${hostname}`];
-  const parts = hostname.split(".");
-  if (parts.length >= 3) {
-    sans.push(`DNS:*.${parts.slice(1).join(".")}`);
-  }
-
-  await fs.promises.writeFile(
-    extPath,
-    [
-      "authorityKeyIdentifier=keyid,issuer",
-      "basicConstraints=CA:FALSE",
-      "keyUsage=digitalSignature,keyEncipherment",
-      "extendedKeyUsage=serverAuth",
-      `subjectAltName=${sans.join(",")}`,
-    ].join("\n") + "\n"
-  );
-
-  // Use -CAserial with an explicit path instead of -CAcreateserial to avoid
-  // incorrect .srl path resolution when $HOME contains a dot (see #152).
-  const srlPath = path.join(stateDir, "ca.srl");
-  if (!fs.existsSync(srlPath)) {
-    await fs.promises.writeFile(
-      srlPath,
-      crypto.randomUUID().replace(/-/g, "").slice(0, 16).toUpperCase() + "\n"
-    );
-  }
-  await opensslAsync([
-    "x509",
-    "-req",
-    "-sha256",
-    "-in",
-    csrPath,
-    "-CA",
-    caCertPath,
-    "-CAkey",
-    caKeyPath,
-    "-CAserial",
-    srlPath,
-    "-out",
-    certPath,
-    ...(await backdatedNotBeforeArgsAsync()),
-    "-days",
-    SERVER_VALIDITY_DAYS.toString(),
-    "-extfile",
-    extPath,
-  ]);
-
-  // Clean up temporary files (keep ca.srl for serial number tracking)
-  for (const tmp of [csrPath, extPath]) {
-    try {
-      await fs.promises.unlink(tmp);
-    } catch {
-      // Non-fatal
-    }
-  }
-
-  await fs.promises.chmod(keyPath, 0o600);
-  await fs.promises.chmod(certPath, 0o644);
-  fixOwnership(keyPath, certPath, srlPath);
-
-  return { certPath, keyPath };
+  return signHostCertAsync(stateDir, hostDir, hostname, true);
 }
 
-/**
- * Create an SNI callback for the TLS server.
- *
- * Only `localhost` itself uses the default server cert. All subdomains
- * (e.g., `tools.localhost`, `chat.myapp.localhost`) get a per-hostname
- * certificate generated on demand and signed by the local CA.
- *
- * RFC 2606 §2 reserves `.localhost` as a top-level domain (TLD). Because
- * `localhost` is a TLD, `*.localhost` sits at the public-suffix boundary and
- * TLS implementations are not permitted to honour wildcard certificates there.
- * Each subdomain therefore requires a certificate with an exact SAN entry.
- *
- * Certificate generation is async to avoid blocking the event loop. A
- * pending-promise map deduplicates concurrent requests for the same hostname.
- *
- * @see https://datatracker.ietf.org/doc/html/rfc2606#section-2
- */
-export function createSNICallback(
+/** Generate an in-memory-only host certificate without persisting anything in host-certs. */
+async function generateEphemeralHostCertAsync(
   stateDir: string,
-  defaultCert: Buffer,
-  defaultKey: Buffer,
-  tlds: string | readonly string[] = "localhost",
-  caCert?: Buffer
-): (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => void {
-  const cache = new Map<string, tls.SecureContext>();
-  const pending = new Map<string, Promise<tls.SecureContext>>();
-  const configuredTlds = Array.isArray(tlds) ? tlds : [tlds];
+  hostname: string
+): Promise<{ cert: Buffer; key: Buffer }> {
+  const tmpDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "portless-ephemeral-cert-"));
+  try {
+    const generated = await signHostCertAsync(stateDir, tmpDir, hostname, false);
+    const [cert, key] = await Promise.all([
+      fs.promises.readFile(generated.certPath),
+      fs.promises.readFile(generated.keyPath),
+    ]);
+    return { cert, key };
+  } finally {
+    await fs.promises.rm(tmpDir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
 
-  // Pre-cache the default context for the built-in localhost certificate.
-  // Include the CA certificate so clients receive the full chain.
-  const defaultCtx = tls.createSecureContext({
-    cert: caCert ? Buffer.concat([defaultCert, caCert]) : defaultCert,
-    key: defaultKey,
-  });
+/** Configuration for bounded per-hostname TLS certificate issuance. */
+export interface CertIssuerOptions {
+  stateDir: string;
+  tlds?: string | readonly string[];
+  getAllowedHostnames: () => readonly string[];
+  allowWildcards?: boolean;
+  allowEphemeralUnregistered?: boolean;
+  maxMemoryEntries?: number;
+  maxDiskEntries?: number;
+}
 
-  return (servername: string, cb: (err: Error | null, ctx?: tls.SecureContext) => void) => {
-    // The bare localhost name uses the default cert.
-    // All subdomains need a cert with an exact SAN entry.
-    // For .localhost: RFC 2606 §2 designates it as a reserved TLD, so
-    // "*.localhost" sits at the public-suffix boundary and TLS specs do
-    // not permit wildcard certificates at that level.
-    if (servername === "localhost") {
-      cb(null, defaultCtx);
-      return;
-    }
-
-    const name = servername.toLowerCase();
-    if (!/^[a-z0-9.-]+$/.test(name) || !configuredTlds.some((tld) => name.endsWith(`.${tld}`))) {
-      cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
-      return;
-    }
-
-    // Check memory cache
-    if (cache.has(servername)) {
-      cb(null, cache.get(servername));
-      return;
-    }
-
-    // Check if a cert already exists on disk
-    const safeName = sanitizeHostForFilename(servername);
-    const hostDir = path.join(stateDir, HOST_CERTS_DIR);
-    const certPath = path.join(hostDir, `${safeName}.pem`);
-    const keyPath = path.join(hostDir, `${safeName}-key.pem`);
-
-    // Try reading existing cert from disk (may fail if files are root-owned)
-    if (
-      fileExists(certPath) &&
-      fileExists(keyPath) &&
-      isCertValid(certPath) &&
-      isCertSignatureStrong(certPath) &&
-      !hasTldWildcardSan(certPath)
-    ) {
-      try {
-        const hostCert = fs.readFileSync(certPath);
-        const ctx = tls.createSecureContext({
-          cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
-          key: fs.readFileSync(keyPath),
-        });
-        cache.set(servername, ctx);
-        cb(null, ctx);
-        return;
-      } catch {
-        // Permission error reading cached cert; regenerate below
-      }
-    }
-
-    // If a generation is already in flight for this hostname, wait for it
-    if (pending.has(servername)) {
-      pending
-        .get(servername)!
-        .then((ctx) => cb(null, ctx))
-        .catch((err) => cb(err instanceof Error ? err : new Error(String(err))));
-      return;
-    }
-
-    // Generate a new cert for this hostname asynchronously
-    const promise = generateHostCertAsync(stateDir, servername).then(async (generated) => {
-      const [hostCert, key] = await Promise.all([
-        fs.promises.readFile(generated.certPath),
-        fs.promises.readFile(generated.keyPath),
-      ]);
-      return tls.createSecureContext({
-        cert: caCert ? Buffer.concat([hostCert, caCert]) : hostCert,
-        key,
-      });
-    });
-
-    pending.set(servername, promise);
-
-    promise
-      .then((ctx) => {
-        cache.set(servername, ctx);
-        pending.delete(servername);
-        cb(null, ctx);
-      })
-      .catch((err) => {
-        pending.delete(servername);
-        cb(err instanceof Error ? err : new Error(String(err)));
-      });
+/** Issues and caches per-hostname TLS certificates for admitted routes within configured TLDs. */
+export class CertIssuer {
+  readonly tlsOptions: {
+    cert: Buffer;
+    key: Buffer;
+    ca?: Buffer;
+    SNICallback: (
+      servername: string,
+      cb: (err: Error | null, ctx?: tls.SecureContext) => void
+    ) => void;
   };
+  readonly sniCallback: (
+    servername: string,
+    cb: (err: Error | null, ctx?: tls.SecureContext) => void
+  ) => void;
+
+  constructor(options: CertIssuerOptions) {
+    const {
+      stateDir,
+      getAllowedHostnames,
+      allowWildcards = false,
+      allowEphemeralUnregistered = true,
+    } = options;
+    const tlds = options.tlds ?? ["localhost"];
+    const configuredTlds = [
+      ...new Set((typeof tlds === "string" ? [tlds] : tlds).map((tld) => tld.toLowerCase())),
+    ];
+    const maxMemoryEntries = Math.max(1, options.maxMemoryEntries ?? 128);
+    const maxDiskEntries = Math.max(1, options.maxDiskEntries ?? 128);
+    const cert = fs.readFileSync(path.join(stateDir, SERVER_CERT_FILE));
+    const key = fs.readFileSync(path.join(stateDir, SERVER_KEY_FILE));
+    const caPath = path.join(stateDir, CA_CERT_FILE);
+    const ca = fs.existsSync(caPath) ? fs.readFileSync(caPath) : undefined;
+    const defaultCtx = tls.createSecureContext({
+      cert: ca ? Buffer.concat([cert, ca]) : cert,
+      key,
+    });
+    const cache = new Map<string, tls.SecureContext>();
+    const ephemeralCache = new Map<string, tls.SecureContext>();
+    const pending = new Map<string, Promise<tls.SecureContext>>();
+    const hostDir = path.join(stateDir, HOST_CERTS_DIR);
+    let ephemeralTokens = EPHEMERAL_BURST;
+    let lastEphemeralRefill = Date.now();
+    let signQueue: Promise<void> = Promise.resolve();
+
+    const enqueueSign = <T>(fn: () => Promise<T>): Promise<T> => {
+      const next = signQueue.then(fn, fn);
+      signQueue = next.then(
+        () => undefined,
+        () => undefined
+      );
+      return next;
+    };
+
+    const rememberIn = (
+      target: Map<string, tls.SecureContext>,
+      name: string,
+      ctx: tls.SecureContext,
+      limit: number
+    ) => {
+      target.delete(name);
+      target.set(name, ctx);
+      while (target.size > limit) {
+        const oldest = target.keys().next().value;
+        if (oldest === undefined) break;
+        target.delete(oldest);
+      }
+    };
+
+    const takeEphemeralToken = (): boolean => {
+      const now = Date.now();
+      const elapsed = now - lastEphemeralRefill;
+      if (elapsed >= EPHEMERAL_REFILL_MS) {
+        const refill = Math.floor(elapsed / EPHEMERAL_REFILL_MS);
+        ephemeralTokens = Math.min(EPHEMERAL_BURST, ephemeralTokens + refill);
+        lastEphemeralRefill += refill * EPHEMERAL_REFILL_MS;
+      }
+      if (ephemeralTokens < 1) return false;
+      ephemeralTokens--;
+      return true;
+    };
+
+    const prune = (safeName: string) => {
+      try {
+        const protectedNames = new Set([...pending.keys()].map(sanitizeHostForFilename));
+        protectedNames.add(safeName);
+        const entries = fs
+          .readdirSync(hostDir)
+          .filter((file) => file.endsWith(".pem") && !file.endsWith("-key.pem"))
+          .map((file) => {
+            try {
+              return {
+                base: file.slice(0, -4),
+                mtime: fs.statSync(path.join(hostDir, file)).mtimeMs,
+              };
+            } catch {
+              return undefined;
+            }
+          })
+          .filter((entry): entry is { base: string; mtime: number } => entry !== undefined);
+        let excess = entries.length - maxDiskEntries;
+        for (const entry of entries.sort((a, b) => a.mtime - b.mtime)) {
+          if (excess <= 0) break;
+          if (protectedNames.has(entry.base)) continue;
+          try {
+            fs.unlinkSync(path.join(hostDir, `${entry.base}.pem`));
+            excess--;
+          } catch {
+            continue;
+          }
+          fs.rmSync(path.join(hostDir, `${entry.base}-key.pem`), { force: true });
+        }
+      } catch {
+        return;
+      }
+    };
+
+    const loadDiskCertAsync = async (
+      certPath: string,
+      keyPath: string
+    ): Promise<tls.SecureContext | null> => {
+      if (!fileExists(certPath) || !fileExists(keyPath)) return null;
+      if (
+        !isCertValid(certPath) ||
+        hasTldWildcardSan(certPath) ||
+        !(await isCertSignatureStrongAsync(certPath))
+      ) {
+        return null;
+      }
+      try {
+        const [hostCert, hostKey] = await Promise.all([
+          fs.promises.readFile(certPath),
+          fs.promises.readFile(keyPath),
+        ]);
+        const ctx = tls.createSecureContext({
+          cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+          key: hostKey,
+        });
+        const now = new Date();
+        await fs.promises.utimes(certPath, now, now).catch(() => undefined);
+        return ctx;
+      } catch {
+        return null;
+      }
+    };
+
+    this.sniCallback = (servername, cb) => {
+      const name = servername.toLowerCase();
+      let admission: "default" | "outsideTld" | "unregistered" | "admitted";
+      if (name === "localhost") {
+        admission = "default";
+      } else {
+        const valid =
+          name.length > 0 &&
+          name.length <= 253 &&
+          /^[a-z0-9.-]+$/.test(name) &&
+          !name.startsWith(".") &&
+          !name.endsWith(".") &&
+          !name.includes("..");
+        if (
+          !valid ||
+          !configuredTlds.some((tld) => name.endsWith(`.${tld}`) && name.length > tld.length + 1)
+        ) {
+          admission = "outsideTld";
+        } else {
+          const allowed = getAllowedHostnames().map((hostname) => hostname.toLowerCase());
+          admission =
+            configuredTlds.some((tld) => name === `portless.${tld}`) ||
+            allowed.includes(name) ||
+            (allowWildcards && allowed.some((parent) => name.endsWith(`.${parent}`)))
+              ? "admitted"
+              : "unregistered";
+        }
+      }
+      switch (admission) {
+        case "default":
+          cb(null, defaultCtx);
+          return;
+        case "outsideTld":
+          cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
+          return;
+        case "unregistered":
+        case "admitted":
+          break;
+      }
+      const cached = cache.get(name);
+      if (cached) {
+        rememberIn(cache, name, cached, maxMemoryEntries);
+        cb(null, cached);
+        return;
+      }
+      if (admission === "unregistered") {
+        const ephemeral = ephemeralCache.get(name);
+        if (ephemeral) {
+          rememberIn(ephemeralCache, name, ephemeral, MAX_EPHEMERAL_MEMORY_ENTRIES);
+          cb(null, ephemeral);
+          return;
+        }
+      }
+      const inFlight = pending.get(name);
+      if (inFlight) {
+        inFlight.then(
+          (ctx) => cb(null, ctx),
+          (error: Error) => cb(error)
+        );
+        return;
+      }
+      const safeName = sanitizeHostForFilename(name);
+      const certPath = path.join(hostDir, `${safeName}.pem`);
+      const keyPath = path.join(hostDir, `${safeName}-key.pem`);
+
+      const promise = (async () => {
+        const diskCtx = await loadDiskCertAsync(certPath, keyPath);
+        if (diskCtx) {
+          rememberIn(cache, name, diskCtx, maxMemoryEntries);
+          return diskCtx;
+        }
+        if (admission === "unregistered") {
+          if (!allowEphemeralUnregistered) {
+            throw new Error(`Refusing certificate for ${servername}: no active route`);
+          }
+          if (!takeEphemeralToken()) {
+            throw new Error(
+              `Refusing certificate for ${servername}: unregistered certificate rate limit exceeded`
+            );
+          }
+          try {
+            const { cert: hostCert, key: hostKey } = await enqueueSign(() =>
+              generateEphemeralHostCertAsync(stateDir, name)
+            );
+            const ctx = tls.createSecureContext({
+              cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+              key: hostKey,
+            });
+            rememberIn(ephemeralCache, name, ctx, MAX_EPHEMERAL_MEMORY_ENTRIES);
+            return ctx;
+          } catch (err: unknown) {
+            const error = err instanceof Error ? err : new Error(String(err));
+            console.error(
+              `[portless] Failed to prepare a TLS certificate for ${name}: ${error.message}`
+            );
+            throw error;
+          }
+        }
+        try {
+          const generated = await enqueueSign(() => generateHostCertAsync(stateDir, name));
+          const [hostCert, hostKey] = await Promise.all([
+            fs.promises.readFile(generated.certPath),
+            fs.promises.readFile(generated.keyPath),
+          ]);
+          const ctx = tls.createSecureContext({
+            cert: ca ? Buffer.concat([hostCert, ca]) : hostCert,
+            key: hostKey,
+          });
+          ephemeralCache.delete(name);
+          rememberIn(cache, name, ctx, maxMemoryEntries);
+          prune(safeName);
+          return ctx;
+        } catch (err: unknown) {
+          const error = err instanceof Error ? err : new Error(String(err));
+          console.error(
+            `[portless] Failed to prepare a TLS certificate for ${name}: ${error.message}`
+          );
+          throw error;
+        }
+      })().finally(() => {
+        pending.delete(name);
+      });
+
+      pending.set(name, promise);
+      promise.then(
+        (ctx) => cb(null, ctx),
+        (error: Error) => cb(error)
+      );
+    };
+    this.tlsOptions = { cert, key, ...(ca ? { ca } : {}), SNICallback: this.sniCallback };
+  }
 }
 
 function trustStateFromStores(stores: TrustStores): TrustInspectionState {
