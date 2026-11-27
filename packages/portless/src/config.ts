@@ -10,7 +10,7 @@ export class ConfigValidationError extends Error {
 }
 
 export interface WorktreeConfig {
-  prefix?: "last-segment" | "branch";
+  prefix?: "last-segment" | "branch" | "directory";
   hostnameTemplate?: string;
   flat?: boolean;
   base?: string;
@@ -547,9 +547,14 @@ function validateWorktreeConfig(value: unknown, prefix: string, configPath: stri
   }
   const obj = value as Record<string, unknown>;
 
-  if (obj.prefix !== undefined && obj.prefix !== "last-segment" && obj.prefix !== "branch") {
+  if (
+    obj.prefix !== undefined &&
+    obj.prefix !== "last-segment" &&
+    obj.prefix !== "branch" &&
+    obj.prefix !== "directory"
+  ) {
     throw new ConfigValidationError(
-      `"${prefix}.prefix" in ${configPath} must be "last-segment" or "branch".`
+      `"${prefix}.prefix" in ${configPath} must be "last-segment", "branch", or "directory".`
     );
   }
 

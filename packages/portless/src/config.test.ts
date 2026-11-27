@@ -336,7 +336,7 @@ describe("loadConfig validation", () => {
   it("rejects invalid worktree options", () => {
     const cases: [unknown, RegExp][] = [
       ["branch", /must be an object/],
-      [{ prefix: "full" }, /last-segment/],
+      [{ prefix: "full" }, /must be "last-segment", "branch", or "directory"/],
       [{ hostnameTemplate: "tenant.{name}" }, /\{worktree\}/],
       [{ hostnameTemplate: "" }, /hostnameTemplate/],
       [{ flat: "true" }, /worktree.flat/],
@@ -355,6 +355,14 @@ describe("loadConfig validation", () => {
       fs.writeFileSync(path.join(tmpDir, "portless.json"), JSON.stringify({ worktree }));
       expect(() => loadConfig(tmpDir)).toThrow(message);
     }
+  });
+
+  it("accepts the directory worktree prefix style", () => {
+    fs.writeFileSync(
+      path.join(tmpDir, "portless.json"),
+      JSON.stringify({ worktree: { prefix: "directory" } })
+    );
+    expect(loadConfig(tmpDir)?.config.worktree).toEqual({ prefix: "directory" });
   });
 
   it("validates worktree layout fields in top-level and app configs", () => {

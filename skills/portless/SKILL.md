@@ -158,7 +158,7 @@ portless run next dev   # -> https://fix-ui.myapp.localhost
 
 No config changes needed. Put `portless run` in `package.json` once and it works in all worktrees.
 
-Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` to use the whole branch. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree.
+Only the last `/` segment of the branch is used by default. Set `worktree.prefix` to `"branch"` to use the whole branch, or to `"directory"` to use the worktree directory name, which stays the same across branch switches. Use `--prefix <label>` or `PORTLESS_PREFIX` to set the label yourself (`""` for none), including outside a worktree.
 
 When a label exists, the hostname layout is selected in this order:
 
