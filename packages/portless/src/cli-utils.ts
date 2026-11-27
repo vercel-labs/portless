@@ -2979,6 +2979,41 @@ export function injectPackageScriptFrameworkFlags(
   commandArgs.push(...forwardedFlags);
 }
 
+const ELEVATED_PORTLESS_ENV_VARS: readonly string[] = [
+  "PORTLESS_STATE_DIR",
+  "PORTLESS_PORT",
+  "PORTLESS_HTTPS",
+  "PORTLESS_TLD",
+  "PORTLESS_WILDCARD",
+  "PORTLESS_LAN",
+  "PORTLESS_LAN_IP",
+  "PORTLESS_UNPRIVILEGED",
+  "PORTLESS_SYNC_HOSTS",
+  "PORTLESS_OPENSSL_TIMEOUT_MS",
+  "PORTLESS_QUIET",
+  "PORTLESS_INTERNAL_LAN_IP",
+  "PORTLESS_INTERNAL_CLEAN_DIRS",
+  "PORTLESS_INTERNAL_CLEAN_STEPS",
+  "PORTLESS_INTERNAL_CLEAN_PRESERVE_PROXY",
+  "PORTLESS_INTERNAL_CLEAN_PRESERVE_ROUTES",
+  "PORTLESS_INTERNAL_SERVICE_ELEVATED",
+];
+
+/** Collect allowlisted proxy and daemon PORTLESS_* env vars for sudo env calls, excluding sharing secrets. */
+export function collectPortlessEnvArgs(
+  env: NodeJS.ProcessEnv = process.env,
+  omit: ReadonlySet<string> = new Set()
+): string[] {
+  const envArgs: string[] = [];
+  for (const key of ELEVATED_PORTLESS_ENV_VARS) {
+    const value = env[key];
+    if (value && !omit.has(key)) {
+      envArgs.push(`${key}=${value}`);
+    }
+  }
+  return envArgs;
+}
+
 /**
  * Prompt the user for input via readline. Returns empty string if stdin closes.
  */

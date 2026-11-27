@@ -8,6 +8,7 @@ import { ensureCerts, ensureTrust } from "./certs.js";
 import {
   buildProxyStartConfig,
   canBindWithoutRoot,
+  collectPortlessEnvArgs,
   discoverState,
   getProtocolPort,
   isProxyRunning,
@@ -1071,19 +1072,6 @@ function readInstalledServiceConfig(spec: ServiceSpec): NormalizedServiceConfig 
   const snapshot = readInstalledServiceSnapshot(spec);
   if (!snapshot) return null;
   return installedConfigFromSnapshot(snapshot, spec.config);
-}
-
-function collectPortlessEnvArgs(
-  env: NodeJS.ProcessEnv = process.env,
-  omit: Set<string> = new Set()
-): string[] {
-  const envArgs: string[] = [];
-  for (const key of Object.keys(env)) {
-    if (key.startsWith("PORTLESS_") && env[key] && !omit.has(key)) {
-      envArgs.push(`${key}=${env[key]}`);
-    }
-  }
-  return envArgs;
 }
 
 function buildElevatedEnvArgs(options: {

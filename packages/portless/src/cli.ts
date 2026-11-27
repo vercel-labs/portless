@@ -144,6 +144,7 @@ import {
   getDefaultTlds,
   getProxyBindTargets,
   canBindWithoutRoot,
+  collectPortlessEnvArgs,
   isUnprivilegedEnvEnabled,
   getRiskyTldReason,
   injectFrameworkFlags,
@@ -569,20 +570,6 @@ function isLocallyInstalled(): boolean {
     dir = parent;
   }
   return false;
-}
-
-/**
- * Collect PORTLESS_* env vars as KEY=VALUE strings suitable for
- * `sudo env KEY=VAL ...` invocations (sudo may strip the environment).
- */
-function collectPortlessEnvArgs(): string[] {
-  const envArgs: string[] = [];
-  for (const key of Object.keys(process.env)) {
-    if (key.startsWith("PORTLESS_") && process.env[key]) {
-      envArgs.push(`${key}=${process.env[key]}`);
-    }
-  }
-  return envArgs;
 }
 
 /**

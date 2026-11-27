@@ -10,6 +10,7 @@ import {
   augmentedPath,
   buildProxyStartConfig,
   canBindWithoutRoot,
+  collectPortlessEnvArgs,
   FALLBACK_PROXY_PORT,
   INTERNAL_LAN_IP_FLAG,
   LEGACY_SYSTEM_STATE_DIR,
@@ -2944,5 +2945,40 @@ describe("isUnprivilegedEnvEnabled", () => {
   it("is off when unset", () => {
     vi.stubEnv("PORTLESS_UNPRIVILEGED", undefined);
     expect(isUnprivilegedEnvEnabled()).toBe(false);
+  });
+});
+
+describe("collectPortlessEnvArgs", () => {
+  it("forwards allowlisted proxy vars and excludes sharing credentials", () => {
+    const args = collectPortlessEnvArgs(
+      {
+        PORTLESS_STATE_DIR: "/tmp/portless-state",
+        PORTLESS_PORT: "443",
+        PORTLESS_HTTPS: "1",
+        PORTLESS_TLD: "localhost",
+        PORTLESS_SYNC_HOSTS: "0",
+        PORTLESS_NETBIRD: "1",
+        PORTLESS_NETBIRD_PASSWORD: "top-secret-password",
+        PORTLESS_NETBIRD_PIN: "654321",
+        PORTLESS_NETBIRD_GROUPS: "eng,ops",
+        PORTLESS_NGROK: "1",
+        PORTLESS_NGROK_CUSTOM_URL: "https://app.ngrok.dev",
+        PORTLESS_TAILSCALE: "1",
+        PORTLESS_TAILSCALE_PORT: "8443",
+        PORTLESS_TAILSCALE_SERVICE: "api",
+        PORTLESS_FUNNEL: "1",
+        PORTLESS_CLOUDFLARE: "1",
+        PORTLESS_UNKNOWN_SECRET: "nope",
+        OTHER_ENV: "ignored",
+      },
+      new Set(["PORTLESS_STATE_DIR"])
+    );
+
+    expect(args).toEqual([
+      "PORTLESS_PORT=443",
+      "PORTLESS_HTTPS=1",
+      "PORTLESS_TLD=localhost",
+      "PORTLESS_SYNC_HOSTS=0",
+    ]);
   });
 });
