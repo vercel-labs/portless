@@ -6,7 +6,7 @@ import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as readline from "node:readline";
-import { execFileSync, execSync, spawn } from "node:child_process";
+import { execFileSync, execSync, spawn, type StdioOptions } from "node:child_process";
 import { HOSTS_SYNC_PATH, PORTLESS_HEADER } from "./proxy.js";
 import { DEFAULT_TLD, ProxyState, parseTldList } from "./proxy-state.js";
 import {
@@ -1371,6 +1371,7 @@ export function spawnCommand(
   commandArgs: string[],
   options?: {
     env?: NodeJS.ProcessEnv;
+    noStdin?: boolean;
     onCleanup?: () => void;
     /** Awaited after the command exits on its own, before cleanup runs. */
     onExit?: (childPid: number | undefined, code: number | null) => Promise<void>;
@@ -1396,6 +1397,7 @@ export function spawnCommand(
     }
   }
 
+  const stdio: StdioOptions = options?.noStdin ? ["ignore", "inherit", "inherit"] : "inherit";
   const spawnedAt = Date.now();
 
   // On Unix, spawn detached so the child gets its own process group. This
@@ -1403,11 +1405,11 @@ export function spawnCommand(
   // single process.kill(-pid, signal) instead of only the immediate child.
   const child = isWindows
     ? spawn("cmd.exe", ["/d", "/s", "/c", commandArgs.join(" ")], {
-        stdio: "inherit",
+        stdio,
         env,
       })
     : spawn("/bin/sh", ["-c", commandArgs.map(shellEscape).join(" ")], {
-        stdio: "inherit",
+        stdio,
         env,
         detached: true,
       });

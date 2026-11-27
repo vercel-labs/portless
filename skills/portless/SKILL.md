@@ -64,6 +64,8 @@ portless -- --inspect  # -> runs "dev --inspect"
 pnpm dev        # -> works without portless, plain "next dev"
 ```
 
+Repeat `--name` on `portless run` to serve one dev server on multiple hostnames: `portless run --name brand-a --name brand-b vite dev`. Each name gets the worktree prefix or configured `worktree.hostnameTemplate`. The first name sets `PORTLESS_URL` and receives any tunnel.
+
 Arguments after `--` go to the script. At a monorepo root, portless passes them to each app it starts. Forwarding through a script with shell operators or a comment exits 2; run the command directly or make the script a single command. In Turbo mode only the root script is checked, and Turbo passes the arguments to each package script unchanged.
 
 Use an optional `portless.json` to override defaults (name, script, port). In each project directory, portless checks `portless.json`, `.config/portless.json`, and the `package.json` `"portless"` key in that order. Only a missing standalone file advances to the next source; an invalid or unreadable file fails. `apps` paths are relative to the project directory even when the config is in `.config`:
@@ -236,6 +238,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | Variable                | Description                                                                    |
 | ----------------------- | ------------------------------------------------------------------------------ |
 | `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
+| `PORTLESS_QUIET`        | Set to `1` to hide startup status lines (same as `--quiet`)                    |
 | `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
 | `PORTLESS_PORT_VAR`     | Rename the app port variable (same as `--port-var`, default: `PORT`)           |
 | `PORTLESS_HOST_VAR`     | Rename the app host variable (same as `--host-var`, default: `HOST`)           |
@@ -254,7 +257,7 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 | `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
 | `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
 
-portless writes its own status lines to stderr, so stdout carries only your app's output. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
+portless writes its own status lines to stderr, so stdout carries only your app's output. `--quiet` or `PORTLESS_QUIET=1` hides the banner, proxy running status, name, hostname, prefix, assigned port, and `Running:` line while leaving app URLs, warnings, errors, proxy startup output, and monorepo URL tables visible. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
 Portless also sets variables in the child process. `PORT` and `HOST` carry the assigned port and host, under the names chosen by `--port-var` and `--host-var`, `PORTLESS_PORT_VAR` and `PORTLESS_HOST_VAR`, or the config fields `portVar` and `hostVar`. A CLI flag wins over the matching environment variable, which wins over the config field. `PORTLESS_URL` holds the URL you open in the browser, and a monorepo run adds `PORTLESS_URL_<APP>` for every proxied app, including itself. `NODE_EXTRA_CA_CERTS` points at the portless CA, merged with any bundle already set: portless writes a combined bundle that includes the existing certificates and the portless CA, so an existing corporate CA bundle and local HTTPS routes are both trusted. `portless env` prints the same trust and URL values for sibling processes.
 
@@ -387,7 +390,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> <cmd> [args...]`                 | Run app at `https://<name>.localhost` (auto-starts proxy)                           |
 | `portless get <name>`                             | Print URL for a service (for cross-service wiring)                                  |
 | `portless get <name> --no-worktree`               | Print URL without worktree config or naming                                         |
-| `portless get <name> --json`                      | Print name, hostname, and URL as JSON                                               |
+| `portless get <name> --json`                      | Print name, hostname, URL, and active route port as JSON                            |
 | `portless env`                                    | Print shell exports for sibling processes (CA trust, LAN mode)                      |
 | `portless env <name>`                             | Also export `PORTLESS_URL` for a service                                            |
 | `portless env VAR=name [VAR=name...]`             | Resolve service URLs into your own variable names                                   |
@@ -428,6 +431,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless hosts sync`                             | Reconcile routes with /etc/hosts (fixes Safari)                                     |
 | `portless hosts clean`                            | Remove portless entries from /etc/hosts                                             |
 | `portless <name> --app-port <n> <cmd>`            | Use a fixed port for the app instead of auto-assignment                             |
+| `portless <name> --no-stdin <cmd>`                | Ignore stdin for the spawned app, useful for Elixir, Phoenix, or Erlang             |
 | `portless <name> --port-var <name> <cmd>`         | Rename the app port variable (default: `PORT`)                                      |
 | `portless <name> --host-var <name> <cmd>`         | Rename the app host variable (default: `HOST`)                                      |
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)                                   |
@@ -440,6 +444,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless --help` / `-h`                          | Show commands and common app options                                                |
 | `portless proxy --help`                           | Show proxy startup options                                                          |
 | `portless <command> --help` / `-h`                | Print command help without running it                                               |
+| `portless completion <shell>`                     | Print a shell completion script (`bash`, `zsh`, or `fish`)                          |
 | `portless --version` / `-v`                       | Show version                                                                        |
 
 `--port-var` and `--host-var` also work in zero-arg and multi-app mode. They win over `PORTLESS_PORT_VAR`, `PORTLESS_HOST_VAR`, and the config fields `portVar` and `hostVar`.
@@ -450,11 +455,21 @@ App ports referenced by stale Tailscale Serve or Funnel records stay reserved, e
 
 `--help` and `-h` print help and never run the command. After `run <cmd>`, `compose <subcommand>`, or `--`, they belong to the wrapped command, so `portless run next dev --help` passes `--help` to Next.js.
 
-**Reserved names:** `run`, `get`, `env`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+**Reserved names:** `run`, `get`, `env`, `alias`, `compose`, `hosts`, `list`, `doctor`, `trust`, `clean`, `prune`, `proxy`, `service`, `completion`, and `mcp` are subcommands and cannot be used as app names directly. Use `portless run <cmd>` to infer the name, or `portless --name <name> <cmd>` to force any name including reserved ones.
+
+## Shell completion
+
+`portless completion <bash|zsh|fish>` prints a shell completion script. Add the command for your shell to its startup configuration, or install the fish completion file:
+
+```bash
+source <(portless completion bash)
+eval "$(portless completion zsh)"
+portless completion fish > ~/.config/fish/completions/portless.fish
+```
 
 ## MCP server
 
-`portless mcp [--tools <profiles>]` starts a stdio MCP server. It defaults to `core`, which provides route listing, URL lookup, sibling environment exports, static alias management, and profile discovery. Add comma-separated `proxy`, `diagnostics`, or `all` profiles as needed. `default` aliases `core`, and `full` aliases `all`. The `tools_profiles` tool lists available profiles. Shared tool arguments are `cwd`, `extraArgs`, and `timeoutMs`; bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. MCP does not run dev servers; start them with `portless run <cmd>` in a shell.
+`portless mcp [--tools <profiles>]` starts a stdio MCP server supporting MCP `2026-07-28` (`server/discover` and per-request `_meta`) as well as legacy `initialize` revisions `2025-11-25` through `2024-11-05` (including `2025-03-26` JSON-RPC batches). It defaults to `core`, which provides route listing, URL lookup, sibling environment exports, static alias management, and profile discovery. Add comma-separated `proxy`, `diagnostics`, or `all` profiles as needed. `default` aliases `core`, and `full` aliases `all`. The `tools_profiles` tool lists available profiles. Shared tool arguments are `cwd`, `extraArgs`, and `timeoutMs`; bad arguments (unknown or wrong type) and calls to a tool that is not enabled return a tool result with `isError: true` that explains the fix, so the model can correct its call; unknown arguments list the tool's own arguments. MCP does not run dev servers; start them with `portless run <cmd>` in a shell.
 
 ```json
 { "mcpServers": { "portless": { "command": "portless", "args": ["mcp"] } } }
