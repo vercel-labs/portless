@@ -3,6 +3,11 @@ import * as net from "node:net";
 import * as path from "node:path";
 import colors from "./colors.js";
 import { PID_FILE, PORT_FILE, START_FILE } from "./proxy-state.js";
+import {
+  tailscaleShareFromRoute,
+  tailscaleShareKey,
+  type TailscaleShareRecord,
+} from "./tailscale.js";
 import type { RouteInfo } from "./types.js";
 import {
   explainUnsafeStateDir,
@@ -64,24 +69,32 @@ export interface RouteMapping extends RouteInfo {
   orphanPid?: number;
   orphanStartTime?: string;
   tailscaleUrl?: string;
+  tailscaleShare?: TailscaleShareRecord;
+  tailscaleSharePending?: true;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
   ngrokUrl?: string;
   ngrokPid?: number;
   cloudflareUrl?: string;
   cloudflarePid?: number;
+  netbirdUrl?: string;
+  netbirdPid?: number;
 }
 
 type RouteMetadataPatch = {
   childPgid?: number | null;
   childStartTime?: string | null;
   tailscaleUrl?: string | null;
+  tailscaleShare?: TailscaleShareRecord | null;
+  tailscaleSharePending?: true | null;
   tailscaleHttpsPort?: number | null;
   tailscaleFunnel?: boolean | null;
   ngrokUrl?: string | null;
   ngrokPid?: number | null;
   cloudflareUrl?: string | null;
   cloudflarePid?: number | null;
+  netbirdUrl?: string | null;
+  netbirdPid?: number | null;
 };
 
 /** A routes file that exists but cannot be read or parsed, so it is not an empty table. */
@@ -149,6 +162,10 @@ function isStaleRoute(route: RouteMapping): boolean {
   return route.retired === true || (route.pid !== 0 && !isPidAlive(route.pid));
 }
 
+function hasTailscaleShare(route: RouteMapping): boolean {
+  return route.tailscaleShare !== undefined || route.tailscaleHttpsPort !== undefined;
+}
+
 /** Whether a stale entry still records a process group, share or member worth recovering. */
 function hasRecoveryData(route: RouteMapping): boolean {
   return (
@@ -156,9 +173,10 @@ function hasRecoveryData(route: RouteMapping): boolean {
     route.childStartTime !== undefined ||
     route.orphanPid !== undefined ||
     route.orphanStartTime !== undefined ||
-    route.tailscaleHttpsPort !== undefined ||
+    hasTailscaleShare(route) ||
     route.ngrokPid !== undefined ||
-    route.cloudflarePid !== undefined
+    route.cloudflarePid !== undefined ||
+    route.netbirdPid !== undefined
   );
 }
 
@@ -553,15 +571,17 @@ export class RouteStore {
           }
           // Background Serve/Funnel forwarding can outlive both the owner and
           // its child. Keep its backend reserved until the share is cleaned up.
-          if (
-            routes.some(
-              (route) =>
-                route.port === port && route.tailscaleHttpsPort !== undefined && isStaleRoute(route)
-            )
-          ) {
+          const reservedByTailscale = routes.some(
+            (route) =>
+              route.port === port &&
+              hasTailscaleShare(route) &&
+              (isStaleRoute(route) ||
+                (force && hostnames.includes(route.hostname) && route.pid !== pid))
+          );
+          if (reservedByTailscale) {
             if (input.port !== undefined) {
               throw new Error(
-                `Port ${port} is reserved by a stale Tailscale share. Run: portless prune`
+                `Port ${port} is reserved by a Tailscale share. Stop the existing share or run: portless prune`
               );
             }
             return { value: undefined, changed: false };
@@ -581,9 +601,11 @@ export class RouteStore {
               void 0;
             }
           }
-          const kept = routes.filter(
-            (route) => !hostnames.includes(route.hostname) || isStaleRoute(route)
-          );
+          const kept = routes.flatMap((route): RouteMapping[] => {
+            if (!hostnames.includes(route.hostname) || isStaleRoute(route)) return [route];
+            if (hasTailscaleShare(route) && route.pid !== pid) return [{ ...route, retired: true }];
+            return [];
+          });
           for (const hostname of hostnames) {
             kept.push({
               hostname,
@@ -652,6 +674,144 @@ export class RouteStore {
     });
   }
 
+  claimTailscaleShare(hostname: string, record: TailscaleShareRecord): string | null {
+    return this.mutateRoutes((routes) => {
+      const key = tailscaleShareKey(record);
+      const conflicting = routes.find((entry) => {
+        if (entry.hostname === hostname || isStaleRoute(entry)) return false;
+        const existing = tailscaleShareFromRoute(entry);
+        return existing !== undefined && tailscaleShareKey(existing) === key;
+      });
+      if (conflicting) return { value: conflicting.hostname, changed: false };
+      const route = findActiveRoute(routes, hostname);
+      if (!route) return { value: null, changed: false };
+      route.tailscaleShare = record;
+      route.tailscaleSharePending = true;
+      return { value: null, changed: true };
+    });
+  }
+
+  /** Remove one stale route and unshare its Tailscale listener atomically when no live route owns that share. */
+  removeStaleRouteWithShare(
+    hostname: string,
+    ownerPid: number,
+    onUnshare: (record: TailscaleShareRecord) => void
+  ): { removed: boolean; pendingClaim?: boolean; unshared?: TailscaleShareRecord; error?: Error } {
+    return this.mutateRoutes<{
+      removed: boolean;
+      pendingClaim?: boolean;
+      unshared?: TailscaleShareRecord;
+      error?: Error;
+    }>((routes) => {
+      const index = routes.findIndex(
+        (route) => route.hostname === hostname && route.pid === ownerPid && isStaleRoute(route)
+      );
+      if (index === -1) return { value: { removed: false }, changed: false };
+      const record = tailscaleShareFromRoute(routes[index]);
+      let unshared: TailscaleShareRecord | undefined;
+      if (record) {
+        const key = tailscaleShareKey(record);
+        const claims = routes.filter((entry) => {
+          if (isStaleRoute(entry)) return false;
+          const existing = tailscaleShareFromRoute(entry);
+          return existing !== undefined && tailscaleShareKey(existing) === key;
+        });
+        const confirmed = claims.some((entry) => !entry.tailscaleSharePending);
+        if (!confirmed && claims.some((entry) => entry.tailscaleSharePending)) {
+          return { value: { removed: false, pendingClaim: true }, changed: false };
+        }
+        if (!confirmed) {
+          try {
+            onUnshare(record);
+            unshared = record;
+          } catch (err) {
+            return {
+              value: {
+                removed: false,
+                error: err instanceof Error ? err : new Error(String(err)),
+              },
+              changed: false,
+            };
+          }
+        }
+      }
+      routes.splice(index, 1);
+      return { value: { removed: true, ...(unshared ? { unshared } : {}) }, changed: true };
+    });
+  }
+
+  /** Atomically unshare and remove an owned Tailscale route, or retain a retired recovery record on unshare failure. */
+  releaseOwnedTailscaleShare(
+    hostname: string,
+    ownerPid: number,
+    hostnames: readonly string[],
+    port: number,
+    record: TailscaleShareRecord,
+    tailscaleUrl: string | undefined,
+    onUnshare: (record: TailscaleShareRecord) => void
+  ): { error?: Error } {
+    return this.mutateRoutes<{ error?: Error }>((routes) => {
+      const key = tailscaleShareKey(record);
+      const claimedByAnother = routes.some((entry) => {
+        if (entry.pid === ownerPid || isStaleRoute(entry) || entry.tailscaleSharePending)
+          return false;
+        const existing = tailscaleShareFromRoute(entry);
+        return existing !== undefined && tailscaleShareKey(existing) === key;
+      });
+      if (!claimedByAnother) {
+        try {
+          onUnshare(record);
+        } catch (err) {
+          const secondary = hostnames.filter((h) => h !== hostname);
+          const kept = routes.filter(
+            (entry) =>
+              !secondary.includes(entry.hostname) || isStaleRoute(entry) || entry.pid !== ownerPid
+          );
+          const existing =
+            kept.find(
+              (entry) =>
+                entry.hostname === hostname && entry.pid === ownerPid && !isStaleRoute(entry)
+            ) ??
+            kept.find(
+              (entry) =>
+                entry.hostname === hostname && entry.pid === ownerPid && entry.retired === true
+            );
+          if (existing) {
+            existing.tailscaleShare = record;
+            delete existing.tailscaleSharePending;
+            if (tailscaleUrl) existing.tailscaleUrl = tailscaleUrl;
+            existing.retired = true;
+          } else {
+            kept.push({
+              hostname,
+              port,
+              pid: ownerPid,
+              retired: true,
+              registeredAt: Date.now(),
+              ...(tailscaleUrl ? { tailscaleUrl } : {}),
+              tailscaleShare: record,
+            });
+          }
+          routes.length = 0;
+          routes.push(...kept);
+          return {
+            value: { error: err instanceof Error ? err : new Error(String(err)) },
+            changed: true,
+          };
+        }
+      }
+      const kept = routes.filter((entry) => {
+        if (entry.pid !== ownerPid) return true;
+        if (entry.hostname === hostname && isStaleRoute(entry)) return false;
+        return !hostnames.includes(entry.hostname) || isStaleRoute(entry);
+      });
+      const changed = kept.length !== routes.length;
+      routes.length = 0;
+      routes.push(...kept);
+      return { value: {}, changed };
+    });
+  }
+
   /** Remove one route only while its recorded owner is still dead. */
   removeStaleRoute(hostname: string, ownerPid: number): boolean {
     return this.mutateRoutes((routes) => {
@@ -685,6 +845,15 @@ export class RouteStore {
         if (fields.tailscaleUrl === null) delete route.tailscaleUrl;
         else if (fields.tailscaleUrl !== undefined) route.tailscaleUrl = fields.tailscaleUrl;
       }
+      if ("tailscaleShare" in fields) {
+        if (fields.tailscaleShare === null) delete route.tailscaleShare;
+        else if (fields.tailscaleShare !== undefined) route.tailscaleShare = fields.tailscaleShare;
+      }
+      if ("tailscaleSharePending" in fields) {
+        if (fields.tailscaleSharePending === null) delete route.tailscaleSharePending;
+        else if (fields.tailscaleSharePending !== undefined)
+          route.tailscaleSharePending = fields.tailscaleSharePending;
+      }
       if ("tailscaleHttpsPort" in fields) {
         if (fields.tailscaleHttpsPort === null) delete route.tailscaleHttpsPort;
         else if (fields.tailscaleHttpsPort !== undefined)
@@ -711,6 +880,14 @@ export class RouteStore {
         if (fields.cloudflarePid === null) delete route.cloudflarePid;
         else if (fields.cloudflarePid !== undefined) route.cloudflarePid = fields.cloudflarePid;
       }
+      if ("netbirdUrl" in fields) {
+        if (fields.netbirdUrl === null) delete route.netbirdUrl;
+        else if (fields.netbirdUrl !== undefined) route.netbirdUrl = fields.netbirdUrl;
+      }
+      if ("netbirdPid" in fields) {
+        if (fields.netbirdPid === null) delete route.netbirdPid;
+        else if (fields.netbirdPid !== undefined) route.netbirdPid = fields.netbirdPid;
+      }
       return { value: undefined, changed: true };
     });
   }
@@ -731,7 +908,11 @@ export class RouteStore {
       delete route.ngrokPid;
       delete route.cloudflareUrl;
       delete route.cloudflarePid;
+      delete route.netbirdUrl;
+      delete route.netbirdPid;
       delete route.tailscaleUrl;
+      delete route.tailscaleShare;
+      delete route.tailscaleSharePending;
       delete route.tailscaleHttpsPort;
       delete route.tailscaleFunnel;
       return { value: true, changed: true };

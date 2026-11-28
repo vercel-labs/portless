@@ -790,6 +790,38 @@ describe("CLI", { timeout: 15_000 }, () => {
       }
     });
 
+    it("includes Tailscale service and NetBird URLs in JSON", () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-shares-"));
+      try {
+        fs.writeFileSync(
+          path.join(tmpDir, "routes.json"),
+          JSON.stringify([
+            {
+              hostname: "app.localhost",
+              port: 4001,
+              pid: 0,
+              registeredAt: 123,
+              tailscaleShare: { kind: "service", serviceId: "svc:api", serviceName: "api" },
+              netbirdUrl: "https://app.netbird.example",
+            },
+          ])
+        );
+        const result = run(["list", "--json"], {
+          env: { PORTLESS_STATE_DIR: tmpDir, PORTLESS_HTTPS: "0" },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(JSON.parse(result.stdout).routes).toEqual([
+          expect.objectContaining({
+            hostname: "app.localhost",
+            tailscaleService: "api",
+            netbirdUrl: "https://app.netbird.example",
+          }),
+        ]);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
     it("exits 1 with empty stdout when routes.json is corrupt", () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-list-corrupt-"));
       try {
@@ -1548,6 +1580,92 @@ describe("CLI", { timeout: 15_000 }, () => {
         expect(await staleOnPort(8443, 8443)).toBe("");
         fs.rmSync(tailscaleLog, { force: true });
         expect(await staleOnPort(8443)).toContain("serve --yes --https=8443 off");
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "keeps a stale Tailscale share when removal fails and retries it",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-share-retry-"));
+        const routesPath = path.join(tmpDir, "routes.json");
+        const binary = path.join(tmpDir, "tailscale");
+        const log = path.join(tmpDir, "tailscale.log");
+        const env = {
+          PORTLESS_STATE_DIR: tmpDir,
+          PORTLESS_TEST_TAILSCALE_LOG: log,
+          PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}`,
+        };
+        try {
+          const route = {
+            hostname: "stale.localhost",
+            port: await getFreePort(),
+            pid: 999999,
+            registeredAt: Date.now() - 60_000,
+            tailscaleShare: { kind: "https", port: 8443 },
+          };
+          fs.writeFileSync(routesPath, JSON.stringify([route]));
+          fs.writeFileSync(binary, '#!/bin/sh\necho "permission denied" >&2\nexit 1\n', {
+            mode: 0o755,
+          });
+          const failed = run(["prune"], { env });
+          expect(failed.status, failed.stderr).toBe(0);
+          expect(failed.stderr).toContain(
+            "could not remove tailscale serve on port 8443; route kept"
+          );
+          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([route]);
+          writeTailscaleShim(tmpDir);
+          const retried = run(["prune"], { env });
+          expect(retried.status, retried.stderr).toBe(0);
+          expect(retried.stdout).toContain("removed tailscale serve on port 8443");
+          expect(fs.readFileSync(log, "utf-8")).toContain("serve --yes --https=8443 off");
+          expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([]);
+        } finally {
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it("does not unshare a stale service while a live route owns the same key", async () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-prune-service-"));
+      const routesPath = path.join(tmpDir, "routes.json");
+      const log = path.join(tmpDir, "tailscale.log");
+      try {
+        writeTailscaleShim(tmpDir);
+        const share = { kind: "service", serviceId: "svc:api", serviceName: "api" };
+        const live = {
+          hostname: "live.localhost",
+          port: await getFreePort(),
+          pid: 0,
+          registeredAt: Date.now(),
+          tailscaleShare: share,
+        };
+        fs.writeFileSync(
+          routesPath,
+          JSON.stringify([
+            {
+              hostname: "stale.localhost",
+              port: await getFreePort(),
+              pid: 999999,
+              registeredAt: Date.now() - 60_000,
+              tailscaleShare: share,
+            },
+            live,
+          ])
+        );
+        const result = run(["prune"], {
+          env: {
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_TEST_TAILSCALE_LOG: log,
+            PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}`,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain("stale.localhost");
+        expect(result.stdout).toContain("route removed");
+        expect(fs.existsSync(log)).toBe(false);
+        expect(JSON.parse(fs.readFileSync(routesPath, "utf-8"))).toEqual([live]);
       } finally {
         fs.rmSync(tmpDir, { recursive: true, force: true });
       }
@@ -7031,6 +7149,271 @@ describe("CLI", { timeout: 15_000 }, () => {
       const { status, stderr } = run(["run"], { cwd: tmpDir });
       expect(status).toBe(1);
       expect(stderr).toContain("appPort");
+    });
+  });
+
+  describe("sharing flags", () => {
+    it.each([
+      { args: ["--tailscale-port", "8443"], key: "PORTLESS_TAILSCALE_PORT", value: "8443" },
+      { args: ["--tailscale-service"], key: "PORTLESS_TAILSCALE_SERVICE", value: "1" },
+      { args: ["--tailscale-service=api"], key: "PORTLESS_TAILSCALE_SERVICE", value: "svc:api" },
+      {
+        args: ["--ngrok-url", "app.ngrok.dev"],
+        key: "PORTLESS_NGROK_CUSTOM_URL",
+        value: "https://app.ngrok.dev",
+      },
+      { args: ["--netbird"], key: "PORTLESS_NETBIRD", value: "1" },
+      { args: ["--netbird-password", "secret"], key: "PORTLESS_NETBIRD_PASSWORD", value: "secret" },
+      { args: ["--netbird-pin", "1234"], key: "PORTLESS_NETBIRD_PIN", value: "1234" },
+      { args: ["--netbird-groups", "dev,ops"], key: "PORTLESS_NETBIRD_GROUPS", value: "dev,ops" },
+    ])("passes $args to the child in each flag position", ({ args, key, value }) => {
+      const child = [process.execPath, "-e", `console.log(process.env.${key})`];
+      for (const command of [
+        [...args, "myapp", ...child],
+        ["myapp", ...args, ...child],
+        ["run", ...args, ...child],
+      ]) {
+        const result = run(command, { env: { PORTLESS: "0", [key]: undefined } });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout.trim()).toBe(value);
+      }
+    });
+
+    it.each([
+      { args: ["--netbird-password", " "], message: "--netbird-password cannot be blank." },
+      { args: ["--netbird-pin", " "], message: "--netbird-pin cannot be blank." },
+      {
+        args: ["--netbird-groups", ",,"],
+        message: "--netbird-groups requires at least one group name.",
+      },
+      { args: ["--tailscale-service="], message: "--tailscale-service= requires a value." },
+      {
+        args: ["--tailscale-port", "65536"],
+        message: "--tailscale-port requires a port number (1-65535).",
+      },
+      {
+        args: ["--ngrok-url", "ftp://example.com"],
+        message: 'Invalid ngrok URL "ftp://example.com".',
+      },
+    ])("rejects invalid $args in each flag position", ({ args, message }) => {
+      for (const command of [
+        [...args, "myapp", "echo", "hello"],
+        ["myapp", ...args, "echo", "hello"],
+        ["run", ...args, "echo", "hello"],
+      ]) {
+        const result = run(command, { env: { PORTLESS: "0" } });
+        expect(result.status).toBe(2);
+        expect(result.stderr).toContain(message);
+      }
+    });
+
+    it.each([
+      { key: "PORTLESS_NETBIRD_PASSWORD", value: " ", message: "cannot be blank." },
+      { key: "PORTLESS_NETBIRD_PASSWORD", value: "", message: "cannot be blank." },
+      { key: "PORTLESS_NETBIRD_PIN", value: " ", message: "cannot be blank." },
+      { key: "PORTLESS_NETBIRD_PIN", value: "", message: "cannot be blank." },
+      { key: "PORTLESS_NETBIRD_GROUPS", value: ",,", message: "requires at least one group name." },
+      { key: "PORTLESS_NETBIRD_GROUPS", value: "", message: "requires at least one group name." },
+    ])("rejects empty $key=$value before launching NetBird", ({ key, value, message }) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-netbird-invalid-"));
+      try {
+        const result = run(["myapp", "echo", "hello"], {
+          env: {
+            PORTLESS: undefined,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_NETBIRD: "1",
+            [key]: value,
+          },
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(`Error: ${key} ${message}`);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("encodes explicit --tailscale-service=false without falling back to Serve and rejects whitespace", () => {
+      const ok = run(
+        [
+          "--tailscale-service=false",
+          "myapp",
+          process.execPath,
+          "-e",
+          "console.log(process.env.PORTLESS_TAILSCALE_SERVICE)",
+        ],
+        { env: { PORTLESS: "0" } }
+      );
+      expect(ok.status, ok.stderr).toBe(0);
+      expect(ok.stdout.trim()).toBe("svc:false");
+
+      const bad = run(["--tailscale-service=   ", "myapp", "echo", "hello"], {
+        env: { PORTLESS: "0" },
+      });
+      expect(bad.status).toBe(2);
+      expect(bad.stderr).toContain("Invalid Tailscale service name");
+    });
+
+    it.each([
+      { PORTLESS_NETBIRD: "0", PORTLESS_NETBIRD_PIN: "1234" },
+      { PORTLESS_NETBIRD: "0", PORTLESS_NETBIRD_PASSWORD: "" },
+      { PORTLESS_NGROK: "0", PORTLESS_NGROK_CUSTOM_URL: "https://a.ngrok.dev" },
+      { PORTLESS_TAILSCALE: "0", PORTLESS_TAILSCALE_PORT: "8443" },
+      { PORTLESS_TAILSCALE: "false", PORTLESS_TAILSCALE_SERVICE: "myapp" },
+    ])("does not enable sharing when explicitly disabled: %s", async (sharingEnv) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-share-disabled-"));
+      const proxy = await startMockProxy(tmpDir);
+      try {
+        const result = run(["myapp", process.execPath, "-e", "console.log('ran')"], {
+          env: {
+            PORTLESS: undefined,
+            PORTLESS_STATE_DIR: tmpDir,
+            PORTLESS_PORT: String(proxy.port),
+            PORTLESS_HTTPS: "0",
+            PORTLESS_SYNC_HOSTS: "0",
+            PORTLESS_FUNNEL: "0",
+            PORTLESS_TAILSCALE: "0",
+            PORTLESS_NGROK: "0",
+            PORTLESS_NETBIRD: "0",
+            PORTLESS_CLOUDFLARE: "0",
+            PATH: [tmpDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+            ...sharingEnv,
+          },
+        });
+        expect(result.status, result.stderr).toBe(0);
+        expect(result.stdout).toContain("ran");
+      } finally {
+        await stopChild(proxy.child);
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it.skipIf(process.platform === "win32")(
+      "infers a Tailscale Service from a dotted app name",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-dotted-service-"));
+        const proxy = await startMockProxy(tmpDir);
+        const log = path.join(tmpDir, "tailscale.log");
+        try {
+          const status = JSON.stringify({
+            Self: { Capabilities: ["https"], Tags: ["tag:dev"] },
+            CurrentTailnet: { MagicDNSEnabled: true, MagicDNSSuffix: "example.ts.net" },
+          });
+          fs.writeFileSync(
+            path.join(tmpDir, "tailscale"),
+            `#!/bin/sh\nprintf '%s\\n' "$*" >> "$PORTLESS_TEST_TAILSCALE_LOG"\nif [ "$1" = status ]; then printf '%s\\n' '${status}'; fi\n`,
+            { mode: 0o755 }
+          );
+          const result = run(["--tailscale-service", "docs.myapp", process.execPath, "-e", ""], {
+            env: {
+              PORTLESS: undefined,
+              PORTLESS_STATE_DIR: tmpDir,
+              PORTLESS_PORT: String(proxy.port),
+              PORTLESS_HTTPS: "0",
+              PORTLESS_SYNC_HOSTS: "0",
+              PORTLESS_TEST_TAILSCALE_LOG: log,
+              PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}`,
+            },
+          });
+          expect(result.status, result.stderr).toBe(0);
+          expect(fs.readFileSync(log, "utf-8")).toContain("--service=svc:docs-myapp");
+        } finally {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.skipIf(process.platform === "win32")(
+      "does not reuse parent PORTLESS_NGROK_URL or pinned URL on nested portless runs",
+      async () => {
+        const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-nested-ngrok-"));
+        const proxy = await startMockProxy(tmpDir);
+        const log = path.join(tmpDir, "ngrok.log");
+        const childScript = path.join(tmpDir, "child.mjs");
+        try {
+          fs.writeFileSync(
+            path.join(tmpDir, "ngrok"),
+            [
+              "#!/bin/sh",
+              'if [ "$1" = version ]; then exit 0; fi',
+              'printf "%s\\n" "$*" >> "$PORTLESS_TEST_NGROK_LOG"',
+              'case "$*" in',
+              '  *"--url=https://outer.ngrok.dev"*)',
+              '    if [ -f "$PORTLESS_TEST_NGROK_LOCK" ]; then echo "ERROR: URL already in use" >&2; exit 1; fi',
+              '    : > "$PORTLESS_TEST_NGROK_LOCK"',
+              "    echo 't=1 lvl=info msg=\"started tunnel\" addr=http://127.0.0.1:4000 url=https://outer.ngrok.dev'",
+              "    ;;",
+              "  *)",
+              "    echo 't=1 lvl=info msg=\"started tunnel\" addr=http://127.0.0.1:4001 url=https://nested-random.ngrok.app'",
+              "    ;;",
+              "esac",
+              "exec sleep 30",
+              "",
+            ].join("\n"),
+            { mode: 0o755 }
+          );
+          fs.writeFileSync(
+            childScript,
+            [
+              'import { execFileSync } from "node:child_process";',
+              'if (process.env.PORTLESS_NGROK_URL !== "https://outer.ngrok.dev") throw new Error("missing output URL");',
+              'if (process.env.PORTLESS_NGROK !== undefined) throw new Error("leaked PORTLESS_NGROK");',
+              'if (process.env.PORTLESS_NGROK_CUSTOM_URL !== undefined) throw new Error("leaked custom URL");',
+              'const localOut = execFileSync(process.execPath, [process.env.PORTLESS_TEST_CLI, "inner-local", process.execPath, "-e", "console.log(process.env.PORTLESS_NGROK_URL ?? \'none\')"], { encoding: "utf-8" });',
+              'const sharedOut = execFileSync(process.execPath, [process.env.PORTLESS_TEST_CLI, "inner-shared", "--ngrok", process.execPath, "-e", "console.log(process.env.PORTLESS_NGROK_URL)"], { encoding: "utf-8" });',
+              'process.stdout.write(localOut.trim() + "|" + sharedOut.trim());',
+              "",
+            ].join("\n")
+          );
+          const result = run(
+            ["outer", "--ngrok-url", "https://outer.ngrok.dev", process.execPath, childScript],
+            {
+              env: {
+                PORTLESS: undefined,
+                PORTLESS_STATE_DIR: tmpDir,
+                PORTLESS_PORT: String(proxy.port),
+                PORTLESS_HTTPS: "0",
+                PORTLESS_SYNC_HOSTS: "0",
+                PORTLESS_TEST_CLI: CLI_PATH,
+                PORTLESS_TEST_NGROK_LOG: log,
+                PORTLESS_TEST_NGROK_LOCK: path.join(tmpDir, "outer.lock"),
+                PATH: `${tmpDir}${path.delimiter}${process.env.PATH ?? ""}`,
+              },
+            }
+          );
+          expect(result.status, result.stderr).toBe(0);
+          expect(result.stdout.trim()).toBe("none|https://nested-random.ngrok.app");
+          const lines = fs.readFileSync(log, "utf-8").trim().split("\n");
+          expect(lines).toHaveLength(2);
+          expect(lines[0]).toContain("--url=https://outer.ngrok.dev");
+          expect(lines[1]).not.toContain("--url=");
+        } finally {
+          await stopChild(proxy.child);
+          fs.rmSync(tmpDir, { recursive: true, force: true });
+        }
+      }
+    );
+
+    it.each([
+      {
+        args: ["--funnel", "--tailscale-service"],
+        message: "--funnel cannot be combined with --tailscale-service.",
+      },
+      {
+        args: ["--tailscale-port", "8443", "--tailscale-service=api"],
+        message: "--tailscale-port cannot be combined with --tailscale-service.",
+      },
+    ])("rejects incompatible sharing flags $args", ({ args, message }) => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-share-conflict-"));
+      try {
+        const result = run([...args, "myapp", "echo", "hello"], {
+          env: { PORTLESS: undefined, PORTLESS_STATE_DIR: tmpDir },
+        });
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain(message);
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
     });
   });
 

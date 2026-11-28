@@ -551,12 +551,15 @@ describe("buildServiceSpec", () => {
 });
 
 describe("buildServiceUninstallSudoArgs", () => {
-  it("builds a service-scoped sudo command that preserves user state", () => {
+  it("builds a service-scoped sudo command that preserves allowlisted proxy env and strips secrets", () => {
     const args = buildServiceUninstallSudoArgs("/fake/cli.js", {
       nodePath: "/usr/bin/node",
       home: "/Users/alice",
       env: {
         PORTLESS_STATE_DIR: "/Users/alice/.portless",
+        PORTLESS_SYNC_HOSTS: "0",
+        PORTLESS_NETBIRD_PASSWORD: "top-secret-password",
+        PORTLESS_NETBIRD_PIN: "123456",
         PORTLESS_DEBUG: "1",
         OTHER_ENV: "ignored",
       },
@@ -564,7 +567,7 @@ describe("buildServiceUninstallSudoArgs", () => {
 
     expect(args).toEqual([
       "env",
-      "PORTLESS_DEBUG=1",
+      "PORTLESS_SYNC_HOSTS=0",
       "HOME=/Users/alice",
       "PORTLESS_STATE_DIR=/Users/alice/.portless",
       "/usr/bin/node",

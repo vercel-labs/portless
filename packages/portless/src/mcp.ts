@@ -3,8 +3,11 @@
  * for each tool call.
  *
  * Intentionally omitted: run, <name> <cmd>, --name, and zero-arg mode
- * (foreground dev servers with no detached form), compose (runs Docker
- * Compose, often in the foreground), proxy start --foreground
+ * (foreground dev servers with no detached form), sharing flags (--tailscale,
+ * --tailscale-port, --tailscale-service, --funnel, --ngrok, --ngrok-url,
+ * --cloudflare, --netbird, --netbird-password, --netbird-pin, and
+ * --netbird-groups) because shares only apply to long-lived apps,
+ * compose (runs Docker Compose, often in the foreground), proxy start --foreground
  * (blocks), trust --device (serves the CA in the foreground), trust, clean,
  * hosts sync, hosts clean, and service (may prompt for sudo or need a TTY),
  * plus mcp and --help (the server itself and human help).
@@ -130,7 +133,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "list",
     "List routes",
-    "List active routes with their URLs, ports, PIDs, uptime, and upstream settings.",
+    "List active routes with their URLs, ports, PIDs, uptime, and upstream settings. Sharing fields appear per route when set: tailscaleUrl, tailscaleFunnel, tailscaleService, ngrokUrl, cloudflareUrl, and netbirdUrl.",
     {
       json: { type: "boolean", description: "Return routes as JSON, including upstream settings." },
     },
@@ -329,7 +332,7 @@ export const TOOLS: ToolDef[] = [
   tool(
     "prune",
     "Prune servers",
-    "Remove stale routes and shares, and stop matching recorded process groups. App ports in stale Tailscale Serve or Funnel records stay reserved after the server stops: automatic assignment skips them, and fixed-port registration refuses them even with --force. Prune stale shares before reusing their ports. A group keeps its route and shares while any member is still running, even after it closes its port, and the surviving member is recorded for a retry. A group that cannot be verified is reported and kept, never signaled. A port holder that cannot be proven part of the recorded group is reported and kept, never killed. Stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups and unrelated port holders are not killed. Refuses a state directory that another user owns or can write to, and signals nothing.",
+    "Remove stale routes and shares, and stop matching recorded process groups. App ports in stale Tailscale Serve or Funnel records stay reserved after the server stops: automatic assignment skips them, and fixed-port registration refuses them even with --force. Prune stale shares before reusing their ports. A group keeps its route and shares while any member is still running, even after it closes its port, and the surviving member is recorded for a retry. A group that cannot be verified is reported and kept, never signaled. A port holder that cannot be proven part of the recorded group is reported and kept, never killed. A stale Tailscale share whose unshare fails is kept, so a later prune retries it. Stop recorded ngrok, cloudflared, and netbird tunnels only when their executable names match, including on Windows. Windows process groups and unrelated port holders are not killed. Refuses a state directory that another user owns or can write to, and signals nothing.",
     {
       force: {
         type: "boolean",

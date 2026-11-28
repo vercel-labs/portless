@@ -1,30 +1,54 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-
 const TAILSCALE_BINARY = "tailscale";
 const TAILSCALE_COMMAND_TIMEOUT_MS = 30_000;
-
-/**
- * Port allocation sequence for tailscale serve HTTPS ports.
- * First app gets 443 (default HTTPS), subsequent apps get 8443+.
- * Ports beyond this list are auto-assigned sequentially but may require
- * Tailscale ACL configuration to be reachable on the tailnet.
- */
-const PREFERRED_SERVE_PORTS = [443, 8443, 8444, 8445, 8446, 8447, 8448, 8449, 8450];
-
-/** Tailscale Funnel only supports these three ports. */
 const FUNNEL_PORTS = [443, 8443, 10000];
-
+const PREFERRED_SERVE_PORTS = [443, 8443, 8444, 8445, 8446, 8447, 8448, 8449, 8450];
+const PREFERRED_HTTP_SERVE_PORTS = [80, 8080, 8081, 8082, 8083, 8084, 8085, 8086, 8087];
 interface TailscaleCommandResult {
   status: number | null;
   stdout: string;
   stderr: string;
   error?: Error;
 }
-
 export type TailscaleCommandRunner = (args: string[]) => TailscaleCommandResult;
-
+export type TailscaleShareKind = "serve" | "funnel" | "service";
+export type TailscaleShareRequest =
+  | { kind: "serve"; preferredPort?: number }
+  | { kind: "funnel"; preferredPort?: number }
+  | { kind: "service"; serviceName: string };
+export type TailscaleShareRecord =
+  | { kind: "https"; port: number }
+  | { kind: "tcp"; port: number }
+  | { kind: "funnel"; port: number }
+  | { kind: "service"; serviceId: string; serviceName: string };
+export interface TailscaleReady {
+  readonly request: TailscaleShareRequest;
+  readonly transport: "https" | "tcp" | "funnel" | "service";
+  readonly host: string;
+  readonly baseUrl: string;
+  readonly serviceId?: string;
+  readonly serviceName?: string;
+}
+export interface EnsureTailscaleReadyOptions {
+  runner?: TailscaleCommandRunner;
+}
+export interface ShareTailscaleOptions {
+  localPort: number;
+  kind: TailscaleShareKind;
+  preferredPort?: number;
+  serviceName?: string;
+  ready?: TailscaleReady;
+  claimShare?: (record: TailscaleShareRecord) => string | null;
+  releaseShare?: () => void;
+  runner?: TailscaleCommandRunner;
+}
+export interface TailscaleShareResult {
+  url: string;
+  record: TailscaleShareRecord;
+  pendingApproval?: boolean;
+}
 interface TailscaleStatusJson {
   Self?: {
     Capabilities?: string[];
@@ -32,23 +56,20 @@ interface TailscaleStatusJson {
     DNSName?: string;
     HostName?: string;
     ID?: string;
+    TailscaleIPs?: string[];
+    Tags?: string[];
   };
   CurrentTailnet?: {
     MagicDNSSuffix?: string;
+    MagicDNSEnabled?: boolean;
   };
 }
-
-export interface TailscaleReadyResult {
-  dnsName: string;
-  baseUrl: string;
+interface ServeStatusJson {
+  Web?: Record<string, unknown>;
+  TCP?: Record<string, unknown>;
+  Services?: Record<string, { Web?: Record<string, unknown>; TCP?: Record<string, unknown> }>;
+  Foreground?: Record<string, ServeStatusJson>;
 }
-
-export interface EnsureTailscaleReadyOptions {
-  requireFunnel?: boolean;
-  requireHttps?: boolean;
-  runner?: TailscaleCommandRunner;
-}
-
 function runTailscaleCommand(command: string, args: string[]): TailscaleCommandResult {
   const result = spawnSync(command, args, {
     encoding: "utf-8",
@@ -63,7 +84,6 @@ function runTailscaleCommand(command: string, args: string[]): TailscaleCommandR
     ...(result.error ? { error: result.error } : {}),
   };
 }
-
 /** Resolve an existing Windows `.cmd` shim on PATH. */
 export function findWindowsCmdShim(
   name: string,
@@ -81,120 +101,74 @@ export function findWindowsCmdShim(
   }
   return null;
 }
-
-/**
- * Run the Tailscale CLI. On Windows, retry through the command shell only when
- * an existing `.cmd` shim cannot be spawned directly.
- */
 function defaultRunner(args: string[]): TailscaleCommandResult {
   const result = runTailscaleCommand(TAILSCALE_BINARY, args);
   const code = (result.error as NodeJS.ErrnoException | undefined)?.code;
-  if (process.platform !== "win32" || (code !== "ENOENT" && code !== "EINVAL")) {
-    return result;
-  }
+  if (process.platform !== "win32" || (code !== "ENOENT" && code !== "EINVAL")) return result;
   const shim = findWindowsCmdShim(TAILSCALE_BINARY);
   if (!shim) return result;
   return runTailscaleCommand(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", shim, ...args]);
 }
-
-function trimDot(value: string): string {
-  return value.endsWith(".") ? value.slice(0, -1) : value;
-}
-
 function normalizeSpace(value: string): string {
   return value.trim().replace(/\s+/g, " ");
 }
-
+function throwCommandError(error: Error, action: string): never {
+  if ((error as NodeJS.ErrnoException).code === "ENOENT")
+    throw new Error(
+      "Tailscale CLI not found. Install Tailscale (https://tailscale.com/download) and ensure `tailscale` is on PATH."
+    );
+  throw new Error(`Failed to ${action}: ${error.message}`);
+}
 function runOrThrow(
   args: string[],
   action: string,
   runner: TailscaleCommandRunner
 ): TailscaleCommandResult {
   const result = runner(args);
-  if (result.error) {
-    const errno = result.error as NodeJS.ErrnoException;
-    if (errno.code === "ENOENT") {
-      throw new Error(
-        "Tailscale CLI not found. Install Tailscale (https://tailscale.com/download) and ensure `tailscale` is on PATH."
-      );
-    }
-    throw new Error(`Failed to ${action}: ${result.error.message}`);
-  }
+  if (result.error) throwCommandError(result.error, action);
   if (result.status !== 0) {
     const details = normalizeSpace(result.stderr || result.stdout);
     throw new Error(`Failed to ${action}: ${details || "unknown tailscale error"}`);
   }
   return result;
 }
-
-function parseStatusJson(raw: string): TailscaleStatusJson {
-  try {
-    return JSON.parse(raw) as TailscaleStatusJson;
-  } catch {
-    throw new Error("Failed to parse `tailscale status --json` output.");
-  }
+function trimDot(value: string): string {
+  return value.replace(/\.+$/, "");
 }
-
 function statusToDnsName(status: TailscaleStatusJson): string {
   const dnsName = status.Self?.DNSName;
-  if (typeof dnsName === "string" && dnsName.length > 0) {
-    return trimDot(dnsName);
-  }
-
+  if (typeof dnsName === "string" && trimDot(dnsName).length > 0) return trimDot(dnsName);
   const host = status.Self?.HostName;
   const suffix = status.CurrentTailnet?.MagicDNSSuffix;
   if (
     typeof host === "string" &&
     host.length > 0 &&
     typeof suffix === "string" &&
-    suffix.length > 0
+    trimDot(suffix)
   ) {
     return `${host}.${trimDot(suffix)}`;
   }
-
   throw new Error(
     "Could not determine Tailscale node DNS name from `tailscale status --json`. Is Tailscale connected?"
   );
 }
-
-function isFunnelCapability(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return normalized === "funnel" || normalized.endsWith("/funnel");
-}
-
-function isHttpsCapability(value: string): boolean {
-  const normalized = value.toLowerCase();
-  return normalized === "https" || normalized.endsWith("/https");
-}
-
-function hasCapability(
-  status: TailscaleStatusJson,
-  predicate: (value: string) => boolean
-): boolean {
+function hasCapability(status: TailscaleStatusJson, capability: string): boolean {
+  const matches = (value: string): boolean => {
+    const normalized = value.toLowerCase();
+    return normalized === capability || normalized.endsWith(`/${capability}`);
+  };
   const capabilities = status.Self?.Capabilities;
-  if (Array.isArray(capabilities) && capabilities.some(predicate)) {
-    return true;
-  }
-
-  const capMap = status.Self?.CapMap;
-  return Boolean(capMap && Object.keys(capMap).some(predicate));
+  return (
+    (Array.isArray(capabilities) && capabilities.some(matches)) ||
+    Boolean(status.Self?.CapMap && Object.keys(status.Self.CapMap).some(matches))
+  );
 }
-
-function hasHttpsCapability(status: TailscaleStatusJson): boolean {
-  return hasCapability(status, isHttpsCapability);
-}
-
-function hasFunnelCapability(status: TailscaleStatusJson): boolean {
-  return hasCapability(status, isFunnelCapability);
-}
-
 function throwHttpsNotEnabled(): never {
   throw new Error(
     "Tailscale HTTPS is not enabled on your tailnet. " +
       "Enable HTTPS certificates in Tailscale DNS settings, then run portless again."
   );
 }
-
 function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
   const nodeId = status.Self?.ID;
   const enableUrl =
@@ -207,264 +181,362 @@ function throwFunnelNotEnabled(status: TailscaleStatusJson): never {
       enableUrl
   );
 }
-
-/**
- * Verify that the Tailscale CLI is installed and the node is connected.
- * Returns the node's DNS name and base URL.
- */
+/** Normalize and validate a Tailscale service name. */
+export function normalizeServiceName(raw: string): string {
+  const name = raw.trim().replace(/^svc:/i, "").toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(name))
+    throw new Error(
+      `Invalid Tailscale service name "${raw}". Use 1-63 lowercase letters, numbers, and hyphens, starting and ending with a letter or number.`
+    );
+  return name;
+}
+export function inferServiceName(raw: string): string {
+  const name = raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 63)
+    .replace(/-+$/, "");
+  return normalizeServiceName(name || raw);
+}
+function validatePort(port: number, kind: TailscaleShareKind): void {
+  if (!Number.isInteger(port) || port < 1 || port > 65535)
+    throw new Error(`Invalid Tailscale port "${port}". Must be a port number between 1 and 65535.`);
+  if (kind === "funnel" && !FUNNEL_PORTS.includes(port))
+    throw new Error(
+      `Tailscale Funnel cannot use port ${port}. Funnel supports ports 443, 8443, and 10000.`
+    );
+}
+/** Verify Tailscale readiness and choose the transport for a share. */
 export function ensureTailscaleReady(
+  request: TailscaleShareRequest = { kind: "serve" },
   options: EnsureTailscaleReadyOptions = {}
-): TailscaleReadyResult {
+): TailscaleReady {
+  const normalizedRequest: TailscaleShareRequest =
+    request.kind === "service"
+      ? { kind: "service", serviceName: normalizeServiceName(request.serviceName) }
+      : request;
+  if (normalizedRequest.kind !== "service" && normalizedRequest.preferredPort !== undefined) {
+    validatePort(normalizedRequest.preferredPort, normalizedRequest.kind);
+  }
   const runner = options.runner ?? defaultRunner;
   runOrThrow(["version"], "check tailscale version", runner);
   const statusResult = runOrThrow(["status", "--json"], "read tailscale status", runner);
-  const status = parseStatusJson(statusResult.stdout);
-  const dnsName = statusToDnsName(status);
-  if (options.requireHttps && !hasHttpsCapability(status)) {
-    throwHttpsNotEnabled();
-  }
-  if (options.requireFunnel && !hasFunnelCapability(status)) {
-    throwFunnelNotEnabled(status);
-  }
-  return {
-    dnsName,
-    baseUrl: `https://${dnsName}`,
-  };
-}
-
-// ---------------------------------------------------------------------------
-// Port allocation
-// ---------------------------------------------------------------------------
-
-interface ServeStatusWeb {
-  [hostPort: string]: {
-    Handlers?: Record<string, unknown>;
-  };
-}
-
-interface ServeStatusJson {
-  Web?: ServeStatusWeb;
-  TCP?: Record<string, unknown>;
-  Foreground?: Record<string, ServeStatusJson>;
-}
-
-/**
- * Query `tailscale serve status --json` and return the set of HTTPS ports
- * currently in use, including ports held by foreground sessions.
- */
-export function getUsedServePorts(runner: TailscaleCommandRunner = defaultRunner): Set<number> {
-  const result = runner(["serve", "status", "--json"]);
-  if (result.error || result.status !== 0) {
-    return new Set();
-  }
+  let status: TailscaleStatusJson;
   try {
-    const config = JSON.parse(result.stdout) as ServeStatusJson;
-    const ports = new Set<number>();
-    for (const session of [config, ...Object.values(config.Foreground ?? {})]) {
-      if (!session || typeof session !== "object") continue;
-      if (session.Web) {
-        for (const hostPort of Object.keys(session.Web)) {
-          const match = hostPort.match(/:(\d+)$/);
-          if (match) {
-            ports.add(parseInt(match[1], 10));
-          }
-        }
-      }
-      if (session.TCP) {
-        for (const portStr of Object.keys(session.TCP)) {
-          const p = parseInt(portStr, 10);
-          if (!isNaN(p)) ports.add(p);
-        }
-      }
-    }
-    return ports;
+    status = JSON.parse(statusResult.stdout) as TailscaleStatusJson;
   } catch {
-    return new Set();
+    throw new Error("Failed to parse `tailscale status --json` output.");
   }
-}
-
-/**
- * Pick the next available HTTPS port from the preferred sequence.
- * Returns the first port not in `usedPorts`. Funnel mode is restricted
- * to 443, 8443, and 10000; serve mode extends beyond its preferred list.
- */
-export function findAvailableServePort(
-  usedPorts: Set<number>,
-  mode: TailscaleMode = "serve"
-): number {
-  const pool = mode === "funnel" ? FUNNEL_PORTS : PREFERRED_SERVE_PORTS;
-  for (const port of pool) {
-    if (!usedPorts.has(port)) return port;
+  if (normalizedRequest.kind === "serve" && status.CurrentTailnet?.MagicDNSEnabled === false) {
+    const ips = status.Self?.TailscaleIPs;
+    const validIps = Array.isArray(ips)
+      ? ips.filter((ip) => typeof ip === "string" && ip.trim())
+      : [];
+    const ip = validIps.find((value) => value.includes(".")) ?? validIps[0];
+    if (!ip)
+      throw new Error(
+        "Could not determine this node's Tailscale IP from `tailscale status --json`. Is Tailscale connected?"
+      );
+    const host = ip.includes(".") || (ip.startsWith("[") && ip.endsWith("]")) ? ip : `[${ip}]`;
+    return { request: normalizedRequest, transport: "tcp", host, baseUrl: `http://${host}` };
   }
-  if (mode === "funnel") {
+  if (status.CurrentTailnet?.MagicDNSEnabled === false) {
+    const feature = normalizedRequest.kind === "funnel" ? "Funnel" : "Services";
     throw new Error(
-      "All Tailscale Funnel ports are in use (443, 8443, 10000). " +
-        "Stop an existing funnel to free a port."
+      `MagicDNS is disabled on your tailnet. Tailscale ${feature} require${feature === "Funnel" ? "s" : ""} MagicDNS; enable it in Tailscale DNS settings, then run portless again.`
     );
   }
-  let port = PREFERRED_SERVE_PORTS[PREFERRED_SERVE_PORTS.length - 1] + 1;
-  while (usedPorts.has(port)) port++;
+  if (!hasCapability(status, "https")) throwHttpsNotEnabled();
+  if (normalizedRequest.kind === "funnel") {
+    if (!hasCapability(status, "funnel")) throwFunnelNotEnabled(status);
+    const host = statusToDnsName(status);
+    return { request: normalizedRequest, transport: "funnel", host, baseUrl: `https://${host}` };
+  }
+  if (normalizedRequest.kind === "service") {
+    if (!Array.isArray(status.Self?.Tags) || status.Self.Tags.length === 0)
+      throw new Error(
+        "Tailscale Services require this device to use a tag-based identity. Re-authenticate with --advertise-tags=tag:<name>, then run portless again."
+      );
+    let suffix = trimDot(status.CurrentTailnet?.MagicDNSSuffix?.trim() ?? "");
+    if (!suffix) {
+      try {
+        const dnsName = statusToDnsName(status);
+        const dot = dnsName.indexOf(".");
+        suffix = dot < 0 ? "" : dnsName.slice(dot + 1);
+      } catch {
+        suffix = "";
+      }
+    }
+    if (!suffix)
+      throw new Error(
+        "Could not determine Tailscale MagicDNS suffix from `tailscale status --json`. Is MagicDNS enabled?"
+      );
+    const serviceName = normalizedRequest.serviceName;
+    const serviceId = `svc:${serviceName}`;
+    const host = `${serviceName}.${suffix}`;
+    return {
+      request: normalizedRequest,
+      transport: "service",
+      host,
+      baseUrl: `https://${host}`,
+      serviceId,
+      serviceName,
+    };
+  }
+  const host = statusToDnsName(status);
+  return { request: normalizedRequest, transport: "https", host, baseUrl: `https://${host}` };
+}
+function readServeStatus(runner: TailscaleCommandRunner): {
+  ports: Set<number>;
+  services: Set<string>;
+} {
+  const ports = new Set<number>();
+  const services = new Set<string>();
+  const result = runner(["serve", "status", "--json"]);
+  if (result.error || result.status !== 0) return { ports, services };
+  try {
+    const config = JSON.parse(result.stdout) as ServeStatusJson;
+    for (const session of [config, ...Object.values(config.Foreground ?? {})]) {
+      if (!session || typeof session !== "object") continue;
+      for (const key of [...Object.keys(session.Web ?? {}), ...Object.keys(session.TCP ?? {})]) {
+        const match = key.match(/:(\d+)$/) ?? key.match(/^(\d+)$/);
+        if (match) ports.add(Number(match[1]));
+      }
+      for (const [id, entry] of Object.entries(session.Services ?? {})) {
+        if (
+          entry &&
+          typeof entry === "object" &&
+          (Object.keys(entry.Web ?? {}).length > 0 || Object.keys(entry.TCP ?? {}).length > 0)
+        ) {
+          services.add(id.toLowerCase());
+        }
+      }
+    }
+  } catch {
+    ports.clear();
+    services.clear();
+  }
+  return { ports, services };
+}
+function findAvailablePort(used: Set<number>, transport: "https" | "tcp" | "funnel"): number {
+  const pool =
+    transport === "funnel"
+      ? FUNNEL_PORTS
+      : transport === "tcp"
+        ? PREFERRED_HTTP_SERVE_PORTS
+        : PREFERRED_SERVE_PORTS;
+  for (const port of pool) if (!used.has(port)) return port;
+  if (transport === "funnel")
+    throw new Error(
+      "All Tailscale Funnel ports are in use (443, 8443, 10000). Stop an existing funnel to free a port."
+    );
+  let port = pool[pool.length - 1] + 1;
+  while (port <= 65535 && used.has(port)) port++;
+  if (port > 65535) throw new Error("No Tailscale ports are available.");
   return port;
 }
-
-// ---------------------------------------------------------------------------
-// Register / unregister
-// ---------------------------------------------------------------------------
-
-function isConflictError(stderr: string, stdout: string): boolean {
-  const text = `${stderr}\n${stdout}`.toLowerCase();
-  return (
-    text.includes("already in use") ||
-    text.includes("already exists") ||
-    text.includes("port conflict") ||
-    text.includes("address already")
-  );
-}
-
-function isFunnelNotEnabledError(stderr: string, stdout: string): boolean {
-  const text = `${stderr}\n${stdout}`.toLowerCase();
-  return text.includes("funnel is not enabled on your tailnet");
-}
-
-function formatFunnelNotEnabledError(stderr: string, stdout: string): string {
-  const details = normalizeSpace(`${stderr}\n${stdout}`);
-  return (
-    "Tailscale Funnel is not enabled on your tailnet. " +
-    "Enable Funnel for this node, then run portless again." +
-    (details ? ` Tailscale said: ${details}` : "")
-  );
-}
-
-export type TailscaleMode = "serve" | "funnel";
-
-export interface RegisterServeOptions {
-  runner?: TailscaleCommandRunner;
-}
-
-const CONFLICT_MESSAGES: Record<TailscaleMode, string> = {
-  serve: "Stop the existing serve or let portless auto-assign a different port.",
-  funnel: "Tailscale Funnel supports ports 443, 8443, and 10000.",
-};
-
-function register(
-  mode: TailscaleMode,
+class TailscalePortConflictError extends Error {}
+function registerPort(
+  transport: "https" | "tcp" | "funnel",
+  port: number,
   localPort: number,
-  httpsPort: number,
   runner: TailscaleCommandRunner
 ): void {
-  const target = `http://127.0.0.1:${localPort}`;
-  const result = runner([mode, "--bg", "--yes", `--https=${httpsPort}`, target]);
+  const mode = transport === "funnel" ? "funnel" : "serve";
+  const protocol = transport === "tcp" ? "tcp" : "https";
+  const target = `${transport === "tcp" ? "tcp" : "http"}://127.0.0.1:${localPort}`;
+  const result = runner([mode, "--bg", "--yes", `--${protocol}=${port}`, target]);
   if (result.error) {
-    const errno = result.error as NodeJS.ErrnoException;
-    if (errno.code === "ENOENT") {
-      throw new Error(
-        "Tailscale CLI not found. Install Tailscale (https://tailscale.com/download) and ensure `tailscale` is on PATH."
-      );
-    }
-    if (mode === "funnel" && isFunnelNotEnabledError(result.stderr, result.stdout)) {
-      throw new Error(formatFunnelNotEnabledError(result.stderr, result.stdout));
-    }
-    if (mode === "funnel" && errno.code === "ETIMEDOUT") {
+    if (transport === "funnel" && (result.error as NodeJS.ErrnoException).code === "ETIMEDOUT")
       throw new Error(
         "Tailscale Funnel registration timed out. Make sure Funnel is enabled on your tailnet, then run portless again."
       );
-    }
-    throw new Error(`Failed to register tailscale ${mode}: ${result.error.message}`);
+    throwCommandError(result.error, `register tailscale ${mode}`);
   }
   if (result.status !== 0) {
-    if (mode === "funnel" && isFunnelNotEnabledError(result.stderr, result.stdout)) {
-      throw new Error(formatFunnelNotEnabledError(result.stderr, result.stdout));
-    }
-    if (isConflictError(result.stderr, result.stdout)) {
+    const output = `${result.stderr}\n${result.stdout}`;
+    if (transport === "funnel" && /funnel is not enabled on your tailnet/i.test(output)) {
+      const details = normalizeSpace(output);
       throw new Error(
-        `Tailscale ${mode === "funnel" ? "Funnel " : ""}HTTPS port ${httpsPort} is already in use. ` +
-          CONFLICT_MESSAGES[mode]
+        "Tailscale Funnel is not enabled on your tailnet. Enable Funnel for this node, then run portless again." +
+          (details ? ` Tailscale said: ${details}` : "")
       );
     }
+    if (/already in use|already exists|port conflict|address already/i.test(output))
+      throw new TailscalePortConflictError(`Tailscale port ${port} is already in use.`);
     const details = normalizeSpace(result.stderr || result.stdout);
     throw new Error(
-      `Failed to register tailscale ${mode} on port ${httpsPort}: ${details || "unknown tailscale error"}`
+      `Failed to register tailscale ${mode} on port ${port}: ${details || "unknown tailscale error"}`
     );
   }
 }
-
-function unregister(
-  mode: TailscaleMode,
-  httpsPort: number,
-  options?: { ignoreMissing?: boolean; runner?: TailscaleCommandRunner }
-): void {
-  const runner = options?.runner ?? defaultRunner;
-  const result = runner([mode, "--yes", `--https=${httpsPort}`, "off"]);
-  if (result.error) {
-    const errno = result.error as NodeJS.ErrnoException;
-    if (errno.code === "ENOENT") return;
-    throw new Error(`Failed to remove tailscale ${mode}: ${result.error.message}`);
+/** Register a Tailscale share and return its URL and cleanup record. */
+export function share(options: ShareTailscaleOptions): TailscaleShareResult {
+  const runner = options.runner ?? defaultRunner;
+  if (options.preferredPort !== undefined) validatePort(options.preferredPort, options.kind);
+  const request: TailscaleShareRequest =
+    options.kind === "service"
+      ? {
+          kind: "service",
+          serviceName: normalizeServiceName(
+            options.serviceName ??
+              (options.ready?.request.kind === "service" ? options.ready.request.serviceName : "")
+          ),
+        }
+      : { kind: options.kind, preferredPort: options.preferredPort };
+  const ready = options.ready ?? ensureTailscaleReady(request, { runner });
+  if (ready.request.kind !== options.kind)
+    throw new Error("Tailscale readiness does not match the requested share kind.");
+  switch (ready.transport) {
+    case "service": {
+      const record: TailscaleShareRecord = {
+        kind: "service",
+        serviceId: ready.serviceId!,
+        serviceName: ready.serviceName!,
+      };
+      if (readServeStatus(runner).services.has(record.serviceId.toLowerCase()))
+        throw new Error(
+          `Tailscale service ${record.serviceId} is already in use. Stop the existing service serve or choose a different service name.`
+        );
+      const conflict = options.claimShare?.(record);
+      if (conflict)
+        throw new Error(`Tailscale service ${record.serviceId} is already in use by ${conflict}.`);
+      try {
+        const result = runner([
+          "serve",
+          "--yes",
+          `--service=${record.serviceId}`,
+          "--https=443",
+          `http://127.0.0.1:${options.localPort}`,
+        ]);
+        const pendingApproval = /approval from an admin is required|approval required/i.test(
+          `${result.stdout}\n${result.stderr}`
+        );
+        if (result.error)
+          throwCommandError(result.error, `register tailscale service ${record.serviceId}`);
+        if (result.status !== 0) {
+          if (pendingApproval)
+            throw new Error(
+              `Tailscale service ${record.serviceId} requires admin approval in the Tailscale admin console.`
+            );
+          const details = normalizeSpace(result.stderr || result.stdout);
+          throw new Error(
+            `Failed to register tailscale service ${record.serviceId}: ${details || "unknown tailscale error"}`
+          );
+        }
+        return {
+          url: ready.baseUrl,
+          record,
+          ...(pendingApproval ? { pendingApproval: true } : {}),
+        };
+      } catch (error) {
+        options.releaseShare?.();
+        throw error;
+      }
+    }
+    case "https":
+    case "tcp":
+    case "funnel": {
+      const transport = ready.transport;
+      const tried = new Set<number>();
+      let lastConflict: Error | undefined;
+      const maxAttempts = options.preferredPort === undefined ? 3 : 1;
+      for (let attempt = 0; attempt < maxAttempts; attempt++) {
+        const used = readServeStatus(runner).ports;
+        if (options.preferredPort !== undefined && used.has(options.preferredPort))
+          throw new Error(
+            `Tailscale port ${options.preferredPort} is already in use. Stop the existing serve or choose a different port.`
+          );
+        for (const port of tried) used.add(port);
+        const port = options.preferredPort ?? findAvailablePort(used, transport);
+        const record: Extract<TailscaleShareRecord, { port: number }> = { kind: transport, port };
+        const conflict = options.claimShare?.(record);
+        if (conflict) {
+          lastConflict = new Error(`Tailscale port ${port} is already in use by ${conflict}.`);
+          if (options.preferredPort !== undefined) throw lastConflict;
+          tried.add(port);
+          continue;
+        }
+        try {
+          registerPort(transport, port, options.localPort, runner);
+        } catch (error) {
+          options.releaseShare?.();
+          if (error instanceof TailscalePortConflictError && attempt + 1 < maxAttempts) {
+            lastConflict = error;
+            tried.add(port);
+            continue;
+          }
+          throw error;
+        }
+        const defaultPort =
+          (ready.baseUrl.startsWith("https://") && port === 443) ||
+          (ready.baseUrl.startsWith("http://") && port === 80);
+        return { url: defaultPort ? ready.baseUrl : `${ready.baseUrl}:${port}`, record };
+      }
+      throw lastConflict ?? new Error("Could not find an available Tailscale port.");
+    }
   }
+}
+/** Remove a Tailscale share described by a cleanup record. */
+export function unshare(
+  record: TailscaleShareRecord,
+  options: { ignoreMissing?: boolean; runner?: TailscaleCommandRunner } = {}
+): void {
+  let args: string[];
+  switch (record.kind) {
+    case "https":
+      args = ["serve", "--yes", `--https=${record.port}`, "off"];
+      break;
+    case "tcp":
+      args = ["serve", "--yes", `--tcp=${record.port}`, "off"];
+      break;
+    case "funnel":
+      args = ["funnel", "--yes", `--https=${record.port}`, "off"];
+      break;
+    case "service":
+      args = ["serve", "--yes", `--service=${record.serviceId}`, "--https=443", "off"];
+      break;
+  }
+  const result = (options.runner ?? defaultRunner)(args);
+  const description = describeTailscaleShare(record);
+  if (result.error) throwCommandError(result.error, `remove ${description}`);
   if (result.status !== 0) {
-    const text = `${result.stderr}\n${result.stdout}`.toLowerCase();
-    const looksLikeMissing =
-      text.includes("not found") ||
-      text.includes("no serve config") ||
-      text.includes("nothing to remove") ||
-      text.includes("does not exist");
-    if (options?.ignoreMissing && looksLikeMissing) return;
+    const output = `${result.stderr}\n${result.stdout}`;
+    if (
+      options.ignoreMissing &&
+      /not found|no serve config|nothing to remove|does not exist/i.test(output)
+    )
+      return;
     const details = normalizeSpace(result.stderr || result.stdout);
-    throw new Error(
-      `Failed to remove tailscale ${mode} on port ${httpsPort}: ${details || "unknown tailscale error"}`
-    );
+    throw new Error(`Failed to remove ${description}: ${details || "unknown tailscale error"}`);
   }
 }
-
-export function registerServe(
-  localPort: number,
-  httpsPort: number,
-  options?: RegisterServeOptions
-): void {
-  register("serve", localPort, httpsPort, options?.runner ?? defaultRunner);
-}
-
-export function registerFunnel(
-  localPort: number,
-  httpsPort: number,
-  options?: RegisterServeOptions
-): void {
-  register("funnel", localPort, httpsPort, options?.runner ?? defaultRunner);
-}
-
-export function unregisterServe(
-  httpsPort: number,
-  options?: { ignoreMissing?: boolean; runner?: TailscaleCommandRunner }
-): void {
-  unregister("serve", httpsPort, options);
-}
-
-export function unregisterFunnel(
-  httpsPort: number,
-  options?: { ignoreMissing?: boolean; runner?: TailscaleCommandRunner }
-): void {
-  unregister("funnel", httpsPort, options);
-}
-
-/**
- * Best-effort cleanup of a tailscale serve or funnel registration from a
- * route's metadata. Picks the right subcommand based on `tailscaleFunnel`.
- */
-export function unregisterTailscale(route: {
+/** Read a Tailscale share record, including legacy route metadata. */
+export function tailscaleShareFromRoute(route: {
+  tailscaleShare?: TailscaleShareRecord;
   tailscaleHttpsPort?: number;
   tailscaleFunnel?: boolean;
-}): void {
-  if (!route.tailscaleHttpsPort) return;
-  const mode: TailscaleMode = route.tailscaleFunnel ? "funnel" : "serve";
-  unregister(mode, route.tailscaleHttpsPort, { ignoreMissing: true });
+}): TailscaleShareRecord | undefined {
+  if (route.tailscaleShare) return route.tailscaleShare;
+  if (route.tailscaleHttpsPort !== undefined)
+    return { kind: route.tailscaleFunnel ? "funnel" : "https", port: route.tailscaleHttpsPort };
+  return undefined;
 }
-
-// ---------------------------------------------------------------------------
-// URL formatting
-// ---------------------------------------------------------------------------
-
-/** Build a display URL, omitting the port for 443 (default HTTPS). */
-export function formatTailscaleUrl(baseUrl: string, httpsPort: number): string {
-  const trimmed = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
-  if (httpsPort === 443) return trimmed;
-  return `${trimmed}:${httpsPort}`;
+/** Return a stable key for a Tailscale share. */
+export function tailscaleShareKey(record: TailscaleShareRecord): string {
+  return record.kind === "service" ? `service:${record.serviceId}` : `port:${record.port}`;
+}
+/** Describe a Tailscale share for display. */
+export function describeTailscaleShare(record: TailscaleShareRecord): string {
+  switch (record.kind) {
+    case "https":
+      return `tailscale serve on port ${record.port}`;
+    case "tcp":
+      return `tailscale tcp serve on port ${record.port}`;
+    case "funnel":
+      return `tailscale funnel on port ${record.port}`;
+    case "service":
+      return `tailscale service ${record.serviceId}`;
+  }
 }

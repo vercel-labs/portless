@@ -235,27 +235,35 @@ Portless stores its state (routes, PID file, port file) in `~/.portless`. When t
 
 ### Environment variables
 
-| Variable                | Description                                                                    |
-| ----------------------- | ------------------------------------------------------------------------------ |
-| `PORTLESS_PORT`         | Override the default proxy port (default: 443 with HTTPS, 80 without)          |
-| `PORTLESS_QUIET`        | Set to `1` to hide startup status lines (same as `--quiet`)                    |
-| `PORTLESS_APP_PORT`     | Use a fixed port for the app; several proxied apps need per-app `appPort`      |
-| `PORTLESS_PORT_VAR`     | Rename the app port variable (same as `--port-var`, default: `PORT`)           |
-| `PORTLESS_HOST_VAR`     | Rename the app host variable (same as `--host-var`, default: `HOST`)           |
-| `PORTLESS_PREFIX`       | Set the worktree prefix (`""` for none, same as `--prefix`)                    |
-| `PORTLESS_HTTPS`        | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                |
-| `PORTLESS_LAN`          | Set to `1` to always enable LAN mode (auto-detects LAN IP)                     |
-| `PORTLESS_LAN_IP`       | Pin a specific LAN IP for LAN mode                                             |
-| `PORTLESS_TLD`          | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com) |
-| `PORTLESS_WILDCARD`     | Set to `1` to allow unregistered subdomains to fall back to parent             |
-| `PORTLESS_UNPRIVILEGED` | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)   |
-| `PORTLESS_SYNC_HOSTS`   | Set to `0` to disable auto-sync of /etc/hosts (on by default)                  |
-| `PORTLESS_TAILSCALE`    | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)     |
-| `PORTLESS_FUNNEL`       | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)    |
-| `PORTLESS_NGROK`        | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                |
-| `PORTLESS_CLOUDFLARE`   | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)      |
-| `PORTLESS_STATE_DIR`    | Override the state directory                                                   |
-| `PORTLESS=0`            | Bypass the proxy, run the command directly                                     |
+| Variable                     | Description                                                                            |
+| ---------------------------- | -------------------------------------------------------------------------------------- |
+| `PORTLESS_PORT`              | Override the default proxy port (default: 443 with HTTPS, 80 without)                  |
+| `PORTLESS_QUIET`             | Set to `1` to hide startup status lines (same as `--quiet`)                            |
+| `PORTLESS_APP_PORT`          | Use a fixed port for the app; several proxied apps need per-app `appPort`              |
+| `PORTLESS_PORT_VAR`          | Rename the app port variable (same as `--port-var`, default: `PORT`)                   |
+| `PORTLESS_HOST_VAR`          | Rename the app host variable (same as `--host-var`, default: `HOST`)                   |
+| `PORTLESS_PREFIX`            | Set the worktree prefix (`""` for none, same as `--prefix`)                            |
+| `PORTLESS_HTTPS`             | HTTPS on by default; set to `0` to disable (same as `--no-tls`)                        |
+| `PORTLESS_LAN`               | Set to `1` to always enable LAN mode (auto-detects LAN IP)                             |
+| `PORTLESS_LAN_IP`            | Pin a specific LAN IP for LAN mode                                                     |
+| `PORTLESS_TLD`               | Use one or more TLDs, single or multi-segment (e.g. localhost,dev.example.com)         |
+| `PORTLESS_WILDCARD`          | Set to `1` to allow unregistered subdomains to fall back to parent                     |
+| `PORTLESS_UNPRIVILEGED`      | Set to `1` to take a port below 1024 without sudo (same as `--unprivileged`)           |
+| `PORTLESS_SYNC_HOSTS`        | Set to `0` to disable auto-sync of /etc/hosts (on by default)                          |
+| `PORTLESS_TAILSCALE`         | Set to `1` to share apps on your Tailscale network (same as `--tailscale`)             |
+| `PORTLESS_TAILSCALE_PORT`    | Pin a Serve port (1 to 65535) or Funnel port (443, 8443, 10000); implies `--tailscale` |
+| `PORTLESS_TAILSCALE_SERVICE` | Set to `1` to infer a Service name, a name to select it, or `0` to disable             |
+| `PORTLESS_FUNNEL`            | Set to `1` to share apps publicly via Tailscale Funnel (same as `--funnel`)            |
+| `PORTLESS_NGROK`             | Set to `1` to share apps publicly via ngrok (same as `--ngrok`)                        |
+| `PORTLESS_NGROK_CUSTOM_URL`  | Pin a custom or static ngrok URL; implies `--ngrok`                                    |
+| `PORTLESS_NETBIRD`           | Set to `1` to share via NetBird, or `0` to disable                                     |
+| `PORTLESS_NETBIRD_PASSWORD`  | Set the NetBird access password; implies `--netbird`                                   |
+| `PORTLESS_NETBIRD_PIN`       | Set the NetBird access PIN; implies `--netbird`                                        |
+| `PORTLESS_NETBIRD_GROUPS`    | Set comma-separated NetBird user groups; implies `--netbird`                           |
+| `PORTLESS_NETBIRD_URL`       | NetBird URL passed to the child process                                                |
+| `PORTLESS_CLOUDFLARE`        | Set to `1` to share apps publicly via Cloudflare (same as `--cloudflare`)              |
+| `PORTLESS_STATE_DIR`         | Override the state directory                                                           |
+| `PORTLESS=0`                 | Bypass the proxy, run the command directly                                             |
 
 portless writes its own status lines to stderr, so stdout carries only your app's output. `--quiet` or `PORTLESS_QUIET=1` hides the banner, proxy running status, name, hostname, prefix, assigned port, and `Running:` line while leaving app URLs, warnings, errors, proxy startup output, and monorepo URL tables visible. A non-empty `NO_COLOR` disables color, while `FORCE_COLOR=0` disables it and `FORCE_COLOR=1` forces it.
 
@@ -326,9 +334,13 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public internet)
 ```
 
-Tailscale HTTPS certificates must be enabled before `--tailscale` or `--funnel` can register HTTPS URLs. Funnel must also be enabled for the tailnet and node before `--funnel` can register the public URL. If either setting is missing, portless exits before starting the child process.
+The Tailscale CLI must be installed and connected. With MagicDNS enabled, Tailscale HTTPS certificates are required. Each `--tailscale` app is root-mounted on its own HTTPS port (443, then 8443, 8444, etc.), so no framework `basePath` configuration is needed. If MagicDNS is disabled, `--tailscale` automatically serves HTTP over TCP on the node's Tailscale IP. Funnel requires MagicDNS, HTTPS, and Funnel enabled for the tailnet and node.
 
-Each `--tailscale` app is root-mounted on its own Tailscale HTTPS port (443, then 8443, 8444, etc.) so no framework `basePath` configuration is needed. Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Tailscale serve registrations are cleaned up when the app exits. Requires `tailscale` CLI installed and connected, with Tailscale HTTPS certificates enabled.
+Use `--tailscale-port <port>` or `PORTLESS_TAILSCALE_PORT` to pin the port; either implies `--tailscale`. Serve accepts ports 1 to 65535, while Funnel accepts 443, 8443, and 10000. The port option cannot be combined with `--tailscale-service`.
+
+Use `--tailscale-service[=<name>]` to expose a Tailscale Service at `https://<service>.<tailnet>`. Without `=<name>`, the app's base name is used. `PORTLESS_TAILSCALE_SERVICE=1` infers the name, a service name selects it directly, and `0` disables it. Services require MagicDNS, HTTPS, and a tag-based device identity (`--advertise-tags`). They cannot be combined with `--funnel` or `--tailscale-port`.
+
+Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Portless removes Tailscale shares when the app exits. If removal fails on exit or during `portless prune`, it keeps the stale route so prune can retry. If Tailscale share removal fails during `portless clean`, it keeps `routes.json` so `portless prune` or a later `portless clean` can retry.
 
 With Vite and Tailscale or Funnel, the active share hostname fills `__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS` (for example `devbox.example.ts.net`), so the shared URL loads. This applies to `--tailscale`, `--funnel`, `PORTLESS_TAILSCALE=1`, and `PORTLESS_FUNNEL=1`. Vite treats the variable as one host before 8.1, so the share hostname takes the slot while `localhost` stays allowed and custom TLDs are not added. ngrok and Cloudflare rewrite the upstream `Host` header to the local app hostname, so the local TLD allowlist already covers them.
 
@@ -342,7 +354,17 @@ portless myapp --ngrok next dev
 # -> https://abc123.ngrok.app          (public internet)
 ```
 
-Set `PORTLESS_NGROK=1` to enable ngrok by default when portless runs an app. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
+Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--ngrok-url <url>` or `PORTLESS_NGROK_CUSTOM_URL` to pin a custom or static URL. Either implies `--ngrok` and passes `--url` to `ngrok http`. Child processes receive the active URL in `PORTLESS_NGROK_URL`. `portless list` shows both local and ngrok URLs. The ngrok tunnel is cleaned up when the app exits. Requires the `ngrok` CLI to be installed and authenticated with `ngrok config add-authtoken <token>`.
+
+### NetBird sharing
+
+```bash
+portless myapp --netbird next dev
+```
+
+`--netbird` or `PORTLESS_NETBIRD=1` exposes the app via `netbird expose`; `PORTLESS_NETBIRD=0` disables it. Install the NetBird CLI and connect with `netbird up` first. Portless keeps the child server bound to `127.0.0.1` and sets `PORTLESS_NETBIRD_URL` on the child. It records the tunnel PID for cleanup on exit and by `portless prune`.
+
+Use `--netbird-password <pw>` or `PORTLESS_NETBIRD_PASSWORD`, `--netbird-pin <code>` or `PORTLESS_NETBIRD_PIN`, and `--netbird-groups <csv>` or `PORTLESS_NETBIRD_GROUPS` to configure access. Each implies `--netbird`.
 
 ### Cloudflare sharing
 
@@ -437,6 +459,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 | `portless <name> --tailscale <cmd>`               | Share the app on your Tailscale network (tailnet)                                   |
 | `portless <name> --funnel <cmd>`                  | Share the app publicly via Tailscale Funnel                                         |
 | `portless <name> --ngrok <cmd>`                   | Share the app publicly via ngrok                                                    |
+| `portless <name> --netbird <cmd>`                 | Share the app via NetBird                                                           |
 | `portless <name> --cloudflare <cmd>`              | Share the app publicly via a Cloudflare quick tunnel                                |
 | `portless <name> --force <cmd>`                   | Kill the existing process and take over its route                                   |
 | `portless --name <name> <cmd>`                    | Force `<name>` as app name (bypasses subcommand dispatch)                           |
@@ -449,7 +472,7 @@ Exit codes: `0` success, `1` failure, `2` usage error (unknown flag or subcomman
 
 `--port-var` and `--host-var` also work in zero-arg and multi-app mode. They win over `PORTLESS_PORT_VAR`, `PORTLESS_HOST_VAR`, and the config fields `portVar` and `hostVar`.
 
-`portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
+`portless prune` keeps a process group's route and shares while any member is still running, even after the group closes its port, and records the member that survived so you can retry with `portless prune --force`. It keeps a port holder it cannot prove part of the recorded group, reporting it instead of killing it, and never signals a group it cannot verify. Prune and clean stop recorded ngrok, cloudflared, and NetBird tunnels only when their executable names match, including on Windows. Windows process groups are not signaled.
 
 App ports referenced by stale Tailscale Serve or Funnel records stay reserved, even after the dev server stops. Automatic assignment skips them, and fixed-port registration refuses them even with `--force`. Run `portless prune` to clean up stale shares before reusing their ports.
 

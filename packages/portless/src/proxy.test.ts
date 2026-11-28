@@ -1255,6 +1255,44 @@ describe("createProxyServer", () => {
       expect(res.body).toBe("mixed case funnel hit");
     });
 
+    it("routes IPv4, IPv6 and exact Tailscale authorities", async () => {
+      const fallback = trackServer(http.createServer((_req, res) => res.end("fallback")));
+      const exact = trackServer(http.createServer((_req, res) => res.end("exact")));
+      await listen(fallback);
+      await listen(exact);
+      const fallbackAddr = fallback.address();
+      const exactAddr = exact.address();
+      if (!fallbackAddr || typeof fallbackAddr === "string") throw new Error("no addr");
+      if (!exactAddr || typeof exactAddr === "string") throw new Error("no addr");
+      const routes: RouteInfo[] = [
+        {
+          hostname: "fallback.localhost",
+          port: fallbackAddr.port,
+          tailscaleUrl: "https://device.ts.net",
+        },
+        {
+          hostname: "exact.localhost",
+          port: exactAddr.port,
+          tailscaleUrl: "https://device.ts.net:80",
+        },
+        { hostname: "ipv4.localhost", port: exactAddr.port, tailscaleUrl: "http://100.64.0.10" },
+        {
+          hostname: "ipv6.localhost",
+          port: exactAddr.port,
+          tailscaleUrl: "http://[fd7a:115c:a1e0::1]:8080",
+        },
+      ];
+      const server = trackServer(
+        createProxyServer({ getRoutes: () => routes, proxyPort: TEST_PROXY_PORT })
+      );
+      await listen(server);
+      for (const host of ["100.64.0.10:80", "[fd7a:115c:a1e0::1]:8080", "device.ts.net:80"]) {
+        const res = await request(server, { host });
+        expect(res.status).toBe(200);
+        expect(res.body).toBe("exact");
+      }
+    });
+
     it("returns 404 for unregistered subdomain prefix by default", async () => {
       const backend = trackServer(
         http.createServer((_req, res) => {

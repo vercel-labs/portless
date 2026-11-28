@@ -1,588 +1,425 @@
-import { describe, it, expect } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+  describeTailscaleShare,
   ensureTailscaleReady,
-  findAvailableServePort,
   findWindowsCmdShim,
-  formatTailscaleUrl,
-  getUsedServePorts,
-  registerFunnel,
-  registerServe,
-  unregisterFunnel,
-  unregisterServe,
-  unregisterTailscale,
+  inferServiceName,
+  normalizeServiceName,
+  share,
+  tailscaleShareFromRoute,
+  tailscaleShareKey,
+  unshare,
   type TailscaleCommandRunner,
+  type TailscaleShareRecord,
 } from "./tailscale.js";
 
-interface MockResult {
-  status?: number | null;
-  stdout?: string;
-  stderr?: string;
-  error?: Error;
-}
+type Result = ReturnType<TailscaleCommandRunner>;
 
-function createRunner(
-  results: Record<string, MockResult>,
-  calls: string[][] = []
-): TailscaleCommandRunner {
-  return (args: string[]) => {
+function runnerFor(status: object, replies: Record<string, Partial<Result>> = {}) {
+  const calls: string[][] = [];
+  const runner: TailscaleCommandRunner = (args) => {
     calls.push(args);
     const key = args.join(" ");
-    const result = results[key];
-    if (!result) {
-      throw new Error(`Unexpected tailscale call: ${key}`);
-    }
-    return {
-      status: result.status ?? 0,
-      stdout: result.stdout ?? "",
-      stderr: result.stderr ?? "",
-      ...(result.error ? { error: result.error } : {}),
-    };
+    const result = key === "status --json" ? { stdout: JSON.stringify(status) } : replies[key];
+    if (!result && key !== "version") throw new Error(`Unexpected command: ${key}`);
+    return { status: 0, stdout: "", stderr: "", ...result };
   };
+  return { runner, calls };
 }
 
-describe("tailscale", () => {
-  // -----------------------------------------------------------------------
-  // ensureTailscaleReady
-  // -----------------------------------------------------------------------
+const httpsStatus = {
+  Self: { DNSName: "devbox.example.ts.net.", Capabilities: ["https", "funnel"] },
+  CurrentTailnet: { MagicDNSEnabled: true },
+};
 
-  describe("ensureTailscaleReady", () => {
-    it("resolves base URL from Self.DNSName", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: { DNSName: "devbox.example.ts.net." },
-          }),
-        },
-      });
-      const ready = ensureTailscaleReady({ runner });
-      expect(ready.dnsName).toBe("devbox.example.ts.net");
-      expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
-    });
+const tcpStatus = {
+  Self: { TailscaleIPs: ["100.64.0.10", "fd7a:115c:a1e0::1"] },
+  CurrentTailnet: { MagicDNSEnabled: false },
+};
 
-    it("falls back to HostName and MagicDNSSuffix", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: { HostName: "devbox" },
-            CurrentTailnet: { MagicDNSSuffix: "example.ts.net." },
-          }),
-        },
-      });
-      const ready = ensureTailscaleReady({ runner });
-      expect(ready.dnsName).toBe("devbox.example.ts.net");
-    });
-
-    it("throws when Funnel is required but not enabled on the tailnet", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: {
-              ID: "nMNPgMjBts11CNTRL",
-              DNSName: "devbox.example.ts.net.",
-              Capabilities: ["https"],
-            },
-          }),
-        },
-      });
-      expect(() => ensureTailscaleReady({ runner, requireFunnel: true })).toThrow(
-        "https://login.tailscale.com/f/funnel?node=nMNPgMjBts11CNTRL"
-      );
-    });
-
-    it("validates node DNS before checking required capabilities", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: {},
-          }),
-        },
-      });
-      expect(() =>
-        ensureTailscaleReady({ runner, requireFunnel: true, requireHttps: true })
-      ).toThrow("Could not determine Tailscale node DNS name");
-    });
-
-    it("throws when HTTPS is required but not enabled on the tailnet", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: {
-              DNSName: "devbox.example.ts.net.",
-              Capabilities: ["funnel"],
-            },
-          }),
-        },
-      });
-      expect(() => ensureTailscaleReady({ runner, requireHttps: true })).toThrow(
-        "Tailscale HTTPS is not enabled on your tailnet"
-      );
-    });
-
-    it("allows HTTPS when the node has an HTTPS capability", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: {
-              DNSName: "devbox.example.ts.net.",
-              CapMap: {
-                https: null,
-              },
-            },
-          }),
-        },
-      });
-      const ready = ensureTailscaleReady({ runner, requireHttps: true });
-      expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
-    });
-
-    it("allows Funnel when the node has a Funnel capability", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Self: {
-              DNSName: "devbox.example.ts.net.",
-              Capabilities: ["https", "https://tailscale.com/cap/funnel"],
-            },
-          }),
-        },
-      });
-      const ready = ensureTailscaleReady({ runner, requireFunnel: true });
-      expect(ready.baseUrl).toBe("https://devbox.example.ts.net");
-    });
-
-    it("throws when tailscale CLI is missing", () => {
-      const enoent = Object.assign(new Error("spawn tailscale ENOENT"), {
-        code: "ENOENT",
-      });
-      const runner = createRunner({
-        version: { status: null, error: enoent },
-      });
-      expect(() => ensureTailscaleReady({ runner })).toThrow("Tailscale CLI not found");
-    });
-
-    it("throws when tailscale is not connected", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: JSON.stringify({ Self: {} }),
-        },
-      });
-      expect(() => ensureTailscaleReady({ runner })).toThrow("Could not determine");
-    });
-
-    it("throws on version check failure", () => {
-      const runner = createRunner({
-        version: { status: 1, stderr: "not found" },
-      });
-      expect(() => ensureTailscaleReady({ runner })).toThrow("Failed to check tailscale version");
-    });
-
-    it("throws on invalid status JSON", () => {
-      const runner = createRunner({
-        version: { status: 0 },
-        "status --json": {
-          status: 0,
-          stdout: "not json",
-        },
-      });
-      expect(() => ensureTailscaleReady({ runner })).toThrow("Failed to parse");
+describe("ensureTailscaleReady", () => {
+  it("uses the node DNS name without requiring a MagicDNS suffix for serve", () => {
+    const { runner } = runnerFor(httpsStatus);
+    expect(ensureTailscaleReady({ kind: "serve" }, { runner })).toMatchObject({
+      transport: "https",
+      host: "devbox.example.ts.net",
+      baseUrl: "https://devbox.example.ts.net",
     });
   });
 
-  // -----------------------------------------------------------------------
-  // getUsedServePorts
-  // -----------------------------------------------------------------------
-
-  describe("getUsedServePorts", () => {
-    it("parses Web ports from serve status JSON", () => {
-      const runner = createRunner({
-        "serve status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            Web: {
-              "devbox.example.ts.net:443": { Handlers: {} },
-              "devbox.example.ts.net:8443": { Handlers: {} },
-            },
-          }),
-        },
-      });
-      const ports = getUsedServePorts(runner);
-      expect(ports).toEqual(new Set([443, 8443]));
+  it("chooses IPv4 or bracketed IPv6 TCP when MagicDNS is disabled", () => {
+    const ipv4 = runnerFor(tcpStatus);
+    expect(ensureTailscaleReady({ kind: "serve" }, ipv4)).toMatchObject({
+      transport: "tcp",
+      host: "100.64.0.10",
+      baseUrl: "http://100.64.0.10",
     });
-
-    it("parses TCP ports", () => {
-      const runner = createRunner({
-        "serve status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            TCP: { "22": { HTTPS: true }, "443": {} },
-          }),
-        },
-      });
-      const ports = getUsedServePorts(runner);
-      expect(ports).toEqual(new Set([22, 443]));
-    });
-
-    it("includes ports held by foreground serve or funnel sessions", () => {
-      const runner = createRunner({
-        "serve status --json": {
-          status: 0,
-          stdout: JSON.stringify({
-            TCP: { "8443": { HTTPS: true } },
-            Web: { "devbox.example.ts.net:8443": { Handlers: {} } },
-            Foreground: {
-              df16b397a48601e8: {
-                TCP: { "443": { HTTPS: true } },
-                Web: { "devbox.example.ts.net:443": { Handlers: {} } },
-                AllowFunnel: { "devbox.example.ts.net:443": true },
-              },
-            },
-          }),
-        },
-      });
-      const ports = getUsedServePorts(runner);
-      expect(ports).toEqual(new Set([443, 8443]));
-    });
-
-    it("returns empty set on command failure", () => {
-      const runner = createRunner({
-        "serve status --json": { status: 1, stderr: "error" },
-      });
-      const ports = getUsedServePorts(runner);
-      expect(ports).toEqual(new Set());
-    });
-
-    it("returns empty set on invalid JSON", () => {
-      const runner = createRunner({
-        "serve status --json": { status: 0, stdout: "not json" },
-      });
-      const ports = getUsedServePorts(runner);
-      expect(ports).toEqual(new Set());
-    });
-
-    it("returns empty set on empty config", () => {
-      const runner = createRunner({
-        "serve status --json": { status: 0, stdout: "{}" },
-      });
-      const ports = getUsedServePorts(runner);
-      expect(ports).toEqual(new Set());
+    const ipv6 = runnerFor({ ...tcpStatus, Self: { TailscaleIPs: ["fd7a:115c:a1e0::1"] } });
+    expect(ensureTailscaleReady({ kind: "serve" }, ipv6)).toMatchObject({
+      transport: "tcp",
+      host: "[fd7a:115c:a1e0::1]",
+      baseUrl: "http://[fd7a:115c:a1e0::1]",
     });
   });
 
-  // -----------------------------------------------------------------------
-  // findAvailableServePort
-  // -----------------------------------------------------------------------
+  it.each([{ kind: "funnel" } as const, { kind: "service", serviceName: "api" } as const])(
+    "rejects $kind when MagicDNS is disabled",
+    (request) => {
+      const { runner } = runnerFor(tcpStatus);
+      expect(() => ensureTailscaleReady(request, { runner })).toThrow("MagicDNS is disabled");
+    }
+  );
 
-  describe("findAvailableServePort", () => {
-    it("returns 443 when nothing is in use", () => {
-      expect(findAvailableServePort(new Set())).toBe(443);
+  it("reports missing HTTPS and Funnel capabilities", () => {
+    const noHttps = runnerFor({ Self: { DNSName: "devbox.example.ts.net" } });
+    expect(() => ensureTailscaleReady({ kind: "serve" }, noHttps)).toThrow("HTTPS is not enabled");
+    const noFunnel = runnerFor({
+      Self: { DNSName: "devbox.example.ts.net", Capabilities: ["https"], ID: "node123" },
     });
+    expect(() => ensureTailscaleReady({ kind: "funnel" }, noFunnel)).toThrow("node=node123");
+  });
 
-    it("returns 8443 when 443 is taken", () => {
-      expect(findAvailableServePort(new Set([443]))).toBe(8443);
+  it("requires tags for service mode", () => {
+    const { runner } = runnerFor(httpsStatus);
+    expect(() => ensureTailscaleReady({ kind: "service", serviceName: "api" }, { runner })).toThrow(
+      "tag-based identity"
+    );
+  });
+
+  it.each([
+    [{ MagicDNSSuffix: "other.ts.net." }, "api.other.ts.net"],
+    [{}, "api.example.ts.net"],
+  ] as [Record<string, string>, string][])(
+    "derives the service hostname from the tailnet or node DNS",
+    (tailnet, host) => {
+      const { runner } = runnerFor({
+        Self: { DNSName: "devbox.example.ts.net.", Capabilities: ["https"], Tags: ["tag:dev"] },
+        CurrentTailnet: tailnet,
+      });
+      expect(
+        ensureTailscaleReady({ kind: "service", serviceName: "svc:API" }, { runner })
+      ).toMatchObject({
+        host,
+        baseUrl: `https://${host}`,
+        serviceId: "svc:api",
+        serviceName: "api",
+      });
+    }
+  );
+
+  it("reports missing CLI and invalid status JSON", () => {
+    const error = Object.assign(new Error("missing"), { code: "ENOENT" });
+    expect(() =>
+      ensureTailscaleReady(
+        { kind: "serve" },
+        { runner: () => ({ status: null, stdout: "", stderr: "", error }) }
+      )
+    ).toThrow("Tailscale CLI not found");
+    const { runner } = runnerFor({});
+    const invalid: TailscaleCommandRunner = (args) =>
+      args[0] === "status" ? { status: 0, stdout: "bad", stderr: "" } : runner(args);
+    expect(() => ensureTailscaleReady({ kind: "serve" }, { runner: invalid })).toThrow(
+      "Failed to parse"
+    );
+  });
+});
+
+describe("normalizeServiceName", () => {
+  it("strips the service prefix and normalizes case", () => {
+    expect(normalizeServiceName(" svc:My-App ")).toBe("my-app");
+  });
+  it.each(["", "svc:", "-app", "app-", "bad name", "x".repeat(64)])(
+    "rejects invalid name %s",
+    (name) => {
+      expect(() => normalizeServiceName(name)).toThrow("Invalid Tailscale service name");
+    }
+  );
+});
+
+describe("inferServiceName", () => {
+  it.each([
+    ["My App!", "my-app"],
+    ["  Web_Server  ", "web-server"],
+    ["svc:api", "svc-api"],
+    ["-Edge..Case-", "edge-case"],
+  ])("derives %s as %s", (raw, name) => {
+    expect(inferServiceName(raw)).toBe(name);
+  });
+
+  it("truncates long names without leaving a trailing hyphen", () => {
+    expect(inferServiceName(`${"a".repeat(62)} b`)).toBe("a".repeat(62));
+    expect(inferServiceName("a".repeat(70))).toBe("a".repeat(63));
+  });
+
+  it("rejects names with no usable characters", () => {
+    expect(() => inferServiceName("___")).toThrow("Invalid Tailscale service name");
+  });
+});
+
+describe("share", () => {
+  it.each([
+    ["100.64.0.10", 80, "http://100.64.0.10"],
+    ["100.64.0.10", 8080, "http://100.64.0.10:8080"],
+    ["fd7a:115c:a1e0::1", 8080, "http://[fd7a:115c:a1e0::1]:8080"],
+  ] as [string, number, string][])("registers TCP for %s on port %i", (ip, port, url) => {
+    const command = `serve --bg --yes --tcp=${port} tcp://127.0.0.1:3000`;
+    const { runner, calls } = runnerFor(
+      { ...tcpStatus, Self: { TailscaleIPs: [ip] } },
+      {
+        "serve status --json": { stdout: "{}" },
+        [command]: {},
+      }
+    );
+    const claimShare = vi.fn(() => null);
+    expect(
+      share({ kind: "serve", localPort: 3000, preferredPort: port, runner, claimShare })
+    ).toEqual({ url, record: { kind: "tcp", port } });
+    expect(claimShare).toHaveBeenCalledWith({ kind: "tcp", port });
+    expect(calls).toContainEqual(command.split(" "));
+  });
+
+  it("selects TCP port 80 by default", () => {
+    const { runner } = runnerFor(tcpStatus, {
+      "serve status --json": { stdout: "{}" },
+      "serve --bg --yes --tcp=80 tcp://127.0.0.1:3000": {},
     });
+    expect(share({ kind: "serve", localPort: 3000, runner }).url).toBe("http://100.64.0.10");
+  });
 
-    it("skips to 8444 when 443 and 8443 are taken", () => {
-      expect(findAvailableServePort(new Set([443, 8443]))).toBe(8444);
+  it.each([0, 65536, 1.5, NaN])("rejects invalid port %s before invoking Tailscale", (port) => {
+    const runner = vi.fn<TailscaleCommandRunner>();
+    expect(() => share({ kind: "serve", localPort: 3000, preferredPort: port, runner })).toThrow(
+      "Invalid Tailscale port"
+    );
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it.each([443, 8443, 10000])("accepts Funnel port %i", (port) => {
+    const { runner } = runnerFor(httpsStatus, {
+      "serve status --json": { stdout: "{}" },
+      [`funnel --bg --yes --https=${port} http://127.0.0.1:3000`]: {},
     });
-
-    it("goes beyond preferred list when all are taken", () => {
-      const all = new Set([443, 8443, 8444, 8445, 8446, 8447, 8448, 8449, 8450]);
-      expect(findAvailableServePort(all)).toBe(8451);
-    });
-
-    it("returns 443 for funnel when nothing is in use", () => {
-      expect(findAvailableServePort(new Set(), "funnel")).toBe(443);
-    });
-
-    it("returns 8443 for funnel when 443 is taken", () => {
-      expect(findAvailableServePort(new Set([443]), "funnel")).toBe(8443);
-    });
-
-    it("returns 10000 for funnel when 443 and 8443 are taken", () => {
-      expect(findAvailableServePort(new Set([443, 8443]), "funnel")).toBe(10000);
-    });
-
-    it("throws when all funnel ports are taken", () => {
-      expect(() => findAvailableServePort(new Set([443, 8443, 10000]), "funnel")).toThrow(
-        "All Tailscale Funnel ports are in use"
-      );
+    expect(share({ kind: "funnel", localPort: 3000, preferredPort: port, runner }).record).toEqual({
+      kind: "funnel",
+      port,
     });
   });
 
-  // -----------------------------------------------------------------------
-  // registerServe / unregisterServe
-  // -----------------------------------------------------------------------
-
-  describe("registerServe", () => {
-    it("calls tailscale serve with correct args", () => {
-      const calls: string[][] = [];
-      const runner = createRunner(
-        {
-          "serve --bg --yes --https=443 http://127.0.0.1:4123": { status: 0 },
-        },
-        calls
-      );
-      registerServe(4123, 443, { runner });
-      expect(calls).toHaveLength(1);
-      expect(calls[0]).toEqual(["serve", "--bg", "--yes", "--https=443", "http://127.0.0.1:4123"]);
-    });
-
-    it("uses custom HTTPS port", () => {
-      const calls: string[][] = [];
-      const runner = createRunner(
-        {
-          "serve --bg --yes --https=8443 http://127.0.0.1:4456": { status: 0 },
-        },
-        calls
-      );
-      registerServe(4456, 8443, { runner });
-      expect(calls[0]).toContain("--https=8443");
-    });
-
-    it("throws on conflict", () => {
-      const runner = createRunner({
-        "serve --bg --yes --https=443 http://127.0.0.1:4123": {
-          status: 1,
-          stderr: "port already in use",
-        },
-      });
-      expect(() => registerServe(4123, 443, { runner })).toThrow("already in use");
-    });
-
-    it("throws on ENOENT", () => {
-      const enoent = Object.assign(new Error("spawn tailscale ENOENT"), {
-        code: "ENOENT",
-      });
-      const runner = createRunner({
-        "serve --bg --yes --https=443 http://127.0.0.1:4123": {
-          status: null,
-          error: enoent,
-        },
-      });
-      expect(() => registerServe(4123, 443, { runner })).toThrow("Tailscale CLI not found");
-    });
-
-    it("throws generic error on non-conflict failure", () => {
-      const runner = createRunner({
-        "serve --bg --yes --https=443 http://127.0.0.1:4123": {
-          status: 1,
-          stderr: "some unknown problem",
-        },
-      });
-      expect(() => registerServe(4123, 443, { runner })).toThrow("some unknown problem");
-    });
+  it("rejects a Funnel port outside the allowed set", () => {
+    const runner = vi.fn<TailscaleCommandRunner>();
+    expect(() => share({ kind: "funnel", localPort: 3000, preferredPort: 80, runner })).toThrow(
+      "Funnel supports ports 443, 8443, and 10000"
+    );
+    expect(runner).not.toHaveBeenCalled();
   });
 
-  describe("unregisterServe", () => {
-    it("calls tailscale serve off with correct args", () => {
-      const calls: string[][] = [];
-      const runner = createRunner({ "serve --yes --https=443 off": { status: 0 } }, calls);
-      unregisterServe(443, { runner });
-      expect(calls[0]).toEqual(["serve", "--yes", "--https=443", "off"]);
+  it("releases a failed claim and retries another port", () => {
+    const { runner } = runnerFor(httpsStatus, {
+      "serve status --json": { stdout: "{}" },
+      "serve --bg --yes --https=443 http://127.0.0.1:3000": {
+        status: 1,
+        stderr: "port already in use",
+      },
+      "serve --bg --yes --https=8443 http://127.0.0.1:3000": {},
     });
-
-    it("ignores missing when requested", () => {
-      const runner = createRunner({
-        "serve --yes --https=443 off": {
-          status: 1,
-          stderr: "nothing to remove",
-        },
-      });
-      expect(() => unregisterServe(443, { ignoreMissing: true, runner })).not.toThrow();
+    const claimShare = vi.fn(() => null);
+    const releaseShare = vi.fn();
+    expect(share({ kind: "serve", localPort: 3000, runner, claimShare, releaseShare })).toEqual({
+      url: "https://devbox.example.ts.net:8443",
+      record: { kind: "https", port: 8443 },
     });
-
-    it("throws on unexpected failure", () => {
-      const runner = createRunner({
-        "serve --yes --https=443 off": {
-          status: 1,
-          stderr: "permission denied",
-        },
-      });
-      expect(() => unregisterServe(443, { runner })).toThrow("permission denied");
-    });
-
-    it("silently returns on ENOENT", () => {
-      const enoent = Object.assign(new Error("spawn tailscale ENOENT"), {
-        code: "ENOENT",
-      });
-      const runner = createRunner({
-        "serve --yes --https=443 off": { status: null, error: enoent },
-      });
-      expect(() => unregisterServe(443, { runner })).not.toThrow();
-    });
+    expect(claimShare.mock.calls).toEqual([
+      [{ kind: "https", port: 443 }],
+      [{ kind: "https", port: 8443 }],
+    ]);
+    expect(releaseShare).toHaveBeenCalledTimes(1);
   });
 
-  // -----------------------------------------------------------------------
-  // registerFunnel / unregisterFunnel
-  // -----------------------------------------------------------------------
-
-  describe("registerFunnel", () => {
-    it("calls tailscale funnel with correct args", () => {
-      const calls: string[][] = [];
-      const runner = createRunner(
-        {
-          "funnel --bg --yes --https=443 http://127.0.0.1:4123": { status: 0 },
-        },
-        calls
-      );
-      registerFunnel(4123, 443, { runner });
-      expect(calls[0]).toEqual(["funnel", "--bg", "--yes", "--https=443", "http://127.0.0.1:4123"]);
+  it.each(["daemon", "route"])("rejects a port already occupied by a %s", (occupied) => {
+    const { runner, calls } = runnerFor(httpsStatus, {
+      "serve status --json": {
+        stdout: JSON.stringify(
+          occupied === "daemon" ? { Web: { "devbox.example.ts.net:8443": {} } } : {}
+        ),
+      },
     });
-
-    it("throws on conflict with funnel port info", () => {
-      const runner = createRunner({
-        "funnel --bg --yes --https=443 http://127.0.0.1:4123": {
-          status: 1,
-          stderr: "port already in use",
-        },
-      });
-      expect(() => registerFunnel(4123, 443, { runner })).toThrow(
-        "Tailscale Funnel supports ports 443, 8443, and 10000"
-      );
-    });
-
-    it("throws an actionable error when Funnel is not enabled on the tailnet", () => {
-      const runner = createRunner({
-        "funnel --bg --yes --https=443 http://127.0.0.1:4123": {
-          status: 1,
-          stderr: [
-            "Funnel is not enabled on your tailnet.",
-            "To enable, visit:",
-            "",
-            "https://login.tailscale.com/f/funnel?node=nMNPgMjBts11CNTRL",
-          ].join("\n"),
-        },
-      });
-      expect(() => registerFunnel(4123, 443, { runner })).toThrow(
-        "Tailscale Funnel is not enabled on your tailnet"
-      );
-    });
-
-    it("throws an actionable error when Funnel registration times out", () => {
-      const timeout = Object.assign(new Error("spawnSync tailscale ETIMEDOUT"), {
-        code: "ETIMEDOUT",
-      });
-      const runner = createRunner({
-        "funnel --bg --yes --https=443 http://127.0.0.1:4123": {
-          status: null,
-          error: timeout,
-        },
-      });
-      expect(() => registerFunnel(4123, 443, { runner })).toThrow(
-        "Tailscale Funnel registration timed out"
-      );
-    });
+    const claimShare = vi.fn(() => "other.localhost");
+    const releaseShare = vi.fn();
+    expect(() =>
+      share({
+        kind: "serve",
+        localPort: 3000,
+        preferredPort: 8443,
+        runner,
+        claimShare,
+        releaseShare,
+      })
+    ).toThrow(
+      occupied === "daemon"
+        ? "Tailscale port 8443 is already in use. Stop the existing serve"
+        : "already in use by other.localhost"
+    );
+    if (occupied === "daemon") expect(claimShare).not.toHaveBeenCalled();
+    expect(releaseShare).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(3);
   });
 
-  describe("unregisterFunnel", () => {
-    it("calls tailscale funnel off with correct args", () => {
-      const calls: string[][] = [];
-      const runner = createRunner({ "funnel --yes --https=443 off": { status: 0 } }, calls);
-      unregisterFunnel(443, { runner });
-      expect(calls[0]).toEqual(["funnel", "--yes", "--https=443", "off"]);
+  it("registers a service, claims it and reports approval", () => {
+    const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
+    const command = "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000";
+    const { runner, calls } = runnerFor(status, {
+      "serve status --json": { stdout: "{}" },
+      [command]: { stdout: "approval from an admin is required" },
     });
-
-    it("ignores missing when requested", () => {
-      const runner = createRunner({
-        "funnel --yes --https=8443 off": {
-          status: 1,
-          stderr: "does not exist",
-        },
-      });
-      expect(() => unregisterFunnel(8443, { ignoreMissing: true, runner })).not.toThrow();
-    });
+    const claimShare = vi.fn(() => null);
+    const record = { kind: "service", serviceId: "svc:api", serviceName: "api" };
+    expect(
+      share({ kind: "service", serviceName: "svc:API", localPort: 3000, runner, claimShare })
+    ).toEqual({ url: "https://api.example.ts.net", record, pendingApproval: true });
+    expect(claimShare).toHaveBeenCalledExactlyOnceWith(record);
+    expect(calls).toContainEqual(command.split(" "));
   });
 
-  // -----------------------------------------------------------------------
-  // unregisterTailscale
-  // -----------------------------------------------------------------------
-
-  describe("unregisterTailscale", () => {
-    it("calls serve off for non-funnel route", () => {
-      const calls: string[][] = [];
-      const runner = createRunner({ "serve --yes --https=443 off": { status: 0 } }, calls);
-      unregisterServe(443, { runner });
-      expect(calls[0]).toEqual(["serve", "--yes", "--https=443", "off"]);
+  it.each(["daemon", "route"])("rejects a service occupied by a %s", (occupied) => {
+    const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
+    const { runner, calls } = runnerFor(status, {
+      "serve status --json": {
+        stdout: JSON.stringify(
+          occupied === "daemon"
+            ? { Services: { "svc:api": { TCP: { "443": { HTTPS: true } } } } }
+            : {}
+        ),
+      },
     });
-
-    it("calls funnel off for funnel route", () => {
-      const calls: string[][] = [];
-      const runner = createRunner({ "funnel --yes --https=8443 off": { status: 0 } }, calls);
-      unregisterFunnel(8443, { runner });
-      expect(calls[0]).toEqual(["funnel", "--yes", "--https=8443", "off"]);
-    });
-
-    it("is a no-op when tailscaleHttpsPort is undefined", () => {
-      expect(() => unregisterTailscale({})).not.toThrow();
-    });
-
-    it("is a no-op when tailscaleHttpsPort is missing", () => {
-      expect(() => unregisterTailscale({ tailscaleFunnel: true })).not.toThrow();
-    });
+    const claimShare = vi.fn(() => "other.localhost");
+    const releaseShare = vi.fn();
+    expect(() =>
+      share({
+        kind: "service",
+        serviceName: "api",
+        localPort: 3000,
+        runner,
+        claimShare,
+        releaseShare,
+      })
+    ).toThrow("Tailscale service svc:api is already in use");
+    if (occupied === "daemon") expect(claimShare).not.toHaveBeenCalled();
+    expect(releaseShare).not.toHaveBeenCalled();
+    expect(calls).toHaveLength(3);
   });
 
-  // -----------------------------------------------------------------------
-  // formatTailscaleUrl
-  // -----------------------------------------------------------------------
+  it.each(["serve", "service"] as const)("releases a %s claim on a registration error", (kind) => {
+    const status = { ...httpsStatus, Self: { ...httpsStatus.Self, Tags: ["tag:dev"] } };
+    const command =
+      kind === "serve"
+        ? "serve --bg --yes --https=8443 http://127.0.0.1:3000"
+        : "serve --yes --service=svc:api --https=443 http://127.0.0.1:3000";
+    const { runner } = runnerFor(status, {
+      "serve status --json": { stdout: "{}" },
+      [command]: { status: 1, stderr: "permission denied" },
+    });
+    const releaseShare = vi.fn();
+    expect(() =>
+      share({
+        kind,
+        ...(kind === "service" ? { serviceName: "api" } : { preferredPort: 8443 }),
+        localPort: 3000,
+        runner,
+        claimShare: () => null,
+        releaseShare,
+      })
+    ).toThrow("permission denied");
+    expect(releaseShare).toHaveBeenCalledOnce();
+  });
+});
 
-  describe("findWindowsCmdShim", () => {
-    it("returns an existing .cmd shim", () => {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tailscale-shim-"));
+describe("unshare", () => {
+  it.each<[TailscaleShareRecord, string[]]>([
+    [{ kind: "https", port: 443 }, ["serve", "--yes", "--https=443", "off"]],
+    [{ kind: "tcp", port: 80 }, ["serve", "--yes", "--tcp=80", "off"]],
+    [{ kind: "funnel", port: 8443 }, ["funnel", "--yes", "--https=8443", "off"]],
+    [
+      { kind: "service", serviceId: "svc:api", serviceName: "api" },
+      ["serve", "--yes", "--service=svc:api", "--https=443", "off"],
+    ],
+  ])("removes $kind shares with the matching command", (record, args) => {
+    const runner = vi.fn<TailscaleCommandRunner>(() => ({ status: 0, stdout: "", stderr: "" }));
+    unshare(record, { runner });
+    expect(runner).toHaveBeenCalledExactlyOnceWith(args);
+  });
+
+  it("throws for failed commands except matching missing shares", () => {
+    const record = { kind: "https", port: 443 } as const;
+    const missing: TailscaleCommandRunner = () => ({
+      status: 1,
+      stdout: "",
+      stderr: "nothing to remove",
+    });
+    expect(() => unshare(record, { runner: missing })).toThrow("nothing to remove");
+    expect(() => unshare(record, { runner: missing, ignoreMissing: true })).not.toThrow();
+    const denied: TailscaleCommandRunner = () => ({
+      status: 1,
+      stdout: "",
+      stderr: "permission denied",
+    });
+    expect(() => unshare(record, { runner: denied, ignoreMissing: true })).toThrow(
+      "permission denied"
+    );
+  });
+
+  it("throws on spawn errors even when missing shares are ignored", () => {
+    const error = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+    const runner: TailscaleCommandRunner = () => ({ status: null, stdout: "", stderr: "", error });
+    expect(() => unshare({ kind: "https", port: 443 }, { runner, ignoreMissing: true })).toThrow(
+      "Tailscale CLI not found"
+    );
+  });
+});
+
+describe("tailscaleShareKey", () => {
+  it("keys HTTPS, TCP, and Funnel shares by port so one daemon port has one owner", () => {
+    expect(tailscaleShareKey({ kind: "https", port: 443 })).toBe("port:443");
+    expect(tailscaleShareKey({ kind: "tcp", port: 443 })).toBe("port:443");
+    expect(tailscaleShareKey({ kind: "funnel", port: 443 })).toBe("port:443");
+    expect(tailscaleShareKey({ kind: "service", serviceId: "svc:api", serviceName: "api" })).toBe(
+      "service:svc:api"
+    );
+  });
+});
+
+describe("route metadata", () => {
+  it("prefers new share metadata and supports legacy serve and funnel fields", () => {
+    const record = { kind: "tcp", port: 8080 } as const;
+    expect(tailscaleShareFromRoute({ tailscaleShare: record, tailscaleHttpsPort: 443 })).toEqual(
+      record
+    );
+    expect(tailscaleShareFromRoute({ tailscaleHttpsPort: 443 })).toEqual({
+      kind: "https",
+      port: 443,
+    });
+    expect(tailscaleShareFromRoute({ tailscaleHttpsPort: 8443, tailscaleFunnel: true })).toEqual({
+      kind: "funnel",
+      port: 8443,
+    });
+    expect(tailscaleShareFromRoute({})).toBeUndefined();
+    expect(tailscaleShareKey(record)).toBe("port:8080");
+    expect(describeTailscaleShare(record)).toBe("tailscale tcp serve on port 8080");
+  });
+});
+
+describe("findWindowsCmdShim", () => {
+  it("finds a shim on PATH and ignores absent entries", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tailscale-shim-"));
+    try {
+      expect(findWindowsCmdShim("tailscale", { PATH: dir })).toBeNull();
       const shim = path.join(dir, "tailscale.cmd");
       fs.writeFileSync(shim, "@echo off\r\n");
-      try {
-        expect(findWindowsCmdShim("tailscale", { PATH: dir })).toBe(shim);
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    });
-
-    it("returns null when no shim exists", () => {
-      const dir = fs.mkdtempSync(path.join(os.tmpdir(), "portless-tailscale-no-shim-"));
-      try {
-        expect(findWindowsCmdShim("tailscale", { PATH: dir })).toBeNull();
-      } finally {
-        fs.rmSync(dir, { recursive: true, force: true });
-      }
-    });
-  });
-
-  describe("formatTailscaleUrl", () => {
-    it("omits port for 443", () => {
-      expect(formatTailscaleUrl("https://devbox.example.ts.net", 443)).toBe(
-        "https://devbox.example.ts.net"
-      );
-    });
-
-    it("includes non-default port", () => {
-      expect(formatTailscaleUrl("https://devbox.example.ts.net", 8443)).toBe(
-        "https://devbox.example.ts.net:8443"
-      );
-    });
-
-    it("trims trailing slash from base URL", () => {
-      expect(formatTailscaleUrl("https://devbox.example.ts.net/", 443)).toBe(
-        "https://devbox.example.ts.net"
-      );
-    });
+      expect(findWindowsCmdShim("tailscale", { PATH: dir })).toBe(shim);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

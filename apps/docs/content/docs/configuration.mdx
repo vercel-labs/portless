@@ -297,6 +297,23 @@ If two apps differ only in punctuation, such as `web.api` and `web-api`, the fir
       <td>off</td>
     </tr>
     <tr>
+      <td>`PORTLESS_TAILSCALE_PORT`</td>
+      <td>
+        Pin a Serve port from 1 to 65535 or a Funnel port of 443, 8443, or 10000; implies
+        `--tailscale`. Cannot be combined with `--tailscale-service`.
+      </td>
+      <td>automatic</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_TAILSCALE_SERVICE`</td>
+      <td>
+        Set to `1` to infer the app's base name, a service name to select it, or `0` to disable.
+        Requires MagicDNS, HTTPS, and a tag-based identity; cannot be combined with `--funnel` or
+        `--tailscale-port`.
+      </td>
+      <td>off</td>
+    </tr>
+    <tr>
       <td>`PORTLESS_FUNNEL`</td>
       <td>Set to `1` to share apps publicly via Tailscale Funnel</td>
       <td>off</td>
@@ -305,6 +322,36 @@ If two apps differ only in punctuation, such as `web.api` and `web-api`, the fir
       <td>`PORTLESS_NGROK`</td>
       <td>Set to `1` to share apps publicly via ngrok</td>
       <td>off</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NGROK_CUSTOM_URL`</td>
+      <td>Pin a custom or static ngrok URL; implies `--ngrok`.</td>
+      <td>automatic</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NETBIRD`</td>
+      <td>Set to `1` to share via NetBird, or `0` to disable.</td>
+      <td>off</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NETBIRD_PASSWORD`</td>
+      <td>Set the NetBird access password; implies `--netbird`.</td>
+      <td>unset</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NETBIRD_PIN`</td>
+      <td>Set the NetBird access PIN; implies `--netbird`.</td>
+      <td>unset</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NETBIRD_GROUPS`</td>
+      <td>Set comma-separated NetBird user groups; implies `--netbird`.</td>
+      <td>unset</td>
+    </tr>
+    <tr>
+      <td>`PORTLESS_NETBIRD_URL`</td>
+      <td>NetBird share URL set on the child process.</td>
+      <td>unset</td>
     </tr>
     <tr>
       <td>`PORTLESS_CLOUDFLARE`</td>
@@ -318,6 +365,8 @@ If two apps differ only in punctuation, such as `web.api` and `web-api`, the fir
     </tr>
   </tbody>
 </table>
+
+See [sharing commands](/commands#share-on-tailscale) for Tailscale requirements, fallback behavior, and cleanup, or [NetBird sharing](/commands#share-with-netbird) for setup and tunnel cleanup.
 
 Portless also sets variables in the child process. `PORT` and `HOST` carry the assigned port and host, under the names chosen by `portVar` and `hostVar`. `PORTLESS_URL` holds the URL you open in the browser, and a monorepo run adds `PORTLESS_URL_<APP>` for every proxied app.
 

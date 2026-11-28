@@ -98,12 +98,32 @@ portless docs.myapp next dev
       <td>Share the app on your Tailscale network.</td>
     </tr>
     <tr>
+      <td>`--tailscale-port <port>`</td>
+      <td>Pin the Tailscale share port; implies `--tailscale`.</td>
+    </tr>
+    <tr>
+      <td>`--tailscale-service[=<name>]`</td>
+      <td>Expose a Tailscale Service, using the app's base name when omitted.</td>
+    </tr>
+    <tr>
       <td>`--funnel`</td>
       <td>Share the app publicly via Tailscale Funnel.</td>
     </tr>
     <tr>
       <td>`--ngrok`</td>
       <td>Share the app publicly via ngrok.</td>
+    </tr>
+    <tr>
+      <td>`--ngrok-url <url>`</td>
+      <td>Pin a custom or static ngrok URL; implies `--ngrok`.</td>
+    </tr>
+    <tr>
+      <td>`--netbird`</td>
+      <td>Share the app via NetBird.</td>
+    </tr>
+    <tr>
+      <td>`--netbird-password <pw>`, `--netbird-pin <code>`, `--netbird-groups <csv>`</td>
+      <td>Configure NetBird access; each implies `--netbird`.</td>
     </tr>
     <tr>
       <td>`--cloudflare`</td>
@@ -152,7 +172,13 @@ portless myapp --funnel next dev
 # -> https://devbox.yourteam.ts.net    (public)
 ```
 
-The Tailscale CLI must be installed and connected (`tailscale up`), with Tailscale HTTPS certificates enabled. `--funnel` also needs Funnel enabled for the tailnet and node. If a setting is missing, portless exits before starting the child process. Set `PORTLESS_TAILSCALE=1` in your shell profile or `.env` to share every app by default. `portless list` shows both local and tailnet URLs, and the Tailscale serve registrations are removed when the app exits.
+The Tailscale CLI must be installed and connected (`tailscale up`). With MagicDNS enabled, Tailscale HTTPS certificates are required. If MagicDNS is disabled, `--tailscale` automatically serves HTTP over TCP on the node's Tailscale IP. Funnel requires MagicDNS, HTTPS, and Funnel enabled for the tailnet and node.
+
+Use `--tailscale-port <port>` or `PORTLESS_TAILSCALE_PORT` to pin the port; either implies `--tailscale`. Serve accepts ports 1 to 65535, while Funnel accepts 443, 8443, and 10000. This option cannot be combined with `--tailscale-service`.
+
+Use `--tailscale-service[=<name>]` to expose a Tailscale Service at `https://<service>.<tailnet>`. Without `=<name>`, the app's base name is used. `PORTLESS_TAILSCALE_SERVICE=1` infers the name, a service name selects it directly, and `0` disables it. Services require MagicDNS, HTTPS, and a tag-based device identity (`--advertise-tags`). They cannot be combined with `--funnel` or `--tailscale-port`.
+
+Set `PORTLESS_TAILSCALE=1` to share every app by default. `portless list` shows both local and tailnet URLs. Portless removes shares when the app exits; if removal fails on exit or during `portless prune`, it keeps the stale route so prune can retry. If Tailscale share removal fails during `portless clean`, it keeps `routes.json` so `portless prune` or a later `portless clean` can retry.
 
 ### Share with ngrok
 
@@ -164,7 +190,19 @@ portless myapp --ngrok next dev
 # -> https://abc123.ngrok.app          (public)
 ```
 
-The ngrok CLI must be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again. Set `PORTLESS_NGROK=1` to enable ngrok by default. `portless list` shows both local and ngrok URLs, and the tunnel closes when the app exits.
+The ngrok CLI must be installed and authenticated. If ngrok reports an authentication error, run `ngrok config add-authtoken <token>` and try again. Set `PORTLESS_NGROK=1` to enable ngrok by default or `0` to disable it. Use `--ngrok-url <url>` or `PORTLESS_NGROK_CUSTOM_URL` to pin a custom or static URL. Either implies `--ngrok` and passes `--url` to `ngrok http`. Child processes receive the active URL in `PORTLESS_NGROK_URL`. `portless list` shows both local and ngrok URLs, and the tunnel closes when the app exits.
+
+### Share with NetBird
+
+Expose your dev server via NetBird:
+
+```bash
+portless myapp --netbird next dev
+```
+
+Install the NetBird CLI and connect with `netbird up` first. `--netbird` or `PORTLESS_NETBIRD=1` runs `netbird expose`; `PORTLESS_NETBIRD=0` disables it. Portless keeps the child server bound to `127.0.0.1` and sets `PORTLESS_NETBIRD_URL` on the child. It records the tunnel PID for cleanup on exit and by `portless prune`.
+
+Use `--netbird-password <pw>` or `PORTLESS_NETBIRD_PASSWORD`, `--netbird-pin <code>` or `PORTLESS_NETBIRD_PIN`, and `--netbird-groups <csv>` or `PORTLESS_NETBIRD_GROUPS` to configure access. Each implies `--netbird`.
 
 ### Share with Cloudflare
 
@@ -357,7 +395,7 @@ portless prune --force
 
 Finds routes whose owning portless process is gone, then removes the stale routes and their Tailscale and tunnel shares once the recorded group is gone. On macOS and Linux, it signals the recorded dev server process group only if its leader still matches the recorded start time, or if a member recorded by an earlier run still matches, and it reports the group stopped only after every member has exited. While any member is still running, even one that closed its port after SIGTERM, prune keeps the route and its shares and records the member that survived, so a retry with `portless prune --force` verifies that member and sends SIGKILL. A group prune cannot verify is kept and reported, never signaled, except that a member holding its port while the recorded leader is gone is recorded so a retry can stop it. Prune reports unrelated port holders without killing them.
 
-On Windows, prune cannot verify or signal process groups. It removes stale routes and Tailscale shares and reports any port holders. Prune and clean stop recorded ngrok and cloudflared tunnels only when their executable names match, including on Windows. `portless run` also attempts to stop recorded orphaned process groups on startup.
+On Windows, prune cannot verify or signal process groups. It removes stale routes and Tailscale shares and reports any port holders. Prune and clean stop recorded ngrok, cloudflared, and NetBird tunnels only when their executable names match, including on Windows. `portless run` also attempts to stop recorded orphaned process groups on startup.
 
 ## Proxy control
 

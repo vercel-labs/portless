@@ -188,6 +188,19 @@ describe("removePortlessStateFiles", () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  it("preserves route files when preserveRoutes is true", () => {
+    fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
+    fs.writeFileSync(path.join(tmpDir, "routes.json.tmp"), "[]");
+    fs.mkdirSync(path.join(tmpDir, "routes.lock"));
+    fs.writeFileSync(path.join(tmpDir, "cloudflared.yml"), "{}");
+
+    expect(removePortlessStateFiles(tmpDir, { preserveRoutes: true })).toEqual([]);
+    expect(fs.existsSync(path.join(tmpDir, "routes.json"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "routes.json.tmp"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "routes.lock"))).toBe(true);
+    expect(fs.existsSync(path.join(tmpDir, "cloudflared.yml"))).toBe(false);
+  });
+
   it("removes allowlisted files and host-certs directory", () => {
     fs.writeFileSync(path.join(tmpDir, "routes.json"), "[]");
     fs.writeFileSync(path.join(tmpDir, "ca.pem"), "pem");

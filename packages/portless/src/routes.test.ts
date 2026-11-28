@@ -375,6 +375,195 @@ describe("RouteStore", () => {
     });
   });
 
+  describe("sharing metadata and recovery", () => {
+    const share = { kind: "tcp", port: 4242 } as const;
+    const service = { kind: "service", serviceId: "svc:api", serviceName: "api" } as const;
+    const stale = { hostname: "stale.localhost", port: 4001, pid: 999999, tailscaleShare: share };
+
+    it("updates and clears metadata on the live route without changing stale recovery", async () => {
+      await store.register({ hostnames: ["app.localhost"], pid: process.pid, port: 4000 });
+      const routes = store.loadRoutes();
+      routes.push({ ...stale, hostname: "app.localhost" });
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify(routes));
+      const metadata = {
+        tailscaleShare: share,
+        tailscaleHttpsPort: 8443,
+        netbirdUrl: "https://netbird.example",
+        netbirdPid: 1234,
+      };
+      store.updateRoute("app.localhost", metadata);
+      expect(store.loadRoutes()[0]).toMatchObject(metadata);
+      store.updateRoute("app.localhost", {
+        tailscaleShare: null,
+        tailscaleHttpsPort: null,
+        netbirdUrl: null,
+        netbirdPid: null,
+      });
+      const [live, recovery] = store.loadRoutes({ includeStale: true });
+      for (const key of Object.keys(metadata)) expect(live).not.toHaveProperty(key);
+      expect(recovery).toMatchObject({ tailscaleShare: share });
+    });
+
+    it("transfers a route and clears its sharing metadata", async () => {
+      await store.register({ hostnames: ["app.localhost"], pid: process.pid, port: 4000 });
+      store.updateRoute("app.localhost", {
+        tailscaleShare: share,
+        tailscaleSharePending: true,
+        tailscaleHttpsPort: 8443,
+        tailscaleFunnel: true,
+        netbirdUrl: "https://netbird.example",
+        netbirdPid: 1234,
+      });
+      expect(store.transferRoute("app.localhost", process.pid, process.ppid)).toBe(true);
+      const route = store.loadRoutes()[0];
+      expect(route.pid).toBe(process.ppid);
+      for (const key of [
+        "tailscaleShare",
+        "tailscaleSharePending",
+        "tailscaleHttpsPort",
+        "tailscaleFunnel",
+        "netbirdUrl",
+        "netbirdPid",
+      ])
+        expect(route).not.toHaveProperty(key);
+    });
+
+    it.each([share, service])(
+      "retains stale $kind recovery and reserves its backend",
+      async (tailscaleShare) => {
+        await store.register({ hostnames: ["live.localhost"], port: 4000, pid: process.pid });
+        fs.writeFileSync(
+          store.getRoutesPath(),
+          JSON.stringify([
+            store.loadRoutes()[0],
+            { ...stale, tailscaleShare },
+            { hostname: "gone.localhost", port: 4002, pid: 999999 },
+          ])
+        );
+        store.updateRoute("live.localhost", { netbirdPid: 1234 });
+        expect(store.loadRoutes({ includeStale: true })).toEqual([
+          expect.objectContaining({ hostname: "live.localhost", netbirdPid: 1234 }),
+          expect.objectContaining({ ...stale, tailscaleShare, retired: true }),
+        ]);
+        await expect(
+          store.register({ hostnames: ["new.localhost"], port: 4001, pid: process.pid })
+        ).rejects.toThrow("Port 4001 is reserved by a Tailscale share");
+      }
+    );
+
+    it.each([share, service])(
+      "claims $kind and rejects a conflicting live route",
+      async (record) => {
+        await store.register({ hostnames: ["one.localhost"], port: 4000, pid: process.pid });
+        await store.register({ hostnames: ["two.localhost"], port: 4001, pid: process.pid });
+        expect(store.claimTailscaleShare("one.localhost", record)).toBeNull();
+        expect(store.loadRoutes()[0]).toMatchObject({
+          tailscaleShare: record,
+          tailscaleSharePending: true,
+        });
+        expect(store.claimTailscaleShare("two.localhost", record)).toBe("one.localhost");
+        expect(store.loadRoutes()[1].tailscaleShare).toBeUndefined();
+      }
+    );
+
+    it.each([share, service])(
+      "waits for a pending $kind claim before removing stale recovery",
+      async (record) => {
+        await store.register({ hostnames: ["live.localhost"], pid: process.pid, port: 4000 });
+        expect(store.claimTailscaleShare("live.localhost", record)).toBeNull();
+        fs.writeFileSync(
+          store.getRoutesPath(),
+          JSON.stringify([...store.loadRoutes(), { ...stale, tailscaleShare: record }])
+        );
+        const unshare = vi.fn();
+        expect(store.removeStaleRouteWithShare(stale.hostname, stale.pid, unshare)).toEqual({
+          removed: false,
+          pendingClaim: true,
+        });
+        expect(store.findStaleRoutes()).toEqual([
+          expect.objectContaining({ ...stale, tailscaleShare: record }),
+        ]);
+        expect(unshare).not.toHaveBeenCalled();
+        store.updateRoute("live.localhost", { tailscaleSharePending: null });
+        expect(store.removeStaleRouteWithShare(stale.hostname, stale.pid, unshare)).toEqual({
+          removed: true,
+        });
+        expect(store.findStaleRoutes()).toEqual([]);
+        expect(unshare).not.toHaveBeenCalled();
+      }
+    );
+
+    it("keeps stale recovery when unshare fails", () => {
+      store.ensureDir();
+      fs.writeFileSync(store.getRoutesPath(), JSON.stringify([stale]));
+      const result = store.removeStaleRouteWithShare(stale.hostname, stale.pid, () => {
+        throw new Error("daemon unreachable");
+      });
+      expect(result.removed).toBe(false);
+      expect(result.error?.message).toBe("daemon unreachable");
+      expect(store.findStaleRoutes()).toEqual([stale]);
+    });
+
+    it.each(["owned", "takeover", "transfer"])(
+      "retains failed unshare recovery after %s",
+      async (mode) => {
+        await store.register({ hostnames: ["app.localhost"], port: 4000, pid: process.pid });
+        store.claimTailscaleShare("app.localhost", share);
+        if (mode === "transfer")
+          expect(store.transferRoute("app.localhost", process.pid, process.ppid)).toBe(true);
+        if (mode === "takeover") {
+          const realKill = process.kill.bind(process);
+          const kill = vi
+            .spyOn(process, "kill")
+            .mockImplementation((pid, signal) =>
+              pid === process.pid ? true : realKill(pid, signal)
+            );
+          try {
+            await store.register({
+              hostnames: ["app.localhost"],
+              port: 4001,
+              pid: process.ppid,
+              force: true,
+            });
+          } finally {
+            kill.mockRestore();
+          }
+          await expect(
+            store.register({ hostnames: ["other.localhost"], port: 4000, pid: process.ppid })
+          ).rejects.toThrow("Port 4000 is reserved by a Tailscale share");
+        }
+        const owner = mode === "owned" ? undefined : store.loadRoutes()[0];
+        const unshare = vi.fn(() => {
+          throw new Error("daemon unreachable");
+        });
+        const result = store.releaseOwnedTailscaleShare(
+          "app.localhost",
+          process.pid,
+          ["app.localhost"],
+          4000,
+          share,
+          "https://device.ts.net",
+          unshare
+        );
+        expect(result.error?.message).toBe("daemon unreachable");
+        expect(unshare).toHaveBeenCalledExactlyOnceWith(share);
+        if (owner) expect(store.loadRoutes()[0]).toEqual(owner);
+        const recovery = store.findStaleRoutes();
+        expect(recovery).toEqual([
+          expect.objectContaining({
+            hostname: "app.localhost",
+            port: 4000,
+            pid: process.pid,
+            retired: true,
+            tailscaleShare: share,
+            tailscaleUrl: "https://device.ts.net",
+          }),
+        ]);
+        expect(recovery[0]).not.toHaveProperty("tailscaleSharePending");
+      }
+    );
+  });
+
   describe("register", () => {
     it("creates the state directory if it does not exist", async () => {
       const nested = path.join(tmpDir, "nested");

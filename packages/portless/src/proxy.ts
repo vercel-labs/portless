@@ -279,7 +279,19 @@ function tailscaleAuthority(tailscaleUrl: string | undefined): string | undefine
  */
 function normalizeAuthority(host: string): string {
   const lower = host.toLowerCase();
-  return lower.endsWith(":443") ? lower.slice(0, -":443".length) : lower;
+  if (!lower.startsWith("[") && lower.indexOf(":") !== lower.lastIndexOf(":")) return lower;
+  const hostname = extractAuthorityHostname(lower);
+  const port = lower.slice(hostname.length);
+  return port === ":443" || port === ":80" ? hostname : lower;
+}
+
+function extractAuthorityHostname(authority: string): string {
+  if (authority.startsWith("[")) {
+    const end = authority.indexOf("]");
+    return end === -1 ? authority : authority.slice(0, end + 1);
+  }
+  const idx = authority.lastIndexOf(":");
+  return idx === -1 ? authority : authority.slice(0, idx);
 }
 
 function findMostSpecificParent<T extends { hostname: string }>(
@@ -310,12 +322,17 @@ function findMostSpecificParent<T extends { hostname: string }>(
  * case-insensitive and treat an explicit `:443` as the default HTTPS port.
  */
 function findRoute(routes: RouteInfo[], host: string, strict?: boolean): RouteInfo | undefined {
+  const exactAuthority = host.toLowerCase();
   const authority = normalizeAuthority(host);
-  const hostname = authority.split(":")[0];
+  const hostname = extractAuthorityHostname(authority);
   return (
     routes.find((r) => r.hostname.toLowerCase() === hostname) ||
+    routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === exactAuthority) ||
     routes.find((r) => tailscaleAuthority(r.tailscaleUrl) === authority) ||
-    routes.find((r) => tailscaleAuthority(r.tailscaleUrl)?.split(":")[0] === hostname) ||
+    routes.find((r) => {
+      const tsAuthority = tailscaleAuthority(r.tailscaleUrl);
+      return tsAuthority !== undefined && extractAuthorityHostname(tsAuthority) === hostname;
+    }) ||
     (strict ? undefined : findMostSpecificParent(routes, hostname))
   );
 }
