@@ -358,6 +358,7 @@ function renderTerminal(command: string): string {
 
 const ERROR_STATUS_TEXT = {
   404: "Not Found",
+  408: "Request Timeout",
   421: "Misdirected Request",
   502: "Bad Gateway",
   503: "Service Unavailable",
@@ -392,6 +393,8 @@ export function renderPage(context: ProxyPageContext): string {
         status,
         `<p class="desc">No app registered for <strong>${escapeHtml(host)}</strong></p>${renderRoutesSection(routes, { proxyPort, tls, path })}${renderTerminal(`portless ${stripTldSuffix(host, tlds)} your-command`)}`
       );
+    case 408:
+      return renderMessagePage(status, message ?? "The request body timed out before completing.");
     case 508:
       return renderErrorPage(
         status,
@@ -416,7 +419,7 @@ export function renderPage(context: ProxyPageContext): string {
   }
 }
 
-function renderMessagePage(status: 421 | 502 | 503 | 504, message: string): string {
+function renderMessagePage(status: 408 | 421 | 502 | 503 | 504, message: string): string {
   return renderErrorPage(status, `<p class="desc">${escapeHtml(message)}</p>`);
 }
 

@@ -552,6 +552,8 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
       proxyReqHeaders["transfer-encoding"] = "chunked";
     }
 
+    let cancelUpstream: (() => void) | undefined;
+
     pool.dispatch(
       route,
       {
@@ -560,7 +562,15 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
         headers: proxyReqHeaders,
         freshConnection: isReplay || undefined,
         onReject: (reason) => {
+          cancelUpstream?.();
           const requestHost = getRequestHost(req);
+          if (reason === "request_timeout") {
+            sendError("request_timeout", requestHost, {
+              status: 408,
+              message: "The request body timed out before completing.",
+            });
+            return;
+          }
           if (reason === "gateway_timeout") {
             sendError("gateway_timeout", requestHost, {
               status: 504,
@@ -592,6 +602,7 @@ export function createProxyServer(options: ProxyServerOptions): ProxyServer {
             proxyReq.destroy();
           }
         };
+        cancelUpstream = finish;
 
         proxyReq.on("response", (proxyRes) => {
           const responseHeaders: http.OutgoingHttpHeaders = { ...proxyRes.headers };
