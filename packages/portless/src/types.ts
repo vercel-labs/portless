@@ -16,7 +16,7 @@ export interface RouteInfo {
 }
 
 /** Status codes for pages rendered directly by the proxy. */
-export type ProxyPageStatus = 200 | 404 | 421 | 502 | 503 | 504 | 508;
+export type ProxyPageStatus = 200 | 404 | 408 | 421 | 502 | 503 | 504 | 508;
 
 /** Structured context passed to proxy page renderers. */
 export interface ProxyPageContext {

@@ -1,6 +1,7 @@
 import * as http from "node:http";
 import * as net from "node:net";
 import * as nodeTls from "node:tls";
+import type { Readable } from "node:stream";
 import type { RouteInfo } from "./types.js";
 import { createLoopbackConnection, isLoopbackPeer } from "./utils.js";
 
@@ -12,10 +13,15 @@ const UPSTREAM_CONNECT_TIMEOUT_MS = 10_000;
 const RESPONSE_STALL_TIMEOUT_MS = 30_000;
 const UPSTREAM_FIRST_BYTE_TIMEOUT_MS = 120_000;
 const UPSTREAM_BODY_IDLE_TIMEOUT_MS = 120_000;
+const REQUEST_BODY_IDLE_TIMEOUT_MS = 15_000;
 const QUEUE_WAIT_TIMEOUT_MS = 30_000;
 const SHUTDOWN_GRACE_MS = 5_000;
 
-export type UpstreamRejectReason = "queue_timeout" | "queue_full" | "gateway_timeout";
+export type UpstreamRejectReason =
+  | "queue_timeout"
+  | "queue_full"
+  | "gateway_timeout"
+  | "request_timeout";
 
 /** Options for dispatching an HTTP request through an upstream pool. */
 export interface UpstreamDispatchOptions {
@@ -34,6 +40,7 @@ type CompatStream = {
 type CompatServerResponse = http.ServerResponse & { stream?: CompatStream };
 
 type BackendState = "idle" | "dialing" | "atCapacity";
+type UploadState = "pendingSocket" | "waitingForClient" | "waitingForUpstream" | "finished";
 type WaitingDispatch = {
   pool: UpstreamPool;
   socketKey: string;
@@ -75,6 +82,11 @@ const REJECT_INFO: Record<UpstreamRejectReason, { status: number; code: string; 
       code: "ETIMEDOUT",
       message: "Service Unavailable: upstream request queue timed out",
     },
+    request_timeout: {
+      status: 408,
+      code: "ETIMEDOUT",
+      message: "Request Timeout: request body timed out",
+    },
   };
 
 const STREAMING_MEDIA_TYPES = new Set([
@@ -88,6 +100,11 @@ const admissions = new Map<number, BackendAdmission>();
 
 function errnoError(message: string, code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(message), { code });
+}
+
+function hasChunkBytes(chunk: unknown): boolean {
+  if (typeof chunk === "string") return chunk.length > 0;
+  return ArrayBuffer.isView(chunk) && chunk.byteLength > 0;
 }
 
 function createTimer() {
@@ -396,9 +413,12 @@ export class UpstreamPool {
     let socketConnected = false;
     let requestClosed = false;
     let responseClosed = false;
+    let uploadState: UploadState = "pendingSocket";
     let proxyReq: http.ClientRequest;
     let proxyResponse: http.IncomingMessage | undefined;
 
+    const pipedSources = new Set<Readable>();
+    const uploadTimer = createTimer();
     const firstByteTimer = createTimer();
     const bodyIdleTimer = createTimer();
     const stallTimer = createTimer();
@@ -409,6 +429,62 @@ export class UpstreamPool {
       admission.peerActive.set(peerKey, (admission.peerActive.get(peerKey) ?? 0) + 1);
     }
 
+    const deriveUploadState = (): UploadState => {
+      if (requestFinished) return "finished";
+      if (!socketConnected) return "pendingSocket";
+      if (proxyReq.writableNeedDrain || proxyReq.writableEnded) return "waitingForUpstream";
+      return "waitingForClient";
+    };
+    const syncUploadTimer = (resetActive: boolean) => {
+      if (slotPhase !== "active") {
+        uploadTimer.clear();
+        return;
+      }
+      const next = deriveUploadState();
+      const changed = next !== uploadState;
+      uploadState = next;
+      switch (next) {
+        case "pendingSocket":
+        case "finished":
+          uploadTimer.clear();
+          break;
+        case "waitingForClient":
+          if (changed || resetActive || !uploadTimer.active) {
+            uploadTimer.arm(REQUEST_BODY_IDLE_TIMEOUT_MS, () => timeoutUpload("request_timeout"));
+          }
+          break;
+        case "waitingForUpstream":
+          if (changed || resetActive || !uploadTimer.active) {
+            uploadTimer.arm(UPSTREAM_FIRST_BYTE_TIMEOUT_MS, () => timeoutUpload("gateway_timeout"));
+          }
+          break;
+      }
+    };
+    const onUploadDrain = () => syncUploadTimer(true);
+    const onPipe = (source: Readable) => pipedSources.add(source);
+    const onUnpipe = (source: Readable) => pipedSources.delete(source);
+    const detachUploadWatchers = () => {
+      uploadTimer.clear();
+      uploadState = "finished";
+      proxyReq?.removeListener("drain", onUploadDrain);
+      proxyReq?.removeListener("pipe", onPipe);
+      proxyReq?.removeListener("unpipe", onUnpipe);
+      pipedSources.clear();
+    };
+    const timeoutUpload = (reason: "request_timeout" | "gateway_timeout") => {
+      if (slotPhase !== "active" || requestFinished) return;
+      for (const source of [...pipedSources]) source.unpipe(proxyReq);
+      detachUploadWatchers();
+      if (!res.headersSent) {
+        if (!getClientStream(res)) res.shouldKeepAlive = false;
+        rejectResponse(res, reason, options.onReject);
+      } else if (!res.writableFinished) {
+        const info = REJECT_INFO[reason];
+        abortResponse(res, errnoError(info.message, info.code));
+      }
+      if (!proxyReq.destroyed) proxyReq.destroy();
+      release();
+    };
     const abortTimedOut = (message: string) => {
       proxyReq.destroy();
       abortResponse(res, errnoError(message, "ETIMEDOUT"));
@@ -470,6 +546,7 @@ export class UpstreamPool {
     };
     const release = () => {
       if (slotPhase === "released") return;
+      detachUploadWatchers();
       detachResponseTimers();
       this.longLivedRequests.delete(proxyReq);
       const prev = slotPhase;
@@ -482,6 +559,7 @@ export class UpstreamPool {
     };
     const promoteToLongLived = () => {
       if (slotPhase !== "active") return;
+      detachUploadWatchers();
       detachResponseTimers();
       slotPhase = "longLived";
       this.longLivedRequests.add(proxyReq);
@@ -518,12 +596,30 @@ export class UpstreamPool {
       throw error;
     }
 
+    const originalWrite = proxyReq.write;
+    const originalEnd = proxyReq.end;
+    proxyReq.write = ((...args: unknown[]) => {
+      const hadBytes = hasChunkBytes(args[0]);
+      const result = Reflect.apply(originalWrite, proxyReq, args) as boolean;
+      syncUploadTimer(hadBytes && !proxyReq.writableNeedDrain && !proxyReq.writableEnded);
+      return result;
+    }) as typeof proxyReq.write;
+    proxyReq.end = ((...args: unknown[]) => {
+      const result = Reflect.apply(originalEnd, proxyReq, args) as http.ClientRequest;
+      syncUploadTimer(false);
+      return result;
+    }) as typeof proxyReq.end;
+    proxyReq.on("drain", onUploadDrain);
+    proxyReq.on("pipe", onPipe);
+    proxyReq.on("unpipe", onUnpipe);
     proxyReq.once("socket", () => {
       socketConnected = true;
+      syncUploadTimer(false);
       maybeStartFirstByteTimer();
     });
     proxyReq.once("finish", () => {
       requestFinished = true;
+      detachUploadWatchers();
       maybeStartFirstByteTimer();
     });
     proxyReq.once("response", (proxyRes) => {

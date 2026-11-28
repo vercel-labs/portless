@@ -985,4 +985,402 @@ describe("UpstreamPool", () => {
       client.destroy();
     }
   }, 30_000);
+
+  it("releases 48 stalled loopback uploads before a queued request hits the 30s deadline", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const errors: string[] = [];
+    let uploadsAccepted = 0;
+    let healthAccepted = false;
+    const backend = http.createServer((req, res) => {
+      if (req.url === "/health") {
+        healthAccepted = true;
+        res.end("ok");
+        return;
+      }
+      uploadsAccepted++;
+      req.once("end", () => res.end("uploaded"));
+      req.resume();
+    });
+    const backendPort = await listen(backend, 128);
+    const server = proxy(backendPort, (error) => errors.push(error));
+    let healthArrived = false;
+    server.on("request", (req) => {
+      if (req.url === "/health") healthArrived = true;
+    });
+    const proxyPort = await listen(server);
+    const uploads = Array.from(
+      { length: 48 },
+      () =>
+        new Promise<{ status: number; connection: string | undefined; error: string }>(
+          (resolve, reject) => {
+            let settled = false;
+            const req = http.request(
+              {
+                host: "127.0.0.1",
+                port: proxyPort,
+                method: "POST",
+                path: "/upload",
+                headers: { host: "app.localhost", "content-length": "1024" },
+                agent: false,
+              },
+              (res) => {
+                let body = "";
+                res.setEncoding("utf8");
+                res.on("data", (chunk: string) => (body += chunk));
+                res.once("end", () => {
+                  settled = true;
+                  resolve({
+                    status: res.statusCode ?? 0,
+                    connection: res.headers.connection,
+                    error: JSON.parse(body).error,
+                  });
+                });
+              }
+            );
+            requests.add(req);
+            req.once("close", () => requests.delete(req));
+            req.once("error", (error) => {
+              if (!settled) reject(error);
+            });
+            req.write("a");
+          }
+        )
+    );
+    await waitFor(() => uploadsAccepted === 48);
+    const health = response(get(proxyPort, "/health"));
+    await waitFor(() => healthArrived);
+    expect(healthAccepted).toBe(false);
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(await Promise.all(uploads)).toEqual(
+      Array(48).fill({ status: 408, connection: "close", error: "request_timeout" })
+    );
+    expect(await health).toEqual({ status: 200, body: "ok" });
+    expect(errors).toEqual([]);
+  }, 30_000);
+
+  it("resets the 15s upload deadline on progress and waits 120s for first-byte after the upload", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let slowStarted = false;
+    let slowReceived = 0;
+    let slowEnded = false;
+    let slowResponse: http.ServerResponse | undefined;
+    let slowDownstream: http.ServerResponse | undefined;
+    let slowBody = "";
+    let hangStarted = false;
+    let hangEnded = false;
+    let hangDownstream: http.ServerResponse | undefined;
+    const backend = http.createServer((req, res) => {
+      if (req.url === "/slow-upload") {
+        slowStarted = true;
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk: Buffer) => {
+          chunks.push(chunk);
+          slowReceived += chunk.length;
+        });
+        req.once("end", () => {
+          slowEnded = true;
+          slowBody = Buffer.concat(chunks).toString();
+          slowResponse = res;
+        });
+        return;
+      }
+      if (req.url === "/hang-after-upload") {
+        hangStarted = true;
+        req.once("end", () => (hangEnded = true));
+        req.resume();
+        return;
+      }
+      res.end("ok");
+    });
+    const backendPort = await listen(backend);
+    const server = proxy(backendPort);
+    server.on("request", (req, res) => {
+      if (req.url === "/slow-upload") slowDownstream = res;
+      if (req.url === "/hang-after-upload") hangDownstream = res;
+    });
+    const proxyPort = await listen(server);
+    const slowReq = http.request({
+      host: "127.0.0.1",
+      port: proxyPort,
+      method: "POST",
+      path: "/slow-upload",
+      headers: { host: "app.localhost", "content-length": "15" },
+      agent: false,
+    });
+    requests.add(slowReq);
+    slowReq.once("close", () => requests.delete(slowReq));
+    slowReq.on("error", () => {});
+    const slowUpload = response(slowReq);
+    slowReq.write("chunk");
+    await waitFor(() => slowStarted && slowReceived >= 5);
+    await vi.advanceTimersByTimeAsync(10_000);
+    slowReq.write("chunk");
+    await waitFor(() => slowReceived >= 10);
+    await vi.advanceTimersByTimeAsync(10_000);
+    slowReq.write("chunk");
+    await waitFor(() => slowReceived >= 15);
+    slowReq.end();
+    await waitFor(() => slowEnded);
+    expect(slowBody).toBe("chunkchunkchunk");
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(slowDownstream?.headersSent).toBe(false);
+    slowResponse!.end(slowBody);
+    expect(await slowUpload).toEqual({ status: 200, body: "chunkchunkchunk" });
+
+    const hangReq = http.request({
+      host: "127.0.0.1",
+      port: proxyPort,
+      method: "POST",
+      path: "/hang-after-upload",
+      headers: { host: "app.localhost", "content-length": "4" },
+      agent: false,
+    });
+    requests.add(hangReq);
+    hangReq.once("close", () => requests.delete(hangReq));
+    hangReq.on("error", () => {});
+    const hangUpload = response(hangReq);
+    hangReq.end("done");
+    await waitFor(() => hangStarted && hangEnded);
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(hangDownstream?.headersSent).toBe(false);
+    expect(hangReq.destroyed).toBe(false);
+    await vi.advanceTimersByTimeAsync(105_000);
+    const rejected = await hangUpload;
+    expect(rejected.status).toBe(504);
+    expect(JSON.parse(rejected.body).error).toBe("gateway_timeout");
+  }, 30_000);
+
+  it("keeps an HTTP/2 session usable after a stalled upload times out and resets a stream that stalls after headers", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const tls = createTlsCerts("portless-h2-upload-");
+    let stallStarted = false;
+    let stallBytes = 0;
+    const backend = http.createServer((req, res) => {
+      if (req.url === "/stall") {
+        stallStarted = true;
+        req.on("data", (chunk: Buffer) => (stallBytes += chunk.length));
+        req.resume();
+        return;
+      }
+      if (req.url === "/early-headers") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.write("partial");
+        req.resume();
+        return;
+      }
+      res.end("ok");
+    });
+    const backendPort = await listen(backend);
+    const server = createProxyServer({
+      getRoutes: () => [{ hostname: "app.localhost", port: backendPort }],
+      proxyPort: 1355,
+      onError: () => {},
+      tls,
+    });
+    const proxyPort = await listen(server);
+    const client = http2.connect(`https://127.0.0.1:${proxyPort}`, {
+      ca: tls.ca,
+      servername: "app.localhost",
+      rejectUnauthorized: false,
+    });
+    client.on("error", () => {});
+    try {
+      const readStream = (stream: http2.ClientHttp2Stream) => {
+        let status = 0;
+        let body = "";
+        let ended = false;
+        let errorCode: string | undefined;
+        const closed = new Promise<void>((resolve) => {
+          stream.setEncoding("utf8");
+          stream.once("response", (headers) => {
+            status = Number(headers[":status"]);
+          });
+          stream.on("data", (chunk: string) => (body += chunk));
+          stream.once("end", () => {
+            ended = true;
+            resolve();
+          });
+          stream.once("error", (error: NodeJS.ErrnoException) => {
+            errorCode = error.code;
+          });
+          stream.once("close", resolve);
+        });
+        return { closed, result: () => ({ status, body, ended, errorCode }) };
+      };
+
+      const stall = client.request(
+        { ":path": "/stall", ":method": "POST", ":authority": "app.localhost" },
+        { endStream: false }
+      );
+      const stallReader = readStream(stall);
+      stall.write("a");
+      await waitFor(() => stallStarted && stallBytes === 1);
+      await vi.advanceTimersByTimeAsync(15_001);
+      await stallReader.closed;
+      expect(stallReader.result().status).toBe(408);
+      expect(JSON.parse(stallReader.result().body).error).toBe("request_timeout");
+      expect(client.destroyed).toBe(false);
+
+      const health = client.request({
+        ":path": "/health",
+        ":method": "GET",
+        ":authority": "app.localhost",
+      });
+      const healthReader = readStream(health);
+      await healthReader.closed;
+      expect(healthReader.result()).toEqual({
+        status: 200,
+        body: "ok",
+        ended: true,
+        errorCode: undefined,
+      });
+
+      const early = client.request(
+        { ":path": "/early-headers", ":method": "POST", ":authority": "app.localhost" },
+        { endStream: false }
+      );
+      const earlyReader = readStream(early);
+      early.write("a");
+      await waitFor(() => earlyReader.result().body.includes("partial"));
+      await vi.advanceTimersByTimeAsync(15_001);
+      await earlyReader.closed;
+      expect(earlyReader.result().ended).toBe(false);
+      expect(earlyReader.result().errorCode).toBe("ERR_HTTP2_STREAM_ERROR");
+      expect(early.rstCode).toBe(http2.constants.NGHTTP2_INTERNAL_ERROR);
+    } finally {
+      client.destroy();
+    }
+  }, 30_000);
+
+  it("releases an early 413 slot after 15s without disconnecting the client or corrupting the response", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const held: http.ServerResponse[] = [];
+    let afterReceived = false;
+    let earlyClosed = false;
+    const backend = http.createServer((req, res) => {
+      if (req.url === "/early") {
+        req.socket.once("close", () => (earlyClosed = true));
+        res.writeHead(413);
+        res.end("too large");
+        return;
+      }
+      if (req.url === "/after") {
+        afterReceived = true;
+        res.end("ok");
+        return;
+      }
+      held.push(res);
+    });
+    const backendPort = await listen(backend);
+    const pool = createPool();
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
+    let afterArrived = false;
+    const server = http.createServer((req, res) => {
+      if (req.url === "/after") afterArrived = true;
+      pool.dispatch(
+        route,
+        { method: req.method, path: req.url, headers: { ...req.headers } },
+        res,
+        (upstream) => {
+          upstream.once("response", (proxyRes) => {
+            res.writeHead(proxyRes.statusCode ?? 502, proxyRes.headers);
+            proxyRes.pipe(res);
+          });
+          upstream.once("error", () => {});
+          req.pipe(upstream);
+        }
+      );
+    });
+    const proxyPort = await listen(server);
+    const initial = Promise.all(Array.from({ length: 47 }, () => response(get(proxyPort))));
+    void initial.catch(() => {});
+    await waitFor(() => held.length === 47);
+    const upload = net.connect(proxyPort, "127.0.0.1");
+    trackSocket(upload);
+    let earlyResponse = "";
+    upload.on("data", (chunk) => (earlyResponse += chunk.toString()));
+    upload.write("POST /early HTTP/1.1\r\nHost: app.localhost\r\nContent-Length: 10\r\n\r\na");
+    await waitFor(() => earlyResponse.includes("too large"));
+    expect(earlyResponse).toContain("413");
+    expect(earlyClosed).toBe(false);
+    expect(upload.destroyed).toBe(false);
+    const after = response(get(proxyPort, "/after"));
+    void after.catch(() => {});
+    await waitFor(() => afterArrived);
+    for (let i = 0; i < 10; i++) await settle();
+    expect(afterReceived).toBe(false);
+    await vi.advanceTimersByTimeAsync(15_001);
+    await waitFor(() => earlyClosed && afterReceived);
+    expect(await after).toEqual({ status: 200, body: "ok" });
+    expect(earlyResponse).toContain("413");
+    expect(earlyResponse).toContain("too large");
+    for (const res of held) res.end("ok");
+    expect(await initial).toEqual(Array(47).fill({ status: 200, body: "ok" }));
+  }, 30_000);
+
+  it("uses the 120s gateway timeout for upstream upload backpressure instead of the 15s request timeout", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    let backendAccepted = false;
+    const backend = net.createServer((socket) => {
+      backendAccepted = true;
+      socket.pause();
+    });
+    const backendPort = await listen(backend);
+    const pool = createPool();
+    const route: RouteInfo = { hostname: "app.localhost", port: backendPort };
+    let downstream: http.ServerResponse | undefined;
+    let upstream: http.ClientRequest | undefined;
+    const server = http.createServer((req, res) => {
+      downstream = res;
+      pool.dispatch(
+        route,
+        {
+          method: "POST",
+          path: req.url,
+          headers: { host: "app.localhost", "content-length": String(16 * 1024 * 1024) },
+          onReject: (reason) => {
+            if (res.headersSent) return;
+            res.writeHead(reason === "gateway_timeout" ? 504 : 408, {
+              "Content-Type": "application/json; charset=utf-8",
+            });
+            res.end(JSON.stringify({ error: reason }));
+          },
+        },
+        res,
+        (request) => {
+          upstream = request;
+          upstream.on("error", () => {});
+        }
+      );
+    });
+    const proxyPort = await listen(server);
+    const post = get(proxyPort, "/backpressure");
+    let connection: string | undefined;
+    post.once("response", (res) => {
+      connection = res.headers.connection;
+    });
+    const result = response(post);
+    void result.catch(() => {});
+    await waitFor(() => backendAccepted);
+    const chunk = Buffer.alloc(64 * 1024, "a");
+    const totalSize = 16 * 1024 * 1024;
+    let sent = 0;
+    while (sent < totalSize) {
+      const ok = upstream!.write(chunk);
+      sent += chunk.length;
+      if (!ok) {
+        await settle();
+        if (upstream!.writableNeedDrain) break;
+      }
+    }
+    expect(upstream!.writableNeedDrain).toBe(true);
+    await vi.advanceTimersByTimeAsync(15_001);
+    expect(downstream?.headersSent).toBe(false);
+    expect(post.destroyed).toBe(false);
+    await vi.advanceTimersByTimeAsync(105_000);
+    const rejected = await result;
+    expect(rejected.status).toBe(504);
+    expect(JSON.parse(rejected.body).error).toBe("gateway_timeout");
+    expect(connection).toBe("close");
+  }, 30_000);
 });
