@@ -486,6 +486,24 @@ function realPathOrNull(value: string): string | null {
   }
 }
 
+/**
+ * Rewrites a versioned Homebrew Cellar path (e.g.
+ * `/opt/homebrew/Cellar/node/26.13.1_4/bin/node`) to its version-stable `opt`
+ * symlink (`/opt/homebrew/opt/node/bin/node`) when that link exists so
+ * launchd plists survive `brew upgrade` + `brew cleanup`.
+ */
+function resolveHomebrewStablePath(targetPath: string): string {
+  if (!path.posix.isAbsolute(targetPath)) return targetPath;
+  const resolved = path.posix.resolve(targetPath);
+  const match = resolved.match(/^(.*)\/Cellar\/([^/]+)\/[^/]+\/(.+)$/);
+  if (!match) return targetPath;
+  const prefix = match[1] || "/";
+  const formula = match[2];
+  const relativeSubpath = match[3];
+  const optPath = path.posix.join(prefix, "opt", formula, relativeSubpath);
+  return fs.existsSync(optPath) ? optPath : targetPath;
+}
+
 function isPathInside(targetPath: string, parentDir: string): boolean {
   if (!targetPath || !parentDir) return false;
   const isContained = (target: string, parent: string): boolean => {
@@ -820,10 +838,12 @@ export function buildServiceSpec(options: {
     programData: options.programData || "C:\\ProgramData",
     config: normalizedConfig,
   };
-  const proxyCommand = buildProxyCommand(ctx.entryScript, ctx.config);
+  const darwinEntryScript =
+    ctx.platform === "darwin" ? resolveHomebrewStablePath(ctx.entryScript) : ctx.entryScript;
+  const proxyCommand = buildProxyCommand(darwinEntryScript, ctx.config);
 
   if (ctx.platform === "darwin") {
-    const programArguments = [ctx.nodePath, ...proxyCommand];
+    const programArguments = [resolveHomebrewStablePath(ctx.nodePath), ...proxyCommand];
     return {
       platform: "darwin",
       label: SERVICE_LABEL,
@@ -1573,7 +1593,8 @@ ${colors.bold("Notes:")}
   Linux systemd units allow 5 starts per 60 seconds
   (StartLimitIntervalSec=60, StartLimitBurst=5).
   macOS, Windows, and other Linux installs use a root or SYSTEM service with
-  the install-time Node path so port 443 can bind at boot.
+  the install-time Node path (or Homebrew opt link on macOS) so port 443 can
+  bind at boot.
 `);
 }
 

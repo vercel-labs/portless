@@ -157,6 +157,63 @@ describe("buildServiceSpec", () => {
     expect(spec.plist).toContain("<string>501</string>");
   });
 
+  it("rewrites Homebrew Cellar paths to version-stable opt links on macOS", () => {
+    vi.mocked(existsSync).mockImplementation(
+      (file) =>
+        file === "/opt/homebrew/opt/node/bin/node" ||
+        file === "/opt/homebrew/opt/portless/libexec/lib/node_modules/portless/dist/cli.js" ||
+        file === "/usr/local/opt/node/bin/node" ||
+        file === "/opt/homebrew/opt/node@24/bin/node"
+    );
+
+    const appleSilicon = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/opt/homebrew/Cellar/node/26.13.1_4/bin/node",
+      entryScript:
+        "/opt/homebrew/Cellar/portless/0.18.1/libexec/lib/node_modules/portless/dist/cli.js",
+      userHome: "/Users/alice",
+      uid: "501",
+      gid: "20",
+    });
+    if (appleSilicon.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(appleSilicon.programArguments.slice(0, 2)).toEqual([
+      "/opt/homebrew/opt/node/bin/node",
+      "/opt/homebrew/opt/portless/libexec/lib/node_modules/portless/dist/cli.js",
+    ]);
+    expect(appleSilicon.plist).toContain("<string>/opt/homebrew/opt/node/bin/node</string>");
+    expect(appleSilicon.plist).not.toContain("/Cellar/");
+
+    const intel = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/usr/local/Cellar/node/26.13.1_4/bin/node",
+      entryScript: "/usr/local/lib/node_modules/portless/dist/cli.js",
+      userHome: "/Users/alice",
+    });
+    if (intel.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(intel.programArguments[0]).toBe("/usr/local/opt/node/bin/node");
+
+    const versioned = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/opt/homebrew/Cellar/node@24/24.12.0/bin/node",
+      entryScript: "/opt/homebrew/lib/node_modules/portless/dist/cli.js",
+      userHome: "/Users/alice",
+    });
+    if (versioned.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(versioned.programArguments[0]).toBe("/opt/homebrew/opt/node@24/bin/node");
+  });
+
+  it("keeps the Cellar path on macOS when the Homebrew opt link does not exist", () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+    const spec = buildServiceSpec({
+      platform: "darwin",
+      nodePath: "/opt/homebrew/Cellar/node/26.13.1_4/bin/node",
+      entryScript: "/opt/homebrew/lib/node_modules/portless/dist/cli.js",
+      userHome: "/Users/alice",
+    });
+    if (spec.platform !== "darwin") throw new Error("Expected macOS service spec");
+    expect(spec.programArguments[0]).toBe("/opt/homebrew/Cellar/node/26.13.1_4/bin/node");
+  });
+
   it("builds a Linux systemd unit for the HTTPS proxy", () => {
     const spec = buildServiceSpec({
       platform: "linux",
