@@ -1193,11 +1193,14 @@ const MAX_CN_LENGTH = 64;
 /** Maximum in-memory contexts cached for unregistered hostnames under configured TLDs. */
 const MAX_EPHEMERAL_MEMORY_ENTRIES = 8;
 
-/** Maximum burst of ephemeral certificates minted for unregistered hostnames. */
-const EPHEMERAL_BURST = 4;
+/** Maximum burst shared by unregistered names and wildcard-only descendants. */
+const DYNAMIC_CERT_BURST = 4;
 
-/** Interval in milliseconds to refill one unregistered certificate token. */
-const EPHEMERAL_REFILL_MS = 15_000;
+/** Interval in milliseconds to refill one dynamic certificate token. */
+const DYNAMIC_CERT_REFILL_MS = 15_000;
+
+/** Bound distinct in-flight disk loads and signing jobs, including registered names. */
+const MAX_PENDING_CERTIFICATES = 32;
 
 async function signHostCertAsync(
   stateDir: string,
@@ -1373,8 +1376,8 @@ export class CertIssuer {
     const ephemeralCache = new Map<string, tls.SecureContext>();
     const pending = new Map<string, Promise<tls.SecureContext>>();
     const hostDir = path.join(stateDir, HOST_CERTS_DIR);
-    let ephemeralTokens = EPHEMERAL_BURST;
-    let lastEphemeralRefill = Date.now();
+    let dynamicTokens = DYNAMIC_CERT_BURST;
+    let lastDynamicRefill = Date.now();
     let signQueue: Promise<void> = Promise.resolve();
 
     const enqueueSign = <T>(fn: () => Promise<T>): Promise<T> => {
@@ -1401,16 +1404,16 @@ export class CertIssuer {
       }
     };
 
-    const takeEphemeralToken = (): boolean => {
+    const takeDynamicToken = (): boolean => {
       const now = Date.now();
-      const elapsed = now - lastEphemeralRefill;
-      if (elapsed >= EPHEMERAL_REFILL_MS) {
-        const refill = Math.floor(elapsed / EPHEMERAL_REFILL_MS);
-        ephemeralTokens = Math.min(EPHEMERAL_BURST, ephemeralTokens + refill);
-        lastEphemeralRefill += refill * EPHEMERAL_REFILL_MS;
+      const elapsed = now - lastDynamicRefill;
+      if (elapsed >= DYNAMIC_CERT_REFILL_MS) {
+        const refill = Math.floor(elapsed / DYNAMIC_CERT_REFILL_MS);
+        dynamicTokens = Math.min(DYNAMIC_CERT_BURST, dynamicTokens + refill);
+        lastDynamicRefill += refill * DYNAMIC_CERT_REFILL_MS;
       }
-      if (ephemeralTokens < 1) return false;
-      ephemeralTokens--;
+      if (dynamicTokens < 1) return false;
+      dynamicTokens--;
       return true;
     };
 
@@ -1480,7 +1483,7 @@ export class CertIssuer {
 
     this.sniCallback = (servername, cb) => {
       const name = servername.toLowerCase();
-      let admission: "default" | "outsideTld" | "unregistered" | "admitted";
+      let admission: "default" | "outsideTld" | "unregistered" | "wildcard" | "admitted";
       if (name === "localhost") {
         admission = "default";
       } else {
@@ -1499,11 +1502,11 @@ export class CertIssuer {
         } else {
           const allowed = getAllowedHostnames().map((hostname) => hostname.toLowerCase());
           admission =
-            configuredTlds.some((tld) => name === `portless.${tld}`) ||
-            allowed.includes(name) ||
-            (allowWildcards && allowed.some((parent) => name.endsWith(`.${parent}`)))
+            configuredTlds.some((tld) => name === `portless.${tld}`) || allowed.includes(name)
               ? "admitted"
-              : "unregistered";
+              : allowWildcards && allowed.some((parent) => name.endsWith(`.${parent}`))
+                ? "wildcard"
+                : "unregistered";
         }
       }
       switch (admission) {
@@ -1514,6 +1517,7 @@ export class CertIssuer {
           cb(new Error(`Refusing certificate for ${servername}: not under a configured TLD`));
           return;
         case "unregistered":
+        case "wildcard":
         case "admitted":
           break;
       }
@@ -1539,6 +1543,12 @@ export class CertIssuer {
         );
         return;
       }
+      // Cache hits and same-name waiters do not create new work. All other
+      // requests must fit before starting disk validation or joining signQueue.
+      if (pending.size >= MAX_PENDING_CERTIFICATES) {
+        cb(new Error(`Refusing certificate for ${servername}: pending certificate limit exceeded`));
+        return;
+      }
       const safeName = sanitizeHostForFilename(name);
       const certPath = path.join(hostDir, `${safeName}.pem`);
       const keyPath = path.join(hostDir, `${safeName}-key.pem`);
@@ -1553,7 +1563,7 @@ export class CertIssuer {
           if (!allowEphemeralUnregistered) {
             throw new Error(`Refusing certificate for ${servername}: no active route`);
           }
-          if (!takeEphemeralToken()) {
+          if (!takeDynamicToken()) {
             throw new Error(
               `Refusing certificate for ${servername}: unregistered certificate rate limit exceeded`
             );
@@ -1575,6 +1585,14 @@ export class CertIssuer {
             );
             throw error;
           }
+        }
+        // A registered parent admits arbitrarily many descendant names, not a
+        // finite set of routes. Share the dynamic issuance budget even in LAN
+        // mode, where ephemeral unregistered certificates are disabled.
+        if (admission === "wildcard" && !takeDynamicToken()) {
+          throw new Error(
+            `Refusing certificate for ${servername}: wildcard certificate rate limit exceeded`
+          );
         }
         try {
           const generated = await enqueueSign(() => generateHostCertAsync(stateDir, name));
