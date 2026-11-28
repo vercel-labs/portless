@@ -780,6 +780,90 @@ describe("CertIssuer", () => {
     expect(fs.existsSync(path.join(tmpDir, "host-certs", "chat_other_localhost.pem"))).toBe(false);
   });
 
+  it("bounds a wildcard SNI burst in LAN mode without blocking registered names", async () => {
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const issuer = makeIssuer({
+        getAllowedHostnames: () => ["myapp.localhost", "registered.myapp.localhost"],
+        allowWildcards: true,
+        allowEphemeralUnregistered: false,
+      });
+      const results = await Promise.allSettled(
+        Array.from({ length: 160 }, (_, i) => request(issuer, `tenant${i}.myapp.localhost`))
+      );
+      expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(4);
+      const rejected = results.filter((result) => result.status === "rejected");
+      expect(rejected).toHaveLength(156);
+      for (const result of rejected) {
+        expect(result.reason.message).toMatch(/certificate (rate )?limit exceeded/);
+      }
+      expect(fs.readdirSync(path.join(tmpDir, "host-certs"))).toHaveLength(8);
+      await expect(request(issuer, "registered.myapp.localhost")).resolves.toBeDefined();
+      await expect(request(issuer, "myapp.localhost")).resolves.toBeDefined();
+      await expect(request(issuer, "portless.localhost")).resolves.toBeDefined();
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      clock.mockRestore();
+      consoleError.mockRestore();
+    }
+  });
+
+  it("shares the dynamic budget, preserves cache hits, and refills wildcard tokens", async () => {
+    const now = Date.now();
+    const clock = vi.spyOn(Date, "now").mockReturnValue(now);
+    try {
+      const issuer = makeIssuer({
+        getAllowedHostnames: () => ["myapp.localhost"],
+        allowWildcards: true,
+        maxMemoryEntries: 1,
+      });
+      // Ephemeral issuance and wildcard issuance share one budget.
+      await request(issuer, "typo.localhost");
+      for (let i = 0; i < 3; i++) await request(issuer, `tenant${i}.myapp.localhost`);
+      await expect(request(issuer, "other.localhost")).rejects.toThrow("rate limit exceeded");
+      await expect(request(issuer, "next.myapp.localhost")).rejects.toThrow("rate limit exceeded");
+      // This certificate was evicted from memory, so it must be loaded from disk.
+      const diskCtx = await request(issuer, "tenant0.myapp.localhost");
+      expect(await request(issuer, "TENANT0.MYAPP.LOCALHOST")).toBe(diskCtx);
+      clock.mockReturnValue(now + 14_999);
+      await expect(request(issuer, "next.myapp.localhost")).rejects.toThrow("rate limit exceeded");
+      clock.mockReturnValue(now + 15_000);
+      const shared = await Promise.all(
+        Array.from({ length: 10 }, () => request(issuer, "next.myapp.localhost"))
+      );
+      expect(shared.every((ctx) => ctx === shared[0])).toBe(true);
+      await expect(request(issuer, "another.myapp.localhost")).rejects.toThrow(
+        "rate limit exceeded"
+      );
+    } finally {
+      clock.mockRestore();
+    }
+  });
+
+  it("caps pending registered names while preserving cached and shared requests", async () => {
+    const hosts = Array.from({ length: 33 }, (_, i) => `svc${i}.localhost`);
+    const issuer = makeIssuer({ getAllowedHostnames: () => [...hosts, "myapp.localhost"] });
+    const cached = await request(issuer, "myapp.localhost");
+    // Submit all names in one turn, before any disk load or signing job settles.
+    const pending = hosts.map((host) => request(issuer, host));
+    const resultsPromise = Promise.allSettled(pending);
+    const duplicate = request(issuer, hosts[0]);
+    expect(await request(issuer, "myapp.localhost")).toBe(cached);
+    await expect(request(issuer, "localhost")).resolves.toBeDefined();
+    const results = await resultsPromise;
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(32);
+    expect(results[32]).toMatchObject({
+      status: "rejected",
+      reason: expect.objectContaining({
+        message: expect.stringContaining("pending certificate limit"),
+      }),
+    });
+    expect(await duplicate).toBe(await pending[0]);
+    // Completed jobs release their slots, so the rejected name can be retried.
+    await expect(request(issuer, hosts[32])).resolves.toBeDefined();
+  });
+
   it("evicts the least recently used memory entry", async () => {
     const issuer = makeIssuer({
       getAllowedHostnames: () => ["one.localhost", "two.localhost", "three.localhost"],
